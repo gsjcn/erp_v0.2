@@ -1,0 +1,260 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CommonStatus {
+  ENABLED
+  DISABLED
+}
+
+enum CustomerRegionType {
+  CHINA
+  OVERSEAS
+}
+
+enum OrderStatus {
+  DRAFT
+  SUBMITTED
+  IN_PRODUCTION
+  COMPLETED
+}
+
+enum ProductionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum InventoryStatus {
+  AVAILABLE
+  USED
+}
+
+enum InventoryTransactionType {
+  IN
+  OUT
+}
+
+model Customer {
+  id           String          @id @default(uuid())
+  customerCode String          @unique
+  customerName String
+  contactName  String?
+  contactPhone String?
+  address      String?
+  regionType   CustomerRegionType @default(CHINA)
+  country      String             @default("中国")
+  province     String?
+  state        String?
+  district     String?
+  city         String?
+  detailAddress String?
+  remark       String?
+  status       CommonStatus    @default(ENABLED)
+  contacts     CustomerContact[]
+  orders       CustomerOrder[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([customerName])
+  @@index([status])
+}
+
+model CustomerContact {
+  id           String   @id @default(uuid())
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  contactName  String
+  contactPhone String?
+  title        String?
+  remark       String?
+  isPrimary    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([contactName])
+}
+
+/// 客户订单总表，只保存订单汇总信息；订单零件必须进入 OrderLine。
+model CustomerOrder {
+  id               String           @id @default(uuid())
+  orderNo          String           @unique
+  customerId       String
+  customer         Customer         @relation(fields: [customerId], references: [id])
+  customerCode     String
+  customerName     String
+  customerSnapshot Json
+  orderDate        DateTime
+  deliveryDate     DateTime?
+  status           OrderStatus      @default(DRAFT)
+  remark           String?
+  lines            OrderLine[]
+  productionTasks  ProductionTask[]
+  inventoryBatches InventoryBatch[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([customerId])
+  @@index([orderDate])
+  @@index([status])
+}
+
+/// 订单零件明细表，一个订单可以包含多个零件。
+model OrderLine {
+  id              String                 @id @default(uuid())
+  orderId         String
+  order           CustomerOrder          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineNo          Int
+  partCode        String
+  partName        String
+  drawingNo       String?
+  quantity        Decimal                @db.Decimal(18, 3)
+  productionPlanQuantity Decimal          @db.Decimal(18, 3)
+  unit            String
+  deliveryDate    DateTime?
+  remark          String?
+  processSnapshot Json?
+  processSteps    OrderLineProcessStep[]
+  productionTasks ProductionTask[]
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@unique([orderId, lineNo])
+  @@index([partCode])
+}
+
+/// 每个订单零件独立保存生产步骤，避免把流程压成一个长字符串。
+model OrderLineProcessStep {
+  id          String    @id @default(uuid())
+  orderLineId String
+  orderLine   OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  stepNo      Int
+  processName String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([orderLineId, stepNo])
+  @@index([processName])
+}
+
+/// 生产任务由订单零件生成，生产状态只保留第一阶段需要的三种状态。
+model ProductionTask {
+  id               String           @id @default(uuid())
+  productionTaskNo String           @unique
+  orderId          String
+  order            CustomerOrder    @relation(fields: [orderId], references: [id])
+  orderLineId      String
+  orderLine        OrderLine        @relation(fields: [orderLineId], references: [id])
+  orderNo          String
+  customerName     String
+  partCode         String
+  partName         String
+  plannedQuantity  Decimal          @db.Decimal(18, 3)
+  completedQuantity Decimal         @default(0) @db.Decimal(18, 3)
+  unit             String
+  status           ProductionStatus @default(PENDING)
+  processSnapshot  Json
+  startedAt        DateTime?
+  completedAt      DateTime?
+  remark           String?
+  inventoryBatch   InventoryBatch?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([orderId])
+  @@index([orderNo])
+  @@index([status])
+  @@index([partCode])
+}
+
+model Warehouse {
+  id                    String                 @id @default(uuid())
+  warehouseCode         String                 @unique
+  warehouseName         String
+  status                CommonStatus           @default(ENABLED)
+  locations             WarehouseLocation[]
+  inventoryBatches      InventoryBatch[]
+  inventoryTransactions InventoryTransaction[]
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+}
+
+model WarehouseLocation {
+  id                    String                 @id @default(uuid())
+  warehouseId           String
+  warehouse             Warehouse              @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  locationCode          String
+  locationName          String
+  status                CommonStatus           @default(ENABLED)
+  inventoryBatches      InventoryBatch[]
+  inventoryTransactions InventoryTransaction[]
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@unique([warehouseId, locationCode])
+}
+
+model InventoryBatch {
+  id                     String                 @id @default(uuid())
+  batchNo                String                 @unique
+  partCode               String
+  partName               String
+  sourceOrderId          String?
+  sourceOrder            CustomerOrder?         @relation(fields: [sourceOrderId], references: [id])
+  sourceOrderNo          String?
+  sourceCustomerName     String?
+  productionTaskId       String?                @unique
+  productionTask         ProductionTask?        @relation(fields: [productionTaskId], references: [id])
+  sourceProductionTaskNo String?
+  quantity               Decimal                @db.Decimal(18, 3)
+  unit                   String
+  warehouseId            String
+  warehouse              Warehouse              @relation(fields: [warehouseId], references: [id])
+  locationId             String?
+  location               WarehouseLocation?     @relation(fields: [locationId], references: [id])
+  status                 InventoryStatus        @default(AVAILABLE)
+  transactions           InventoryTransaction[]
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+
+  @@index([partCode])
+  @@index([sourceOrderNo])
+  @@index([warehouseId])
+  @@index([status])
+}
+
+/// 库存流水只追加记录，用于保留入库 / 出库数量变化。
+model InventoryTransaction {
+  id                     String                   @id @default(uuid())
+  transactionNo          String                   @unique
+  transactionType        InventoryTransactionType
+  batchId                String?
+  batch                  InventoryBatch?          @relation(fields: [batchId], references: [id])
+  partCode               String
+  partName               String
+  orderNo                String?
+  productionTaskNo       String?
+  quantity               Decimal                  @db.Decimal(18, 3)
+  unit                   String
+  warehouseId            String
+  warehouse              Warehouse                @relation(fields: [warehouseId], references: [id])
+  locationId             String?
+  location               WarehouseLocation?       @relation(fields: [locationId], references: [id])
+  transactionTime        DateTime                 @default(now())
+  remark                 String?
+  sourceRecordType       String?
+  sourceRecordId         String?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+
+  @@index([transactionType])
+  @@index([partCode])
+  @@index([orderNo])
+  @@index([transactionTime])
+}

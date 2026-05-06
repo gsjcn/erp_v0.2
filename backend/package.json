@@ -1,0 +1,39 @@
+{
+  "name": "@baisheng/erp-backend",
+  "private": true,
+  "version": "0.2.0",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "db:generate": "prisma generate --schema ../database/prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema ../database/prisma/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema ../database/prisma/schema.prisma",
+    "db:seed": "prisma db seed --schema ../database/prisma/schema.prisma"
+  },
+  "prisma": {
+    "seed": "tsx ../database/prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.19",
+    "@nestjs/core": "^11.1.19",
+    "@nestjs/platform-express": "^11.1.19",
+    "@prisma/client": "^5.22.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "dotenv": "^16.4.7",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@nestjs/testing": "^11.1.19",
+    "@types/node": "^22.10.2",
+    "prisma": "^5.22.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

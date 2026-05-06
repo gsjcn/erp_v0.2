@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+database/postgres-data/
+database/backups/
+storage/uploads/
+storage/exports/
+
+frontend/dist/
+backend/dist/

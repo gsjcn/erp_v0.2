@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: baisheng-erp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-baisheng_erp}
+      POSTGRES_USER: ${POSTGRES_USER:-baisheng}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_this_password}
+    volumes:
+      - ./database/postgres-data:/var/lib/postgresql/data
+      - ./database/backups:/backups
+    networks:
+      - erp-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-baisheng} -d ${POSTGRES_DB:-baisheng_erp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: baisheng-erp-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-baisheng}:${POSTGRES_PASSWORD:-change_this_password}@postgres:5432/${POSTGRES_DB:-baisheng_erp}?schema=public
+      PORT: 3000
+      CORS_ORIGIN: http://localhost:${FRONTEND_PORT:-8080}
+    volumes:
+      - ./storage/uploads:/app/storage/uploads
+      - ./storage/exports:/app/storage/exports
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - erp-net
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: baisheng-erp-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend
+    networks:
+      - erp-net
+
+networks:
+  erp-net:
+    driver: bridge
