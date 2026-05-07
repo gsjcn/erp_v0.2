@@ -8,8 +8,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-baisheng}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_this_password}
     volumes:
-      - ./database/postgres-data:/var/lib/postgresql/data
-      - ./database/backups:/backups
+      - ${POSTGRES_DATA_DIR:-./database/postgres-data}:/var/lib/postgresql/data
+      - ${POSTGRES_BACKUP_DIR:-./database/backups}:/backups
     networks:
       - erp-net
     healthcheck:
@@ -27,15 +27,26 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-baisheng}:${POSTGRES_PASSWORD:-change_this_password}@postgres:5432/${POSTGRES_DB:-baisheng_erp}?schema=public
       PORT: 3000
-      CORS_ORIGIN: http://localhost:${FRONTEND_PORT:-8080}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      UPLOAD_DIR: /app/storage/uploads
+      EXPORT_DIR: /app/storage/exports
     volumes:
-      - ./storage/uploads:/app/storage/uploads
-      - ./storage/exports:/app/storage/exports
+      - ${UPLOAD_DIR:-./storage/uploads}:/app/storage/uploads
+      - ${EXPORT_DIR:-./storage/exports}:/app/storage/exports
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - erp-net
 
@@ -50,7 +61,13 @@ services:
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - erp-net
 

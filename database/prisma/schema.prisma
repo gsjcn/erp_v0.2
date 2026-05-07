@@ -22,12 +22,37 @@ enum OrderStatus {
   SUBMITTED
   IN_PRODUCTION
   COMPLETED
+  CANCELLED
+}
+
+enum OrderLineFulfillmentMode {
+  PRODUCTION
+  STOCK
+  REWORK
 }
 
 enum ProductionStatus {
   PENDING
   IN_PROGRESS
   COMPLETED
+}
+
+enum ProductionNoticeType {
+  QUANTITY_INCREASE
+  QUANTITY_DECREASE
+  ORDER_CANCELLED
+  MATERIAL_ADDED
+  TASK_WITHDRAWN
+}
+
+enum ProductionNoticeStatus {
+  PENDING
+  ACKNOWLEDGED
+}
+
+enum ProductionNoticeTarget {
+  PRODUCTION
+  WAREHOUSE
 }
 
 enum InventoryStatus {
@@ -81,6 +106,21 @@ model CustomerContact {
   @@index([contactName])
 }
 
+/// 物料基础清单，只保存零件编码、名称和默认单位；库存数量仍然从 InventoryBatch 实时计算。
+model Material {
+  id                String       @id @default(uuid())
+  partCode          String       @unique
+  partName          String
+  unit              String       @default("件")
+  partSpecification String?
+  status            CommonStatus @default(ENABLED)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@index([partName])
+  @@index([status])
+}
+
 /// 客户订单总表，只保存订单汇总信息；订单零件必须进入 OrderLine。
 model CustomerOrder {
   id               String           @id @default(uuid())
@@ -114,19 +154,27 @@ model OrderLine {
   partCode        String
   partName        String
   drawingNo       String?
+  drawingVersion  String?
+  drawingFileName String?
+  drawingFileUrl  String?
+  partThickness   Decimal                @default(1) @db.Decimal(18, 3)
+  partSpecification String?
   quantity        Decimal                @db.Decimal(18, 3)
   productionPlanQuantity Decimal          @db.Decimal(18, 3)
+  fulfillmentMode OrderLineFulfillmentMode @default(PRODUCTION)
   unit            String
   deliveryDate    DateTime?
   remark          String?
   processSnapshot Json?
   processSteps    OrderLineProcessStep[]
   productionTasks ProductionTask[]
+  inventoryBatches InventoryBatch[]
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
   @@unique([orderId, lineNo])
   @@index([partCode])
+  @@index([fulfillmentMode])
 }
 
 /// 每个订单零件独立保存生产步骤，避免把流程压成一个长字符串。
@@ -136,6 +184,7 @@ model OrderLineProcessStep {
   orderLine   OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
   stepNo      Int
   processName String
+  processRemark String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -160,10 +209,13 @@ model ProductionTask {
   unit             String
   status           ProductionStatus @default(PENDING)
   processSnapshot  Json
+  isReplenishment  Boolean          @default(false)
+  sourceProductionTaskNo String?
   startedAt        DateTime?
   completedAt      DateTime?
   remark           String?
   inventoryBatch   InventoryBatch?
+  processCompletions ProductionProcessCompletion[]
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -171,6 +223,138 @@ model ProductionTask {
   @@index([orderNo])
   @@index([status])
   @@index([partCode])
+  @@index([isReplenishment])
+  @@index([sourceProductionTaskNo])
+}
+
+/// 生产操作人员基础账号，第一阶段只做工序确认需要的账号 ID、姓名、岗位和搜索字段。
+model ProductionOperator {
+  id             String       @id @default(uuid())
+  accountId      String       @unique
+  name           String
+  role           String
+  pinyin         String?
+  pinyinInitials String?
+  keywords       String[]     @default([])
+  idCardMasked   String?
+  idCardBound    Boolean      @default(false)
+  status         CommonStatus @default(ENABLED)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([name])
+  @@index([status])
+}
+
+/// 每道工序的完成表单；同一个生产任务的同一道工序只保留当前有效记录。
+model ProductionProcessCompletion {
+  id                String                         @id @default(uuid())
+  productionTaskId  String
+  productionTask    ProductionTask                 @relation(fields: [productionTaskId], references: [id], onDelete: Cascade)
+  stepNo            Int
+  processName       String
+  processRemark     String?
+  isCompleted       Boolean                        @default(false)
+  completedQuantity Decimal                        @default(0) @db.Decimal(18, 3)
+  scrapQuantity     Decimal                        @default(0) @db.Decimal(18, 3)
+  shortageQuantity  Decimal                        @default(0) @db.Decimal(18, 3)
+  shortageMode      String?
+  replenishmentTaskNo String?
+  managerName       String?
+  shortageReason    String?
+  unit              String
+  operatorCode      String?
+  operatorName      String?
+  operatorRole      String?
+  completedAt       DateTime?
+  quantityOverrideReason String?
+  remark            String?
+  logs              ProductionProcessCompletionLog[]
+  createdAt         DateTime                       @default(now())
+  updatedAt         DateTime                       @updatedAt
+
+  @@unique([productionTaskId, stepNo])
+  @@index([processName])
+  @@index([isCompleted])
+  @@index([completedAt])
+}
+
+/// 工序完成表单修改日志，只追加，不覆盖。
+model ProductionProcessCompletionLog {
+  id                String                      @id @default(uuid())
+  completionId      String
+  completion        ProductionProcessCompletion @relation(fields: [completionId], references: [id], onDelete: Cascade)
+  productionTaskId  String
+  processName       String
+  action            String
+  operatorCode      String?
+  operatorName      String?
+  beforeSnapshot    Json?
+  afterSnapshot     Json
+  createdAt         DateTime                    @default(now())
+
+  @@index([completionId])
+  @@index([productionTaskId])
+  @@index([createdAt])
+}
+
+model ProductionNotice {
+  id                 String                 @id @default(uuid())
+  noticeNo           String                 @unique
+  noticeType         ProductionNoticeType
+  status             ProductionNoticeStatus @default(PENDING)
+  target             ProductionNoticeTarget @default(PRODUCTION)
+  orderId            String?
+  orderNo            String
+  orderLineId        String?
+  productionTaskId   String?
+  productionTaskNo   String?
+  partCode           String?
+  partName           String?
+  beforeQuantity     Decimal?               @db.Decimal(18, 3)
+  afterQuantity      Decimal?               @db.Decimal(18, 3)
+  deltaQuantity      Decimal?               @db.Decimal(18, 3)
+  unit               String?
+  reason             String
+  managerName        String?
+  acknowledgedBy     String?
+  acknowledgedAt     DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@index([status])
+  @@index([target])
+  @@index([target, status])
+  @@index([noticeType])
+  @@index([orderNo])
+  @@index([productionTaskNo])
+  @@index([createdAt])
+}
+
+model ProductionScrapRecord {
+  id                 String   @id @default(uuid())
+  scrapNo            String   @unique
+  orderId            String?
+  orderNo            String
+  orderLineId        String?
+  productionTaskId   String?
+  productionTaskNo   String?
+  partCode           String
+  partName           String
+  quantity           Decimal  @db.Decimal(18, 3)
+  unit               String
+  reason             String
+  sourceRecordType   String
+  sourceRecordId     String
+  recordDate         DateTime @default(now())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([sourceRecordType, sourceRecordId])
+  @@index([orderNo])
+  @@index([productionTaskNo])
+  @@index([partCode])
+  @@index([recordDate])
 }
 
 model Warehouse {
@@ -207,6 +391,8 @@ model InventoryBatch {
   partName               String
   sourceOrderId          String?
   sourceOrder            CustomerOrder?         @relation(fields: [sourceOrderId], references: [id])
+  sourceOrderLineId      String?
+  sourceOrderLine        OrderLine?             @relation(fields: [sourceOrderLineId], references: [id])
   sourceOrderNo          String?
   sourceCustomerName     String?
   productionTaskId       String?                @unique
@@ -220,11 +406,13 @@ model InventoryBatch {
   location               WarehouseLocation?     @relation(fields: [locationId], references: [id])
   status                 InventoryStatus        @default(AVAILABLE)
   transactions           InventoryTransaction[]
+  adjustments            InventoryAdjustment[]
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 
   @@index([partCode])
   @@index([sourceOrderNo])
+  @@index([sourceOrderLineId])
   @@index([warehouseId])
   @@index([status])
 }
@@ -257,4 +445,33 @@ model InventoryTransaction {
   @@index([partCode])
   @@index([orderNo])
   @@index([transactionTime])
+}
+
+/// 仓库盘点调整记录：库存管理员修改批次数量时必须保留清点工单、清点人、日期和签字信息。
+model InventoryAdjustment {
+  id                 String         @id @default(uuid())
+  adjustmentNo       String         @unique
+  batchId            String
+  batch              InventoryBatch @relation(fields: [batchId], references: [id])
+  partCode           String
+  partName           String
+  beforeQuantity     Decimal        @db.Decimal(18, 3)
+  afterQuantity      Decimal        @db.Decimal(18, 3)
+  deltaQuantity      Decimal        @db.Decimal(18, 3)
+  unit               String
+  countedBy          String
+  countedAt          DateTime
+  signatureName      String
+  attachmentFileName String?
+  attachmentFileUrl  String?
+  attachmentMimeType String?
+  attachmentSize     Int?
+  remark             String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@index([batchId])
+  @@index([partCode])
+  @@index([countedAt])
+  @@index([createdAt])
 }

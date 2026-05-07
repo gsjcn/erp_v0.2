@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CommonStatus, CustomerRegionType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { buildPinyinSearchText, normalizeSearchKeyword } from '../../common/pinyin-search';
 import {
   CheckCustomerCodeQueryDto,
   CheckCustomerNameQueryDto,
@@ -17,27 +18,23 @@ export class CustomersService {
 
   async findAll(query: CustomerQueryDto) {
     const where: Prisma.CustomerWhereInput = {};
-    const keyword = query.keyword?.trim();
-
-    if (keyword) {
-      where.OR = [
-        { customerCode: { contains: keyword, mode: 'insensitive' } },
-        { customerName: { contains: keyword, mode: 'insensitive' } },
-        { contactName: { contains: keyword, mode: 'insensitive' } },
-        { contacts: { some: { contactName: { contains: keyword, mode: 'insensitive' } } } },
-        { contacts: { some: { contactPhone: { contains: keyword, mode: 'insensitive' } } } }
-      ];
-    }
+    const keyword = normalizeSearchKeyword(query.keyword);
 
     if (query.status) {
       where.status = query.status;
     }
 
-    return this.prisma.customer.findMany({
+    const customers = await this.prisma.customer.findMany({
       where,
       include: this.customerInclude(),
       orderBy: [{ status: 'asc' }, { customerCode: 'asc' }]
     });
+
+    if (!keyword) {
+      return customers;
+    }
+
+    return customers.filter((customer) => this.customerMatchesKeyword(customer, keyword));
   }
 
   async checkName(query: CheckCustomerNameQueryDto) {
@@ -110,7 +107,8 @@ export class CustomersService {
   async update(id: string, dto: UpdateCustomerDto) {
     const existing = await this.ensureExists(id);
 
-    const customerName = dto.customerName ? this.normalizeRequired(dto.customerName, 'customerName is required') : undefined;
+    const customerName =
+      dto.customerName !== undefined ? this.normalizeRequired(dto.customerName, 'customerName is required') : undefined;
     if (customerName) {
       await this.ensureCustomerNameAvailable(customerName, id);
     }
@@ -139,8 +137,9 @@ export class CustomersService {
           data: {
             customerName,
             ...regionData,
-            contactName: primaryContact?.contactName,
-            contactPhone: primaryContact?.contactPhone,
+            // 没有联系人时必须清空主表联系人快照，避免停用客户看起来仍有可用联系人。
+            contactName: primaryContact ? primaryContact.contactName : null,
+            contactPhone: primaryContact ? primaryContact.contactPhone : null,
             address: this.buildAddress(regionData),
             remark: dto.remark?.trim(),
             status: contacts.length ? existing.status : CommonStatus.DISABLED,
@@ -261,6 +260,32 @@ export class CustomersService {
         ? [region.country, region.province, region.city, region.district, region.detailAddress]
         : [region.country, region.state, region.province, region.district, region.city, region.detailAddress];
     return parts.filter(Boolean).join(' ');
+  }
+
+  private customerMatchesKeyword(customer: any, keyword: string) {
+    // 客户资料搜索不能只依赖数据库 contains；拼音和首字母需要后端统一生成，避免不同终端规则不一致。
+    const contactParts = (customer.contacts || []).flatMap((contact: any) => [
+      contact.contactName,
+      contact.contactPhone,
+      contact.title,
+      contact.remark
+    ]);
+    const searchText = buildPinyinSearchText([
+      customer.customerCode,
+      customer.customerName,
+      customer.contactName,
+      customer.contactPhone,
+      customer.address,
+      customer.country,
+      customer.province,
+      customer.state,
+      customer.district,
+      customer.city,
+      customer.detailAddress,
+      customer.remark,
+      ...contactParts
+    ]);
+    return searchText.includes(keyword);
   }
 
   private async customerNameExists(customerName: string, excludeId?: string) {

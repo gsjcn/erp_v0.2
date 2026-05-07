@@ -1,8 +1,147 @@
-import { PrismaClient, OrderStatus, ProductionStatus } from '@prisma/client';
+import { Prisma, PrismaClient, OrderStatus, ProductionStatus, OrderLineFulfillmentMode } from '@prisma/client';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { drawingUploadPath } from '../../backend/src/storage/upload-paths';
 
 const prisma = new PrismaClient();
 
-const processMap: Record<string, string[]> = {
+function assertSeedResetAllowed() {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const allowDestructiveSeed = process.env.ALLOW_DESTRUCTIVE_SEED === 'true';
+  if (isProduction && !allowDestructiveSeed) {
+    throw new Error('Seed reset is blocked in production. Set ALLOW_DESTRUCTIVE_SEED=true only when you intentionally reset test data.');
+  }
+}
+
+type SeedOrderLine = {
+  partCode: string;
+  partName: string;
+  drawingNo: string;
+  drawingVersion?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  partThickness?: number;
+  partSpecification?: string;
+  quantity: number;
+  productionPlanQuantity?: number;
+  fulfillmentMode?: OrderLineFulfillmentMode;
+  unit: string;
+};
+
+type SeedProcessStep = string | { processName: string; processRemark?: string };
+
+type NormalizedSeedProcessStep = {
+  processName: string;
+  processRemark?: string;
+};
+
+const defaultPartSpecifications = ['120mm x 204mm x 10mm', '200mm x 300mm x 2mm', '500mm x 800mm x 3mm'];
+const defaultPartThicknesses = [1.2, 2, 3, 1.5];
+const seedDrawingByNo: Record<string, { drawingFileName: string; drawingFileUrl: string; title: string }> = {
+  'DRW-4101': {
+    drawingFileName: 'DRW-4101-A.pdf',
+    drawingFileUrl: '/uploads/drawings/seed-DRW-4101-A.pdf',
+    title: 'DRW-4101 Press Test Cover'
+  },
+  'DRW-4102': {
+    drawingFileName: 'DRW-4102-A.pdf',
+    drawingFileUrl: '/uploads/drawings/seed-DRW-4102-A.pdf',
+    title: 'DRW-4102 Welding Test Bracket'
+  },
+  'DRW-4103': {
+    drawingFileName: 'DRW-4103-A.pdf',
+    drawingFileUrl: '/uploads/drawings/seed-DRW-4103-A.pdf',
+    title: 'DRW-4103 Coating Test Base'
+  }
+};
+
+function withPartDrawingDefaults(line: SeedOrderLine, index: number) {
+  const drawing = seedDrawingByNo[line.drawingNo];
+  return {
+    ...line,
+    drawingVersion: line.drawingVersion || 'A',
+    drawingFileName: line.drawingFileName || drawing?.drawingFileName,
+    drawingFileUrl: line.drawingFileUrl || drawing?.drawingFileUrl,
+    partThickness: line.partThickness ?? defaultPartThicknesses[index % defaultPartThicknesses.length],
+    partSpecification: line.partSpecification || defaultPartSpecifications[index % defaultPartSpecifications.length]
+  };
+}
+
+function pdfEscape(value: string) {
+  return value.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+
+function buildSeedPdf(title: string) {
+  const lines = [title, 'Baisheng ERP seed drawing', 'Used for drawing preview and duplicate file name tests.'];
+  const content = [
+    'BT',
+    '/F1 18 Tf',
+    '72 760 Td',
+    `(${pdfEscape(lines[0])}) Tj`,
+    '/F1 12 Tf',
+    '0 -28 Td',
+    `(${pdfEscape(lines[1])}) Tj`,
+    '0 -20 Td',
+    `(${pdfEscape(lines[2])}) Tj`,
+    'ET'
+  ].join('\n');
+
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n',
+    `4 0 obj\n<< /Length ${Buffer.byteLength(content, 'utf8')} >>\nstream\n${content}\nendstream\nendobj\n`,
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n'
+  ];
+
+  let pdf = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (const object of objects) {
+    offsets.push(Buffer.byteLength(pdf, 'utf8'));
+    pdf += object;
+  }
+
+  const xrefStart = Buffer.byteLength(pdf, 'utf8');
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  pdf += offsets.map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('');
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+  return Buffer.from(pdf, 'utf8');
+}
+
+async function seedDrawingFiles() {
+  const uploadPath = drawingUploadPath();
+  for (const drawing of Object.values(seedDrawingByNo)) {
+    const fileName = drawing.drawingFileUrl.split('/').pop();
+    if (!fileName) {
+      continue;
+    }
+    // 示例图纸用于本地测试“在线预览”和“同名图纸确认”，不代表真实客户图纸。
+    writeFileSync(join(uploadPath, fileName), buildSeedPdf(drawing.title));
+  }
+}
+
+async function resetSeedData() {
+  // 本地测试 seed 必须可重复执行；先清空业务表，避免旧补单、库存和工序记录污染新测试数据。
+  await prisma.inventoryAdjustment.deleteMany();
+  await prisma.inventoryTransaction.deleteMany();
+  await prisma.inventoryBatch.deleteMany();
+  await prisma.productionScrapRecord.deleteMany();
+  await prisma.productionNotice.deleteMany();
+  await prisma.productionProcessCompletionLog.deleteMany();
+  await prisma.productionProcessCompletion.deleteMany();
+  await prisma.productionTask.deleteMany();
+  await prisma.orderLineProcessStep.deleteMany();
+  await prisma.orderLine.deleteMany();
+  await prisma.customerOrder.deleteMany();
+  await prisma.customerContact.deleteMany();
+  await prisma.customer.deleteMany();
+  await prisma.warehouseLocation.deleteMany();
+  await prisma.warehouse.deleteMany();
+  await prisma.productionOperator.deleteMany();
+  await prisma.material.deleteMany();
+}
+
+const processMap: Record<string, SeedProcessStep[]> = {
   'P-1001': ['激光切割', '折弯', '焊接', '打磨', '包装'],
   'P-1002': ['激光切割', '折弯', '喷涂', '包装'],
   'P-1003': ['冲压', '打磨', '装配', '包装'],
@@ -12,11 +151,143 @@ const processMap: Record<string, string[]> = {
   'P-3001': ['冲压', '打磨', '包装'],
   'P-3002': ['激光切割', '折弯', '焊接', '包装'],
   'P-3003': ['折弯', '装配', '包装'],
-  'P-4001': ['激光切割', '折弯', '包装'],
-  'P-4002': ['冲压', '打磨', '包装'],
+  'P-4001': ['激光切割', '折弯', { processName: '冲压', processRemark: '4次' }, '包装'],
+  'P-4002': ['冲压', { processName: '打磨', processRemark: '去毛刺' }, '包装'],
   'P-4003': ['激光切割', '喷涂', '包装'],
-  'P-4004': ['装配', '包装']
+  'P-4004': ['装配', '包装'],
+  'P-4101': [{ processName: '冲压', processRemark: '首件确认后连续生产' }, '打磨', '包装'],
+  'P-4102': ['激光切割', { processName: '折弯', processRemark: 'R角按图纸' }, '焊接', '包装'],
+  'P-4103': ['冲压', '喷涂', '包装']
 };
+
+function normalizeSeedProcessSteps(steps: SeedProcessStep[]): NormalizedSeedProcessStep[] {
+  return steps
+    .map((step) => {
+      if (typeof step === 'string') {
+        return { processName: step.trim() };
+      }
+      return {
+        processName: step.processName.trim(),
+        processRemark: step.processRemark?.trim()
+      };
+    })
+    .filter((step) => step.processName);
+}
+
+function seedProcessSnapshot(steps: NormalizedSeedProcessStep[]): Prisma.InputJsonValue {
+  return steps.map((step) => ({
+    processName: step.processName,
+    ...(step.processRemark ? { processRemark: step.processRemark } : {})
+  })) as Prisma.InputJsonValue;
+}
+
+const productionOperatorSeeds = [
+  {
+    accountId: 'OP-001',
+    name: '张明',
+    role: '冲压操作员',
+    pinyin: 'zhangming',
+    pinyinInitials: 'zm',
+    keywords: ['zhang', 'ming', 'zm', '冲压'],
+    idCardBound: false
+  },
+  {
+    accountId: 'OP-002',
+    name: '李强',
+    role: '激光切割操作员',
+    pinyin: 'liqiang',
+    pinyinInitials: 'lq',
+    keywords: ['li', 'qiang', 'lq', '激光', '切割'],
+    idCardBound: false
+  },
+  {
+    accountId: 'OP-003',
+    name: '王磊',
+    role: '焊接操作员',
+    pinyin: 'wanglei',
+    pinyinInitials: 'wl',
+    keywords: ['wang', 'lei', 'wl', '焊接'],
+    idCardBound: false
+  },
+  {
+    accountId: 'OP-004',
+    name: '赵敏',
+    role: '包装操作员',
+    pinyin: 'zhaomin',
+    pinyinInitials: 'zm',
+    keywords: ['zhao', 'min', 'zm', '包装'],
+    idCardBound: false
+  },
+  {
+    accountId: 'OP-005',
+    name: '顾胜钧',
+    role: '折弯操作员',
+    pinyin: 'gushengjun',
+    pinyinInitials: 'gsj',
+    keywords: ['gu', 'sheng', 'jun', 'gs', 'gsj', '折弯'],
+    idCardMasked: '3204********1234',
+    idCardBound: true
+  }
+];
+
+const seedOperators = productionOperatorSeeds.map((operator) => ({
+  operatorCode: operator.accountId,
+  operatorName: operator.name,
+  operatorRole: operator.role
+}));
+
+async function seedProductionOperators() {
+  for (const operator of productionOperatorSeeds) {
+    await prisma.productionOperator.upsert({
+      where: { accountId: operator.accountId },
+      update: {
+        name: operator.name,
+        role: operator.role,
+        pinyin: operator.pinyin,
+        pinyinInitials: operator.pinyinInitials,
+        keywords: operator.keywords,
+        idCardMasked: operator.idCardMasked,
+        idCardBound: operator.idCardBound,
+        status: 'ENABLED'
+      },
+      create: {
+        ...operator,
+        status: 'ENABLED'
+      }
+    });
+  }
+}
+
+function seedProductionTaskState(
+  orderNo: string,
+  lineIndex: number,
+  orderStatus: OrderStatus,
+  processSteps: NormalizedSeedProcessStep[]
+) {
+  if (orderStatus === OrderStatus.COMPLETED) {
+    return { taskStatus: ProductionStatus.COMPLETED, partialCompletedStepCount: processSteps.length };
+  }
+
+  // SO-20260506-005 专门保留多种生产测试状态：
+  // 001：所有工序已确认但未最终确认，用于测试“确认完成”和短缺 / 补单逻辑。
+  // 002：只完成第一道工序，用于测试“下一道工序”和多选连续工序。
+  // 003：未开始生产，用于测试“开始生产”。
+  if (orderNo === 'SO-20260506-005') {
+    if (lineIndex === 0) {
+      return { taskStatus: ProductionStatus.IN_PROGRESS, partialCompletedStepCount: processSteps.length };
+    }
+    if (lineIndex === 1) {
+      return { taskStatus: ProductionStatus.IN_PROGRESS, partialCompletedStepCount: 1 };
+    }
+    return { taskStatus: ProductionStatus.PENDING, partialCompletedStepCount: 0 };
+  }
+
+  if (orderStatus === OrderStatus.IN_PRODUCTION && lineIndex === 0) {
+    return { taskStatus: ProductionStatus.IN_PROGRESS, partialCompletedStepCount: 1 };
+  }
+
+  return { taskStatus: ProductionStatus.PENDING, partialCompletedStepCount: 0 };
+}
 
 async function seedCustomers() {
   const customers = [
@@ -192,6 +463,18 @@ async function seedOrders() {
         { partCode: 'P-4003', partName: '侧封板', drawingNo: 'DRW-4003', quantity: 90, productionPlanQuantity: 90, unit: '件' },
         { partCode: 'P-4004', partName: '支撑脚', drawingNo: 'DRW-4004', quantity: 80, productionPlanQuantity: 80, unit: '件' }
       ]
+    },
+    {
+      orderNo: 'SO-20260506-005',
+      customer: customer1,
+      orderDate: new Date('2026-05-06T00:00:00.000Z'),
+      deliveryDate: new Date('2026-05-28T00:00:00.000Z'),
+      status: OrderStatus.IN_PRODUCTION,
+      lines: [
+        { partCode: 'P-4101', partName: '冲压测试盖板', drawingNo: 'DRW-4101', quantity: 100, productionPlanQuantity: 120, unit: '件' },
+        { partCode: 'P-4102', partName: '焊接测试支架', drawingNo: 'DRW-4102', quantity: 60, productionPlanQuantity: 60, unit: '件' },
+        { partCode: 'P-4103', partName: '喷涂测试底座', drawingNo: 'DRW-4103', quantity: 80, productionPlanQuantity: 100, unit: '件' }
+      ]
     }
   ];
 
@@ -230,51 +513,53 @@ async function seedOrders() {
     });
 
     for (const [index, line] of order.lines.entries()) {
+      const lineData = withPartDrawingDefaults(line, index);
+      const fulfillmentMode = lineData.fulfillmentMode || OrderLineFulfillmentMode.PRODUCTION;
+      const processSteps =
+        fulfillmentMode === OrderLineFulfillmentMode.STOCK ? [] : normalizeSeedProcessSteps(processMap[lineData.partCode] || []);
       const savedLine = await prisma.orderLine.upsert({
         where: { orderId_lineNo: { orderId: savedOrder.id, lineNo: index + 1 } },
         update: {
-          ...line,
-          quantity: line.quantity,
-          productionPlanQuantity: line.productionPlanQuantity ?? line.quantity,
-          processSnapshot: processMap[line.partCode]
+          ...lineData,
+          quantity: lineData.quantity,
+          productionPlanQuantity: lineData.productionPlanQuantity ?? lineData.quantity,
+          fulfillmentMode,
+          processSnapshot: seedProcessSnapshot(processSteps)
         },
         create: {
           orderId: savedOrder.id,
           lineNo: index + 1,
-          ...line,
-          quantity: line.quantity,
-          productionPlanQuantity: line.productionPlanQuantity ?? line.quantity,
+          ...lineData,
+          quantity: lineData.quantity,
+          productionPlanQuantity: lineData.productionPlanQuantity ?? lineData.quantity,
+          fulfillmentMode,
           deliveryDate: order.deliveryDate,
-          processSnapshot: processMap[line.partCode]
+          processSnapshot: seedProcessSnapshot(processSteps)
         }
       });
 
       await prisma.orderLineProcessStep.deleteMany({ where: { orderLineId: savedLine.id } });
-      for (const [stepIndex, processName] of processMap[line.partCode].entries()) {
+      for (const [stepIndex, processStep] of processSteps.entries()) {
         await prisma.orderLineProcessStep.create({
           data: {
             orderLineId: savedLine.id,
             stepNo: stepIndex + 1,
-            processName
+            processName: processStep.processName,
+            processRemark: processStep.processRemark
           }
         });
       }
 
-      if (order.status !== OrderStatus.DRAFT) {
-        const taskStatus =
-          order.status === OrderStatus.COMPLETED
-            ? ProductionStatus.COMPLETED
-            : order.status === OrderStatus.IN_PRODUCTION && index === 0
-              ? ProductionStatus.IN_PROGRESS
-              : ProductionStatus.PENDING;
+      if (order.status !== OrderStatus.DRAFT && fulfillmentMode !== OrderLineFulfillmentMode.STOCK) {
+        const { taskStatus, partialCompletedStepCount } = seedProductionTaskState(order.orderNo, index, order.status, processSteps);
 
-        await prisma.productionTask.upsert({
+        const savedTask = await prisma.productionTask.upsert({
           where: { productionTaskNo: `PT-${order.orderNo}-${String(index + 1).padStart(3, '0')}` },
           update: {
             status: taskStatus,
-            plannedQuantity: line.productionPlanQuantity ?? line.quantity,
-            completedQuantity: taskStatus === ProductionStatus.COMPLETED ? line.quantity : 0,
-            processSnapshot: processMap[line.partCode],
+            plannedQuantity: lineData.productionPlanQuantity ?? lineData.quantity,
+            completedQuantity: taskStatus === ProductionStatus.COMPLETED ? lineData.quantity : 0,
+            processSnapshot: seedProcessSnapshot(processSteps),
             startedAt: taskStatus !== ProductionStatus.PENDING ? new Date('2026-05-06T02:00:00.000Z') : null,
             completedAt: taskStatus === ProductionStatus.COMPLETED ? new Date('2026-05-06T08:00:00.000Z') : null
           },
@@ -284,19 +569,159 @@ async function seedOrders() {
             orderLineId: savedLine.id,
             orderNo: order.orderNo,
             customerName: order.customer.customerName,
-            partCode: line.partCode,
-            partName: line.partName,
-            plannedQuantity: line.productionPlanQuantity ?? line.quantity,
-            completedQuantity: taskStatus === ProductionStatus.COMPLETED ? line.quantity : 0,
-            unit: line.unit,
+            partCode: lineData.partCode,
+            partName: lineData.partName,
+            plannedQuantity: lineData.productionPlanQuantity ?? lineData.quantity,
+            completedQuantity: taskStatus === ProductionStatus.COMPLETED ? lineData.quantity : 0,
+            unit: lineData.unit,
             status: taskStatus,
-            processSnapshot: processMap[line.partCode],
+            processSnapshot: seedProcessSnapshot(processSteps),
             startedAt: taskStatus !== ProductionStatus.PENDING ? new Date('2026-05-06T02:00:00.000Z') : null,
             completedAt: taskStatus === ProductionStatus.COMPLETED ? new Date('2026-05-06T08:00:00.000Z') : null
           }
         });
+
+        await seedTaskProcessCompletions({
+          productionTaskId: savedTask.id,
+          taskStatus,
+          steps: processSteps,
+          unit: lineData.unit,
+          completedQuantity:
+            taskStatus === ProductionStatus.COMPLETED ? lineData.quantity : lineData.productionPlanQuantity ?? lineData.quantity,
+          partialCompletedStepCount
+        });
       }
     }
+  }
+}
+
+async function seedTaskProcessCompletions({
+  productionTaskId,
+  taskStatus,
+  steps,
+  unit,
+  completedQuantity,
+  partialCompletedStepCount
+}: {
+  productionTaskId: string;
+  taskStatus: ProductionStatus;
+  steps: NormalizedSeedProcessStep[];
+  unit: string;
+  completedQuantity: number;
+  partialCompletedStepCount: number;
+}) {
+  await prisma.productionProcessCompletion.deleteMany({ where: { productionTaskId } });
+
+  for (const [index, processStep] of steps.entries()) {
+    const processName = processStep.processName;
+    const isCompleted = taskStatus === ProductionStatus.COMPLETED || index < partialCompletedStepCount;
+    const operator = seedOperators[index % seedOperators.length];
+    const completedAt = isCompleted ? new Date(`2026-05-06T0${Math.min(index + 2, 8)}:00:00.000Z`) : null;
+    const completion = await prisma.productionProcessCompletion.create({
+      data: {
+        productionTaskId,
+        stepNo: index + 1,
+        processName,
+        processRemark: processStep.processRemark,
+        isCompleted,
+        completedQuantity: isCompleted ? completedQuantity : 0,
+        unit,
+        operatorCode: isCompleted ? operator.operatorCode : null,
+        operatorName: isCompleted ? operator.operatorName : null,
+        operatorRole: isCompleted ? operator.operatorRole : null,
+        completedAt,
+        remark: isCompleted ? '种子数据：工序已完成' : null
+      }
+    });
+
+    if (isCompleted) {
+      await prisma.productionProcessCompletionLog.create({
+        data: {
+          completionId: completion.id,
+          productionTaskId,
+          processName,
+          action: 'SEED_COMPLETE',
+          operatorCode: operator.operatorCode,
+          operatorName: operator.operatorName,
+          afterSnapshot: {
+            stepNo: index + 1,
+            processName,
+            processRemark: processStep.processRemark,
+            isCompleted,
+            completedQuantity,
+            unit,
+            operatorCode: operator.operatorCode,
+            operatorName: operator.operatorName,
+            operatorRole: operator.operatorRole,
+            completedAt: completedAt?.toISOString(),
+            remark: '种子数据：工序已完成'
+          }
+        }
+      });
+    }
+  }
+}
+
+async function upsertMaterial(data: { partCode: string; partName: string; unit: string; partSpecification?: string | null }) {
+  const existing = await prisma.material.findFirst({
+    where: { partCode: { equals: data.partCode, mode: 'insensitive' } },
+    select: { id: true, partSpecification: true }
+  });
+
+  if (existing) {
+    await prisma.material.update({
+      where: { id: existing.id },
+      data: {
+        partName: data.partName,
+        unit: data.unit,
+        partSpecification: data.partSpecification ?? existing.partSpecification,
+        status: 'ENABLED'
+      }
+    });
+    return;
+  }
+
+  await prisma.material.create({
+    data: {
+      partCode: data.partCode,
+      partName: data.partName,
+      unit: data.unit,
+      partSpecification: data.partSpecification || null
+    }
+  });
+}
+
+async function seedMaterials() {
+  const orderMaterials = await prisma.orderLine.findMany({
+    select: {
+      partCode: true,
+      partName: true,
+      unit: true,
+      partSpecification: true
+    },
+    orderBy: [{ partCode: 'asc' }]
+  });
+
+  for (const material of orderMaterials) {
+    await upsertMaterial({
+      partCode: material.partCode,
+      partName: material.partName,
+      unit: material.unit,
+      partSpecification: material.partSpecification
+    });
+  }
+
+  const demoZeroStockMaterials = [
+    { partCode: 'B3', partName: 'B3门板', unit: '件', partSpecification: '120mm x 204mm x 10mm' },
+    { partCode: 'B3-0001', partName: 'B3-测试门板', unit: '件', partSpecification: '200mm x 300mm x 2mm' },
+    { partCode: 'B3ASDJ', partName: 'B3ASDJ门板', unit: '件', partSpecification: '500mm x 800mm x 3mm' },
+    { partCode: 'C3', partName: 'C3门板', unit: '件', partSpecification: '100mm x 180mm x 1.5mm' },
+    { partCode: 'MC-3', partName: '3类机加工产品', unit: '件', partSpecification: '按图加工' }
+  ];
+
+  // 这些物料只进入物料清单，不创建库存批次，用于验证库存页 0 库存搜索结果。
+  for (const material of demoZeroStockMaterials) {
+    await upsertMaterial(material);
   }
 }
 
@@ -318,7 +743,16 @@ async function seedInventory() {
     const batch = await prisma.inventoryBatch.upsert({
       where: { batchNo },
       update: {
+        partCode: task.partCode,
+        partName: task.partName,
+        sourceOrderId: task.orderId,
+        sourceOrderLineId: task.orderLineId,
+        sourceOrderNo: task.orderNo,
+        sourceCustomerName: task.customerName,
+        productionTaskId: task.id,
+        sourceProductionTaskNo: task.productionTaskNo,
         quantity: task.completedQuantity,
+        unit: task.unit,
         warehouseId: warehouse.id,
         locationId: location.id,
         status: 'AVAILABLE'
@@ -328,6 +762,7 @@ async function seedInventory() {
         partCode: task.partCode,
         partName: task.partName,
         sourceOrderId: task.orderId,
+        sourceOrderLineId: task.orderLineId,
         sourceOrderNo: task.orderNo,
         sourceCustomerName: task.customerName,
         productionTaskId: task.id,
@@ -367,6 +802,98 @@ async function seedInventory() {
     });
   }
 
+  const stockSeedItems = [
+    {
+      batchNo: 'IB-STOCK-DEMO-P4101',
+      transactionNo: 'IT-IN-STOCK-DEMO-P4101',
+      partCode: 'P-4101',
+      partName: '冲压测试盖板',
+      quantity: 50,
+      unit: '件'
+    },
+    {
+      batchNo: 'IB-STOCK-DEMO-P4102',
+      transactionNo: 'IT-IN-STOCK-DEMO-P4102',
+      partCode: 'P-4102',
+      partName: '焊接测试支架',
+      quantity: 40,
+      unit: '件'
+    },
+    {
+      batchNo: 'IB-STOCK-DEMO-P4103',
+      transactionNo: 'IT-IN-STOCK-DEMO-P4103',
+      partCode: 'P-4103',
+      partName: '喷涂测试底座',
+      quantity: 60,
+      unit: '件'
+    }
+  ];
+
+  // 独立库存批次不绑定订单，用于测试下单时“使用库存”和“库存再加工”的库存扣减逻辑。
+  for (const [index, item] of stockSeedItems.entries()) {
+    const location = warehouse.locations[index % warehouse.locations.length];
+    const batch = await prisma.inventoryBatch.upsert({
+      where: { batchNo: item.batchNo },
+      update: {
+        partCode: item.partCode,
+        partName: item.partName,
+        sourceOrderId: null,
+        sourceOrderLineId: null,
+        sourceOrderNo: null,
+        sourceCustomerName: null,
+        productionTaskId: null,
+        sourceProductionTaskNo: null,
+        quantity: item.quantity,
+        unit: item.unit,
+        warehouseId: warehouse.id,
+        locationId: location.id,
+        status: 'AVAILABLE'
+      },
+      create: {
+        batchNo: item.batchNo,
+        partCode: item.partCode,
+        partName: item.partName,
+        sourceOrderId: null,
+        sourceOrderLineId: null,
+        sourceOrderNo: null,
+        sourceCustomerName: null,
+        productionTaskId: null,
+        sourceProductionTaskNo: null,
+        quantity: item.quantity,
+        unit: item.unit,
+        warehouseId: warehouse.id,
+        locationId: location.id,
+        status: 'AVAILABLE'
+      }
+    });
+
+    await prisma.inventoryTransaction.upsert({
+      where: { transactionNo: item.transactionNo },
+      update: {
+        batchId: batch.id,
+        quantity: item.quantity,
+        warehouseId: warehouse.id,
+        locationId: location.id
+      },
+      create: {
+        transactionNo: item.transactionNo,
+        transactionType: 'IN',
+        batchId: batch.id,
+        partCode: item.partCode,
+        partName: item.partName,
+        orderNo: null,
+        productionTaskNo: null,
+        quantity: item.quantity,
+        unit: item.unit,
+        warehouseId: warehouse.id,
+        locationId: location.id,
+        remark: '种子数据：独立库存，可用于下单时选择使用库存或库存再加工',
+        sourceRecordType: 'SeedStockInventory',
+        sourceRecordId: item.batchNo
+      }
+    });
+  }
+
   // 种子数据中的已入库库存还没有发货，所以订单不能直接显示为已完成。
   await prisma.customerOrder.updateMany({
     where: {
@@ -378,9 +905,14 @@ async function seedInventory() {
 }
 
 async function main() {
+  assertSeedResetAllowed();
+  await resetSeedData();
+  await seedDrawingFiles();
   await seedCustomers();
   await seedWarehouses();
+  await seedProductionOperators();
   await seedOrders();
+  await seedMaterials();
   await seedInventory();
 }
 

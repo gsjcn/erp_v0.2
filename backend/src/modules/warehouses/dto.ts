@@ -1,4 +1,4 @@
-import { InventoryTransactionType } from '@prisma/client';
+import { InventoryTransactionType, ProductionNoticeStatus } from '@prisma/client';
 import { IsDateString, IsEnum, IsOptional, IsString } from 'class-validator';
 
 export class CreateWarehouseDto {
@@ -61,4 +61,15 @@ export class WarehouseTransactionQueryDto {
   @IsOptional()
   @IsEnum(InventoryTransactionType)
   transactionType?: InventoryTransactionType;
+}
+
+export class WarehouseNoticeQueryDto {
+  @IsOptional()
+  @IsEnum(ProductionNoticeStatus)
+  status?: ProductionNoticeStatus;
+}
+
+export class AcknowledgeWarehouseNoticeDto {
+  @IsString()
+  acknowledgedBy!: string;
 }

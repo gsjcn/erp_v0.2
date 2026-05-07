@@ -34,6 +34,20 @@ copy .env.example .env
 docker compose up -d --build
 ```
 
+建议在 `.env` 中修改：
+
+```text
+POSTGRES_PASSWORD=强密码
+FRONTEND_PORT=8080
+BACKEND_PORT=3000
+POSTGRES_DATA_DIR=./database/postgres-data
+POSTGRES_BACKUP_DIR=./database/backups
+UPLOAD_DIR=./storage/uploads
+EXPORT_DIR=./storage/exports
+```
+
+说明：`.env` 里的 `UPLOAD_DIR` 和 `EXPORT_DIR` 表示 NAS 宿主机上的挂载目录；backend 容器内部固定使用 `/app/storage/uploads` 和 `/app/storage/exports`，避免容器内外路径混用。
+
 首次启动后进入 backend 容器执行数据库初始化：
 
 ```bash
@@ -57,4 +71,18 @@ http://localhost:3000/api
 
 ```text
 http://localhost:5176
+```
+
+手机真机测试不要使用 `localhost`，需要使用开发电脑局域网 IP，例如：
+
+```text
+http://192.168.110.147:5176/orders
+```
+
+Docker 部署后可检查容器健康状态：
+
+```bash
+docker compose ps
+docker compose logs backend
+docker compose logs frontend
 ```

@@ -1,16 +1,17 @@
 import 'reflect-metadata';
+import './env/bootstrap-env';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import { loadEnv } from './env/load-env';
-
-loadEnv();
+import { uploadRootPath } from './storage/upload-paths';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const corsOrigin = process.env.CORS_ORIGIN?.split(',').map((item) => item.trim()).filter(Boolean);
 
   app.setGlobalPrefix('api');
+  app.useStaticAssets(uploadRootPath(), { prefix: '/uploads/' });
   app.enableCors({
     origin: corsOrigin && corsOrigin.length > 0 ? corsOrigin : true
   });

@@ -24,7 +24,7 @@
         </div>
       </header>
 
-      <nav class="mobile-nav-list" aria-label="移动端导航">
+      <nav ref="mobileNav" class="mobile-nav-list" aria-label="移动端导航">
         <RouterLink v-for="item in navItems" :key="item.path" :to="item.path" class="mobile-nav-item">
           <el-icon><component :is="item.icon" /></el-icon>
           <span>{{ item.label }}</span>
@@ -60,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { ArrowLeft } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
@@ -69,6 +69,7 @@ import { navItems } from '../config/navigation';
 const route = useRoute();
 const router = useRouter();
 const { shellClass } = useDeviceProfile();
+const mobileNav = ref<HTMLElement>();
 
 interface BreadcrumbItem {
   label: string;
@@ -113,4 +114,14 @@ function goParent() {
     void router.push(parentPath.value);
   }
 }
+
+async function scrollActiveMobileNavIntoView() {
+  await nextTick();
+  const activeItem = mobileNav.value?.querySelector('.router-link-active');
+  // 手机端横向导航较长，切换到后面的栏目时自动把当前栏目滚到可见区域。
+  activeItem?.scrollIntoView({ block: 'nearest', inline: 'center' });
+}
+
+watch(() => route.path, scrollActiveMobileNavIntoView);
+onMounted(scrollActiveMobileNavIntoView);
 </script>

@@ -4,8 +4,8 @@
       <h2 class="page-title">每个零件的生产流程选择</h2>
       <div class="process-actions">
         <el-button :disabled="!order" @click="goOrderDetail">返回订单明细</el-button>
-        <el-button :disabled="!selectedLine" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
-        <el-button type="primary" :disabled="!selectedLine" :loading="saving" @click="saveProcess">保存流程</el-button>
+        <el-button :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
+        <el-button type="primary" :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存流程</el-button>
         <el-button type="success" :disabled="!canSubmitOrder" :loading="submitting" @click="submitOrderFromProcess">
           提交生产
         </el-button>
@@ -14,61 +14,130 @@
 
     <div class="filter-bar process-filter">
       <div class="filter-field">
-        <label>客户</label>
-        <el-select
-          v-model="selectedCustomerId"
-          filterable
-          clearable
-          placeholder="先选择客户"
-          style="width: 260px"
-          @change="handleCustomerChange"
-        >
-          <el-option v-for="item in customers" :key="item.id" :label="item.customerName" :value="item.id" />
-        </el-select>
+        <label>订单日期</label>
+        <DateRangeFilter v-model="orderDateRange" @change="handleDateChange" />
       </div>
 
       <div class="filter-field">
-        <label>订单日期</label>
-        <el-date-picker
-          v-model="orderDateRange"
-          type="daterange"
-          value-format="YYYY-MM-DD"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          range-separator="-"
-          style="width: 260px"
-          :disabled="!selectedCustomerId"
-          @change="handleDateChange"
+        <label>客户</label>
+        <CustomerSelect
+          v-model="selectedCustomerId"
+          placeholder="全部客户"
+          width="260px"
+          @change="handleCustomerChange"
         />
       </div>
 
-      <el-button type="primary" :disabled="!selectedCustomerId" :loading="ordersLoading" @click="loadOrders">
-        查询订单
-      </el-button>
-
       <div class="filter-field">
         <label>订单</label>
-        <el-select
+        <OrderSelect
           v-model="selectedOrderNo"
-          filterable
-          clearable
-          placeholder="再选择订单"
-          style="width: 320px"
-          :disabled="!selectedCustomerId || orders.length === 0"
+          :orders="orders"
+          placeholder="可选订单"
+          width="320px"
+          :disabled="orders.length === 0"
           @change="handleOrderChange"
-        >
-          <el-option
-            v-for="item in orders"
-            :key="item.orderNo"
-            :label="`${item.orderNo} / ${formatDate(item.orderDate)}`"
-            :value="item.orderNo"
-          />
-        </el-select>
+        />
       </div>
+
+      <el-button type="primary" :loading="ordersLoading" @click="loadOrders">查询订单</el-button>
     </div>
 
-    <el-empty v-if="!selectedCustomerId" description="请先选择客户" />
-    <el-empty v-else-if="!selectedOrderNo" description="请选择订单" />
+    <el-empty v-if="ordersLoaded && orders.length === 0" description="当前条件没有订单" />
+
+    <div v-else-if="!selectedOrderNo" v-loading="ordersLoading" class="process-order-list">
+      <div class="order-list-note">
+        <strong>当前条件订单</strong>
+        <span>可先按订单日期筛选全部客户订单，再按客户或订单继续缩小范围。</span>
+      </div>
+
+      <div class="table-card desktop-table">
+        <el-table :data="orders" max-height="calc(100vh - 330px)">
+          <el-table-column label="订单号" min-width="190">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="selectOrderFromList(row.orderNo)">{{ row.orderNo }}</el-button>
+            </template>
+          </el-table-column>
+          <el-table-column prop="customerName" label="客户" min-width="210" />
+          <el-table-column label="订单日期" width="130">
+            <template #default="{ row }">{{ formatDate(row.orderDate) }}</template>
+          </el-table-column>
+          <el-table-column label="交期" width="130">
+            <template #default="{ row }">{{ formatDate(row.deliveryDate) }}</template>
+          </el-table-column>
+          <el-table-column prop="partCount" label="零件数" width="100" />
+          <el-table-column label="客户订单数量" width="140">
+            <template #default="{ row }">{{ formatQuantity(row.totalQuantity, row.unit) }}</template>
+          </el-table-column>
+          <el-table-column label="生产计划数量" width="140">
+            <template #default="{ row }">{{ formatQuantity(row.totalProductionPlanQuantity, row.unit) }}</template>
+          </el-table-column>
+          <el-table-column label="订单状态" width="170">
+            <template #default="{ row }">
+              <StatusTag :value="row.status" />
+            </template>
+          </el-table-column>
+          <el-table-column label="仓库阶段" width="130">
+            <template #default="{ row }">
+              <StatusTag :value="row.warehouseStage" compact />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="170" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="selectOrderFromList(row.orderNo)">选择订单</el-button>
+              <el-button link type="primary" @click="goOrderSummaryDetail(row.orderNo)">查看明细</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div class="mobile-card-list">
+        <article v-for="item in orders" :key="item.id" class="mobile-card">
+          <div class="mobile-card-header">
+            <div class="mobile-card-title">
+              <strong>
+                <el-button link type="primary" @click="selectOrderFromList(item.orderNo)">{{ item.orderNo }}</el-button>
+              </strong>
+              <small>{{ item.customerName }}</small>
+            </div>
+          </div>
+          <div class="mobile-card-fields">
+            <div class="mobile-field">
+              <label>订单状态</label>
+              <span><StatusTag :value="item.status" compact /></span>
+            </div>
+            <div class="mobile-field">
+              <label>仓库阶段</label>
+              <span><StatusTag :value="item.warehouseStage" compact /></span>
+            </div>
+            <div class="mobile-field">
+              <label>订单日期</label>
+              <span>{{ formatDate(item.orderDate) }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>交期</label>
+              <span>{{ formatDate(item.deliveryDate) }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>零件数</label>
+              <span>{{ item.partCount }} 个</span>
+            </div>
+            <div class="mobile-field">
+              <label>客户订单数量</label>
+              <span>{{ formatQuantity(item.totalQuantity, item.unit) }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>生产计划数量</label>
+              <span>{{ formatQuantity(item.totalProductionPlanQuantity, item.unit) }}</span>
+            </div>
+          </div>
+          <div class="mobile-card-actions">
+            <el-button link type="primary" @click="selectOrderFromList(item.orderNo)">选择订单</el-button>
+            <el-button link type="primary" @click="goOrderSummaryDetail(item.orderNo)">查看明细</el-button>
+          </div>
+        </article>
+      </div>
+    </div>
 
     <div v-else-if="order" v-loading="loading" class="process-layout">
       <div class="panel parts-panel">
@@ -87,6 +156,7 @@
           </div>
           <p v-if="missingLineNames.length" class="missing-text">未配置：{{ missingLineNames.join('、') }}</p>
           <p v-else class="ready-text">全部零件已配置流程</p>
+          <p v-if="order.status !== 'DRAFT'" class="locked-text">当前订单已提交，生产流程只能查看，不能修改。</p>
         </div>
 
         <div class="panel-header">
@@ -103,9 +173,9 @@
           <span>
             <strong>{{ line.partName }}</strong>
             <small>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</small>
-            <small>生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</small>
+            <small>{{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</small>
           </span>
-          <em>{{ line.processSteps.length ? `${line.processSteps.length} 道` : '未选择' }}</em>
+          <em>{{ line.fulfillmentMode === 'STOCK' ? '使用库存' : line.processSteps.length ? `${line.processSteps.length} 道` : '未选择' }}</em>
         </button>
       </div>
 
@@ -117,37 +187,39 @@
 
         <div class="process-templates">
           <span>常用流程</span>
-          <el-button v-for="template in processTemplates" :key="template.name" size="small" @click="applyTemplate(template.steps)">
+          <el-button
+            v-for="template in processTemplates"
+            :key="template.name"
+            size="small"
+            :disabled="!canEditProcess"
+            @click="applyTemplate(template.steps)"
+          >
             {{ template.name }}
           </el-button>
         </div>
 
         <div class="available-processes">
-          <el-button v-for="process in processOptions" :key="process" round @click="addStep(process)">
+          <el-button v-for="process in processOptions" :key="process" round :disabled="!canEditProcess" @click="addStep(process)">
             {{ process }}
           </el-button>
         </div>
 
-        <div class="custom-process">
-          <el-input
-            v-model="customProcessName"
-            placeholder="输入自定义工艺"
-            clearable
-            style="max-width: 320px"
-            @keyup.enter="addCustomStep"
-          />
-          <el-button type="primary" plain @click="addCustomStep">添加工艺</el-button>
+        <div class="standard-process-help">
+          工序名称只允许选择标准工序；次数、参数和特殊要求请写入工序备注，避免后续统计混乱。
         </div>
 
         <h4>已选流程</h4>
         <div class="selected-steps">
-          <div v-for="(step, index) in draftSteps" :key="`${index}-${step}`" class="selected-step">
+          <div v-for="(step, index) in draftSteps" :key="`${index}-${step.processName}`" class="selected-step">
             <span class="step-index">{{ index + 1 }}</span>
-            <el-input v-model="draftSteps[index]" placeholder="工艺名称" />
+            <el-select v-model="step.processName" placeholder="标准工序" :disabled="!canEditProcess" @change="normalizeDraftSteps">
+              <el-option v-for="process in processOptions" :key="process" :label="process" :value="process" />
+            </el-select>
+            <el-input v-model="step.processRemark" placeholder="参数备注，例如 4次 / M6孔" :disabled="!canEditProcess" />
             <div class="step-actions">
-              <el-button link :disabled="index === 0" @click="moveStep(index, -1)">上移</el-button>
-              <el-button link :disabled="index === draftSteps.length - 1" @click="moveStep(index, 1)">下移</el-button>
-              <el-button link type="danger" @click="removeStep(index)">删除</el-button>
+              <el-button link :disabled="!canEditProcess || index === 0" @click="moveStep(index, -1)">上移</el-button>
+              <el-button link :disabled="!canEditProcess || index === draftSteps.length - 1" @click="moveStep(index, 1)">下移</el-button>
+              <el-button link type="danger" :disabled="!canEditProcess" @click="removeStep(index)">删除</el-button>
             </div>
           </div>
           <el-empty v-if="draftSteps.length === 0" description="当前零件未选择生产流程" />
@@ -162,13 +234,17 @@ import { computed, onMounted, ref } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
+import CustomerSelect from '../components/CustomerSelect.vue';
+import DateRangeFilter from '../components/DateRangeFilter.vue';
+import OrderSelect from '../components/OrderSelect.vue';
 import StatusTag from '../components/StatusTag.vue';
-import type { Customer, OrderDetail, OrderLine, OrderSummary } from '../types/erp';
+import { standardProcessOptions } from '../config/processes';
+import type { OrderDetail, OrderLine, OrderSummary, ProcessStepDetail } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
+import { validateStockModeLines } from '../utils/orderLineStockChecks';
 
 const route = useRoute();
 const router = useRouter();
-const customers = ref<Customer[]>([]);
 const orders = ref<OrderSummary[]>([]);
 const order = ref<OrderDetail>();
 const selectedCustomerId = ref('');
@@ -176,15 +252,15 @@ const selectedOrderNo = ref('');
 const selectedLineId = ref('');
 const orderDateRange = ref<string[]>([]);
 const lastDateRange = ref<string[]>([]);
-const draftSteps = ref<string[]>([]);
-const customProcessName = ref('');
+const draftSteps = ref<ProcessStepDetail[]>([]);
 const loading = ref(false);
 const ordersLoading = ref(false);
+const ordersLoaded = ref(false);
 const saving = ref(false);
 const submitting = ref(false);
 const restoringSelection = ref(false);
 
-const processOptions = ['激光切割', '折弯', '冲压', '焊接', '打磨', '喷涂', '装配', '包装'];
+const processOptions: string[] = [...standardProcessOptions];
 const processTemplates = [
   { name: '激光折弯包装', steps: ['激光切割', '折弯', '包装'] },
   { name: '焊接件', steps: ['激光切割', '折弯', '焊接', '打磨', '包装'] },
@@ -193,41 +269,36 @@ const processTemplates = [
 ];
 
 const selectedLine = computed<OrderLine | undefined>(() => order.value?.lines.find((line) => line.id === selectedLineId.value));
-const savedSteps = computed(() => selectedLine.value?.processSteps || []);
-const isDirty = computed(() => JSON.stringify(normalizeSteps(draftSteps.value)) !== JSON.stringify(savedSteps.value));
-const totalLineCount = computed(() => order.value?.lines.length || 0);
-const configuredLineCount = computed(() => order.value?.lines.filter((line) => line.processSteps.length > 0).length || 0);
+const savedSteps = computed(() => selectedLineProcessDetails(selectedLine.value));
+const isDirty = computed(() => JSON.stringify(normalizeSteps(draftSteps.value)) !== JSON.stringify(normalizeSteps(savedSteps.value)));
+const processRequiredLines = computed(() => order.value?.lines.filter((line) => line.fulfillmentMode !== 'STOCK') || []);
+const totalLineCount = computed(() => processRequiredLines.value.length);
+const configuredLineCount = computed(() => processRequiredLines.value.filter((line) => line.processSteps.length > 0).length);
 const processPercent = computed(() =>
   totalLineCount.value ? Math.round((configuredLineCount.value / totalLineCount.value) * 100) : 0
 );
-const missingLineNames = computed(() => order.value?.lines.filter((line) => line.processSteps.length === 0).map((line) => line.partName) || []);
+const missingLineNames = computed(() => processRequiredLines.value.filter((line) => line.processSteps.length === 0).map((line) => line.partName));
+const canEditProcess = computed(() => order.value?.status === 'DRAFT' && selectedLine.value?.fulfillmentMode !== 'STOCK');
 const canSubmitOrder = computed(
-  () => order.value?.status === 'DRAFT' && totalLineCount.value > 0 && missingLineNames.value.length === 0 && !isDirty.value
+  () => order.value?.status === 'DRAFT' && (order.value?.lines.length || 0) > 0 && missingLineNames.value.length === 0 && !isDirty.value
 );
 
-async function loadCustomers() {
-  customers.value = await erpApi.customers();
-}
-
 async function loadOrders() {
-  if (!selectedCustomerId.value) {
-    resetOrderSelection();
-    return;
-  }
-
   ordersLoading.value = true;
   try {
-    // 生产流程页必须先按客户和可选订单日期筛订单，避免直接展示无关订单零件。
+    // 订单日期是生产流程页的第一层筛选；客户和订单都是可选的下一级筛选条件。
     orders.value = await erpApi.orders({
-      customerId: selectedCustomerId.value,
+      customerId: selectedCustomerId.value || undefined,
       dateFrom: orderDateRange.value[0],
       dateTo: orderDateRange.value[1]
     });
 
-    if (!orders.value.some((item) => item.orderNo === selectedOrderNo.value)) {
+    if (selectedOrderNo.value && !orders.value.some((item) => item.orderNo === selectedOrderNo.value)) {
+      selectedOrderNo.value = '';
       resetOrderSelection();
     }
     lastDateRange.value = [...orderDateRange.value];
+    ordersLoaded.value = true;
   } finally {
     ordersLoading.value = false;
   }
@@ -290,6 +361,10 @@ async function handleOrderChange() {
     restoringSelection.value = false;
     return;
   }
+  if (!selectedOrderNo.value) {
+    resetOrderSelection();
+    return;
+  }
   await loadOrder();
 }
 
@@ -297,6 +372,16 @@ function resetOrderSelection() {
   order.value = undefined;
   selectedLineId.value = '';
   draftSteps.value = [];
+}
+
+function fulfillmentModeLabel(mode?: string) {
+  if (mode === 'STOCK') {
+    return '使用库存';
+  }
+  if (mode === 'REWORK') {
+    return '库存再加工';
+  }
+  return '重新生产';
 }
 
 async function selectLine(lineId: string) {
@@ -330,32 +415,36 @@ async function confirmDiscardChanges() {
 
 function applySelectedLine(lineId: string) {
   selectedLineId.value = lineId;
-  draftSteps.value = [...(order.value?.lines.find((line) => line.id === lineId)?.processSteps || [])];
+  draftSteps.value = selectedLineProcessDetails(order.value?.lines.find((line) => line.id === lineId));
 }
 
 function addStep(processName: string) {
+  if (!canEditProcess.value) {
+    ElMessage.warning('只有草稿订单可以修改生产流程');
+    return;
+  }
   const step = processName.trim();
   if (!step) {
     return;
   }
-  draftSteps.value.push(step);
-}
-
-function addCustomStep() {
-  const step = customProcessName.value.trim();
-  if (!step) {
-    ElMessage.warning('请填写工艺名称');
+  if (normalizeSteps(draftSteps.value).some((item) => item.processName === step)) {
+    ElMessage.warning(`当前零件已包含工艺：${step}`);
     return;
   }
-  addStep(step);
-  customProcessName.value = '';
+  draftSteps.value.push({ processName: step, processRemark: '' });
 }
 
 function removeStep(index: number) {
+  if (!canEditProcess.value) {
+    return;
+  }
   draftSteps.value.splice(index, 1);
 }
 
 function moveStep(index: number, offset: number) {
+  if (!canEditProcess.value) {
+    return;
+  }
   const target = index + offset;
   const next = [...draftSteps.value];
   const [item] = next.splice(index, 1);
@@ -364,11 +453,40 @@ function moveStep(index: number, offset: number) {
 }
 
 function applyTemplate(steps: string[]) {
-  draftSteps.value = [...steps];
+  if (!canEditProcess.value) {
+    ElMessage.warning('只有草稿订单可以修改生产流程');
+    return;
+  }
+  draftSteps.value = normalizeSteps(steps.map((processName) => ({ processName })));
 }
 
-function normalizeSteps(steps: string[]) {
-  return steps.map((step) => step.trim()).filter(Boolean);
+function normalizeSteps(steps: ProcessStepDetail[]) {
+  const result: ProcessStepDetail[] = [];
+  steps.forEach((step) => {
+    const processName = step.processName.trim();
+    if (processName && processOptions.includes(processName) && !result.some((item) => item.processName === processName)) {
+      const processRemark = step.processRemark?.trim();
+      result.push({
+        processName,
+        ...(processRemark ? { processRemark } : {})
+      });
+    }
+  });
+  return result;
+}
+
+function normalizeDraftSteps() {
+  draftSteps.value = normalizeSteps(draftSteps.value);
+}
+
+function selectedLineProcessDetails(line?: OrderLine): ProcessStepDetail[] {
+  if (!line) {
+    return [];
+  }
+  if (line.processStepDetails?.length) {
+    return line.processStepDetails.map((step) => ({ ...step }));
+  }
+  return line.processSteps.map((processName) => ({ processName }));
 }
 
 function goOrderDetail() {
@@ -377,8 +495,21 @@ function goOrderDetail() {
   }
 }
 
+async function selectOrderFromList(orderNo: string) {
+  selectedOrderNo.value = orderNo;
+  await handleOrderChange();
+}
+
+function goOrderSummaryDetail(orderNo: string) {
+  void router.push(`/orders/${orderNo}`);
+}
+
 async function saveProcess() {
   if (!order.value || !selectedLine.value) {
+    return false;
+  }
+  if (!canEditProcess.value) {
+    ElMessage.warning('只有草稿订单可以修改生产流程');
     return false;
   }
 
@@ -446,6 +577,12 @@ async function submitOrderFromProcess() {
 
   submitting.value = true;
   try {
+    const inventorySummary = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+    const stockCheck = validateStockModeLines(order.value.lines, inventorySummary);
+    if (!stockCheck.ok) {
+      ElMessage.warning(stockCheck.message);
+      return;
+    }
     // 生产流程页确认全部零件流程后，直接提交订单并生成 ProductionTask。
     order.value = await erpApi.submitOrder(order.value.orderNo);
     ElMessage.success('订单已提交生产');
@@ -456,10 +593,9 @@ async function submitOrderFromProcess() {
 }
 
 async function loadInitialState() {
-  await loadCustomers();
-
   const initialOrderNo = String(route.query.orderNo || '');
   if (!initialOrderNo) {
+    await loadOrders();
     return;
   }
 
@@ -496,6 +632,24 @@ onMounted(loadInitialState);
   gap: 24px;
 }
 
+.process-order-list {
+  display: grid;
+  gap: 14px;
+}
+
+.order-list-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.order-list-note strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
 .parts-panel,
 .builder-panel {
   min-height: min(520px, calc(100vh - 230px));
@@ -528,6 +682,12 @@ onMounted(loadInitialState);
 
 .missing-text {
   color: #d97706;
+}
+
+.locked-text {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .ready-text {
@@ -589,11 +749,25 @@ onMounted(loadInitialState);
 .process-templates {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 4px 20px 14px;
 }
 
+.process-templates .el-button,
+.available-processes .el-button,
+.custom-process .el-button,
+.step-actions .el-button {
+  margin-left: 0;
+}
+
 .process-templates span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.standard-process-help {
+  margin: 0 20px 18px;
   color: #64748b;
   font-size: 13px;
 }
@@ -615,8 +789,9 @@ onMounted(loadInitialState);
 
 .selected-step {
   display: grid;
-  grid-template-columns: 42px minmax(180px, 1fr) 180px;
+  grid-template-columns: 42px minmax(140px, 180px) minmax(180px, 1fr) 180px;
   align-items: center;
+  gap: 10px;
   min-height: 48px;
   margin-bottom: 10px;
   padding: 8px 10px;
@@ -665,6 +840,58 @@ onMounted(loadInitialState);
   .step-actions {
     grid-column: 2;
     text-align: left;
+  }
+}
+
+@media (max-width: 900px) {
+  .process-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .process-actions .el-button {
+    width: 100%;
+  }
+
+  .process-templates,
+  .available-processes,
+  .custom-process,
+  .selected-steps {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .process-templates {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .process-templates > span {
+    width: 100%;
+  }
+
+  .process-templates .el-button,
+  .available-processes .el-button {
+    flex: 0 1 auto;
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .custom-process .el-input {
+    max-width: none !important;
+    width: 100%;
+  }
+
+  .selected-step {
+    grid-template-columns: 34px minmax(0, 1fr);
+    padding: 8px;
+  }
+
+  .step-actions {
+    grid-column: 2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 }
 </style>

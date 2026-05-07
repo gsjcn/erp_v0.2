@@ -1,9 +1,11 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import {
+  AcknowledgeWarehouseNoticeDto,
   ConfirmReceiptDto,
   ConfirmShipmentDto,
   CreateWarehouseDto,
   CreateWarehouseLocationDto,
+  WarehouseNoticeQueryDto,
   WarehouseWorkQueryDto,
   WarehouseTransactionQueryDto
 } from './dto';
@@ -26,6 +28,16 @@ export class WarehousesController {
   @Post('warehouses/:warehouseId/locations')
   createLocation(@Param('warehouseId') warehouseId: string, @Body() dto: CreateWarehouseLocationDto) {
     return this.warehousesService.createLocation(warehouseId, dto);
+  }
+
+  @Get('warehouse/notices')
+  warehouseNotices(@Query() query: WarehouseNoticeQueryDto) {
+    return this.warehousesService.warehouseNotices(query);
+  }
+
+  @Post('warehouse/notices/:id/acknowledge')
+  acknowledgeWarehouseNotice(@Param('id') id: string, @Body() dto: AcknowledgeWarehouseNoticeDto) {
+    return this.warehousesService.acknowledgeWarehouseNotice(id, dto);
   }
 
   @Get('warehouse/receipts/pending')

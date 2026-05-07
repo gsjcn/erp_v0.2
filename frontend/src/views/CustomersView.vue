@@ -8,7 +8,32 @@
     <div class="filter-bar">
       <div class="filter-field">
         <label>关键词</label>
-        <el-input v-model="keyword" placeholder="客户名称 / 编码 / 联系人" style="width: 280px" clearable />
+        <el-autocomplete
+          v-model="keyword"
+          :fetch-suggestions="queryCustomerSuggestions"
+          :trigger-on-focus="true"
+          :debounce="240"
+          clearable
+          value-key="customerName"
+          popper-class="customer-search-popper"
+          placeholder="客户名称 / ID / 联系人 / 拼音"
+          style="width: 320px"
+          @select="handleCustomerSuggestionSelect"
+          @keyup.enter="loadCustomers"
+        >
+          <template #default="{ item }">
+            <div class="customer-suggestion">
+              {{ item.customerName }}
+            </div>
+          </template>
+        </el-autocomplete>
+      </div>
+      <div class="filter-field">
+        <label>状态</label>
+        <el-select v-model="statusFilter" clearable placeholder="全部状态" style="width: 150px">
+          <el-option label="启用" value="ENABLED" />
+          <el-option label="停用" value="DISABLED" />
+        </el-select>
       </div>
       <el-button type="primary" :loading="loading" @click="loadCustomers">搜索</el-button>
       <el-button @click="reset">重置</el-button>
@@ -52,9 +77,12 @@
             <strong>{{ customer.customerName }}</strong>
             <small>{{ customer.customerCode }}</small>
           </div>
-          <StatusTag :value="customer.status" />
         </div>
         <div class="mobile-card-fields">
+          <div class="mobile-field">
+            <label>状态</label>
+            <span><StatusTag :value="customer.status" /></span>
+          </div>
           <div class="mobile-field mobile-full">
             <label>地区</label>
             <span>{{ formatRegion(customer) }}</span>
@@ -182,12 +210,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { erpApi } from '../api/erp';
 import StatusTag from '../components/StatusTag.vue';
 import { chinaRegions, worldCountryOptions } from '../config/regions';
-import type { Customer, CustomerContact, CustomerRegionType } from '../types/erp';
+import type { CommonStatus, Customer, CustomerContact, CustomerRegionType } from '../types/erp';
 
 interface CustomerForm {
   customerCode?: string;
@@ -203,8 +231,11 @@ interface CustomerForm {
   contacts: CustomerContact[];
 }
 
+type CustomerSearchSuggestion = Customer;
+
 const customers = ref<Customer[]>([]);
 const keyword = ref('');
+const statusFilter = ref<CommonStatus>();
 const loading = ref(false);
 const saving = ref(false);
 const dialogVisible = ref(false);
@@ -219,10 +250,20 @@ const nameCheckText = ref('');
 const codeCheckText = ref('');
 let nameCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let codeCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
+let customerSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 
 const form = reactive<CustomerForm>(blankForm());
 
 const cityOptions = computed(() => chinaRegions.find((item) => item.province === form.province)?.cities || []);
+
+watch([keyword, statusFilter], () => {
+  if (customerSearchTimer) {
+    window.clearTimeout(customerSearchTimer);
+  }
+  customerSearchTimer = window.setTimeout(() => {
+    void loadCustomers();
+  }, 300);
+});
 const customerCodeHint = computed(() => {
   if (editingId.value) {
     return '客户ID保存后不可更改。';
@@ -267,7 +308,7 @@ function applyForm(next: CustomerForm) {
 async function loadCustomers() {
   loading.value = true;
   try {
-    customers.value = await erpApi.customers(keyword.value);
+    customers.value = await erpApi.customers(keyword.value, statusFilter.value);
   } finally {
     loading.value = false;
   }
@@ -275,6 +316,21 @@ async function loadCustomers() {
 
 function reset() {
   keyword.value = '';
+  statusFilter.value = undefined;
+  void loadCustomers();
+}
+
+async function queryCustomerSuggestions(queryString: string, callback: (items: CustomerSearchSuggestion[]) => void) {
+  try {
+    const result = await erpApi.customers(queryString, statusFilter.value);
+    callback(result);
+  } catch {
+    callback([]);
+  }
+}
+
+function handleCustomerSuggestionSelect(customer: CustomerSearchSuggestion) {
+  keyword.value = customer.customerName;
   void loadCustomers();
 }
 
@@ -380,6 +436,10 @@ function clearCodeCheck() {
 }
 
 function clearCheckTimers() {
+  if (customerSearchTimer) {
+    window.clearTimeout(customerSearchTimer);
+    customerSearchTimer = undefined;
+  }
   if (nameCheckTimer) {
     window.clearTimeout(nameCheckTimer);
     nameCheckTimer = undefined;
@@ -648,6 +708,29 @@ onBeforeUnmount(clearCheckTimers);
   grid-template-columns: 86px minmax(140px, 1fr) minmax(140px, 1fr) minmax(140px, 1fr) 72px;
   gap: 8px;
   align-items: center;
+}
+
+.customer-suggestion {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 40px;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.customer-search-popper .el-autocomplete-suggestion__wrap) {
+  max-height: 320px;
+}
+
+:global(.customer-search-popper .el-autocomplete-suggestion li) {
+  height: 44px;
+  padding: 0 14px;
+  line-height: 44px;
 }
 
 .contact-rule {

@@ -198,6 +198,17 @@ a {
   flex-wrap: wrap;
 }
 
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.page-actions .el-button {
+  margin-left: 0;
+}
+
 .page-title {
   margin: 0;
   font-size: 24px;
@@ -288,10 +299,13 @@ a {
 }
 
 .mobile-card {
+  width: 100%;
+  min-width: 0;
   padding: 14px;
   background: #ffffff;
   border: 1px solid var(--erp-soft-border);
   border-radius: 8px;
+  overflow: hidden;
 }
 
 .mobile-card-header {
@@ -303,6 +317,7 @@ a {
 }
 
 .mobile-card-title {
+  flex: 1 1 0;
   min-width: 0;
 }
 
@@ -341,8 +356,8 @@ a {
   line-height: 18px;
 }
 
-.mobile-field span,
-.mobile-field strong {
+.mobile-field > span,
+.mobile-field > strong {
   display: block;
   min-width: 0;
   overflow: hidden;
@@ -350,6 +365,11 @@ a {
   font-size: 13px;
   line-height: 20px;
   text-overflow: ellipsis;
+}
+
+.mobile-field .el-tag {
+  max-width: 100%;
+  vertical-align: top;
 }
 
 .mobile-card-actions {
@@ -363,6 +383,15 @@ a {
 
 .mobile-card-actions .el-button {
   margin-left: 0;
+}
+
+.mobile-card-header .el-tag {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 104px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mobile-full {
@@ -445,6 +474,20 @@ a {
 
 .el-button {
   border-radius: 6px;
+}
+
+.el-dialog {
+  max-height: calc(100dvh - 72px);
+  margin-top: min(4vh, 36px) !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.el-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 900px) {
@@ -568,6 +611,11 @@ a {
     justify-self: start;
   }
 
+  .page-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
   .page-title {
     font-size: 22px;
   }
@@ -610,6 +658,10 @@ a {
   .stat-grid {
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 12px;
+  }
+
+  .stat-grid > .stat-card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 
   .stat-card {
@@ -662,6 +714,16 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .mobile-card > .mobile-card-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .mobile-card > .mobile-card-header .el-tag {
+    justify-self: end;
+  }
+
   .mobile-empty {
     display: block;
     padding: 18px;
@@ -674,7 +736,76 @@ a {
 
   .el-dialog {
     width: calc(100vw - 24px) !important;
+    max-height: calc(100dvh - 24px);
     margin: 12px auto !important;
+  }
+
+  .el-overlay-dialog {
+    padding: 0 12px;
+  }
+
+  .el-dialog__header {
+    padding: 16px 16px 10px;
+  }
+
+  .el-dialog__body {
+    max-height: calc(100dvh - 150px);
+    padding: 10px 16px 14px;
+  }
+
+  .el-dialog__footer {
+    padding: 10px 16px 16px;
+  }
+
+  .el-dialog .el-form {
+    width: 100%;
+  }
+
+  /* 手机端弹窗取消固定 label 宽度，避免字段挤压和横向溢出。 */
+  .el-dialog .el-form-item {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+
+  .el-dialog .el-form-item__label {
+    justify-content: flex-start;
+    width: auto !important;
+    height: auto;
+    padding: 0;
+    line-height: 20px;
+  }
+
+  .el-dialog .el-form-item__content {
+    width: 100%;
+    min-width: 0;
+    margin-left: 0 !important;
+  }
+
+  .el-dialog .el-input,
+  .el-dialog .el-input-number,
+  .el-dialog .el-select,
+  .el-dialog .el-textarea,
+  .el-dialog .el-date-editor {
+    width: 100% !important;
+  }
+
+  .el-dialog .el-radio-group {
+    display: flex;
+    width: 100%;
+  }
+
+  .el-dialog .el-radio-button {
+    flex: 1;
+  }
+
+  .el-dialog .el-radio-button__inner {
+    width: 100%;
+  }
+
+  .el-dialog__footer .el-button + .el-button {
+    margin-left: 8px;
   }
 
   .el-input,

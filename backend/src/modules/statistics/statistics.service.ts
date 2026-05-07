@@ -28,8 +28,14 @@ export class StatisticsService {
     const start = new Date(Date.UTC(year, 0, 1));
     const end = new Date(Date.UTC(year + 1, 0, 1));
 
+    const customerId = query.customerId?.trim();
+
     const orders = await this.prisma.customerOrder.findMany({
-      where: { orderDate: { gte: start, lt: end } },
+      // 统计表仍是只读展示，客户筛选只限制订单范围，不改变按 orderDate 归属的统计口径。
+      where: {
+        orderDate: { gte: start, lt: end },
+        customerId: customerId || undefined
+      },
       include: { lines: true },
       orderBy: [{ orderDate: 'desc' }, { orderNo: 'desc' }]
     });
@@ -77,7 +83,10 @@ export class StatisticsService {
     const [productionTasks, shipmentTransactions] =
       orderNos.length > 0
         ? await this.prisma.$transaction([
-            this.prisma.productionTask.findMany({ where: { orderNo: { in: orderNos } } }),
+            this.prisma.productionTask.findMany({
+              where: { orderNo: { in: orderNos } },
+              include: { inventoryBatch: true }
+            }),
             this.prisma.inventoryTransaction.findMany({
               where: {
                 transactionType: InventoryTransactionType.OUT,
@@ -96,7 +105,6 @@ export class StatisticsService {
       taskPeriodMap.set(task.productionTaskNo, orderPeriod);
       const row = getRow(orderPeriod.periodKey, orderPeriod.periodLabel, task.partCode, task.partName, task.unit);
       row.orderNoSet.add(task.orderNo);
-      row.completedProductionQuantity += decimalToNumber(task.completedQuantity);
     }
 
     for (const transaction of shipmentTransactions) {
@@ -119,26 +127,57 @@ export class StatisticsService {
     }
 
     const taskNos = Array.from(taskPeriodMap.keys());
-    const stockBatches =
+    const receiptTransactions =
       taskNos.length > 0
-        ? await this.prisma.inventoryBatch.findMany({
+        ? await this.prisma.inventoryTransaction.findMany({
             where: {
-              sourceOrderId: null,
-              sourceProductionTaskNo: { in: taskNos }
+              transactionType: InventoryTransactionType.IN,
+              productionTaskNo: { in: taskNos }
             }
           })
         : [];
 
-    for (const batch of stockBatches) {
-      if (!batch.sourceProductionTaskNo) {
+    const stockQuantityByTaskNo = new Map<string, number>();
+    const orderReceiptQuantityByTaskNo = new Map<string, number>();
+    for (const transaction of receiptTransactions) {
+      if (!transaction.productionTaskNo) {
         continue;
       }
-      const orderPeriod = taskPeriodMap.get(batch.sourceProductionTaskNo);
+      const orderPeriod = taskPeriodMap.get(transaction.productionTaskNo);
       if (!orderPeriod) {
         continue;
       }
-      const row = getRow(orderPeriod.periodKey, orderPeriod.periodLabel, batch.partCode, batch.partName, batch.unit);
-      row.stockQuantity += decimalToNumber(batch.quantity);
+      const quantity = decimalToNumber(transaction.quantity);
+      // 统计历史生产结果必须按 IN 流水计算，不能按当前库存余量计算。
+      if (transaction.orderNo) {
+        orderReceiptQuantityByTaskNo.set(
+          transaction.productionTaskNo,
+          (orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) || 0) + quantity
+        );
+        continue;
+      }
+      const row = getRow(
+        orderPeriod.periodKey,
+        orderPeriod.periodLabel,
+        transaction.partCode,
+        transaction.partName,
+        transaction.unit
+      );
+      row.stockQuantity += quantity;
+      stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) || 0) + quantity);
+    }
+
+    for (const task of productionTasks) {
+      const orderPeriod = taskPeriodMap.get(task.productionTaskNo);
+      if (!orderPeriod) {
+        continue;
+      }
+      const row = getRow(orderPeriod.periodKey, orderPeriod.periodLabel, task.partCode, task.partName, task.unit);
+      row.completedProductionQuantity += this.toEffectiveTaskCompletedQuantity(
+        task,
+        stockQuantityByTaskNo.get(task.productionTaskNo) || 0,
+        orderReceiptQuantityByTaskNo.get(task.productionTaskNo) || 0
+      );
     }
 
     // 统计页只读展示，所有周期均按 CustomerOrder.orderDate 归属，不按生产完成或发货日期归属。
@@ -208,5 +247,15 @@ export class StatisticsService {
       periodKey: String(year),
       periodLabel: `${year}年`
     };
+  }
+
+  private toEffectiveTaskCompletedQuantity(task: any, stockQuantity = 0, orderReceiptQuantity = 0) {
+    const completedQuantity = decimalToNumber(task.completedQuantity);
+    if (completedQuantity > 0) {
+      return completedQuantity;
+    }
+    // 历史任务若已入库但 completedQuantity 仍为 0，优先使用订单入库 IN 流水兜底。
+    const orderInventoryQuantity = orderReceiptQuantity || (task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0);
+    return orderInventoryQuantity + stockQuantity;
   }
 }

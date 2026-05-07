@@ -7,10 +7,15 @@
 
     <div class="filter-bar statistics-filter">
       <div class="filter-field">
+        <label>客户</label>
+        <CustomerSelect v-model="customerId" placeholder="全部客户" width="220px" />
+      </div>
+      <div class="filter-field">
         <label>年份</label>
         <el-input-number v-model="year" :min="2000" :max="2100" :controls="false" style="width: 120px" />
       </div>
       <el-button type="primary" :loading="loading" @click="loadStatistics">查询</el-button>
+      <el-button @click="resetStatisticsFilters">重置</el-button>
     </div>
 
     <el-tabs v-model="activePeriod" class="statistics-tabs">
@@ -153,9 +158,12 @@
             <strong><OrderNoLink :order-no="row.orderNo" /></strong>
             <small>{{ row.periodLabel }} / {{ row.customerName }}</small>
           </div>
-          <StatusTag :value="row.status" />
         </div>
         <div class="mobile-card-fields">
+          <div class="mobile-field">
+            <label>订单状态</label>
+            <span><StatusTag :value="row.status" compact /></span>
+          </div>
           <div class="mobile-field">
             <label>订单日期</label>
             <span>{{ formatDate(row.orderDate) }}</span>
@@ -186,6 +194,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { erpApi } from '../api/erp';
+import CustomerSelect from '../components/CustomerSelect.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
 import StatusTag from '../components/StatusTag.vue';
 import type { OrderStatisticsResponse, StatisticsPeriod } from '../types/erp';
@@ -193,6 +202,7 @@ import { formatDate, formatQuantity } from '../utils/format';
 
 const activePeriod = ref<StatisticsPeriod>('year');
 const year = ref(new Date().getFullYear());
+const customerId = ref('');
 const loading = ref(false);
 const statistics = ref<OrderStatisticsResponse>();
 
@@ -221,19 +231,28 @@ const totals = computed(() => ({
 async function loadStatistics() {
   loading.value = true;
   try {
-    // 统计页为只读页面，按订单日期把订单、生产、发货和转库存数量归属到年度、季度、月度。
+    // 统计页为只读页面，筛选只限制展示范围，不提供任何订单、生产、仓库操作。
     statistics.value = await erpApi.orderStatistics({
       period: activePeriod.value,
-      year: year.value
+      year: year.value,
+      customerId: customerId.value || undefined
     });
   } finally {
     loading.value = false;
   }
 }
 
+function resetStatisticsFilters() {
+  customerId.value = '';
+  year.value = new Date().getFullYear();
+  void loadStatistics();
+}
+
 watch(activePeriod, loadStatistics);
 
-onMounted(loadStatistics);
+onMounted(async () => {
+  await loadStatistics();
+});
 </script>
 
 <style scoped>
