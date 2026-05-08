@@ -1,5 +1,6 @@
 import { InventoryTransactionType, ProductionNoticeStatus } from '@prisma/client';
-import { IsDateString, IsEnum, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ArrayNotEmpty, IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class CreateWarehouseDto {
   @IsOptional()
@@ -39,6 +40,13 @@ export class ConfirmShipmentDto {
   remark?: string;
 }
 
+export class ConfirmBatchShipmentDto extends ConfirmShipmentDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsString({ each: true })
+  batchIds!: string[];
+}
+
 export class WarehouseWorkQueryDto {
   @IsOptional()
   @IsString()
@@ -72,4 +80,30 @@ export class WarehouseNoticeQueryDto {
 export class AcknowledgeWarehouseNoticeDto {
   @IsString()
   acknowledgedBy!: string;
+
+  @IsOptional()
+  @IsIn(['STOCK', 'SCRAP', 'NONE'])
+  handlingMode?: 'STOCK' | 'SCRAP' | 'NONE';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  handlingQuantity?: number;
+
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
+
+  @IsOptional()
+  @IsString()
+  locationId?: string;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  mergeConfirmed?: boolean;
 }

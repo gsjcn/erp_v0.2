@@ -3,6 +3,7 @@ import { OrderStatus, Prisma, ProductionNoticeStatus, ProductionNoticeTarget, Pr
 import { decimalToNumber, processSnapshotToDetails, type ProcessStepSnapshot } from '../../common/serializers';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
+  ApproveProductionReplenishmentRequestDto,
   CompleteProcessStepDto,
   CompleteProcessStepsDto,
   CompleteProductionDto,
@@ -10,8 +11,10 @@ import {
   ProductionAnnualSummaryQueryDto,
   ProductionNoticeQueryDto,
   ProductionOperatorQueryDto,
+  ProductionReplenishmentRequestQueryDto,
   ProductionScrapQueryDto,
   ProductionTaskQueryDto,
+  RejectProductionReplenishmentRequestDto,
   WithdrawProductionTaskDto
 } from './dto';
 
@@ -76,7 +79,7 @@ const fallbackProductionOperators: ProductionOperatorRow[] = [
   }
 ];
 
-type ShortageMode = 'REPLENISHMENT' | 'MANAGER_APPROVED';
+type ShortageMode = 'REPLENISHMENT_REQUEST' | 'REPLENISHMENT' | 'MANAGER_APPROVED';
 
 interface ProcessShortageDto {
   scrapQuantity?: number;
@@ -99,6 +102,11 @@ interface ResolvedOperatorSnapshot {
   code: string | null;
   name: string | null;
   role: string | null;
+}
+
+interface ReplenishmentTaskSourceInfo {
+  sourceType: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE';
+  sourceRequestNo?: string | null;
 }
 
 interface ProcessQuantityGuard {
@@ -136,11 +144,11 @@ export class ProductionService {
   async acknowledgeNotice(id: string, dto: AcknowledgeProductionNoticeDto) {
     const acknowledgedBy = dto.acknowledgedBy.trim();
     if (!acknowledgedBy) {
-      throw new BadRequestException('Acknowledged by is required');
+      throw new BadRequestException('确认人员不能为空');
     }
     const notice = await this.prisma.productionNotice.findUnique({ where: { id } });
     if (!notice) {
-      throw new NotFoundException('Production notice not found');
+      throw new NotFoundException('生产通知不存在');
     }
     const saved = await this.prisma.productionNotice.update({
       where: { id },
@@ -153,8 +161,70 @@ export class ProductionService {
     return this.toNotice(saved);
   }
 
+  async replenishmentRequests(query: ProductionReplenishmentRequestQueryDto = {}) {
+    const where: Prisma.ProductionReplenishmentRequestWhereInput = {};
+    if (query.status) {
+      where.status = query.status;
+    }
+    const keyword = query.keyword?.trim();
+    if (keyword) {
+      where.OR = [
+        { requestNo: { contains: keyword, mode: 'insensitive' } },
+        { orderNo: { contains: keyword, mode: 'insensitive' } },
+        { productionTaskNo: { contains: keyword, mode: 'insensitive' } },
+        { partCode: { contains: keyword, mode: 'insensitive' } },
+        { partName: { contains: keyword, mode: 'insensitive' } },
+        { reason: { contains: keyword, mode: 'insensitive' } },
+        { requestedByCode: { contains: keyword, mode: 'insensitive' } },
+        { requestedByName: { contains: keyword, mode: 'insensitive' } },
+        { supervisorName: { contains: keyword, mode: 'insensitive' } },
+        { supervisorRemark: { contains: keyword, mode: 'insensitive' } },
+        { replenishmentTaskNo: { contains: keyword, mode: 'insensitive' } }
+      ];
+    }
+    if (query.orderNo?.trim()) {
+      where.orderNo = { contains: query.orderNo.trim(), mode: 'insensitive' };
+    }
+    if (query.productionTaskNo?.trim()) {
+      where.productionTaskNo = { contains: query.productionTaskNo.trim(), mode: 'insensitive' };
+    }
+    if (query.partCode?.trim()) {
+      where.partCode = { contains: query.partCode.trim(), mode: 'insensitive' };
+    }
+    if (query.dateFrom || query.dateTo) {
+      where.createdAt = {};
+      if (query.dateFrom) {
+        where.createdAt.gte = this.startOfDay(query.dateFrom);
+      }
+      if (query.dateTo) {
+        where.createdAt.lte = this.endOfDay(query.dateTo);
+      }
+    }
+
+    const requests = await this.prisma.productionReplenishmentRequest.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }]
+    });
+    const statusRank: Record<string, number> = { PENDING: 0, APPROVED: 1, REJECTED: 2 };
+    return requests
+      .sort((left, right) => (statusRank[left.status] ?? 9) - (statusRank[right.status] ?? 9))
+      .map((request) => this.toProductionReplenishmentRequest(request));
+  }
+
   async scrapRecords(query: ProductionScrapQueryDto = {}) {
     const where: Prisma.ProductionScrapRecordWhereInput = {};
+    if (query.customerId?.trim()) {
+      const orders = await this.prisma.customerOrder.findMany({
+        where: { customerId: query.customerId.trim() },
+        select: { id: true }
+      });
+      const orderIds = orders.map((order) => order.id);
+      if (orderIds.length === 0) {
+        return [];
+      }
+      // ProductionScrapRecord 第一阶段只保存 orderId 快照，不做复杂关系；客户筛选先通过订单表换算 orderId。
+      where.orderId = { in: orderIds };
+    }
     if (query.orderNo?.trim()) {
       where.orderNo = { contains: query.orderNo.trim(), mode: 'insensitive' };
     }
@@ -252,7 +322,7 @@ export class ProductionService {
     const operators = uniqueCodes.map((code) => {
       const operator = operatorMap.get(code);
       if (!operator) {
-        throw new BadRequestException(`Valid operatorCode is required: ${code}`);
+        throw new BadRequestException(`操作人员不存在或未启用：${code}`);
       }
       return operator;
     });
@@ -432,13 +502,13 @@ export class ProductionService {
   async start(id: string) {
     const task = await this.findTaskOrThrow(id);
     if (task.order.status === OrderStatus.CANCELLED) {
-      throw new BadRequestException('Cancelled order cannot start new production task');
+      throw new BadRequestException('已取消订单不能开始新的生产任务');
     }
     if (task.inventoryBatch) {
-      throw new BadRequestException('Production task cannot be started after warehouse receipt');
+      throw new BadRequestException('生产任务已入库，不能重新开始生产');
     }
     if (task.status === ProductionStatus.COMPLETED) {
-      throw new BadRequestException('Completed task cannot be started');
+      throw new BadRequestException('已完成任务不能重新开始生产');
     }
 
     // 开始生产时同步订单状态，第一阶段只标记为 IN_PRODUCTION。
@@ -465,27 +535,27 @@ export class ProductionService {
     const handledAt = dto.handledAt ? new Date(dto.handledAt) : new Date();
     const remark = dto.remark?.trim();
     if (!managerName || !reason) {
-      throw new BadRequestException('Manager name and withdraw reason are required');
+      throw new BadRequestException('管理人员姓名和撤回原因不能为空');
     }
     if (!['STOCK', 'SCRAP', 'NONE'].includes(handlingMode)) {
-      throw new BadRequestException('Withdraw handling mode is required');
+      throw new BadRequestException('撤回处理方式不能为空');
     }
     if (!Number.isFinite(handlingQuantity) || handlingQuantity < 0) {
-      throw new BadRequestException('Withdraw handling quantity must be greater than or equal to 0');
+      throw new BadRequestException('撤回处理数量必须大于或等于 0');
     }
     if (handlingMode !== 'NONE' && handlingQuantity <= 0) {
-      throw new BadRequestException('Withdraw handling quantity is required when parts are moved to stock or scrapped');
+      throw new BadRequestException('转库存或报废时，撤回处理数量必须大于 0');
     }
     if (handlingMode === 'NONE' && handlingQuantity > 0) {
-      throw new BadRequestException('Handling quantity must be 0 when no physical parts are handled');
+      throw new BadRequestException('无实物处理时，处理数量必须为 0');
     }
     if (Number.isNaN(handledAt.getTime())) {
-      throw new BadRequestException('Withdraw handled date is invalid');
+      throw new BadRequestException('撤回处理日期无效');
     }
 
     const task = await this.findTaskOrThrow(id);
     if (task.inventoryBatch) {
-      throw new BadRequestException('Production task cannot be withdrawn after warehouse receipt');
+      throw new BadRequestException('生产任务已入库，不能撤回');
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -497,7 +567,7 @@ export class ProductionService {
         (child) => child.status !== ProductionStatus.PENDING || child.inventoryBatch || child.processCompletions.length > 0
       );
       if (lockedChild) {
-        throw new BadRequestException('Started replenishment task exists and cannot be withdrawn automatically');
+        throw new BadRequestException('已有补单任务开始生产，不能自动撤回');
       }
 
       await tx.productionTask.deleteMany({
@@ -597,11 +667,11 @@ export class ProductionService {
   async complete(id: string, dto: CompleteProductionDto) {
     const task = await this.findTaskOrThrow(id);
     if (task.inventoryBatch) {
-      throw new BadRequestException('Production task cannot be changed after warehouse receipt');
+      throw new BadRequestException('生产任务已入库，不能修改生产完成记录');
     }
     const isFinalCorrection = task.status === ProductionStatus.COMPLETED;
     if (task.status !== ProductionStatus.IN_PROGRESS && !isFinalCorrection) {
-      throw new BadRequestException('Production task must be started before completion');
+      throw new BadRequestException('生产任务必须先开始，才能确认完成');
     }
 
     const stepDetails = processSnapshotToDetails(task.processSnapshot);
@@ -609,13 +679,13 @@ export class ProductionService {
     const plannedQuantity = decimalToNumber(task.plannedQuantity);
     const completedQuantity = dto.completedQuantity ?? plannedQuantity;
     if (completedQuantity <= 0) {
-      throw new BadRequestException('Completed quantity must be greater than 0');
+      throw new BadRequestException('完成数量必须大于 0');
     }
 
     const completionMap = new Map((task.processCompletions || []).map((item: any) => [item.stepNo, item]));
     const finalCompletion = steps.length > 0 ? completionMap.get(steps.length) : null;
     if (steps.length > 0 && !steps.every((_, index) => completionMap.get(index + 1)?.isCompleted)) {
-      throw new BadRequestException('All process steps must be confirmed before production completion');
+      throw new BadRequestException('所有工序确认完成后，才能确认生产完成');
     }
 
     const finalOperators =
@@ -678,8 +748,9 @@ export class ProductionService {
           }
         });
         await this.upsertProductionScrapRecord(tx, task, savedCompletion, shortageHandling.scrapQuantity);
+        await this.syncProductionReplenishmentRequest(tx, task, savedCompletion, shortageHandling, finalOperators);
       } else if (completedQuantity < plannedQuantity) {
-        throw new BadRequestException('Completed quantity cannot be less than planned quantity');
+        throw new BadRequestException('完成数量不能小于生产计划数量');
       }
 
       const saved = await tx.productionTask.update({
@@ -709,23 +780,23 @@ export class ProductionService {
   async completeProcessStep(id: string, dto: CompleteProcessStepDto) {
     const task = await this.findTaskOrThrow(id);
     if (task.inventoryBatch) {
-      throw new BadRequestException('Production process cannot be changed after warehouse receipt');
+      throw new BadRequestException('生产任务已入库，不能修改工序完成记录');
     }
     const stepDetails = processSnapshotToDetails(task.processSnapshot);
     const steps = stepDetails.map((step) => step.processName);
     const stepIndex = steps.findIndex((step) => step === dto.processName);
     if (stepIndex < 0) {
-      throw new BadRequestException('Process step does not belong to this production task');
+      throw new BadRequestException('该工序不属于当前生产任务');
     }
     if (task.status === ProductionStatus.PENDING) {
-      throw new BadRequestException('Production task must be started before process completion');
+      throw new BadRequestException('生产任务必须先开始，才能确认工序完成');
     }
     if (task.status === ProductionStatus.COMPLETED && !dto.isCompleted) {
-      throw new BadRequestException('Completed production process cannot be marked incomplete');
+      throw new BadRequestException('已完成生产的工序不能改为未完成');
     }
 
     if (dto.isCompleted && !dto.completedQuantity) {
-      throw new BadRequestException('Completed quantity is required');
+      throw new BadRequestException('完成数量不能为空');
     }
     const operators = await this.resolveOperatorSnapshot(dto.operatorCodes, dto.operatorCode);
 
@@ -733,7 +804,7 @@ export class ProductionService {
     const processRemark = stepDetails[stepIndex]?.processRemark || null;
     const completedQuantity = dto.isCompleted ? Number(dto.completedQuantity) : 0;
     if (dto.isCompleted && completedQuantity <= 0) {
-      throw new BadRequestException('Completed quantity must be greater than 0');
+      throw new BadRequestException('完成数量必须大于 0');
     }
 
     await this.prisma.$transaction(async (tx) => {
@@ -744,11 +815,11 @@ export class ProductionService {
 
       // 生产流程必须按已保存的顺序完成，避免跳过前道工序直接把后道工序标绿。
       if (dto.isCompleted && stepNo > 1 && !completionMap.get(stepNo - 1)?.isCompleted) {
-        throw new BadRequestException('Previous process step must be completed first');
+        throw new BadRequestException('必须先完成上一道工序');
       }
 
       if (!dto.isCompleted && completions.some((item) => item.stepNo > stepNo && item.isCompleted)) {
-        throw new BadRequestException('Later process step is already completed');
+        throw new BadRequestException('后续工序已完成，不能回退当前工序');
       }
 
       const existing = await tx.productionProcessCompletion.findUnique({
@@ -843,33 +914,33 @@ export class ProductionService {
   async completeProcessSteps(id: string, dto: CompleteProcessStepsDto) {
     const task = await this.findTaskOrThrow(id);
     if (task.inventoryBatch) {
-      throw new BadRequestException('Production process cannot be changed after warehouse receipt');
+      throw new BadRequestException('生产任务已入库，不能修改工序完成记录');
     }
     const stepDetails = processSnapshotToDetails(task.processSnapshot);
     const steps = stepDetails.map((step) => step.processName);
     if (task.status === ProductionStatus.PENDING) {
-      throw new BadRequestException('Production task must be started before process completion');
+      throw new BadRequestException('生产任务必须先开始，才能确认工序完成');
     }
 
     const completedQuantity = Number(dto.completedQuantity);
     if (completedQuantity <= 0) {
-      throw new BadRequestException('Completed quantity must be greater than 0');
+      throw new BadRequestException('完成数量必须大于 0');
     }
 
     const selectedStepNos = dto.processNames.map((processName) => {
       const stepIndex = steps.findIndex((step) => step === processName.trim());
       if (stepIndex < 0) {
-        throw new BadRequestException(`Process step ${processName} does not belong to this production task`);
+        throw new BadRequestException(`工序 ${processName} 不属于当前生产任务`);
       }
       return stepIndex + 1;
     });
     const uniqueStepNos = Array.from(new Set(selectedStepNos)).sort((a, b) => a - b);
     if (uniqueStepNos.length === 0) {
-      throw new BadRequestException('At least one process step is required');
+      throw new BadRequestException('至少需要选择一道工序');
     }
     for (let index = 1; index < uniqueStepNos.length; index += 1) {
       if (uniqueStepNos[index] !== uniqueStepNos[index - 1] + 1) {
-        throw new BadRequestException('Batch completed process steps must be continuous');
+        throw new BadRequestException('批量确认的工序必须连续');
       }
     }
 
@@ -883,7 +954,7 @@ export class ProductionService {
       // 批量确认仍必须遵守工艺顺序，只允许连续确认，不能跳过前道工序。
       for (const stepNo of uniqueStepNos) {
         if (stepNo > 1 && !completionMap.get(stepNo - 1)?.isCompleted && !selectedStepNoSet.has(stepNo - 1)) {
-          throw new BadRequestException('Previous process step must be completed first');
+          throw new BadRequestException('必须先完成上一道工序');
         }
       }
 
@@ -979,6 +1050,215 @@ export class ProductionService {
     return this.toTask((await this.findTaskOrThrow(id))!);
   }
 
+  async approveReplenishmentRequest(id: string, dto: ApproveProductionReplenishmentRequestDto) {
+    const managerName = dto.managerName?.trim();
+    if (!managerName) {
+      throw new BadRequestException('车间主管姓名不能为空');
+    }
+    const supervisorRemark = dto.remark?.trim() || null;
+
+    const updatedTaskId = await this.prisma.$transaction(async (tx) => {
+      const completion = await tx.productionProcessCompletion.findUnique({
+        where: { id },
+        include: {
+          productionTask: {
+            include: {
+              order: true,
+              orderLine: true
+            }
+          },
+          replenishmentRequests: {
+            orderBy: { createdAt: 'desc' }
+          }
+        }
+      });
+      if (!completion) {
+        throw new NotFoundException('生产报废补单申请不存在');
+      }
+      if (completion.shortageMode !== 'REPLENISHMENT_REQUEST') {
+        throw new BadRequestException('没有待确认的生产报废补单申请');
+      }
+      if (completion.replenishmentTaskNo) {
+        throw new BadRequestException('生产报废补单申请已经生成任务');
+      }
+
+      const task = completion.productionTask;
+      const shortageQuantity = decimalToNumber(completion.shortageQuantity);
+      if (shortageQuantity <= 0) {
+        throw new BadRequestException('生产报废补单申请数量必须大于 0');
+      }
+
+      // 生产报废补单必须由车间主管确认后才生成补单任务；它和订单页面由销售/计划发起的数量增加补单分开记录。
+      let request = completion.replenishmentRequests[0];
+      if (!request) {
+        request = await this.createProductionReplenishmentRequest(tx, task, completion, {
+          code: completion.operatorCode,
+          name: completion.operatorName,
+          role: completion.operatorRole
+        });
+      }
+      if (request.status === 'APPROVED') {
+        throw new BadRequestException('生产报废补单申请已经确认');
+      }
+
+      const stepDetails = processSnapshotToDetails(task.processSnapshot);
+      const shortageHandling: ResolvedShortageHandling = {
+        scrapQuantity: decimalToNumber(completion.scrapQuantity),
+        shortageQuantity,
+        shortageMode: 'REPLENISHMENT',
+        replenishmentTaskNo: null,
+        managerName,
+        shortageReason: completion.shortageReason || request.reason || '生产报废补单申请已由车间主管确认'
+      };
+      const replenishmentTaskNo = await this.applyReplenishmentHandling(tx, task, stepDetails, shortageHandling, null, {
+        sourceType: 'PRODUCTION_SCRAP',
+        sourceRequestNo: request.requestNo
+      });
+      if (!replenishmentTaskNo) {
+        throw new BadRequestException('生产报废补单任务生成失败');
+      }
+
+      const beforeSnapshot = this.toProcessCompletionSnapshot(completion);
+      const reviewedAt = new Date();
+      const savedCompletion = await tx.productionProcessCompletion.update({
+        where: { id: completion.id },
+        data: {
+          shortageMode: 'REPLENISHMENT',
+          replenishmentTaskNo,
+          managerName,
+          shortageReason: shortageHandling.shortageReason,
+          remark: supervisorRemark || completion.remark
+        }
+      });
+
+      await tx.productionReplenishmentRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'APPROVED',
+          supervisorName: managerName,
+          supervisorRemark,
+          approvedAt: reviewedAt,
+          reviewedAt,
+          replenishmentTaskNo
+        }
+      });
+
+      await tx.productionProcessCompletionLog.create({
+        data: {
+          completionId: savedCompletion.id,
+          productionTaskId: task.id,
+          processName: savedCompletion.processName,
+          action: 'APPROVE_REPLENISHMENT_REQUEST',
+          operatorName: managerName,
+          beforeSnapshot,
+          afterSnapshot: this.toProcessCompletionSnapshot(savedCompletion)
+        }
+      });
+
+      return task.id;
+    });
+
+    return this.toTask((await this.findTaskOrThrow(updatedTaskId))!);
+  }
+
+  async rejectReplenishmentRequest(id: string, dto: RejectProductionReplenishmentRequestDto) {
+    const managerName = dto.managerName?.trim();
+    const reason = dto.reason?.trim();
+    if (!managerName) {
+      throw new BadRequestException('车间主管姓名不能为空');
+    }
+    if (!reason) {
+      throw new BadRequestException('驳回原因不能为空');
+    }
+
+    const updatedTaskId = await this.prisma.$transaction(async (tx) => {
+      const completion = await tx.productionProcessCompletion.findUnique({
+        where: { id },
+        include: {
+          productionTask: {
+            include: {
+              order: true,
+              orderLine: true
+            }
+          },
+          replenishmentRequests: {
+            orderBy: { createdAt: 'desc' }
+          }
+        }
+      });
+      if (!completion) {
+        throw new NotFoundException('生产报废补单申请不存在');
+      }
+      if (completion.shortageMode !== 'REPLENISHMENT_REQUEST') {
+        throw new BadRequestException('没有待确认的生产报废补单申请');
+      }
+      if (completion.replenishmentTaskNo) {
+        throw new BadRequestException('生产报废补单申请已经生成任务');
+      }
+
+      const task = completion.productionTask;
+      const shortageQuantity = decimalToNumber(completion.shortageQuantity);
+      if (shortageQuantity <= 0) {
+        throw new BadRequestException('生产报废补单申请数量必须大于 0');
+      }
+
+      let request = completion.replenishmentRequests[0];
+      if (!request) {
+        request = await this.createProductionReplenishmentRequest(tx, task, completion, {
+          code: completion.operatorCode,
+          name: completion.operatorName,
+          role: completion.operatorRole
+        });
+      }
+      if (request.status === 'APPROVED') {
+        throw new BadRequestException('已确认的生产报废补单申请不能驳回');
+      }
+      if (request.status === 'REJECTED') {
+        throw new BadRequestException('生产报废补单申请已经驳回');
+      }
+
+      const shortageReason = `生产报废补单申请被主管驳回：${reason}`;
+      const beforeSnapshot = this.toProcessCompletionSnapshot(completion);
+      const reviewedAt = new Date();
+      const savedCompletion = await tx.productionProcessCompletion.update({
+        where: { id: completion.id },
+        data: {
+          shortageMode: 'MANAGER_APPROVED',
+          managerName,
+          shortageReason
+        }
+      });
+
+      await tx.productionReplenishmentRequest.update({
+        where: { id: request.id },
+        data: {
+          status: 'REJECTED',
+          supervisorName: managerName,
+          supervisorRemark: reason,
+          approvedAt: null,
+          reviewedAt,
+          replenishmentTaskNo: null
+        }
+      });
+
+      await tx.productionProcessCompletionLog.create({
+        data: {
+          completionId: savedCompletion.id,
+          productionTaskId: task.id,
+          processName: savedCompletion.processName,
+          action: 'REJECT_REPLENISHMENT_REQUEST',
+          operatorName: managerName,
+          beforeSnapshot,
+          afterSnapshot: this.toProcessCompletionSnapshot(savedCompletion)
+        }
+      });
+
+      return task.id;
+    });
+
+    return this.toTask((await this.findTaskOrThrow(updatedTaskId))!);
+  }
+
   private taskInclude() {
     return {
       order: true,
@@ -987,6 +1267,9 @@ export class ProductionService {
       processCompletions: {
         orderBy: { stepNo: 'asc' as const },
         include: {
+          replenishmentRequests: {
+            orderBy: { createdAt: 'desc' as const }
+          },
           logs: {
             orderBy: { createdAt: 'desc' as const }
           }
@@ -1001,7 +1284,7 @@ export class ProductionService {
       include: this.taskInclude()
     });
     if (!task) {
-      throw new NotFoundException('Production task not found');
+      throw new NotFoundException('生产任务不存在');
     }
     return task;
   }
@@ -1021,7 +1304,7 @@ export class ProductionService {
     if (stepNo > 1 && completedQuantity > expectedQuantity) {
       const reason = quantityOverrideReason?.trim();
       if (!reason) {
-        throw new BadRequestException('Quantity override reason is required when completed quantity is greater than previous process quantity');
+        throw new BadRequestException('当前工序完成数量大于上一道工序数量时，必须填写原因');
       }
       return {
         expectedQuantity,
@@ -1085,33 +1368,42 @@ export class ProductionService {
     }
 
     if (dto.scrapQuantity === undefined || dto.scrapQuantity === null) {
-      throw new BadRequestException('Scrap quantity is required when final completed quantity is less than planned quantity');
+      throw new BadRequestException('最终完成数量小于计划数量时，必须填写报废数量');
     }
 
     const scrapQuantity = Number(dto.scrapQuantity);
     if (!Number.isFinite(scrapQuantity) || scrapQuantity < 0) {
-      throw new BadRequestException('Scrap quantity must be greater than or equal to 0');
+      throw new BadRequestException('报废数量必须大于或等于 0');
     }
     if (scrapQuantity > shortageQuantity) {
-      throw new BadRequestException('Scrap quantity cannot be greater than shortage quantity');
+      throw new BadRequestException('报废数量不能大于短缺数量');
     }
 
-    const shortageMode = dto.shortageMode || (dto.createReplenishment ? 'REPLENISHMENT' : undefined);
+    // 兼容旧前端字段：生产人员不能直接生成补单任务，只能发起生产报废补单申请。
+    const shortageMode = dto.shortageMode || (dto.createReplenishment ? 'REPLENISHMENT_REQUEST' : undefined);
     if (!shortageMode) {
-      throw new BadRequestException('Shortage handling method is required');
+      throw new BadRequestException('短缺处理方式不能为空');
     }
-    if (shortageMode !== 'REPLENISHMENT' && shortageMode !== 'MANAGER_APPROVED') {
-      throw new BadRequestException('Invalid shortage handling method');
+    if (
+      shortageMode !== 'REPLENISHMENT_REQUEST' &&
+      shortageMode !== 'REPLENISHMENT' &&
+      shortageMode !== 'MANAGER_APPROVED'
+    ) {
+      throw new BadRequestException('短缺处理方式无效');
+    }
+
+    if (shortageMode === 'REPLENISHMENT' && !existingReplenishmentTaskNo) {
+      throw new BadRequestException('生产报废补单必须先由生产人员申请，并由车间主管确认');
     }
 
     if (existingReplenishmentTaskNo && shortageMode !== 'REPLENISHMENT') {
-      throw new BadRequestException('Existing replenishment task cannot be changed to manager approval');
+      throw new BadRequestException('已有补单任务时，不能改成其他短缺处理方式');
     }
 
     const managerName = dto.managerName?.trim() || null;
     const shortageReason = dto.shortageReason?.trim() || null;
     if (shortageMode === 'MANAGER_APPROVED' && (!managerName || !shortageReason)) {
-      throw new BadRequestException('Manager name and shortage reason are required when no replenishment is created');
+      throw new BadRequestException('不补单完成时，必须填写管理人员姓名和缺货理由');
     }
 
     return {
@@ -1136,7 +1428,8 @@ export class ProductionService {
     task: any,
     steps: ProcessStepSnapshot[],
     shortageHandling: ResolvedShortageHandling,
-    existingReplenishmentTaskNo?: string | null
+    existingReplenishmentTaskNo?: string | null,
+    sourceInfo?: ReplenishmentTaskSourceInfo
   ) {
     if (shortageHandling.shortageQuantity <= 0) {
       if (existingReplenishmentTaskNo) {
@@ -1149,7 +1442,15 @@ export class ProductionService {
       return null;
     }
 
-    return this.createOrUpdateReplenishmentTask(tx, task, steps, shortageHandling.shortageQuantity, existingReplenishmentTaskNo);
+    return this.createOrUpdateReplenishmentTask(
+      tx,
+      task,
+      steps,
+      shortageHandling.shortageQuantity,
+      existingReplenishmentTaskNo,
+      shortageHandling.shortageReason,
+      sourceInfo
+    );
   }
 
   private async createOrUpdateReplenishmentTask(
@@ -1157,16 +1458,19 @@ export class ProductionService {
     task: any,
     steps: ProcessStepSnapshot[],
     plannedQuantity: number,
-    existingReplenishmentTaskNo?: string | null
+    existingReplenishmentTaskNo?: string | null,
+    sourceRemark?: string | null,
+    sourceInfo?: ReplenishmentTaskSourceInfo
   ) {
     // 补单仍然挂在原订单和零件下，任务号按原任务号追加 R 序号，现场更容易区分来源。
+    const replenishmentRemark = sourceRemark || `补单来源：${task.productionTaskNo}`;
     if (existingReplenishmentTaskNo) {
       const existing = await tx.productionTask.findUnique({
         where: { productionTaskNo: existingReplenishmentTaskNo }
       });
       if (existing) {
         if (existing.status !== ProductionStatus.PENDING) {
-          throw new BadRequestException('Existing replenishment task has started and cannot be changed');
+          throw new BadRequestException('已有补单任务已开始生产，不能修改');
         }
         await tx.productionTask.update({
           where: { productionTaskNo: existingReplenishmentTaskNo },
@@ -1174,7 +1478,13 @@ export class ProductionService {
             plannedQuantity,
             unit: task.unit,
             processSnapshot: this.processStepsToJson(steps),
-            remark: `补单来源：${task.productionTaskNo}`
+            ...(sourceInfo
+              ? {
+                  replenishmentSourceType: sourceInfo.sourceType,
+                  replenishmentSourceRequestNo: sourceInfo.sourceRequestNo || null
+                }
+              : {}),
+            remark: replenishmentRemark
           }
         });
         return existingReplenishmentTaskNo;
@@ -1187,6 +1497,7 @@ export class ProductionService {
         orderLineId: task.orderLineId,
         isReplenishment: true,
         sourceProductionTaskNo,
+        ...(sourceInfo?.sourceType ? { replenishmentSourceType: sourceInfo.sourceType } : {}),
         status: ProductionStatus.PENDING
       },
       orderBy: { productionTaskNo: 'asc' }
@@ -1198,7 +1509,13 @@ export class ProductionService {
           plannedQuantity,
           unit: task.unit,
           processSnapshot: this.processStepsToJson(steps),
-          remark: `补单来源：${task.productionTaskNo}`
+          ...(sourceInfo
+            ? {
+                replenishmentSourceType: sourceInfo.sourceType,
+                replenishmentSourceRequestNo: sourceInfo.sourceRequestNo || null
+              }
+            : {}),
+          remark: replenishmentRemark
         }
       });
       return existingPending.productionTaskNo;
@@ -1209,12 +1526,13 @@ export class ProductionService {
         orderLineId: task.orderLineId,
         isReplenishment: true,
         sourceProductionTaskNo,
+        ...(sourceInfo?.sourceType ? { replenishmentSourceType: sourceInfo.sourceType } : {}),
         status: { not: ProductionStatus.PENDING }
       },
       orderBy: { productionTaskNo: 'desc' }
     });
     if (existingStarted) {
-      throw new BadRequestException('Existing replenishment task has started and cannot be replaced by a duplicate');
+      throw new BadRequestException('已有补单任务已开始生产，不能用重复补单替换');
     }
 
     const productionTaskNo = await this.generateNextReplenishmentTaskNo(tx, sourceProductionTaskNo);
@@ -1233,7 +1551,9 @@ export class ProductionService {
         status: ProductionStatus.PENDING,
         isReplenishment: true,
         sourceProductionTaskNo,
-        remark: `补单来源：${task.productionTaskNo}`
+        replenishmentSourceType: sourceInfo?.sourceType || 'PRODUCTION_SCRAP',
+        replenishmentSourceRequestNo: sourceInfo?.sourceRequestNo || null,
+        remark: replenishmentRemark
       }
     });
     return productionTaskNo;
@@ -1251,7 +1571,7 @@ export class ProductionService {
       return;
     }
     if (existing.status !== ProductionStatus.PENDING || existing.inventoryBatch || existing.processCompletions.length > 0) {
-      throw new BadRequestException('Existing replenishment task has records and cannot be removed automatically');
+      throw new BadRequestException('已有补单任务存在生产记录，不能自动删除');
     }
     await tx.productionTask.delete({ where: { productionTaskNo: replenishmentTaskNo } });
   }
@@ -1276,7 +1596,7 @@ export class ProductionService {
         return `${prefix}${String(index).padStart(2, '0')}`;
       }
     }
-    throw new BadRequestException('No available replenishment task number');
+    throw new BadRequestException('没有可用的补单任务号');
   }
 
   private async upsertProductionScrapRecord(
@@ -1326,6 +1646,110 @@ export class ProductionService {
         recordDate: new Date()
       }
     });
+  }
+
+  private async syncProductionReplenishmentRequest(
+    tx: Prisma.TransactionClient,
+    task: any,
+    completion: any,
+    shortageHandling: ResolvedShortageHandling,
+    requestedBy: ResolvedOperatorSnapshot
+  ) {
+    const existingRequest = await tx.productionReplenishmentRequest.findUnique({
+      where: { processCompletionId: completion.id }
+    });
+
+    if (shortageHandling.shortageMode !== 'REPLENISHMENT_REQUEST' || shortageHandling.shortageQuantity <= 0) {
+      if (existingRequest?.status === 'PENDING') {
+        await tx.productionReplenishmentRequest.delete({ where: { id: existingRequest.id } });
+      }
+      return;
+    }
+
+    if (existingRequest?.status === 'APPROVED') {
+      throw new BadRequestException('已确认的生产报废补单申请不能修改');
+    }
+
+    // 操作员在工序完成表中发现报废并选择“生产报废补单申请”时，只创建待确认申请，不直接生成生产任务。
+    await this.createProductionReplenishmentRequest(tx, task, completion, requestedBy, existingRequest?.requestNo);
+  }
+
+  private async createProductionReplenishmentRequest(
+    tx: Prisma.TransactionClient,
+    task: any,
+    completion: any,
+    requestedBy: ResolvedOperatorSnapshot,
+    existingRequestNo?: string | null
+  ) {
+    // sourceType 固定为 PRODUCTION_SCRAP，用于后续区分“质量/生产报废补单”和“销售/计划追加补单”。
+    const requestQuantity = decimalToNumber(completion.shortageQuantity);
+    const scrapQuantity = decimalToNumber(completion.scrapQuantity);
+    const reason = [
+      `生产报废补单申请：${task.productionTaskNo}`,
+      `工序：${completion.processName}`,
+      `报废：${this.roundQuantity(scrapQuantity)} ${task.unit}`,
+      `申请补齐：${this.roundQuantity(requestQuantity)} ${task.unit}`,
+      completion.remark ? `说明：${completion.remark}` : ''
+    ]
+      .filter(Boolean)
+      .join('；');
+
+    return tx.productionReplenishmentRequest.upsert({
+      where: { processCompletionId: completion.id },
+      update: {
+        sourceType: 'PRODUCTION_SCRAP',
+        status: 'PENDING',
+        orderId: task.orderId,
+        orderNo: task.orderNo,
+        orderLineId: task.orderLineId,
+        productionTaskId: task.id,
+        productionTaskNo: task.productionTaskNo,
+        partCode: task.partCode,
+        partName: task.partName,
+        requestQuantity,
+        scrapQuantity,
+        unit: task.unit,
+        reason,
+        requestedByCode: requestedBy.code,
+        requestedByName: requestedBy.name,
+        supervisorName: null,
+        supervisorRemark: null,
+        approvedAt: null,
+        reviewedAt: null,
+        replenishmentTaskNo: null
+      },
+      create: {
+        requestNo: existingRequestNo || (await this.generateNextReplenishmentRequestNo(tx)),
+        sourceType: 'PRODUCTION_SCRAP',
+        status: 'PENDING',
+        orderId: task.orderId,
+        orderNo: task.orderNo,
+        orderLineId: task.orderLineId,
+        productionTaskId: task.id,
+        productionTaskNo: task.productionTaskNo,
+        processCompletionId: completion.id,
+        partCode: task.partCode,
+        partName: task.partName,
+        requestQuantity,
+        scrapQuantity,
+        unit: task.unit,
+        reason,
+        requestedByCode: requestedBy.code,
+        requestedByName: requestedBy.name
+      }
+    });
+  }
+
+  private async generateNextReplenishmentRequestNo(tx: Prisma.TransactionClient) {
+    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `PRR-${dateKey}-`;
+    const lastRequest = await tx.productionReplenishmentRequest.findFirst({
+      where: { requestNo: { startsWith: prefix } },
+      orderBy: { requestNo: 'desc' },
+      select: { requestNo: true }
+    });
+    const nextSequence = lastRequest ? Number(lastRequest.requestNo.slice(prefix.length)) + 1 : 1;
+    return `${prefix}${String(nextSequence).padStart(4, '0')}`;
   }
 
   private async generateNextScrapNo(tx: Prisma.TransactionClient) {
@@ -1525,6 +1949,7 @@ export class ProductionService {
   }
 
   private toProcessCompletionSnapshot(completion: any) {
+    const replenishmentRequest = completion.replenishmentRequests?.[0];
     return {
       stepNo: completion.stepNo,
       processName: completion.processName,
@@ -1535,6 +1960,12 @@ export class ProductionService {
       shortageQuantity: decimalToNumber(completion.shortageQuantity),
       shortageMode: completion.shortageMode,
       replenishmentTaskNo: completion.replenishmentTaskNo,
+      replenishmentRequestNo: replenishmentRequest?.requestNo,
+      replenishmentSource: replenishmentRequest?.sourceType,
+      replenishmentRequestStatus: replenishmentRequest?.status,
+      replenishmentApprovedBy: replenishmentRequest?.supervisorName,
+      replenishmentApprovedAt: replenishmentRequest?.approvedAt ? new Date(replenishmentRequest.approvedAt).toISOString() : null,
+      replenishmentReviewedAt: replenishmentRequest?.reviewedAt ? new Date(replenishmentRequest.reviewedAt).toISOString() : null,
       managerName: completion.managerName,
       shortageReason: completion.shortageReason,
       unit: completion.unit,
@@ -1566,6 +1997,7 @@ export class ProductionService {
       unit: notice.unit,
       reason: notice.reason,
       managerName: notice.managerName,
+      handlingPlan: notice.handlingPlan,
       acknowledgedBy: notice.acknowledgedBy,
       acknowledgedAt: notice.acknowledgedAt,
       createdAt: notice.createdAt
@@ -1592,6 +2024,36 @@ export class ProductionService {
     };
   }
 
+  private toProductionReplenishmentRequest(request: any) {
+    return {
+      id: request.id,
+      requestNo: request.requestNo,
+      sourceType: request.sourceType,
+      status: request.status,
+      orderId: request.orderId,
+      orderNo: request.orderNo,
+      orderLineId: request.orderLineId,
+      productionTaskId: request.productionTaskId,
+      productionTaskNo: request.productionTaskNo,
+      processCompletionId: request.processCompletionId,
+      partCode: request.partCode,
+      partName: request.partName,
+      requestQuantity: decimalToNumber(request.requestQuantity),
+      scrapQuantity: decimalToNumber(request.scrapQuantity),
+      unit: request.unit,
+      reason: request.reason,
+      requestedByCode: request.requestedByCode,
+      requestedByName: request.requestedByName,
+      supervisorName: request.supervisorName,
+      supervisorRemark: request.supervisorRemark,
+      approvedAt: request.approvedAt,
+      reviewedAt: request.reviewedAt,
+      replenishmentTaskNo: request.replenishmentTaskNo,
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt
+    };
+  }
+
   private toTask(task: any) {
     const stepDetails = processSnapshotToDetails(task.processSnapshot);
     const steps = stepDetails.map((step) => step.processName);
@@ -1605,6 +2067,9 @@ export class ProductionService {
       orderNo: task.orderNo,
       isReplenishment: task.isReplenishment,
       sourceProductionTaskNo: task.sourceProductionTaskNo,
+      replenishmentSourceType: this.resolveTaskReplenishmentSourceType(task),
+      replenishmentSourceRequestNo: task.replenishmentSourceRequestNo,
+      replenishmentSourceLabel: this.resolveTaskReplenishmentSourceLabel(task),
       customerId: task.order?.customerId,
       customerName: task.customerName,
       orderDate: task.order?.orderDate,
@@ -1629,6 +2094,7 @@ export class ProductionService {
       processCompletions: steps.map((processName, index) => {
         const stepNo = index + 1;
         const completion = completionMap.get(stepNo) as any;
+        const replenishmentRequest = completion?.replenishmentRequests?.[0];
         // 已完成或已入库的历史任务可能没有完整工序表记录；接口层按业务结果兜底，让页面工序标签保持绿色只读。
         const isCompleted = Boolean(completion?.isCompleted) || isImplicitlyCompleted;
         const completionQuantity = completion ? decimalToNumber(completion.completedQuantity) : 0;
@@ -1643,6 +2109,13 @@ export class ProductionService {
           shortageQuantity: decimalToNumber(completion?.shortageQuantity),
           shortageMode: completion?.shortageMode,
           replenishmentTaskNo: completion?.replenishmentTaskNo,
+          replenishmentRequestNo: replenishmentRequest?.requestNo,
+          replenishmentSource: replenishmentRequest?.sourceType,
+          replenishmentRequestStatus: replenishmentRequest?.status,
+          replenishmentApprovedBy: replenishmentRequest?.supervisorName,
+          replenishmentApprovedAt: replenishmentRequest?.approvedAt,
+          replenishmentReviewedAt: replenishmentRequest?.reviewedAt,
+          replenishmentApprovalRemark: replenishmentRequest?.supervisorRemark,
           managerName: completion?.managerName,
           shortageReason: completion?.shortageReason,
           unit: completion?.unit || task.unit,
@@ -1667,5 +2140,48 @@ export class ProductionService {
       completedAt: task.completedAt,
       remark: task.remark
     };
+  }
+
+  private resolveTaskReplenishmentSourceType(task: any) {
+    if (!task?.isReplenishment) {
+      return null;
+    }
+    if (task.replenishmentSourceType) {
+      return task.replenishmentSourceType;
+    }
+    const remark = String(task.remark || '');
+    if (remark.includes('生产报废') || remark.includes('PRODUCTION_SCRAP')) {
+      return 'PRODUCTION_SCRAP';
+    }
+    return 'ORDER_CHANGE';
+  }
+
+  private resolveTaskReplenishmentSourceLabel(task: any) {
+    const sourceType = this.resolveTaskReplenishmentSourceType(task);
+    if (sourceType === 'PRODUCTION_SCRAP') {
+      return '生产报废补单';
+    }
+    if (sourceType === 'ORDER_CHANGE') {
+      return '订单补单';
+    }
+    return null;
+  }
+
+  private startOfDay(value: string) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException('开始日期无效');
+    }
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+
+  private endOfDay(value: string) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException('结束日期无效');
+    }
+    date.setHours(23, 59, 59, 999);
+    return date;
   }
 }

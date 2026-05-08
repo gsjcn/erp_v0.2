@@ -31,7 +31,7 @@
           v-model="filters.keyword"
           :fetch-suggestions="queryMaterialSuggestions"
           value-key="value"
-          placeholder="输入零件编码、名称、拼音或首字母；也可输入客户、订单号、任务号或批次号"
+          placeholder="零件编码 / 名称 / 拼音 / 客户 / 订单 / 任务 / 批次"
           style="width: 330px"
           clearable
           @select="selectMaterialSuggestion"
@@ -62,7 +62,7 @@
       </div>
       <div class="filter-field">
         <label>订单号</label>
-        <el-input v-model="filters.orderNo" placeholder="sourceOrderNo" style="width: 190px" clearable />
+        <el-input v-model="filters.orderNo" placeholder="订单号 / 生产来源订单号" style="width: 220px" clearable />
       </div>
       <div class="filter-field">
         <label>状态</label>
@@ -100,6 +100,15 @@
         <el-table-column label="备货库存" width="140">
           <template #default="{ row }">{{ formatQuantity(row.stockInventoryQuantity, row.unit) }}</template>
         </el-table-column>
+        <el-table-column label="备货来源构成" min-width="240">
+          <template #default="{ row }">
+            <div class="stock-source-breakdown">
+              <el-tag size="small" effect="plain">正常 {{ formatQuantity(row.normalOrderStockQuantity || 0, row.unit) }}</el-tag>
+              <el-tag size="small" effect="plain" type="warning">取消 {{ formatQuantity(row.cancelledOrderStockQuantity || 0, row.unit) }}</el-tag>
+              <el-tag size="small" effect="plain" type="info">变更 {{ formatQuantity(row.customerChangeStockQuantity || 0, row.unit) }}</el-tag>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="累计数量" width="130">
           <template #default="{ row }">{{ formatQuantity(row.totalQuantity, row.unit) }}</template>
         </el-table-column>
@@ -122,6 +131,11 @@
               </el-tag>
               <span v-if="!row.warehouses.length" class="muted">无可用库存</span>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源/图纸" width="120">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openSourceDetails(row.partCode, row.unit, 'ALL')">查看来源</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -152,6 +166,10 @@
             <label>备货库存</label>
             <span>{{ formatQuantity(row.stockInventoryQuantity, row.unit) }}</span>
           </div>
+          <div class="mobile-field mobile-full">
+            <label>备货来源构成</label>
+            <span>{{ stockSourceBreakdownText(row) }}</span>
+          </div>
           <div class="mobile-field">
             <label>累计数量</label>
             <span>{{ formatQuantity(row.totalQuantity, row.unit) }}</span>
@@ -164,6 +182,9 @@
             <label>仓库分布</label>
             <span>{{ warehouseSummaryText(row) }}</span>
           </div>
+        </div>
+        <div class="mobile-card-actions">
+          <el-button link type="primary" @click="openSourceDetails(row.partCode, row.unit, 'ALL')">来源/图纸</el-button>
         </div>
       </article>
     </div>
@@ -180,6 +201,17 @@
         </el-table-column>
         <el-table-column prop="partCode" label="零件编码" width="140" />
         <el-table-column prop="partName" label="零件名称" min-width="180" />
+        <el-table-column label="图纸" min-width="190">
+          <template #default="{ row }">
+            <div class="cell-main">{{ drawingInfoText(row) }}</div>
+            <DrawingPreviewLink
+              :file-name="row.drawingFileName"
+              :file-url="row.drawingFileUrl"
+              link-text="打开图纸"
+              :title="`${row.partName || row.partCode} 库存图纸`"
+            />
+          </template>
+        </el-table-column>
         <el-table-column label="当前剩余" width="120">
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
         </el-table-column>
@@ -191,8 +223,9 @@
         </el-table-column>
         <el-table-column label="来源订单" min-width="180">
           <template #default="{ row }">
-            <OrderNoLink v-if="row.sourceOrderNo" :order-no="row.sourceOrderNo" />
+            <OrderNoLink v-if="inventorySourceOrderNo(row)" :order-no="inventorySourceOrderNo(row)" />
             <span v-else class="muted">备货库存</span>
+            <div v-if="row.inventorySourceType === 'STOCK' && inventorySourceOrderNo(row)" class="cell-subtext">生产来源订单</div>
           </template>
         </el-table-column>
         <el-table-column label="生产任务" min-width="220">
@@ -212,8 +245,11 @@
             <StatusTag :value="row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="盘点" width="130" fixed="right">
+        <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
+            <el-button link type="primary" @click="openSourceDetails(row.partCode, row.unit, 'ALL')">
+              来源
+            </el-button>
             <el-button link type="primary" :disabled="!canAdjustBatch(row)" @click="openAdjustDialog(row)">
               盘点调整
             </el-button>
@@ -262,8 +298,21 @@
           <div class="mobile-field">
             <label>来源订单</label>
             <span>
-              <OrderNoLink v-if="batch.sourceOrderNo" :order-no="batch.sourceOrderNo" />
+              <OrderNoLink v-if="inventorySourceOrderNo(batch)" :order-no="inventorySourceOrderNo(batch)" />
               <span v-else class="muted">备货库存</span>
+              <small v-if="batch.inventorySourceType === 'STOCK' && inventorySourceOrderNo(batch)" class="mobile-subtext">生产来源订单</small>
+            </span>
+          </div>
+          <div class="mobile-field mobile-full">
+            <label>图纸</label>
+            <span>
+              {{ drawingInfoText(batch) }}
+              <DrawingPreviewLink
+                :file-name="batch.drawingFileName"
+                :file-url="batch.drawingFileUrl"
+                link-text="打开图纸"
+                :title="`${batch.partName || batch.partCode} 库存图纸`"
+              />
             </span>
           </div>
           <div class="mobile-field mobile-full">
@@ -283,6 +332,9 @@
           </div>
         </div>
         <div class="mobile-card-actions">
+          <el-button size="small" type="primary" plain @click="openSourceDetails(batch.partCode, batch.unit, 'ALL')">
+            来源/图纸
+          </el-button>
           <el-button size="small" type="primary" plain :disabled="!canAdjustBatch(batch)" @click="openAdjustDialog(batch)">
             盘点调整
           </el-button>
@@ -290,6 +342,12 @@
       </article>
       <div v-if="!inventory.length && !loading" class="mobile-empty">暂无库存</div>
     </div>
+
+    <InventorySourceDetailsDialog
+      v-model="sourceDetailsVisible"
+      :loading="sourceDetailsLoading"
+      :detail="sourceDetails"
+    />
 
     <el-dialog v-model="adjustDialogVisible" title="库存盘点调整" width="640px" class="responsive-dialog">
       <div v-if="selectedBatch" class="adjustment-summary">
@@ -382,12 +440,15 @@ import { ElMessage } from 'element-plus';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
+import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
+import InventorySourceDetailsDialog from '../components/InventorySourceDetailsDialog.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
 import StatusTag from '../components/StatusTag.vue';
 import type {
   InventoryAdjustment,
   InventoryBatch,
   InventoryMaterialSuggestion,
+  InventorySourceDetailResponse,
   InventoryStatus,
   InventorySummaryRow,
   Warehouse
@@ -401,6 +462,10 @@ const loading = ref(false);
 const adjustDialogVisible = ref(false);
 const adjustSaving = ref(false);
 const selectedBatch = ref<InventoryBatch>();
+const sourceDetailsVisible = ref(false);
+const sourceDetailsLoading = ref(false);
+const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
+const materialSuggestionRequestSeq = ref(0);
 const adjustmentFileInput = ref<HTMLInputElement>();
 const adjustmentFile = ref<File | null>(null);
 const adjustmentHistory = ref<InventoryAdjustment[]>([]);
@@ -422,6 +487,7 @@ const allowedAdjustmentMimeTypes = [
   'image/gif',
   'image/tiff'
 ];
+const genericAdjustmentMimeTypes = ['', 'application/octet-stream'];
 const filters = reactive<{
   keyword?: string;
   customerId?: string;
@@ -449,7 +515,11 @@ const inventoryQueryNoticeRows = computed(() => {
 });
 
 async function loadWarehouses() {
-  warehouses.value = await erpApi.warehouses();
+  try {
+    warehouses.value = await erpApi.warehouses();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '仓库列表加载失败');
+  }
 }
 
 async function loadInventory() {
@@ -458,6 +528,8 @@ async function loadInventory() {
     const [summaryRows, inventoryRows] = await Promise.all([erpApi.inventorySummary(filters), erpApi.inventory(filters)]);
     inventorySummary.value = summaryRows;
     inventory.value = inventoryRows;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存数据加载失败');
   } finally {
     loading.value = false;
   }
@@ -474,10 +546,17 @@ function reset() {
 
 async function queryMaterialSuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
   const normalizedKeyword = keyword.trim();
+  const requestId = ++materialSuggestionRequestSeq.value;
+  callback([]);
   try {
-    callback(await erpApi.inventoryMaterialSuggestions(normalizedKeyword, filters.warehouseId));
+    const result = await erpApi.inventoryMaterialSuggestions(normalizedKeyword, filters.warehouseId);
+    if (requestId === materialSuggestionRequestSeq.value) {
+      callback(result);
+    }
   } catch {
-    callback([]);
+    if (requestId === materialSuggestionRequestSeq.value) {
+      callback([]);
+    }
   }
 }
 
@@ -487,18 +566,58 @@ function selectMaterialSuggestion(item: InventoryMaterialSuggestion) {
 }
 
 function inventorySourceLabel(row: InventoryBatch) {
-  return row.inventorySourceType === 'ORDER' ? '订单库存' : '备货库存';
+  if (row.inventorySourceType === 'ORDER') {
+    return '订单库存';
+  }
+  return sourceKindLabel(row.sourceKind);
 }
 
 function inventorySourceTagType(row: InventoryBatch) {
-  return row.inventorySourceType === 'ORDER' ? 'success' : 'warning';
+  if (row.inventorySourceType === 'ORDER') {
+    return 'success';
+  }
+  return row.sourceKind === 'CANCELLED_ORDER' ? 'danger' : row.sourceKind === 'CUSTOMER_CHANGE' ? 'warning' : 'info';
+}
+
+function sourceKindLabel(kind?: string) {
+  const map: Record<string, string> = {
+    NORMAL_ORDER: '正常订单备货',
+    CANCELLED_ORDER: '取消订单转库存',
+    CUSTOMER_CHANGE: '客户变更转库存'
+  };
+  return map[kind || 'NORMAL_ORDER'] || kind || '正常订单备货';
+}
+
+function stockSourceBreakdownText(row: InventorySummaryRow) {
+  return [
+    `正常 ${formatQuantity(row.normalOrderStockQuantity || 0, row.unit)}`,
+    `取消 ${formatQuantity(row.cancelledOrderStockQuantity || 0, row.unit)}`,
+    `变更 ${formatQuantity(row.customerChangeStockQuantity || 0, row.unit)}`
+  ].join(' / ');
 }
 
 function customerDisplay(row: InventoryBatch) {
   return row.sourceCustomerName || (row.inventorySourceType === 'STOCK' ? '备货库存' : '-');
 }
 
+function inventorySourceOrderNo(row: InventoryBatch) {
+  return row.productionSourceOrderNo || row.sourceOrderNo || '';
+}
+
+function drawingInfoText(row: InventoryBatch) {
+  const drawingNo = row.drawingNo || '未记录图号';
+  const version = row.drawingVersion ? ` / ${row.drawingVersion}` : '';
+  return `${drawingNo}${version}`;
+}
+
 function taskRelationText(row: InventoryBatch) {
+  if (row.replenishmentSourceLabel) {
+    return row.sourceProductionTaskNo ? `${row.replenishmentSourceLabel} / 源任务 ${row.sourceProductionTaskNo}` : row.replenishmentSourceLabel;
+  }
+  if (row.replenishmentSourceType) {
+    const label = row.replenishmentSourceType === 'PRODUCTION_SCRAP' ? '生产报废补单' : '订单补单';
+    return row.replenishmentSourceRequestNo ? `${label}：${row.replenishmentSourceRequestNo}` : label;
+  }
   if (row.isReplenishment && row.sourceReplenishmentTaskNo) {
     return `补单来源：${row.sourceReplenishmentTaskNo}`;
   }
@@ -519,6 +638,27 @@ function warehouseSummaryText(row: InventorySummaryRow) {
 
 function canAdjustBatch(row: InventoryBatch) {
   return Boolean(row.canAdjust);
+}
+
+async function openSourceDetails(partCode: string, unit?: string, sourceType: 'ALL' | 'ORDER' | 'STOCK' = 'ALL') {
+  if (!partCode?.trim()) {
+    ElMessage.warning('请先选择零件');
+    return;
+  }
+  sourceDetailsVisible.value = true;
+  sourceDetailsLoading.value = true;
+  sourceDetails.value = null;
+  try {
+    sourceDetails.value = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
+      unit,
+      warehouseId: filters.warehouseId,
+      sourceType
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败');
+  } finally {
+    sourceDetailsLoading.value = false;
+  }
 }
 
 function currentDateTimeValue() {
@@ -562,7 +702,10 @@ function onAdjustmentFileChange(event: Event) {
 function isAllowedAdjustmentFile(file: File) {
   const fileName = file.name.toLowerCase();
   const extension = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '';
-  return allowedAdjustmentFileExtensions.includes(extension) && allowedAdjustmentMimeTypes.includes(file.type);
+  return (
+    allowedAdjustmentFileExtensions.includes(extension) &&
+    (genericAdjustmentMimeTypes.includes(file.type) || allowedAdjustmentMimeTypes.includes(file.type))
+  );
 }
 
 function formatSignedQuantity(value: number, unit: string) {
@@ -584,6 +727,8 @@ async function loadAdjustmentHistory(batchId: string) {
   adjustmentHistoryLoading.value = true;
   try {
     adjustmentHistory.value = await erpApi.inventoryBatchAdjustments(batchId);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '盘点记录加载失败');
   } finally {
     adjustmentHistoryLoading.value = false;
   }
@@ -715,6 +860,12 @@ onMounted(async () => {
   gap: 6px;
 }
 
+.stock-source-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .material-suggestion {
   display: flex;
   flex-direction: column;
@@ -812,11 +963,31 @@ onMounted(async () => {
 
 .mobile-card-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
   margin-top: 12px;
 }
 
+.mobile-card-actions .el-button {
+  margin-left: 0;
+}
+
 @media (max-width: 768px) {
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .inventory-query-notice {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .inventory-query-notice span {
+    width: 100%;
+  }
+
   .adjustment-form :deep(.el-form-item) {
     display: block;
   }
@@ -834,6 +1005,14 @@ onMounted(async () => {
   .adjustment-delta {
     display: block;
     margin: 8px 0 0;
+  }
+
+  .mobile-card-actions {
+    justify-content: flex-start;
+  }
+
+  .mobile-card-actions .el-button {
+    flex: 1 1 128px;
   }
 }
 </style>

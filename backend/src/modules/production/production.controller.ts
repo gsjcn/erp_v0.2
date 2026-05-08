@@ -1,14 +1,17 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import {
   AcknowledgeProductionNoticeDto,
+  ApproveProductionReplenishmentRequestDto,
   CompleteProcessStepDto,
   CompleteProcessStepsDto,
   CompleteProductionDto,
   ProductionAnnualSummaryQueryDto,
   ProductionNoticeQueryDto,
   ProductionOperatorQueryDto,
+  ProductionReplenishmentRequestQueryDto,
   ProductionScrapQueryDto,
   ProductionTaskQueryDto,
+  RejectProductionReplenishmentRequestDto,
   WithdrawProductionTaskDto
 } from './dto';
 import { ProductionService } from './production.service';
@@ -40,6 +43,21 @@ export class ProductionController {
   @Post('notices/:id/acknowledge')
   acknowledgeNotice(@Param('id') id: string, @Body() dto: AcknowledgeProductionNoticeDto) {
     return this.productionService.acknowledgeNotice(id, dto);
+  }
+
+  @Post('process-completions/:id/replenishment-request/approve')
+  approveReplenishmentRequest(@Param('id') id: string, @Body() dto: ApproveProductionReplenishmentRequestDto) {
+    return this.productionService.approveReplenishmentRequest(id, dto);
+  }
+
+  @Post('process-completions/:id/replenishment-request/reject')
+  rejectReplenishmentRequest(@Param('id') id: string, @Body() dto: RejectProductionReplenishmentRequestDto) {
+    return this.productionService.rejectReplenishmentRequest(id, dto);
+  }
+
+  @Get('replenishment-requests')
+  replenishmentRequests(@Query() query: ProductionReplenishmentRequestQueryDto) {
+    return this.productionService.replenishmentRequests(query);
   }
 
   @Get('scrap-records')

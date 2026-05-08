@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsDateString, IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsDateString, IsEnum, IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
 import { OrderLineFulfillmentMode, OrderStatus } from '@prisma/client';
 
 export class OrderQueryDto {
@@ -18,6 +18,14 @@ export class OrderQueryDto {
   @IsOptional()
   @IsEnum(OrderStatus)
   status?: OrderStatus;
+
+  @IsOptional()
+  @IsString()
+  statuses?: string;
+
+  @IsOptional()
+  @IsString()
+  productionStatuses?: string;
 }
 
 export class NextOrderNoQueryDto {
@@ -54,6 +62,64 @@ export class ProcessStepDto {
   @IsOptional()
   @IsString()
   processRemark?: string;
+}
+
+export class StockSourceSelectionDto {
+  @IsString()
+  @IsNotEmpty()
+  batchId!: string;
+
+  @IsOptional()
+  @IsString()
+  batchNo?: string;
+
+  @IsOptional()
+  @IsString()
+  partCode?: string;
+
+  @IsOptional()
+  @IsString()
+  partName?: string;
+
+  @IsNumber()
+  @Min(0.001)
+  quantity!: number;
+
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @IsOptional()
+  @IsString()
+  replenishmentSourceType?: string;
+
+  @IsOptional()
+  @IsString()
+  replenishmentSourceRequestNo?: string;
+
+  @IsOptional()
+  @IsString()
+  replenishmentSourceLabel?: string;
+
+  @IsOptional()
+  @IsIn(['MATCHED', 'NEEDS_CONFIRMATION', 'INCOMPLETE', 'UNKNOWN'])
+  compatibilityStatus?: 'MATCHED' | 'NEEDS_CONFIRMATION' | 'INCOMPLETE' | 'UNKNOWN';
+
+  @IsOptional()
+  @IsString()
+  compatibilityReason?: string;
+
+  @IsOptional()
+  @IsString()
+  manualConfirmedBy?: string;
+
+  @IsOptional()
+  @IsString()
+  manualConfirmedAt?: string;
+
+  @IsOptional()
+  @IsString()
+  manualConfirmRemark?: string;
 }
 
 export class CreateOrderLineDto {
@@ -116,6 +182,12 @@ export class CreateOrderLineDto {
   @ValidateNested({ each: true })
   @Type(() => ProcessStepDto)
   processSteps?: ProcessStepDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => StockSourceSelectionDto)
+  selectedStockSources?: StockSourceSelectionDto[];
 }
 
 export class CreateOrderDto {
@@ -210,13 +282,45 @@ export class UpdateLineQuantityDto {
   managerName?: string;
 }
 
+export class CancelOrderHandlingPlanItemDto {
+  @IsString()
+  @IsNotEmpty()
+  orderLineId!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  productionTaskNo!: string;
+
+  @IsIn(['STOCK', 'SCRAP', 'NONE'])
+  handlingMode!: 'STOCK' | 'SCRAP' | 'NONE';
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  handlingQuantity?: number;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+}
+
 export class CancelOrderDto {
   @IsString()
   reason!: string;
 
-  @IsOptional()
   @IsString()
-  managerName?: string;
+  @IsNotEmpty()
+  managerName!: string;
+
+  @IsOptional()
+  @IsIn(['NOT_PRODUCED', 'PRODUCED'])
+  productionCancelState?: 'NOT_PRODUCED' | 'PRODUCED';
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CancelOrderHandlingPlanItemDto)
+  handlingPlan?: CancelOrderHandlingPlanItemDto[];
 }
 
 export class CancelStartedOrderDto extends CancelOrderDto {}

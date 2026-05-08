@@ -65,7 +65,7 @@ export class OrdersController {
       fileFilter: (_request, file, callback) => {
         const extension = extname(file.originalname).toLowerCase();
         if (!allowedDrawingExtensions.has(extension)) {
-          callback(new BadRequestException('Drawing file type is not supported'), false);
+          callback(new BadRequestException('图纸文件格式不支持'), false);
           return;
         }
         callback(null, true);
@@ -74,7 +74,7 @@ export class OrdersController {
   )
   uploadDrawing(@UploadedFile() file?: Express.Multer.File) {
     if (!file) {
-      throw new BadRequestException('Drawing file is required');
+      throw new BadRequestException('必须上传图纸文件');
     }
 
     return {

@@ -1,0 +1,28 @@
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { CreateProcessTemplateDto, ProcessTemplateQueryDto, UpdateProcessTemplateDto } from './dto';
+import { ProcessTemplatesService } from './process-templates.service';
+
+@Controller('process-templates')
+export class ProcessTemplatesController {
+  constructor(private readonly processTemplatesService: ProcessTemplatesService) {}
+
+  @Get()
+  findAll(@Query() query: ProcessTemplateQueryDto) {
+    return this.processTemplatesService.findAll(query);
+  }
+
+  @Post()
+  create(@Body() dto: CreateProcessTemplateDto) {
+    return this.processTemplatesService.create(dto);
+  }
+
+  @Patch(':id')
+  update(@Param('id') id: string, @Body() dto: UpdateProcessTemplateDto) {
+    return this.processTemplatesService.update(id, dto);
+  }
+
+  @Delete(':id')
+  delete(@Param('id') id: string) {
+    return this.processTemplatesService.delete(id);
+  }
+}

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import {
   AcknowledgeWarehouseNoticeDto,
+  ConfirmBatchShipmentDto,
   ConfirmReceiptDto,
   ConfirmShipmentDto,
   CreateWarehouseDto,
@@ -58,6 +59,16 @@ export class WarehousesController {
   @Post('warehouse/shipments/:batchId/confirm')
   confirmShipment(@Param('batchId') batchId: string, @Body() dto: ConfirmShipmentDto) {
     return this.warehousesService.confirmShipment(batchId, dto);
+  }
+
+  @Post('warehouse/shipments/batch-confirm')
+  confirmBatchShipment(@Body() dto: ConfirmBatchShipmentDto) {
+    return this.warehousesService.confirmBatchShipment(dto);
+  }
+
+  @Post('warehouse/shipments/orders/:orderNo/confirm')
+  confirmOrderShipment(@Param('orderNo') orderNo: string, @Body() dto: ConfirmShipmentDto) {
+    return this.warehousesService.confirmOrderShipment(orderNo, dto);
   }
 
   @Get('warehouse/transactions')

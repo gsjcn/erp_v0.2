@@ -15,8 +15,9 @@ import {
   ValidateNested
 } from 'class-validator';
 
-export const productionShortageModes = ['REPLENISHMENT', 'MANAGER_APPROVED'] as const;
+export const productionShortageModes = ['REPLENISHMENT_REQUEST', 'REPLENISHMENT', 'MANAGER_APPROVED'] as const;
 export const productionWithdrawHandlingModes = ['STOCK', 'SCRAP', 'NONE'] as const;
+export const productionReplenishmentRequestStatuses = ['PENDING', 'APPROVED', 'REJECTED'] as const;
 
 export class ProductionOperatorQueryDto {
   @IsOptional()
@@ -39,7 +40,58 @@ export class AcknowledgeProductionNoticeDto {
   acknowledgedBy!: string;
 }
 
+export class ApproveProductionReplenishmentRequestDto {
+  @IsString()
+  managerName!: string;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+}
+
+export class RejectProductionReplenishmentRequestDto {
+  @IsString()
+  managerName!: string;
+
+  @IsString()
+  reason!: string;
+}
+
+export class ProductionReplenishmentRequestQueryDto {
+  @IsOptional()
+  @IsIn(productionReplenishmentRequestStatuses)
+  status?: (typeof productionReplenishmentRequestStatuses)[number];
+
+  @IsOptional()
+  @IsString()
+  keyword?: string;
+
+  @IsOptional()
+  @IsString()
+  orderNo?: string;
+
+  @IsOptional()
+  @IsString()
+  productionTaskNo?: string;
+
+  @IsOptional()
+  @IsString()
+  partCode?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
+}
+
 export class ProductionScrapQueryDto {
+  @IsOptional()
+  @IsString()
+  customerId?: string;
+
   @IsOptional()
   @IsString()
   orderNo?: string;

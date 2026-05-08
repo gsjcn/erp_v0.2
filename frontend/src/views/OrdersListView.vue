@@ -16,12 +16,33 @@
       </div>
       <div class="filter-field">
         <label>订单状态</label>
-        <el-select v-model="filters.status" placeholder="全部状态" clearable style="width: 180px">
-          <el-option label="草稿" value="DRAFT" />
-          <el-option label="已提交" value="SUBMITTED" />
-          <el-option label="生产/入库/发货中" value="IN_PRODUCTION" />
-          <el-option label="已完成" value="COMPLETED" />
-          <el-option label="已取消" value="CANCELLED" />
+        <el-select
+          v-model="filters.orderStatuses"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="勾选订单状态"
+          style="width: 210px"
+        >
+          <el-option v-for="option in orderStatusOptions" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+      </div>
+      <div class="filter-field">
+        <label>生产状态</label>
+        <el-select
+          v-model="filters.productionStatuses"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="勾选生产状态"
+          style="width: 190px"
+        >
+          <el-option
+            v-for="option in productionStatusOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
         </el-select>
       </div>
       <el-button type="primary" :loading="loading" @click="loadOrders">查询</el-button>
@@ -54,14 +75,15 @@
             <StatusTag :value="row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="仓库阶段" width="130">
+        <el-table-column label="生产状态" width="130">
           <template #default="{ row }">
-            <StatusTag :value="row.warehouseStage" compact />
+            <StatusTag :value="orderProductionStatusValue(row)" compact />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="goProcess(row)">生产流程</el-button>
+            <el-button link type="danger" :disabled="!canCancelOrder(row)" @click.stop="openCancelOrder(row)">取消</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -81,8 +103,8 @@
             <span><StatusTag :value="order.status" compact /></span>
           </div>
           <div class="mobile-field">
-            <label>仓库阶段</label>
-            <span><StatusTag :value="order.warehouseStage" compact /></span>
+            <label>生产状态</label>
+            <span><StatusTag :value="orderProductionStatusValue(order)" compact /></span>
           </div>
           <div class="mobile-field">
             <label>订单日期</label>
@@ -106,14 +128,15 @@
           </div>
         </div>
         <div class="mobile-card-actions">
-          <el-button link type="primary" @click="goDetail(order)">查看明细</el-button>
+          <el-button link type="primary" @click="goDetail(order)">订单明细</el-button>
           <el-button link type="primary" @click="goProcess(order)">生产流程</el-button>
+          <el-button link type="danger" :disabled="!canCancelOrder(order)" @click="openCancelOrder(order)">取消</el-button>
         </div>
       </article>
       <div v-if="!orders.length && !loading" class="mobile-empty">暂无订单</div>
     </div>
 
-    <el-dialog v-model="dialogVisible" title="新增订单" width="min(1500px, calc(100vw - 32px))">
+    <el-dialog v-model="dialogVisible" title="新增订单" width="min(1500px, calc(100vw - 32px))" class="responsive-dialog order-create-dialog">
       <el-form label-width="86px">
         <div class="order-form-grid">
           <el-form-item label="客户">
@@ -169,7 +192,10 @@
               </div>
             </el-popover>
           </div>
-          <el-button size="small" @click="addLine">新增零件</el-button>
+          <div class="dialog-subtitle-actions">
+            <el-button size="small" @click="processDefinitionManagerVisible = true">标准工序维护</el-button>
+            <el-button size="small" @click="addLine">新增零件</el-button>
+          </div>
         </div>
 
         <OrderLineEditor
@@ -181,8 +207,96 @@
         />
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveOrder">保存订单</el-button>
+        <div class="dialog-footer-actions">
+          <el-button @click="dialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="saving" @click="saveOrder">保存订单</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="processDefinitionManagerVisible"
+      title="标准工序维护"
+      width="min(900px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <ProcessDefinitionManager
+        title="订单页面标准工序"
+        hint="这里维护下单和补单后可选的标准工序；重复工序名称会被系统拦截。"
+      />
+    </el-dialog>
+
+    <el-dialog v-model="cancelOrderVisible" title="取消订单" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
+      <el-alert
+        title="正常订单和补单订单都可以取消。未开始生产的订单会删除未开工任务并释放库存；已开始生产的订单会同步通知生产和仓库处理已生产物料。"
+        type="warning"
+        :closable="false"
+        class="mb-16"
+      />
+      <el-form label-width="116px">
+        <el-form-item label="订单号">
+          <strong>{{ activeCancelOrder?.orderNo }}</strong>
+        </el-form-item>
+        <el-form-item label="客户">
+          <span>{{ activeCancelOrder?.customerName }}</span>
+        </el-form-item>
+        <el-form-item label="订单状态">
+          <StatusTag v-if="activeCancelOrder" :value="activeCancelOrder.status" />
+        </el-form-item>
+        <el-form-item label="取消日期">
+          <el-input v-model="cancelOrderForm.cancelAt" disabled />
+          <div class="form-hint">提交时由系统自动记录，操作人员不需要手工回填。</div>
+        </el-form-item>
+        <el-form-item label="生产状态" required>
+          <el-radio-group v-model="cancelOrderForm.productionCancelState">
+            <el-radio-button label="NOT_PRODUCED">未生产取消</el-radio-button>
+            <el-radio-button label="PRODUCED">已生产取消</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">必须人工选择。若已生产，系统会同步通知仓库逐项确认转库存或报废。</div>
+        </el-form-item>
+        <div v-if="cancelOrderForm.productionCancelState === 'PRODUCED'" class="cancel-handling-section">
+          <div class="cancel-handling-title">
+            <strong>已生产零件处理计划</strong>
+            <span>仓库确认时仍可修改，最终以仓库实物清点为准。</span>
+          </div>
+          <div v-if="cancelHandlingPlanRows.length" class="cancel-handling-list">
+            <article v-for="row in cancelHandlingPlanRows" :key="row.productionTaskNo" class="cancel-handling-row">
+              <div class="cancel-handling-main">
+                <strong>{{ row.partCode }} / {{ row.partName }}</strong>
+                <span>{{ row.productionTaskNo }}，已完成 {{ formatQuantity(row.completedQuantity, row.unit) }} / 计划 {{ formatQuantity(row.plannedQuantity, row.unit) }}</span>
+              </div>
+              <el-radio-group v-model="row.handlingMode" @change="handleCancelHandlingModeChange(row)">
+                <el-radio-button label="STOCK">转库存</el-radio-button>
+                <el-radio-button label="SCRAP">报废</el-radio-button>
+                <el-radio-button label="NONE">无实物</el-radio-button>
+              </el-radio-group>
+              <el-input-number
+                v-model="row.handlingQuantity"
+                :min="0"
+                :max="Math.max(row.completedQuantity, row.plannedQuantity)"
+                :precision="3"
+                :controls="false"
+                class="cancel-handling-quantity"
+                :disabled="row.handlingMode === 'NONE'"
+              />
+              <el-input v-model="row.remark" maxlength="120" show-word-limit placeholder="处理说明，可修改" />
+            </article>
+          </div>
+          <el-alert v-else title="该订单未发现已开始生产的零件；请选择“未生产取消”或刷新订单后重试。" type="warning" :closable="false" />
+        </div>
+        <el-form-item label="管理人员" required>
+          <el-input v-model="cancelOrderForm.managerName" placeholder="填写管理人员姓名" />
+        </el-form-item>
+        <el-form-item label="取消原因" required>
+          <el-input v-model="cancelOrderForm.reason" type="textarea" :rows="4" placeholder="例如：客户取消、重复下单、项目暂停" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer-actions">
+          <el-button @click="cancelOrderVisible = false">返回</el-button>
+          <el-button type="danger" :loading="saving" @click="saveCancelOrder">确认取消订单</el-button>
+        </div>
       </template>
     </el-dialog>
   </section>
@@ -198,9 +312,19 @@ import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
 import OrderLineEditor from '../components/OrderLineEditor.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
+import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import StatusTag from '../components/StatusTag.vue';
-import type { Customer, InventorySummaryRow, OrderStatus, OrderSummary } from '../types/erp';
-import { formatDate, formatQuantity } from '../utils/format';
+import type {
+  Customer,
+  InventorySummaryRow,
+  OrderDetail,
+  OrderLine,
+  OrderLineProductionTask,
+  OrderStatus,
+  OrderSummary,
+  ProductionStatus
+} from '../types/erp';
+import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
 import {
   confirmDuplicateDrawingFiles,
   confirmDuplicateDrawingNos,
@@ -208,6 +332,7 @@ import {
   confirmExistingDrawingNos
 } from '../utils/orderLineDuplicateChecks';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
+import { findUnreviewedStockSourceLine, sanitizeOrderLinePayload, validateReviewedStockSourceLines } from '../utils/stockSourceReview';
 
 const router = useRouter();
 const customers = ref<Customer[]>([]);
@@ -218,11 +343,32 @@ const orderDateRange = ref<string[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 const dialogVisible = ref(false);
+const cancelOrderVisible = ref(false);
+const processDefinitionManagerVisible = ref(false);
+const activeCancelOrder = ref<OrderSummary>();
+const activeCancelOrderDetail = ref<OrderDetail>();
+
+const orderStatusOptions: Array<{ label: string; value: OrderStatus }> = [
+  { label: '草稿', value: 'DRAFT' },
+  { label: '已提交', value: 'SUBMITTED' },
+  { label: '生产/入库/发货中', value: 'IN_PRODUCTION' },
+  { label: '已完成', value: 'COMPLETED' },
+  { label: '已取消', value: 'CANCELLED' }
+];
+const productionStatusOptions: Array<{ label: string; value: ProductionStatus }> = [
+  { label: '待生产', value: 'PENDING' },
+  { label: '生产中', value: 'IN_PROGRESS' },
+  { label: '已完成', value: 'COMPLETED' }
+];
 
 const filters = reactive<{
   customerId?: string;
-  status?: OrderStatus;
-}>({});
+  orderStatuses: OrderStatus[];
+  productionStatuses: ProductionStatus[];
+}>({
+  orderStatuses: orderStatusOptions.map((option) => option.value),
+  productionStatuses: productionStatusOptions.map((option) => option.value)
+});
 
 const orderForm = reactive<{
   customerId: string;
@@ -242,6 +388,26 @@ const generatingOrderNo = ref(false);
 const checkingOrderNo = ref(false);
 const orderNoAvailable = ref(false);
 const orderNoCheckText = ref('');
+const cancelOrderForm = reactive({
+  cancelAt: '',
+  managerName: '',
+  productionCancelState: 'NOT_PRODUCED' as 'NOT_PRODUCED' | 'PRODUCED',
+  reason: ''
+});
+type CancelHandlingMode = '' | 'STOCK' | 'SCRAP' | 'NONE';
+type CancelHandlingPlanRow = {
+  orderLineId: string;
+  productionTaskNo: string;
+  partCode: string;
+  partName: string;
+  plannedQuantity: number;
+  completedQuantity: number;
+  unit: string;
+  handlingMode: CancelHandlingMode;
+  handlingQuantity: number;
+  remark: string;
+};
+const cancelHandlingPlanRows = ref<CancelHandlingPlanRow[]>([]);
 let orderNoCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let orderNoCheckSequence = 0;
 
@@ -274,37 +440,81 @@ function newLine(index: number): CreateOrderLinePayload {
     fulfillmentMode: 'PRODUCTION',
     unit: '件',
     deliveryDate: '',
-    processSteps: []
+    processSteps: [],
+    selectedStockSources: []
   };
 }
 
 async function loadCustomers() {
-  customers.value = await erpApi.customers();
+  try {
+    customers.value = await erpApi.customers();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败');
+  }
 }
 
 async function loadOrders() {
+  if (filters.orderStatuses.length === 0 || filters.productionStatuses.length === 0) {
+    loading.value = false;
+    orders.value = [];
+    return;
+  }
   loading.value = true;
   try {
     orders.value = await erpApi.orders({
       customerId: filters.customerId,
-      status: filters.status,
+      statuses: selectedOrderStatusesForQuery(),
+      productionStatuses: selectedProductionStatusesForQuery(),
       dateFrom: dateRange.value[0],
       dateTo: dateRange.value[1]
     });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '订单列表加载失败');
   } finally {
     loading.value = false;
   }
 }
 
 async function loadInventorySummary() {
-  inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+  try {
+    inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+    return true;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存汇总加载失败');
+    return false;
+  }
 }
 
 function reset() {
   filters.customerId = undefined;
-  filters.status = undefined;
+  filters.orderStatuses = orderStatusOptions.map((option) => option.value);
+  filters.productionStatuses = productionStatusOptions.map((option) => option.value);
   dateRange.value = [];
   void loadOrders();
+}
+
+function selectedOrderStatusesForQuery() {
+  if (filters.orderStatuses.length === orderStatusOptions.length) {
+    return undefined;
+  }
+  return [...filters.orderStatuses];
+}
+
+function selectedProductionStatusesForQuery() {
+  if (filters.productionStatuses.length === productionStatusOptions.length) {
+    return undefined;
+  }
+  return [...filters.productionStatuses];
+}
+
+function orderProductionStatusValue(order: OrderSummary) {
+  if (order.status === 'DRAFT') {
+    return 'ORDER_DRAFT';
+  }
+  if (order.status === 'CANCELLED') {
+    return 'ORDER_CANCELLED';
+  }
+  return order.productionStatus;
 }
 
 async function openCreate() {
@@ -316,7 +526,9 @@ async function openCreate() {
   orderForm.lines = [newLine(0), newLine(1), newLine(2)];
   orderNoTouched.value = false;
   clearOrderNoCheck();
-  await loadInventorySummary();
+  if (!(await loadInventorySummary())) {
+    return;
+  }
   dialogVisible.value = true;
   await generateOrderNo();
 }
@@ -362,10 +574,22 @@ async function saveOrder() {
     ElMessage.warning('请补齐订单零件、厚度等必填信息');
     return;
   }
-  await loadInventorySummary();
+  if (!(await loadInventorySummary())) {
+    return;
+  }
   const stockCheck = validateStockModeLines(orderForm.lines, inventorySummary.value);
   if (!stockCheck.ok) {
     ElMessage.warning(`草稿可先保存；${stockCheck.message}，提交生产前必须补足`);
+  }
+  const unreviewedStockLine = findUnreviewedStockSourceLine(orderForm.lines);
+  if (unreviewedStockLine) {
+    ElMessage.warning(`请先核对 ${unreviewedStockLine.partCode || unreviewedStockLine.partName} 的库存来源、图号和版本`);
+    return;
+  }
+  const reviewedStockCheck = validateReviewedStockSourceLines(orderForm.lines);
+  if (!reviewedStockCheck.ok) {
+    ElMessage.warning(reviewedStockCheck.message);
+    return;
   }
   if (!(await confirmDuplicateDrawingNos(orderForm.lines))) {
     return;
@@ -538,13 +762,7 @@ function syncPlanQuantity(line: CreateOrderLinePayload) {
 }
 
 function normalizedLines() {
-  return orderForm.lines.map((line) => ({
-    ...line,
-    deliveryDate: line.deliveryDate || orderForm.deliveryDate,
-    fulfillmentMode: line.fulfillmentMode || 'PRODUCTION',
-    productionPlanQuantity:
-      line.fulfillmentMode === 'STOCK' ? 0 : Math.max(line.productionPlanQuantity || line.quantity, line.quantity)
-  }));
+  return orderForm.lines.map((line) => sanitizeOrderLinePayload(line, orderForm.deliveryDate));
 }
 
 function goDetail(row: OrderSummary) {
@@ -552,7 +770,135 @@ function goDetail(row: OrderSummary) {
 }
 
 function goProcess(row: OrderSummary) {
-  void router.push({ path: '/processes', query: { orderNo: row.orderNo } });
+  void router.push({ path: '/processes', query: { orderNo: row.orderNo, returnTo: '/orders' } });
+}
+
+function canCancelOrder(row: OrderSummary) {
+  return row.status !== 'CANCELLED' && row.status !== 'COMPLETED';
+}
+
+async function openCancelOrder(row: OrderSummary) {
+  if (!canCancelOrder(row)) {
+    ElMessage.warning(row.status === 'COMPLETED' ? '已完成订单第一阶段不允许直接取消' : '订单已取消');
+    return;
+  }
+  activeCancelOrder.value = row;
+  activeCancelOrderDetail.value = undefined;
+  cancelHandlingPlanRows.value = [];
+  cancelOrderForm.cancelAt = formatDateTime(new Date().toISOString());
+  cancelOrderForm.managerName = '';
+  cancelOrderForm.productionCancelState = 'NOT_PRODUCED';
+  cancelOrderForm.reason = '';
+  try {
+    activeCancelOrderDetail.value = await erpApi.order(row.orderNo);
+    cancelHandlingPlanRows.value = buildCancelHandlingPlanRows(activeCancelOrderDetail.value);
+    if (cancelHandlingPlanRows.value.length > 0) {
+      cancelOrderForm.productionCancelState = 'PRODUCED';
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消订单资料加载失败');
+    return;
+  }
+  cancelOrderVisible.value = true;
+}
+
+function taskHasProductionProgress(task: OrderLineProductionTask) {
+  return task.status !== 'PENDING' || task.completedQuantity > 0;
+}
+
+function buildCancelHandlingPlanRows(order: OrderDetail) {
+  return order.lines.flatMap((line: OrderLine) =>
+    (line.productionTasks || [])
+      .filter(taskHasProductionProgress)
+      .map((task) => ({
+        orderLineId: line.id,
+        productionTaskNo: task.productionTaskNo,
+        partCode: line.partCode,
+        partName: line.partName,
+        plannedQuantity: task.plannedQuantity,
+        completedQuantity: task.completedQuantity,
+        unit: line.unit,
+        handlingMode: '' as CancelHandlingMode,
+        handlingQuantity: 0,
+        remark: ''
+      }))
+  );
+}
+
+function handleCancelHandlingModeChange(row: CancelHandlingPlanRow) {
+  if (row.handlingMode === 'NONE') {
+    row.handlingQuantity = 0;
+    return;
+  }
+  if (row.handlingQuantity <= 0) {
+    row.handlingQuantity = row.completedQuantity > 0 ? row.completedQuantity : row.plannedQuantity;
+  }
+}
+
+function collectCancelHandlingPlan() {
+  if (cancelOrderForm.productionCancelState !== 'PRODUCED') {
+    return undefined;
+  }
+  if (cancelHandlingPlanRows.value.length === 0) {
+    ElMessage.warning('已生产取消必须先加载并选择零件处理方式');
+    return false;
+  }
+  for (const row of cancelHandlingPlanRows.value) {
+    if (!row.handlingMode) {
+      ElMessage.warning(`请选择 ${row.partCode} / ${row.productionTaskNo} 的处理方式`);
+      return false;
+    }
+    if ((row.handlingMode === 'STOCK' || row.handlingMode === 'SCRAP') && row.handlingQuantity <= 0) {
+      ElMessage.warning(`请填写 ${row.partCode} / ${row.productionTaskNo} 的处理数量`);
+      return false;
+    }
+    if (row.handlingMode === 'NONE' && !row.remark.trim()) {
+      ElMessage.warning(`请填写 ${row.partCode} / ${row.productionTaskNo} 无实物处理说明`);
+      return false;
+    }
+  }
+  return cancelHandlingPlanRows.value.map((row) => ({
+    orderLineId: row.orderLineId,
+    productionTaskNo: row.productionTaskNo,
+    handlingMode: row.handlingMode as 'STOCK' | 'SCRAP' | 'NONE',
+    handlingQuantity: row.handlingMode === 'NONE' ? 0 : row.handlingQuantity,
+    remark: row.remark.trim() || undefined
+  }));
+}
+
+async function saveCancelOrder() {
+  if (!activeCancelOrder.value) {
+    return;
+  }
+  if (!cancelOrderForm.managerName.trim()) {
+    ElMessage.warning('请填写管理人员姓名');
+    return;
+  }
+  if (!cancelOrderForm.reason.trim()) {
+    ElMessage.warning('请填写取消订单原因');
+    return;
+  }
+  const handlingPlan = collectCancelHandlingPlan();
+  if (handlingPlan === false) {
+    return;
+  }
+
+  saving.value = true;
+  try {
+    await erpApi.cancelOrder(activeCancelOrder.value.orderNo, {
+      reason: cancelOrderForm.reason.trim(),
+      managerName: cancelOrderForm.managerName.trim(),
+      productionCancelState: cancelOrderForm.productionCancelState,
+      handlingPlan
+    });
+    ElMessage.success('订单已取消');
+    cancelOrderVisible.value = false;
+    await loadOrders();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消订单失败');
+  } finally {
+    saving.value = false;
+  }
 }
 
 onMounted(async () => {
@@ -627,6 +973,17 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.dialog-subtitle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-subtitle-actions .el-button {
+  margin-left: 0;
+}
+
 .duplicate-help-button {
   color: #f59e0b;
 }
@@ -646,4 +1003,119 @@ onMounted(async () => {
   min-height: 0;
 }
 
+.dialog-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  width: 100%;
+}
+
+.form-hint {
+  width: 100%;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.cancel-handling-section {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px 116px;
+}
+
+.cancel-handling-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.cancel-handling-title span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.cancel-handling-list {
+  display: grid;
+  gap: 8px;
+}
+
+.cancel-handling-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto 130px minmax(180px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.cancel-handling-main {
+  display: grid;
+  gap: 3px;
+}
+
+.cancel-handling-main span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.cancel-handling-quantity {
+  width: 130px;
+}
+
+@media (max-width: 900px) {
+  .order-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .order-no-field,
+  .order-date-range-field {
+    width: 100%;
+  }
+
+  .order-no-field .el-button {
+    flex: 1 1 120px;
+  }
+
+  .dialog-subtitle {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .dialog-subtitle-actions,
+  .dialog-subtitle-actions .el-button {
+    width: 100%;
+  }
+
+  .dialog-footer-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dialog-footer-actions .el-button {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .cancel-handling-section {
+    margin-left: 0;
+  }
+
+  .cancel-handling-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .cancel-handling-row {
+    grid-template-columns: 1fr;
+  }
+
+  .cancel-handling-quantity {
+    width: 100%;
+  }
+}
 </style>

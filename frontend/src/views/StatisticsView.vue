@@ -193,6 +193,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
@@ -237,6 +238,8 @@ async function loadStatistics() {
       year: year.value,
       customerId: customerId.value || undefined
     });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '统计数据加载失败');
   } finally {
     loading.value = false;
   }

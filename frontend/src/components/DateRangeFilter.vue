@@ -29,7 +29,7 @@ const props = withDefaults(
     startPlaceholder: '开始',
     endPlaceholder: '结束',
     clearable: true,
-    width: '200px'
+    width: '190px'
   }
 );
 

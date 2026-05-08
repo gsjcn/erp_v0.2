@@ -104,6 +104,7 @@ function orderMatchesKeyword(order: OrderSummary, normalizedKeyword: string) {
     formatDate(order.orderDate),
     formatDate(order.deliveryDate),
     order.status,
+    order.productionStatus,
     order.warehouseStage
   ]
     .filter(Boolean)
@@ -174,5 +175,38 @@ watch(
 
 :global(.order-select-popper .el-select-dropdown__wrap) {
   max-height: 320px;
+}
+
+:global(.order-select-popper .el-select-dropdown__item) {
+  height: auto;
+  min-height: 64px;
+  padding: 6px 14px;
+  line-height: normal;
+}
+
+:global(.order-select-popper .el-select-dropdown__item.is-hovering),
+:global(.order-select-popper .el-select-dropdown__item:hover) {
+  background: #f1f5f9;
+}
+
+@media (max-width: 900px) {
+  .order-select-summary {
+    display: -webkit-box;
+    overflow: hidden;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .order-option-main {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .order-option span,
+  .order-option small {
+    white-space: normal;
+  }
 }
 </style>

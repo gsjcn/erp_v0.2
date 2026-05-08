@@ -3,7 +3,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'node:path';
 import { inventoryAdjustmentUploadPath } from '../../storage/upload-paths';
-import { AdjustInventoryBatchDto, InventoryQueryDto, MaterialSuggestionQueryDto } from './dto';
+import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialSuggestionQueryDto } from './dto';
 import { InventoryService } from './inventory.service';
 
 const allowedAdjustmentExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
@@ -16,6 +16,7 @@ const allowedAdjustmentMimeTypes = new Set([
   'image/gif',
   'image/tiff'
 ]);
+const genericUploadMimeTypes = new Set(['', 'application/octet-stream']);
 
 function safeAdjustmentFileName(
   _request: unknown,
@@ -44,6 +45,11 @@ export class InventoryController {
     return this.inventoryService.materialSuggestions(query);
   }
 
+  @Get('materials/:partCode/source-details')
+  materialSourceDetails(@Param('partCode') partCode: string, @Query() query: InventorySourceDetailQueryDto) {
+    return this.inventoryService.materialSourceDetails(partCode, query);
+  }
+
   @Post('adjustments/upload')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -54,8 +60,12 @@ export class InventoryController {
       limits: { fileSize: 30 * 1024 * 1024 },
       fileFilter: (_request, file, callback) => {
         const extension = extname(file.originalname).toLowerCase();
-        if (!allowedAdjustmentExtensions.has(extension) || !allowedAdjustmentMimeTypes.has(file.mimetype)) {
-          callback(new BadRequestException('Inventory adjustment file type is not supported'), false);
+        const mimeType = file.mimetype || '';
+        if (
+          !allowedAdjustmentExtensions.has(extension) ||
+          (!genericUploadMimeTypes.has(mimeType) && !allowedAdjustmentMimeTypes.has(mimeType))
+        ) {
+          callback(new BadRequestException('库存盘点附件格式不支持'), false);
           return;
         }
         callback(null, true);
@@ -64,7 +74,7 @@ export class InventoryController {
   )
   uploadAdjustmentFile(@UploadedFile() file?: Express.Multer.File) {
     if (!file) {
-      throw new BadRequestException('Inventory adjustment file is required');
+      throw new BadRequestException('必须上传库存盘点附件');
     }
 
     return {

@@ -3,12 +3,14 @@ export type CustomerRegionType = 'CHINA' | 'OVERSEAS';
 export type OrderStatus = 'DRAFT' | 'SUBMITTED' | 'IN_PRODUCTION' | 'COMPLETED' | 'CANCELLED';
 export type OrderLineFulfillmentMode = 'PRODUCTION' | 'STOCK' | 'REWORK';
 export type ProductionStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED';
-export type ProductionShortageMode = 'REPLENISHMENT' | 'MANAGER_APPROVED';
+export type ProductionShortageMode = 'REPLENISHMENT_REQUEST' | 'REPLENISHMENT' | 'MANAGER_APPROVED';
+export type ProductionReplenishmentRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 export type ProductionNoticeType = 'QUANTITY_INCREASE' | 'QUANTITY_DECREASE' | 'ORDER_CANCELLED' | 'MATERIAL_ADDED' | 'TASK_WITHDRAWN';
 export type ProductionNoticeStatus = 'PENDING' | 'ACKNOWLEDGED';
 export type ProductionNoticeTarget = 'PRODUCTION' | 'WAREHOUSE';
 export type InventoryStatus = 'AVAILABLE' | 'USED';
 export type InventorySourceType = 'ORDER' | 'STOCK';
+export type InventorySourceKind = 'NORMAL_ORDER' | 'CANCELLED_ORDER' | 'CUSTOMER_CHANGE';
 export type StatisticsPeriod = 'year' | 'quarter' | 'month';
 export type WarehouseStage =
   | 'ORDER_DRAFT'
@@ -23,6 +25,24 @@ export type WarehouseStage =
 export interface ProcessStepDetail {
   processName: string;
   processRemark?: string;
+}
+
+export interface ProcessTemplate {
+  id: string;
+  templateName: string;
+  steps: ProcessStepDetail[];
+  remark?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProcessDefinition {
+  id: string;
+  processName: string;
+  remark?: string;
+  status: CommonStatus;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Customer {
@@ -67,6 +87,7 @@ export interface OrderSummary {
   totalQuantity: number;
   totalProductionPlanQuantity: number;
   unit: string;
+  productionStatus: ProductionStatus;
   warehouseStage: WarehouseStage;
   remark?: string;
 }
@@ -88,6 +109,7 @@ export interface OrderLine {
   unit: string;
   deliveryDate?: string;
   remark?: string;
+  selectedStockSources?: StockSourceSelection[];
   processSteps: string[];
   processStepDetails?: ProcessStepDetail[];
   productionTaskNo?: string;
@@ -99,6 +121,7 @@ export interface OrderLine {
   productionScrapQuantity?: number;
   productionShortageMode?: ProductionShortageMode;
   productionReplenishmentTaskNos?: string[];
+  productionReplenishmentRequestNos?: string[];
   productionShortageReasons?: Array<{ managerName?: string; shortageReason?: string }>;
   productionProgressText?: string;
   warehouseStage: WarehouseStage;
@@ -108,12 +131,32 @@ export interface OrderLine {
   locationName?: string;
 }
 
+export interface StockSourceSelection {
+  batchId: string;
+  batchNo?: string;
+  partCode?: string;
+  partName?: string;
+  quantity: number;
+  unit?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
+  compatibilityStatus?: 'MATCHED' | 'NEEDS_CONFIRMATION' | 'INCOMPLETE' | 'UNKNOWN';
+  compatibilityReason?: string;
+  manualConfirmedBy?: string;
+  manualConfirmedAt?: string;
+  manualConfirmRemark?: string;
+}
+
 export interface OrderLineProductionTask {
   id: string;
   productionTaskNo: string;
   status: ProductionStatus;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
   plannedQuantity: number;
   completedQuantity: number;
   canCancelReplenishment?: boolean;
@@ -131,6 +174,9 @@ export interface ProductionTask {
   orderNo: string;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
   customerId?: string;
   customerName: string;
   orderDate?: string;
@@ -169,6 +215,13 @@ export interface ProductionProcessCompletion {
   shortageQuantity: number;
   shortageMode?: ProductionShortageMode;
   replenishmentTaskNo?: string;
+  replenishmentRequestNo?: string;
+  replenishmentSource?: string;
+  replenishmentRequestStatus?: string;
+  replenishmentApprovedBy?: string;
+  replenishmentApprovedAt?: string;
+  replenishmentReviewedAt?: string;
+  replenishmentApprovalRemark?: string;
   managerName?: string;
   shortageReason?: string;
   unit: string;
@@ -220,9 +273,18 @@ export interface ProductionNotice {
   unit?: string;
   reason: string;
   managerName?: string;
+  handlingPlan?: ProductionNoticeHandlingPlan;
   acknowledgedBy?: string;
   acknowledgedAt?: string;
   createdAt: string;
+}
+
+export interface ProductionNoticeHandlingPlan {
+  handlingMode: 'STOCK' | 'SCRAP' | 'NONE';
+  handlingQuantity: number;
+  remark?: string;
+  plannedBy?: string;
+  plannedAt?: string;
 }
 
 export interface ProductionScrapRecord {
@@ -241,6 +303,34 @@ export interface ProductionScrapRecord {
   sourceRecordType: string;
   sourceRecordId: string;
   createdAt: string;
+}
+
+export interface ProductionReplenishmentRequest {
+  id: string;
+  requestNo: string;
+  sourceType: 'PRODUCTION_SCRAP' | string;
+  status: ProductionReplenishmentRequestStatus;
+  orderId?: string;
+  orderNo: string;
+  orderLineId?: string;
+  productionTaskId?: string;
+  productionTaskNo?: string;
+  processCompletionId?: string;
+  partCode: string;
+  partName: string;
+  requestQuantity: number;
+  scrapQuantity: number;
+  unit: string;
+  reason: string;
+  requestedByCode?: string;
+  requestedByName?: string;
+  supervisorName?: string;
+  supervisorRemark?: string;
+  approvedAt?: string;
+  reviewedAt?: string;
+  replenishmentTaskNo?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ProductionAnnualSummaryRow {
@@ -310,6 +400,9 @@ export interface WarehouseReceipt {
   productionTaskNo: string;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
   customerId?: string;
   orderNo: string;
   customerName: string;
@@ -326,6 +419,12 @@ export interface WarehouseReceipt {
   orderReceiptQuantity?: number;
   stockQuantity?: number;
   unit: string;
+  drawingNo?: string;
+  drawingVersion?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  partThickness?: number | null;
+  partSpecification?: string;
   status: string;
   completedAt?: string;
 }
@@ -336,6 +435,9 @@ export interface WarehouseShipment {
   productionTaskNo?: string;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
   customerId?: string;
   orderNo?: string;
   customerName?: string;
@@ -345,8 +447,21 @@ export interface WarehouseShipment {
   partName: string;
   quantity: number;
   unit: string;
+  warehouseId?: string;
   warehouseName: string;
+  locationId?: string;
   locationName?: string;
+  inventorySourceType?: InventorySourceType;
+  sourceKind?: InventorySourceKind;
+  productionSourceOrderNo?: string;
+  productionSourceCustomerName?: string;
+  productionDate?: string;
+  drawingNo?: string;
+  drawingVersion?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  partThickness?: number | null;
+  partSpecification?: string;
   status: string;
 }
 
@@ -363,14 +478,27 @@ export interface InventoryBatch {
   locationId?: string;
   locationName?: string;
   inventorySourceType: InventorySourceType;
+  sourceKind?: InventorySourceKind;
   isOrderInventory: boolean;
   sourceOrderNo?: string;
   orderDate?: string;
   deliveryDate?: string;
   sourceCustomerName?: string;
+  productionSourceOrderNo?: string;
+  productionSourceCustomerName?: string;
   sourceProductionTaskNo?: string;
   isReplenishment?: boolean;
   sourceReplenishmentTaskNo?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
+  productionDate?: string;
+  drawingNo?: string;
+  drawingVersion?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  partThickness?: number | null;
+  partSpecification?: string;
   status: InventoryStatus;
 }
 
@@ -392,6 +520,9 @@ export interface InventorySummaryRow {
   totalQuantity: number;
   orderInventoryQuantity: number;
   stockInventoryQuantity: number;
+  normalOrderStockQuantity: number;
+  cancelledOrderStockQuantity: number;
+  customerChangeStockQuantity: number;
   warehouses: InventorySummaryWarehouseRow[];
 }
 
@@ -404,6 +535,65 @@ export interface InventoryMaterialSuggestion {
   availableQuantity: number;
   orderInventoryQuantity: number;
   stockInventoryQuantity: number;
+}
+
+export interface InventorySourceBatchDetail {
+  id: string;
+  batchNo: string;
+  partCode: string;
+  partName: string;
+  quantity: number;
+  unit: string;
+  warehouseId: string;
+  warehouseName?: string;
+  locationId?: string;
+  locationName?: string;
+  inventorySourceType: InventorySourceType;
+  sourceKind?: InventorySourceKind;
+  sourceOrderNo?: string;
+  sourceCustomerName?: string;
+  productionSourceOrderNo?: string;
+  productionSourceCustomerName?: string;
+  sourceProductionTaskNo?: string;
+  replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+  replenishmentSourceRequestNo?: string;
+  replenishmentSourceLabel?: string;
+  productionDate?: string;
+  orderDate?: string;
+  deliveryDate?: string;
+  drawingNo?: string;
+  drawingVersion?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  partThickness?: number | null;
+  partSpecification?: string;
+  status: InventoryStatus;
+  createdAt: string;
+}
+
+export interface InventorySourceDetailResponse {
+  partCode: string;
+  partName: string;
+  unit: string;
+  availableQuantity: number;
+  batchCount: number;
+  orderSourceCount: number;
+  stockSourceCount: number;
+  sources: InventorySourceBatchDetail[];
+}
+
+export interface InventorySourceExpected {
+  partCode?: string;
+  partName?: string;
+  drawingNo?: string;
+  drawingVersion?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  partThickness?: number | null;
+  partSpecification?: string;
+  requiredQuantity?: number;
+  unit?: string;
+  fulfillmentMode?: OrderLineFulfillmentMode;
 }
 
 export interface InventoryAdjustment {

@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CommonStatus, CustomerRegionType, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { buildPinyinSearchText, normalizeSearchKeyword } from '../../common/pinyin-search';
+import { normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin-search';
 import {
   CheckCustomerCodeQueryDto,
   CheckCustomerNameQueryDto,
@@ -40,7 +40,7 @@ export class CustomersService {
   async checkName(query: CheckCustomerNameQueryDto) {
     const customerName = query.customerName.trim();
     if (!customerName) {
-      throw new BadRequestException('customerName is required');
+      throw new BadRequestException('客户名称不能为空');
     }
     const exists = await this.customerNameExists(customerName, query.excludeId);
     return {
@@ -53,7 +53,7 @@ export class CustomersService {
   async checkCode(query: CheckCustomerCodeQueryDto) {
     const customerCode = query.customerCode.trim();
     if (!customerCode) {
-      throw new BadRequestException('customerCode is required');
+      throw new BadRequestException('客户ID不能为空');
     }
     const exists = await this.customerCodeExists(customerCode, query.excludeId);
     return {
@@ -68,7 +68,7 @@ export class CustomersService {
   }
 
   async create(dto: CreateCustomerDto) {
-    const customerName = this.normalizeRequired(dto.customerName, 'customerName is required');
+    const customerName = this.normalizeRequired(dto.customerName, '客户名称不能为空');
     await this.ensureCustomerNameAvailable(customerName);
 
     const customerCode = dto.customerCode?.trim() || (await this.generateCustomerCode());
@@ -95,10 +95,10 @@ export class CustomersService {
       });
     } catch (error) {
       if (this.isDuplicateCustomerNameError(error)) {
-        throw new BadRequestException(`Customer name ${customerName} already exists`);
+        throw new BadRequestException(`客户名称 ${customerName} 已存在，请修改后再保存`);
       }
       if (this.isDuplicateCustomerCodeError(error)) {
-        throw new BadRequestException(`Customer code ${customerCode} already exists`);
+        throw new BadRequestException(`客户ID ${customerCode} 已存在，请修改后再保存`);
       }
       throw error;
     }
@@ -108,12 +108,12 @@ export class CustomersService {
     const existing = await this.ensureExists(id);
 
     const customerName =
-      dto.customerName !== undefined ? this.normalizeRequired(dto.customerName, 'customerName is required') : undefined;
+      dto.customerName !== undefined ? this.normalizeRequired(dto.customerName, '客户名称不能为空') : undefined;
     if (customerName) {
       await this.ensureCustomerNameAvailable(customerName, id);
     }
     if (dto.customerCode?.trim() && dto.customerCode.trim() !== existing.customerCode) {
-      throw new BadRequestException('Customer code cannot be changed after creation');
+      throw new BadRequestException('客户ID创建后不可修改');
     }
 
     const regionData = this.normalizeRegion({
@@ -150,10 +150,10 @@ export class CustomersService {
       });
     } catch (error) {
       if (this.isDuplicateCustomerNameError(error)) {
-        throw new BadRequestException(`Customer name ${customerName} already exists`);
+        throw new BadRequestException(`客户名称 ${customerName} 已存在，请修改后再保存`);
       }
       if (this.isDuplicateCustomerCodeError(error)) {
-        throw new BadRequestException(`Customer code ${existing.customerCode} already exists`);
+        throw new BadRequestException(`客户ID ${existing.customerCode} 已存在，请修改后再保存`);
       }
       throw error;
     }
@@ -165,7 +165,7 @@ export class CustomersService {
     if (dto.status === CommonStatus.ENABLED) {
       const primaryContactCount = await this.prisma.customerContact.count({ where: { customerId: id, isPrimary: true } });
       if (primaryContactCount === 0) {
-        throw new BadRequestException('Cannot enable customer without primary contact');
+        throw new BadRequestException('没有主要联系人，不能启用客户');
       }
     }
 
@@ -179,7 +179,7 @@ export class CustomersService {
   private async ensureExists(id: string) {
     const customer = await this.prisma.customer.findUnique({ where: { id } });
     if (!customer) {
-      throw new NotFoundException('Customer not found');
+      throw new NotFoundException('客户不存在');
     }
     return customer;
   }
@@ -197,8 +197,8 @@ export class CustomersService {
     const regionType = dto.regionType || CustomerRegionType.CHINA;
 
     if (regionType === CustomerRegionType.CHINA) {
-      const province = this.normalizeRequired(dto.province, 'province is required for China customer');
-      const city = this.normalizeRequired(dto.city, 'city is required for China customer');
+      const province = this.normalizeRequired(dto.province, '中国地区客户必须选择省份');
+      const city = this.normalizeRequired(dto.city, '中国地区客户必须选择城市');
       return {
         regionType,
         country: '中国',
@@ -210,7 +210,7 @@ export class CustomersService {
       };
     }
 
-    const country = this.normalizeRequired(dto.country, 'country is required for overseas customer');
+    const country = this.normalizeRequired(dto.country, '国外地区客户必须选择国家');
     return {
       regionType,
       country,
@@ -248,7 +248,7 @@ export class CustomersService {
 
     const primaryCount = normalized.filter((contact) => contact.isPrimary).length;
     if (primaryCount !== 1) {
-      throw new BadRequestException('Exactly one primary contact is required');
+      throw new BadRequestException('有联系人时必须且只能选择一个主要联系人');
     }
 
     return normalized;
@@ -270,7 +270,7 @@ export class CustomersService {
       contact.title,
       contact.remark
     ]);
-    const searchText = buildPinyinSearchText([
+    const searchParts = [
       customer.customerCode,
       customer.customerName,
       customer.contactName,
@@ -284,8 +284,8 @@ export class CustomersService {
       customer.detailAddress,
       customer.remark,
       ...contactParts
-    ]);
-    return searchText.includes(keyword);
+    ];
+    return pinyinSearchMatches(searchParts, keyword);
   }
 
   private async customerNameExists(customerName: string, excludeId?: string) {
@@ -301,7 +301,7 @@ export class CustomersService {
 
   private async ensureCustomerNameAvailable(customerName: string, excludeId?: string) {
     if (await this.customerNameExists(customerName, excludeId)) {
-      throw new BadRequestException(`Customer name ${customerName} already exists`);
+      throw new BadRequestException(`客户名称 ${customerName} 已存在，请修改后再保存`);
     }
   }
 
@@ -318,7 +318,7 @@ export class CustomersService {
 
   private async ensureCustomerCodeAvailable(customerCode: string, excludeId?: string) {
     if (await this.customerCodeExists(customerCode, excludeId)) {
-      throw new BadRequestException(`Customer code ${customerCode} already exists`);
+      throw new BadRequestException(`客户ID ${customerCode} 已存在，请修改后再保存`);
     }
   }
 
@@ -330,7 +330,7 @@ export class CustomersService {
         return code;
       }
     }
-    throw new BadRequestException('Unable to generate customerCode');
+    throw new BadRequestException('无法自动生成客户ID，请手工填写');
   }
 
   private customerInclude() {

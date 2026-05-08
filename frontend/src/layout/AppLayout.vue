@@ -77,22 +77,18 @@ interface BreadcrumbItem {
 }
 
 const orderNo = computed(() => String(route.params.orderNo || route.query.orderNo || ''));
+const returnToPath = computed(() => normalizeReturnTo(route.query.returnTo));
 
 const breadcrumbs = computed<BreadcrumbItem[]>(() => {
   if (route.path.startsWith('/orders/') && orderNo.value) {
     return [
       { label: '订单', path: '/orders' },
-      { label: orderNo.value },
       { label: '明细' }
     ];
   }
 
   if (route.path === '/processes' && orderNo.value) {
-    return [
-      { label: '订单', path: '/orders' },
-      { label: orderNo.value, path: `/orders/${encodeURIComponent(orderNo.value)}` },
-      { label: '生产流程' }
-    ];
+    return [{ label: '生产流程' }];
   }
 
   const current = navItems.find((item) => item.path === route.path);
@@ -100,11 +96,12 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
 });
 
 const parentPath = computed(() => {
+  if (returnToPath.value) {
+    return returnToPath.value;
+  }
+
   if (route.path.startsWith('/orders/') && orderNo.value) {
     return '/orders';
-  }
-  if (route.path === '/processes' && orderNo.value) {
-    return `/orders/${encodeURIComponent(orderNo.value)}`;
   }
   return '';
 });
@@ -113,6 +110,16 @@ function goParent() {
   if (parentPath.value) {
     void router.push(parentPath.value);
   }
+}
+
+function normalizeReturnTo(value: unknown) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const path = String(raw || '').trim();
+  // 只允许站内相对路径，避免把返回按钮变成外部跳转入口。
+  if (!path.startsWith('/') || path.startsWith('//')) {
+    return '';
+  }
+  return path;
 }
 
 async function scrollActiveMobileNavIntoView() {

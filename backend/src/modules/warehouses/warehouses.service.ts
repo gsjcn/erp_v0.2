@@ -5,6 +5,7 @@ import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   AcknowledgeWarehouseNoticeDto,
+  ConfirmBatchShipmentDto,
   ConfirmReceiptDto,
   ConfirmShipmentDto,
   CreateWarehouseDto,
@@ -45,21 +46,249 @@ export class WarehousesService {
     if (!acknowledgedBy) {
       throw new BadRequestException('Acknowledged by is required');
     }
-    const notice = await this.prisma.productionNotice.findFirst({
-      where: { id, target: ProductionNoticeTarget.WAREHOUSE }
-    });
-    if (!notice) {
-      throw new NotFoundException('Warehouse notice not found');
+
+    return runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const notice = await tx.productionNotice.findFirst({
+          where: { id, target: ProductionNoticeTarget.WAREHOUSE }
+        });
+        if (!notice) {
+          throw new NotFoundException('Warehouse notice not found');
+        }
+
+        if (this.requiresWithdrawStockReceipt(notice)) {
+          // 管理撤回选择“转库存”时，仓库确认通知必须同步生成备货库存和入库流水，避免通知已确认但库存账没有增加。
+          await this.createStockBatchFromNotice(tx, notice, dto, {
+            batchPrefix: 'IB-WITHDRAW',
+            transactionPrefix: 'IT-IN-WITHDRAW',
+            sourceRecordType: 'ProductionTaskWithdrawStock',
+            defaultRemark: '管理撤回转入备货库存',
+            requireQuantityFromNotice: true,
+            sourceKind: 'NORMAL_ORDER'
+          });
+        } else if (this.requiresCustomerChangeHandling(notice)) {
+          // 客户取消或减量后，仓库必须记录多余实物的处理方式：转备货库存、报废，或确认无实物。
+          await this.applyCustomerChangeNoticeHandling(tx, notice, dto);
+        }
+
+        const saved = await tx.productionNotice.update({
+          where: { id },
+          data: {
+            status: ProductionNoticeStatus.ACKNOWLEDGED,
+            acknowledgedBy,
+            acknowledgedAt: new Date()
+          }
+        });
+        return this.toNotice(saved);
+      },
+      '当前仓库通知正在被其他操作处理，请刷新后重新确认'
+    );
+  }
+
+  private requiresWithdrawStockReceipt(notice: any) {
+    return (
+      notice.noticeType === 'TASK_WITHDRAWN' &&
+      notice.target === ProductionNoticeTarget.WAREHOUSE &&
+      decimalToNumber(notice.afterQuantity) > 0
+    );
+  }
+
+  private requiresCustomerChangeHandling(notice: any) {
+    return (
+      notice.target === ProductionNoticeTarget.WAREHOUSE &&
+      (notice.noticeType === 'QUANTITY_DECREASE' || notice.noticeType === 'ORDER_CANCELLED')
+    );
+  }
+
+  private async applyCustomerChangeNoticeHandling(
+    tx: Prisma.TransactionClient,
+    notice: any,
+    dto: AcknowledgeWarehouseNoticeDto
+  ) {
+    const handlingMode = dto.handlingMode || 'NONE';
+    const handlingQuantity = decimalToNumber(dto.handlingQuantity);
+
+    if (!['STOCK', 'SCRAP', 'NONE'].includes(handlingMode)) {
+      throw new BadRequestException('Warehouse handling mode is required');
     }
-    const saved = await this.prisma.productionNotice.update({
-      where: { id },
-      data: {
-        status: ProductionNoticeStatus.ACKNOWLEDGED,
-        acknowledgedBy,
-        acknowledgedAt: new Date()
+    if (handlingMode !== 'NONE' && handlingQuantity <= 0) {
+      throw new BadRequestException('Handling quantity is required when parts are moved to stock or scrapped');
+    }
+    if (handlingMode === 'NONE' && handlingQuantity > 0) {
+      throw new BadRequestException('Handling quantity must be 0 when no physical parts are handled');
+    }
+
+    if (handlingMode === 'STOCK') {
+      await this.createStockBatchFromNotice(tx, notice, dto, {
+        batchPrefix: 'IB-NOTICE',
+        transactionPrefix: 'IT-IN-NOTICE',
+        sourceRecordType: 'CustomerChangeStockHandling',
+        defaultRemark: '客户取消或减量后转入备货库存',
+        handlingQuantity,
+        sourceKind: notice.noticeType === 'ORDER_CANCELLED' ? 'CANCELLED_ORDER' : 'CUSTOMER_CHANGE'
+      });
+      return;
+    }
+
+    if (handlingMode === 'SCRAP') {
+      await this.createScrapRecordFromNotice(tx, notice, dto, handlingQuantity);
+    }
+  }
+
+  private async createStockBatchFromNotice(
+    tx: Prisma.TransactionClient,
+    notice: any,
+    dto: AcknowledgeWarehouseNoticeDto,
+    options: {
+      batchPrefix: string;
+      transactionPrefix: string;
+      sourceRecordType: string;
+      defaultRemark: string;
+      requireQuantityFromNotice?: boolean;
+      handlingQuantity?: number;
+      sourceKind?: string;
+    }
+  ) {
+    const quantity = options.requireQuantityFromNotice ? decimalToNumber(notice.afterQuantity) : decimalToNumber(options.handlingQuantity);
+    if (!notice.partCode || !notice.partName || !notice.unit || !notice.productionTaskNo) {
+      throw new BadRequestException('Warehouse stock notice is missing part or production task information');
+    }
+    if (!dto.warehouseId?.trim()) {
+      throw new BadRequestException('warehouseId is required when withdraw parts are moved to stock');
+    }
+
+    const existingTransaction = await tx.inventoryTransaction.findFirst({
+      where: {
+        sourceRecordType: options.sourceRecordType,
+        sourceRecordId: notice.id
+      },
+      select: { id: true }
+    });
+    if (existingTransaction) {
+      return;
+    }
+
+    const target = await this.resolveTargetLocationWithClient(tx, dto.warehouseId, dto.locationId);
+    const sourceKind = options.sourceKind || 'NORMAL_ORDER';
+    await this.ensureMergeConfirmedForMixedStock(tx, notice, target.warehouseId, sourceKind, dto.mergeConfirmed);
+    const sourceOrder = notice.orderId
+      ? await tx.customerOrder.findUnique({
+          where: { id: notice.orderId },
+          select: { orderNo: true, customerName: true }
+        })
+      : null;
+    const batchNo = `${options.batchPrefix}-${notice.noticeNo}`;
+    const transactionNo = `${options.transactionPrefix}-${notice.noticeNo}`;
+    const batch = await tx.inventoryBatch.upsert({
+      where: { batchNo },
+      update: {},
+      create: {
+        batchNo,
+        partCode: notice.partCode,
+        partName: notice.partName,
+        sourceOrderId: null,
+        sourceOrderNo: sourceOrder?.orderNo || notice.orderNo || null,
+        sourceCustomerName: sourceOrder?.customerName || null,
+        productionTaskId: null,
+        sourceProductionTaskNo: notice.productionTaskNo,
+        sourceKind,
+        quantity,
+        unit: notice.unit,
+        warehouseId: target.warehouseId,
+        locationId: target.locationId,
+        status: 'AVAILABLE'
       }
     });
-    return this.toNotice(saved);
+
+    await tx.inventoryTransaction.upsert({
+      where: { transactionNo },
+      update: {},
+      create: {
+        transactionNo,
+        transactionType: 'IN',
+        batchId: batch.id,
+        partCode: notice.partCode,
+        partName: notice.partName,
+        orderNo: null,
+        productionTaskNo: notice.productionTaskNo,
+        quantity,
+        unit: notice.unit,
+        warehouseId: target.warehouseId,
+        locationId: target.locationId,
+        remark: dto.remark?.trim() || notice.reason || options.defaultRemark,
+        sourceRecordType: options.sourceRecordType,
+        sourceRecordId: notice.id
+      }
+    });
+  }
+
+  private async ensureMergeConfirmedForMixedStock(
+    tx: Prisma.TransactionClient,
+    notice: any,
+    warehouseId: string,
+    sourceKind: string,
+    mergeConfirmed?: boolean
+  ) {
+    if (!['CANCELLED_ORDER', 'CUSTOMER_CHANGE'].includes(sourceKind)) {
+      return;
+    }
+
+    const existingMixedStock = await tx.inventoryBatch.findFirst({
+      where: {
+        partCode: { equals: notice.partCode, mode: 'insensitive' },
+        unit: notice.unit,
+        warehouseId,
+        status: 'AVAILABLE',
+        quantity: { gt: 0 },
+        sourceOrderId: null,
+        sourceKind: { not: sourceKind }
+      },
+      select: { batchNo: true, sourceKind: true, sourceOrderNo: true }
+    });
+
+    if (existingMixedStock && !mergeConfirmed) {
+      throw new BadRequestException(
+        `Stock source merge confirmation is required. Existing batch ${existingMixedStock.batchNo} has source ${existingMixedStock.sourceKind}`
+      );
+    }
+  }
+
+  private async createScrapRecordFromNotice(
+    tx: Prisma.TransactionClient,
+    notice: any,
+    dto: AcknowledgeWarehouseNoticeDto,
+    quantity: number
+  ) {
+    if (!notice.partCode || !notice.partName || !notice.unit) {
+      throw new BadRequestException('Warehouse scrap notice is missing part information');
+    }
+
+    await tx.productionScrapRecord.upsert({
+      where: {
+        sourceRecordType_sourceRecordId: {
+          sourceRecordType: 'CustomerChangeWarehouseScrap',
+          sourceRecordId: notice.id
+        }
+      },
+      update: {},
+      create: {
+        scrapNo: await this.generateNextScrapNo(tx),
+        orderId: notice.orderId,
+        orderNo: notice.orderNo,
+        orderLineId: notice.orderLineId,
+        productionTaskId: notice.productionTaskId,
+        productionTaskNo: notice.productionTaskNo,
+        partCode: notice.partCode,
+        partName: notice.partName,
+        quantity,
+        unit: notice.unit,
+        reason: dto.remark?.trim() || `仓库按客户取消或减量处理报废：${notice.reason}`,
+        sourceRecordType: 'CustomerChangeWarehouseScrap',
+        sourceRecordId: notice.id,
+        recordDate: new Date()
+      }
+    });
   }
 
   async createWarehouse(dto: CreateWarehouseDto) {
@@ -192,6 +421,10 @@ export class WarehousesService {
               sourceCustomerName: task.customerName,
               productionTaskId: task.id,
               sourceProductionTaskNo: task.productionTaskNo,
+              sourceKind: 'NORMAL_ORDER',
+              // 库存批次保留补单来源，避免后续发货或借用库存时丢失生产报废补单 / 订单补单区别。
+              replenishmentSourceType: task.replenishmentSourceType,
+              replenishmentSourceRequestNo: task.replenishmentSourceRequestNo,
               quantity: orderQuantity,
               unit: task.unit,
               warehouseId: target.warehouseId,
@@ -232,6 +465,10 @@ export class WarehousesService {
               sourceCustomerName: null,
               productionTaskId: orderQuantity > 0 ? null : task.id,
               sourceProductionTaskNo: task.productionTaskNo,
+              sourceKind: 'NORMAL_ORDER',
+              // 多做转库存也必须继承原生产任务的补单来源，后续库存合并时才能核对来源构成。
+              replenishmentSourceType: task.replenishmentSourceType,
+              replenishmentSourceRequestNo: task.replenishmentSourceRequestNo,
               quantity: stockQuantity,
               unit: task.unit,
               warehouseId: target.warehouseId,
@@ -281,18 +518,25 @@ export class WarehousesService {
       where.sourceOrder = orderWhere;
     }
     if (query.orderNo) {
-      where.sourceOrderNo = { contains: query.orderNo.trim(), mode: 'insensitive' };
+      const orderNo = query.orderNo.trim();
+      // 待发货可按当前绑定订单、原生产任务号或原生产订单检索，避免备货库存绑定新订单后丢失来源查询能力。
+      where.OR = [
+        { sourceOrderNo: { contains: orderNo, mode: 'insensitive' } },
+        { sourceProductionTaskNo: { contains: orderNo, mode: 'insensitive' } },
+        { replenishmentSourceRequestNo: { contains: orderNo, mode: 'insensitive' } },
+        { productionTask: { is: { orderNo: { contains: orderNo, mode: 'insensitive' } } } }
+      ];
     }
 
     const batches = await this.prisma.inventoryBatch.findMany({
       where,
       include: {
-        warehouse: true,
-        location: true,
-        sourceOrder: true,
-        sourceOrderLine: true,
-        productionTask: { include: { orderLine: true } }
-      },
+          warehouse: true,
+          location: true,
+          sourceOrder: true,
+          sourceOrderLine: true,
+          productionTask: { include: { order: true, orderLine: true } }
+        },
       orderBy: [{ createdAt: 'desc' }, { batchNo: 'asc' }]
     });
 
@@ -300,63 +544,104 @@ export class WarehousesService {
   }
 
   async confirmShipment(batchId: string, dto: ConfirmShipmentDto) {
-    // 发货是第一阶段的最小出库动作：库存批次改为 USED，并追加 OUT 库存流水。
     return runSerializableTransaction(
       this.prisma,
       async (tx) => {
-        const batch = await tx.inventoryBatch.findUnique({
-          where: { id: batchId },
-          include: { warehouse: true, location: true }
-        });
-        if (!batch) {
-          throw new NotFoundException('Inventory batch not found');
+        const shipped = await this.shipOneBatch(tx, batchId, dto.remark);
+        if (shipped.sourceOrderId) {
+          await this.refreshOrderShipmentStatus(tx, shipped.sourceOrderId);
         }
-        if (batch.status !== 'AVAILABLE') {
-          throw new BadRequestException('Only AVAILABLE inventory can be shipped');
-        }
-        if (decimalToNumber(batch.quantity) <= 0) {
-          throw new BadRequestException('Only inventory quantity greater than 0 can be shipped');
-        }
-
-        // 发货状态检查和出库流水必须共用同一份最新库存批次，防止重复点击把同一批库存出两次。
-        const shipped = await tx.inventoryBatch.update({
-          where: { id: batch.id },
-          data: { quantity: 0, status: 'USED' },
-          include: { warehouse: true, location: true }
-        });
-
-        await tx.inventoryTransaction.create({
-          data: {
-            transactionNo: `IT-OUT-${batch.batchNo}`,
-            transactionType: 'OUT',
-            batchId: batch.id,
-            partCode: batch.partCode,
-            partName: batch.partName,
-            orderNo: batch.sourceOrderNo,
-            productionTaskNo: batch.sourceProductionTaskNo,
-            quantity: batch.quantity,
-            unit: batch.unit,
-            warehouseId: batch.warehouseId,
-            locationId: batch.locationId,
-            remark: dto.remark || '仓库确认发货',
-            sourceRecordType: 'InventoryBatch',
-            sourceRecordId: batch.id
-          }
-        });
-
-        if (batch.sourceOrderId) {
-          if (await this.isOrderShipmentClosed(tx, batch.sourceOrderId)) {
-            await tx.customerOrder.update({
-              where: { id: batch.sourceOrderId },
-              // 只有全部生产任务已入库并完成发货后，订单才允许进入 COMPLETED。
-              data: { status: 'COMPLETED' }
-            });
-          }
-        }
-
         return shipped;
       },
       '当前库存批次正在被其他发货操作修改，请刷新后重新发货'
+    );
+  }
+
+  async confirmBatchShipment(dto: ConfirmBatchShipmentDto) {
+    const batchIds = Array.from(new Set(dto.batchIds.map((item) => item.trim()).filter(Boolean)));
+    if (batchIds.length === 0) {
+      throw new BadRequestException('Batch ids are required');
+    }
+
+    return runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const batches = await tx.inventoryBatch.findMany({
+          where: { id: { in: batchIds } },
+          select: { id: true, sourceOrderId: true, sourceOrderNo: true }
+        });
+        if (batches.length !== batchIds.length) {
+          throw new NotFoundException('Some inventory batches were not found');
+        }
+        const orderIds = Array.from(
+          new Set(batches.map((batch) => batch.sourceOrderId).filter((value): value is string => Boolean(value)))
+        );
+        if (orderIds.length !== 1) {
+          throw new BadRequestException('Batch shipment can only include one order');
+        }
+
+        // 批量发货仍逐批写 OUT 流水，但必须放在同一事务里，保证同一订单多零件出库状态一致。
+        const shipped = [];
+        for (const batchId of batchIds) {
+          shipped.push(await this.shipOneBatch(tx, batchId, dto.remark || '按订单批量发货'));
+        }
+        await this.refreshOrderShipmentStatus(tx, orderIds[0]);
+        return {
+          orderId: orderIds[0],
+          shippedCount: shipped.length,
+          shipped
+        };
+      },
+      '当前订单库存正在被其他发货操作修改，请刷新后重新发货'
+    );
+  }
+
+  async confirmOrderShipment(orderNo: string, dto: ConfirmShipmentDto) {
+    const normalizedOrderNo = orderNo.trim();
+    if (!normalizedOrderNo) {
+      throw new BadRequestException('Order number is required');
+    }
+
+    return runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const order = await tx.customerOrder.findFirst({
+          where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
+          select: { id: true, orderNo: true, status: true }
+        });
+        if (!order) {
+          throw new NotFoundException('Order not found');
+        }
+        if (order.status === 'CANCELLED') {
+          throw new BadRequestException('Cancelled order cannot be shipped');
+        }
+
+        const batches = await tx.inventoryBatch.findMany({
+          where: {
+            sourceOrderId: order.id,
+            status: 'AVAILABLE',
+            quantity: { gt: 0 }
+          },
+          select: { id: true },
+          orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
+        });
+        if (batches.length === 0) {
+          throw new BadRequestException('No pending shipment inventory for this order');
+        }
+
+        const shipped = [];
+        for (const batch of batches) {
+          shipped.push(await this.shipOneBatch(tx, batch.id, dto.remark || '按订单整单发货'));
+        }
+        await this.refreshOrderShipmentStatus(tx, order.id);
+        return {
+          orderId: order.id,
+          orderNo: order.orderNo,
+          shippedCount: shipped.length,
+          shipped
+        };
+      },
+      '当前订单库存正在被其他发货操作修改，请刷新后重新整单发货'
     );
   }
 
@@ -385,18 +670,27 @@ export class WarehousesService {
   }
 
   private async resolveTargetLocation(dto: ConfirmReceiptDto) {
-    if (dto.warehouseId) {
-      const warehouse = await this.prisma.warehouse.findUnique({
-        where: { id: dto.warehouseId },
+    return this.resolveTargetLocationWithClient(this.prisma, dto.warehouseId, dto.locationId);
+  }
+
+  private async resolveTargetLocationWithClient(
+    client: WarehousePrismaClient,
+    warehouseId?: string,
+    locationId?: string
+  ) {
+    if (warehouseId) {
+      const warehouse = await client.warehouse.findUnique({
+        where: { id: warehouseId },
         include: { locations: { orderBy: { locationCode: 'asc' } } }
       });
       if (!warehouse) {
         throw new NotFoundException('Warehouse not found');
       }
 
-      const location = dto.locationId
-        ? warehouse.locations.find((item) => item.id === dto.locationId)
-        : warehouse.locations[0];
+      const location = locationId ? warehouse.locations.find((item) => item.id === locationId) : warehouse.locations[0];
+      if (locationId && !location) {
+        throw new BadRequestException('Warehouse location does not belong to selected warehouse');
+      }
 
       return {
         warehouseId: warehouse.id,
@@ -404,7 +698,7 @@ export class WarehousesService {
       };
     }
 
-    const warehouse = await this.prisma.warehouse.findFirst({
+    const warehouse = await client.warehouse.findFirst({
       where: { status: 'ENABLED' },
       include: { locations: { where: { status: 'ENABLED' }, orderBy: { locationCode: 'asc' } } },
       orderBy: { warehouseCode: 'asc' }
@@ -480,6 +774,14 @@ export class WarehousesService {
     return receivedMap;
   }
 
+  private replenishmentSourceLabel(row: { replenishmentSourceType?: string | null; replenishmentSourceRequestNo?: string | null } | null | undefined) {
+    if (!row?.replenishmentSourceType) {
+      return null;
+    }
+    const prefix = row.replenishmentSourceType === 'PRODUCTION_SCRAP' ? '生产报废补单' : '订单补单';
+    return row.replenishmentSourceRequestNo ? `${prefix}：${row.replenishmentSourceRequestNo}` : prefix;
+  }
+
   private toReceipt(task: any, statusText: string, receivedOrderQuantity = 0) {
     const plannedQuantity = decimalToNumber(task.plannedQuantity);
     const completedQuantity = decimalToNumber(task.completedQuantity);
@@ -493,6 +795,9 @@ export class WarehousesService {
       productionTaskNo: task.productionTaskNo,
       isReplenishment: task.isReplenishment,
       sourceProductionTaskNo: task.sourceProductionTaskNo,
+      replenishmentSourceType: task.replenishmentSourceType,
+      replenishmentSourceRequestNo: task.replenishmentSourceRequestNo,
+      replenishmentSourceLabel: this.replenishmentSourceLabel(task),
       customerId: task.order?.customerId,
       orderNo: task.orderNo,
       customerName: task.customerName,
@@ -509,6 +814,12 @@ export class WarehousesService {
       stockQuantity,
       quantity: completedQuantity,
       unit: task.unit,
+      drawingNo: task.orderLine?.drawingNo,
+      drawingVersion: task.orderLine?.drawingVersion,
+      drawingFileName: task.orderLine?.drawingFileName,
+      drawingFileUrl: task.orderLine?.drawingFileUrl,
+      partThickness: task.orderLine?.partThickness ? decimalToNumber(task.orderLine.partThickness) : null,
+      partSpecification: task.orderLine?.partSpecification,
       status: statusText,
       completedAt: task.completedAt
     };
@@ -521,6 +832,9 @@ export class WarehousesService {
       productionTaskNo: batch.sourceProductionTaskNo,
       isReplenishment: Boolean(batch.productionTask?.isReplenishment),
       sourceProductionTaskNo: batch.productionTask?.sourceProductionTaskNo,
+      replenishmentSourceType: batch.replenishmentSourceType || batch.productionTask?.replenishmentSourceType,
+      replenishmentSourceRequestNo: batch.replenishmentSourceRequestNo || batch.productionTask?.replenishmentSourceRequestNo,
+      replenishmentSourceLabel: this.replenishmentSourceLabel(batch.productionTask || batch),
       customerId: batch.sourceOrder?.customerId,
       orderNo: batch.sourceOrderNo,
       customerName: batch.sourceCustomerName,
@@ -530,10 +844,98 @@ export class WarehousesService {
       partName: batch.partName,
       quantity: decimalToNumber(batch.quantity),
       unit: batch.unit,
+      warehouseId: batch.warehouseId,
       warehouseName: batch.warehouse.warehouseName,
+      locationId: batch.locationId,
       locationName: batch.location?.locationName,
+      inventorySourceType: batch.sourceOrderId ? 'ORDER' : 'STOCK',
+      sourceKind: batch.sourceKind || 'NORMAL_ORDER',
+      productionSourceOrderNo: batch.productionTask?.order?.orderNo,
+      productionSourceCustomerName: batch.productionTask?.order?.customerName || batch.sourceCustomerName,
+      productionDate: batch.productionTask?.completedAt || batch.createdAt,
+      drawingNo: batch.productionTask?.orderLine?.drawingNo || batch.sourceOrderLine?.drawingNo,
+      drawingVersion: batch.productionTask?.orderLine?.drawingVersion || batch.sourceOrderLine?.drawingVersion,
+      drawingFileName: batch.productionTask?.orderLine?.drawingFileName || batch.sourceOrderLine?.drawingFileName,
+      drawingFileUrl: batch.productionTask?.orderLine?.drawingFileUrl || batch.sourceOrderLine?.drawingFileUrl,
+      partThickness: batch.productionTask?.orderLine?.partThickness
+        ? decimalToNumber(batch.productionTask.orderLine.partThickness)
+        : batch.sourceOrderLine?.partThickness
+          ? decimalToNumber(batch.sourceOrderLine.partThickness)
+          : null,
+      partSpecification: batch.productionTask?.orderLine?.partSpecification || batch.sourceOrderLine?.partSpecification,
       status: '待发货'
     };
+  }
+
+  private async shipOneBatch(tx: Prisma.TransactionClient, batchId: string, remark?: string) {
+    const batch = await tx.inventoryBatch.findUnique({
+      where: { id: batchId },
+      include: { warehouse: true, location: true }
+    });
+    if (!batch) {
+      throw new NotFoundException('Inventory batch not found');
+    }
+    if (!batch.sourceOrderId) {
+      throw new BadRequestException('Only order inventory can be shipped from warehouse shipment');
+    }
+    if (batch.status !== 'AVAILABLE') {
+      throw new BadRequestException('Only AVAILABLE inventory can be shipped');
+    }
+    if (decimalToNumber(batch.quantity) <= 0) {
+      throw new BadRequestException('Only inventory quantity greater than 0 can be shipped');
+    }
+
+    // 发货状态检查和出库流水必须共用同一份最新库存批次，防止重复点击把同一批库存出两次。
+    const shipped = await tx.inventoryBatch.update({
+      where: { id: batch.id },
+      data: { quantity: 0, status: 'USED' },
+      include: { warehouse: true, location: true }
+    });
+
+    await tx.inventoryTransaction.create({
+      data: {
+        transactionNo: `IT-OUT-${batch.batchNo}`,
+        transactionType: 'OUT',
+        batchId: batch.id,
+        partCode: batch.partCode,
+        partName: batch.partName,
+        orderNo: batch.sourceOrderNo,
+        productionTaskNo: batch.sourceProductionTaskNo,
+        quantity: batch.quantity,
+        unit: batch.unit,
+        warehouseId: batch.warehouseId,
+        locationId: batch.locationId,
+        remark: remark || '仓库确认发货',
+        sourceRecordType: 'InventoryBatch',
+        sourceRecordId: batch.id
+      }
+    });
+
+    return shipped;
+  }
+
+  private async refreshOrderShipmentStatus(tx: Prisma.TransactionClient, orderId: string) {
+    const order = await tx.customerOrder.findUnique({ where: { id: orderId }, select: { status: true } });
+    if (!order || order.status === 'CANCELLED') {
+      return;
+    }
+
+    if (await this.isOrderShipmentClosed(tx, orderId)) {
+      await tx.customerOrder.update({
+        where: { id: orderId },
+        // 只有全部订单库存发货完成后，订单才允许进入 COMPLETED。
+        data: { status: 'COMPLETED' }
+      });
+      return;
+    }
+
+    if (order.status !== 'DRAFT') {
+      // 部分发货时订单仍在流转中；页面仓库阶段会按批次显示“待发货/部分发货”。
+      await tx.customerOrder.update({
+        where: { id: orderId },
+        data: { status: 'IN_PRODUCTION' }
+      });
+    }
   }
 
   private async isOrderShipmentClosed(tx: Prisma.TransactionClient, orderId: string) {
@@ -588,10 +990,23 @@ export class WarehousesService {
       unit: notice.unit,
       reason: notice.reason,
       managerName: notice.managerName,
+      handlingPlan: notice.handlingPlan,
       acknowledgedBy: notice.acknowledgedBy,
       acknowledgedAt: notice.acknowledgedAt,
       createdAt: notice.createdAt
     };
+  }
+
+  private async generateNextScrapNo(tx: Prisma.TransactionClient) {
+    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `SCRAP-${dateKey}-`;
+    const lastRecord = await tx.productionScrapRecord.findFirst({
+      where: { scrapNo: { startsWith: prefix } },
+      orderBy: { scrapNo: 'desc' },
+      select: { scrapNo: true }
+    });
+    const nextSequence = lastRecord ? Number(lastRecord.scrapNo.slice(prefix.length)) + 1 : 1;
+    return `${prefix}${String(nextSequence).padStart(4, '0')}`;
   }
 
   private async generateWarehouseCode() {

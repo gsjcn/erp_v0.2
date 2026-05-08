@@ -1,6 +1,6 @@
 import { Decimal } from '@prisma/client/runtime/library';
 
-export const STANDARD_PROCESS_NAMES = ['激光切割', '折弯', '冲压', '焊接', '打磨', '喷涂', '装配', '包装', '其他'] as const;
+export const STANDARD_PROCESS_NAMES = ['激光切割', '折弯', '冲压', '焊接', '打磨', '喷涂', '抛丸', '抛光', '装配', '包装', '其他'] as const;
 
 export type StandardProcessName = (typeof STANDARD_PROCESS_NAMES)[number];
 

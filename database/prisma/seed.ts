@@ -2,6 +2,7 @@ import { Prisma, PrismaClient, OrderStatus, ProductionStatus, OrderLineFulfillme
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { drawingUploadPath } from '../../backend/src/storage/upload-paths';
+import { buildPinyinSearchText } from '../../backend/src/common/pinyin-search';
 
 const prisma = new PrismaClient();
 
@@ -138,6 +139,8 @@ async function resetSeedData() {
   await prisma.warehouseLocation.deleteMany();
   await prisma.warehouse.deleteMany();
   await prisma.productionOperator.deleteMany();
+  await prisma.processTemplate.deleteMany();
+  await prisma.processDefinition.deleteMany();
   await prisma.material.deleteMany();
 }
 
@@ -159,6 +162,27 @@ const processMap: Record<string, SeedProcessStep[]> = {
   'P-4102': ['激光切割', { processName: '折弯', processRemark: 'R角按图纸' }, '焊接', '包装'],
   'P-4103': ['冲压', '喷涂', '包装']
 };
+
+const processTemplateSeeds: Array<{ templateName: string; steps: SeedProcessStep[]; remark?: string }> = [
+  { templateName: '激光折弯包装', steps: ['激光切割', '折弯', '包装'], remark: '常用钣金零件基础流程' },
+  { templateName: '焊接件', steps: ['激光切割', '折弯', '焊接', '打磨', '包装'], remark: '带焊接和打磨的组合件流程' },
+  { templateName: '冲压装配件', steps: ['冲压', '打磨', '装配', '包装'], remark: '冲压后需要装配的零件流程' },
+  { templateName: '喷涂件', steps: ['激光切割', '折弯', '喷涂', '包装'], remark: '带表面喷涂的基础流程' }
+];
+
+const processDefinitionSeeds = [
+  '激光切割',
+  '折弯',
+  '冲压',
+  '焊接',
+  '打磨',
+  '喷涂',
+  '抛丸',
+  '抛光',
+  '装配',
+  '包装',
+  '其他'
+];
 
 function normalizeSeedProcessSteps(steps: SeedProcessStep[]): NormalizedSeedProcessStep[] {
   return steps
@@ -253,6 +277,46 @@ async function seedProductionOperators() {
       create: {
         ...operator,
         status: 'ENABLED'
+      }
+    });
+  }
+}
+
+async function seedProcessTemplates() {
+  for (const template of processTemplateSeeds) {
+    const steps = normalizeSeedProcessSteps(template.steps);
+    await prisma.processTemplate.upsert({
+      where: { templateNameNormalized: template.templateName.trim().toLowerCase() },
+      update: {
+        steps: seedProcessSnapshot(steps),
+        remark: template.remark,
+        searchText: buildPinyinSearchText([template.templateName, template.remark, ...steps.flatMap((step) => [step.processName, step.processRemark])])
+      },
+      create: {
+        templateName: template.templateName,
+        templateNameNormalized: template.templateName.trim().toLowerCase(),
+        steps: seedProcessSnapshot(steps),
+        remark: template.remark,
+        searchText: buildPinyinSearchText([template.templateName, template.remark, ...steps.flatMap((step) => [step.processName, step.processRemark])])
+      }
+    });
+  }
+}
+
+async function seedProcessDefinitions() {
+  for (const processName of processDefinitionSeeds) {
+    await prisma.processDefinition.upsert({
+      where: { processNameNormalized: processName.trim().toLowerCase() },
+      update: {
+        processName,
+        status: 'ENABLED',
+        searchText: buildPinyinSearchText([processName])
+      },
+      create: {
+        processName,
+        processNameNormalized: processName.trim().toLowerCase(),
+        status: 'ENABLED',
+        searchText: buildPinyinSearchText([processName])
       }
     });
   }
@@ -911,6 +975,8 @@ async function main() {
   await seedCustomers();
   await seedWarehouses();
   await seedProductionOperators();
+  await seedProcessDefinitions();
+  await seedProcessTemplates();
   await seedOrders();
   await seedMaterials();
   await seedInventory();

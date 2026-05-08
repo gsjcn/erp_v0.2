@@ -6,6 +6,13 @@
         <el-badge :value="pendingNoticeCount" :hidden="pendingNoticeCount === 0" class="notice-badge">
           <el-button :icon="Bell" @click="openNotices">通知</el-button>
         </el-badge>
+        <el-badge
+          :value="pendingReplenishmentRequestCount"
+          :hidden="pendingReplenishmentRequestCount === 0"
+          class="notice-badge"
+        >
+        <el-button :icon="Document" @click="openReplenishmentRequests">生产报废补单</el-button>
+        </el-badge>
         <el-button :icon="Document" @click="openScrapRecords">报废统计</el-button>
         <el-button :icon="Download" :disabled="filteredTasks.length === 0" @click="exportExcel">导出 Excel</el-button>
         <el-button :icon="Printer" :disabled="filteredTasks.length === 0" @click="openPrintPreview">打印预览</el-button>
@@ -132,8 +139,16 @@
             <StatusTag :value="effectiveProductionStatus(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="190" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
+            <el-button
+              v-if="pendingProductionReplenishmentRequest(row)"
+              link
+              type="warning"
+              @click="openReplenishmentApproval(row)"
+            >
+              主管确认补单
+            </el-button>
             <el-button v-if="shouldShowStartAction(row)" link type="primary" @click="start(row)">开始生产</el-button>
             <el-button
               v-else-if="shouldShowConfirmCompletedAction(row)"
@@ -227,6 +242,14 @@
           </div>
         </div>
         <div class="mobile-card-actions">
+          <el-button
+            v-if="pendingProductionReplenishmentRequest(task)"
+            link
+            type="warning"
+            @click="openReplenishmentApproval(task)"
+          >
+            主管确认补单
+          </el-button>
           <el-button v-if="shouldShowStartAction(task)" link type="primary" @click="start(task)">开始生产</el-button>
           <el-button
             v-else-if="shouldShowConfirmCompletedAction(task)"
@@ -289,10 +312,149 @@
       @confirm="saveNoticeAcknowledge"
     />
 
+    <el-dialog v-model="replenishmentRequestVisible" title="生产报废补单申请" width="min(980px, calc(100vw - 32px))">
+      <div class="replenishment-request-toolbar">
+        <el-radio-group v-model="replenishmentRequestStatusFilter" size="small">
+          <el-radio-button label="ALL">全部 {{ productionReplenishmentRequests.length }}</el-radio-button>
+          <el-radio-button label="PENDING">待确认 {{ replenishmentRequestCounts.PENDING }}</el-radio-button>
+          <el-radio-button label="APPROVED">已生成报废补单 {{ replenishmentRequestCounts.APPROVED }}</el-radio-button>
+          <el-radio-button label="REJECTED">已驳回 {{ replenishmentRequestCounts.REJECTED }}</el-radio-button>
+        </el-radio-group>
+        <el-input
+          v-model="replenishmentRequestKeyword"
+          clearable
+          placeholder="搜索申请单 / 订单 / 任务 / 零件 / 人员"
+          class="replenishment-request-search"
+          @keyup.enter="queryReplenishmentRequests"
+        />
+        <el-button type="primary" size="small" @click="queryReplenishmentRequests">查询</el-button>
+        <el-button size="small" @click="resetReplenishmentRequestFilters">重置</el-button>
+      </div>
+      <div v-loading="replenishmentRequestLoading" class="replenishment-request-list">
+        <div v-if="filteredProductionReplenishmentRequests.length === 0" class="muted">暂无生产报废补单申请</div>
+        <article
+          v-for="request in filteredProductionReplenishmentRequests"
+          :key="request.id"
+          class="replenishment-request-item"
+        >
+          <div class="replenishment-request-main">
+            <div class="replenishment-request-title">
+              <strong>{{ request.requestNo }}</strong>
+              <StatusTag :value="replenishmentRequestStatusTag(request.status)" compact />
+            </div>
+            <div class="replenishment-request-grid">
+              <p><span>订单号</span>{{ request.orderNo }}</p>
+              <p><span>任务号</span>{{ request.productionTaskNo || '-' }}</p>
+              <p><span>零件</span>{{ request.partName }} / {{ request.partCode }}</p>
+              <p><span>报废数量</span>{{ formatQuantity(request.scrapQuantity, request.unit) }}</p>
+              <p><span>申请补齐</span>{{ formatQuantity(request.requestQuantity, request.unit) }}</p>
+              <p><span>申请人员</span>{{ request.requestedByName || request.requestedByCode || '-' }}</p>
+            </div>
+            <p class="replenishment-request-reason">{{ request.reason }}</p>
+            <small>
+              来源：{{ replenishmentSourceTypeText(request.sourceType) }} / 创建时间：{{ formatDateTime(request.createdAt) }}
+              <template v-if="request.reviewedAt"> / 审核时间：{{ formatDateTime(request.reviewedAt) }}</template>
+              <template v-if="request.replenishmentTaskNo"> / 报废补单任务：{{ request.replenishmentTaskNo }}</template>
+              <template v-if="request.supervisorName"> / 主管：{{ request.supervisorName }}</template>
+              <template v-if="request.supervisorRemark"> / 审核说明：{{ request.supervisorRemark }}</template>
+            </small>
+          </div>
+          <div class="replenishment-request-actions">
+            <el-button
+              v-if="request.status === 'PENDING'"
+              type="primary"
+              size="small"
+              @click="openReplenishmentApprovalFromRequest(request)"
+            >
+              主管确认
+            </el-button>
+            <el-button
+              v-if="request.status === 'PENDING'"
+              type="danger"
+              size="small"
+              plain
+              @click="openReplenishmentReject(request)"
+            >
+              驳回申请
+            </el-button>
+            <span v-else class="muted">{{ replenishmentRequestStatusText(request.status) }}</span>
+          </div>
+        </article>
+      </div>
+      <template #footer>
+        <el-button @click="replenishmentRequestVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="replenishmentRejectVisible" title="驳回生产报废补单申请" width="min(620px, calc(100vw - 32px))">
+      <div v-if="activeReplenishmentRejectRequest" class="final-confirm-panel">
+        <el-alert
+          title="驳回后不会生成补单任务，该短缺会按管理确认缺货完成保存；请确认现场确实不需要补齐客户订单数量。"
+          type="warning"
+          :closable="false"
+        />
+        <div class="process-info-grid mt-16">
+          <div>
+            <label>申请单号</label>
+            <strong>{{ activeReplenishmentRejectRequest.requestNo }}</strong>
+          </div>
+          <div>
+            <label>订单号</label>
+            <strong>{{ activeReplenishmentRejectRequest.orderNo }}</strong>
+          </div>
+          <div>
+            <label>任务号</label>
+            <strong>{{ activeReplenishmentRejectRequest.productionTaskNo || '-' }}</strong>
+          </div>
+          <div>
+            <label>零件</label>
+            <strong>{{ activeReplenishmentRejectRequest.partName }}</strong>
+          </div>
+          <div>
+            <label>报废数量</label>
+            <strong>{{ formatQuantity(activeReplenishmentRejectRequest.scrapQuantity, activeReplenishmentRejectRequest.unit) }}</strong>
+          </div>
+          <div>
+            <label>申请补齐</label>
+            <strong>{{ formatQuantity(activeReplenishmentRejectRequest.requestQuantity, activeReplenishmentRejectRequest.unit) }}</strong>
+          </div>
+        </div>
+        <el-form label-width="128px" class="mt-16">
+          <el-form-item label="主管姓名" required>
+            <el-input v-model="replenishmentRejectForm.managerName" placeholder="请输入车间主管姓名" style="width: 260px" />
+          </el-form-item>
+          <el-form-item label="驳回原因" required>
+            <el-input
+              v-model="replenishmentRejectForm.reason"
+              type="textarea"
+              :rows="3"
+              placeholder="例如：客户已同意缺货发货，不生成补单"
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="replenishmentRejectVisible = false">取消</el-button>
+        <el-button type="danger" :loading="replenishmentRejectSaving" @click="saveReplenishmentReject">
+          确认驳回
+        </el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="scrapVisible" title="生产报废统计" width="min(980px, calc(100vw - 32px))">
       <div class="dialog-filter-row">
-        <el-input v-model="scrapFilters.orderNo" clearable placeholder="订单号" style="width: 220px" />
-        <DateRangeFilter v-model="scrapDateRange" />
+        <div class="filter-field compact">
+          <label>报废日期</label>
+          <DateRangeFilter v-model="scrapDateRange" />
+        </div>
+        <div class="filter-field compact">
+          <label>客户</label>
+          <CustomerSelect v-model="scrapFilters.customerId" placeholder="全部客户" width="220px" @change="handleScrapCustomerChange" />
+        </div>
+        <div class="filter-field compact">
+          <label>订单</label>
+          <OrderSelect v-model="scrapFilters.orderNo" :orders="scrapOrderOptions" placeholder="全部订单" width="260px" />
+        </div>
         <el-button type="primary" :loading="scrapLoading" @click="loadScrapRecords">查询</el-button>
         <el-button @click="resetScrapFilters">重置</el-button>
       </div>
@@ -429,7 +591,7 @@
                 :label="processName"
                 :disabled="processName === activeProcessName"
               >
-                {{ processName }}
+                {{ activeTask ? processStepDisplay(activeTask, processName) : processName }}
               </el-checkbox>
             </el-checkbox-group>
             <div class="process-help-text">可一次确认连续工序，系统仍按工艺顺序保存每道工序记录。</div>
@@ -481,13 +643,13 @@
             </el-form-item>
             <el-form-item label="处理方式" required>
               <el-radio-group v-model="processForm.shortageMode" :disabled="activeProcessReadonly">
-                <el-radio-button label="REPLENISHMENT">生成补单</el-radio-button>
+                <el-radio-button label="REPLENISHMENT_REQUEST">生产报废补单申请</el-radio-button>
                 <el-radio-button label="MANAGER_APPROVED">管理确认缺货完成</el-radio-button>
               </el-radio-group>
             </el-form-item>
             <el-alert
-              v-if="processForm.shortageMode === 'REPLENISHMENT'"
-              title="保存后系统会生成补单生产任务，任务号按原任务号顺序追加 R01、R02，并继续链接当前订单号。"
+              v-if="processForm.shortageMode === 'REPLENISHMENT_REQUEST'"
+              title="保存后只生成生产报废补单申请，车间主管确认后系统才会生成补单任务。"
               type="info"
               :closable="false"
             />
@@ -627,7 +789,7 @@
           />
           <div v-if="finalShouldShowShortagePanel" class="shortage-panel">
             <el-alert
-              :title="`缺少 ${formatQuantity(finalShortageQuantity, activeFinalTask.unit)}，必须填写报废数量，并选择补单或管理确认缺货完成。`"
+              :title="`缺少 ${formatQuantity(finalShortageQuantity, activeFinalTask.unit)}，必须填写报废数量，并选择生产报废补单申请或管理确认缺货完成。`"
               type="warning"
               :closable="false"
             />
@@ -644,13 +806,13 @@
             </el-form-item>
             <el-form-item label="处理方式" required>
               <el-radio-group v-model="finalForm.shortageMode">
-                <el-radio-button label="REPLENISHMENT">生成补单</el-radio-button>
+                <el-radio-button label="REPLENISHMENT_REQUEST">生产报废补单申请</el-radio-button>
                 <el-radio-button label="MANAGER_APPROVED">管理确认缺货完成</el-radio-button>
               </el-radio-group>
             </el-form-item>
             <el-alert
-              v-if="finalForm.shortageMode === 'REPLENISHMENT'"
-              title="保存后系统会生成补单生产任务，任务号按原任务号顺序追加 R01、R02，并继续链接当前订单号。"
+              v-if="finalForm.shortageMode === 'REPLENISHMENT_REQUEST'"
+              title="提交后只形成生产报废补单申请，车间主管确认后才生成补单任务；补单来源会记录为生产报废。"
               type="info"
               :closable="false"
             />
@@ -678,6 +840,7 @@
               collapse-tags
               collapse-tags-tooltip
               reserve-keyword
+              placeholder="可不填，输入姓名 / 拼音 / 账号ID"
               :remote-method="searchFinalOperators"
               :loading="isOperatorLoading(finalOperatorScope)"
               style="width: 260px"
@@ -705,6 +868,69 @@
         <el-button @click="finalConfirmVisible = false">取消</el-button>
         <el-button type="primary" :loading="finalSaving" @click="saveFinalProductionCompletion">
           {{ activeFinalTask?.status === 'COMPLETED' ? '保存修改' : '确认完成' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="replenishmentApprovalVisible"
+      title="主管确认生产报废补单"
+      width="min(680px, calc(100vw - 32px))"
+    >
+      <div v-if="activeReplenishmentApprovalTask && activeReplenishmentApprovalCompletion" class="final-confirm-panel">
+        <div class="process-info-grid">
+          <div>
+            <label>客户</label>
+            <strong>{{ activeReplenishmentApprovalTask.customerName }}</strong>
+          </div>
+          <div>
+            <label>订单号</label>
+            <strong>{{ activeReplenishmentApprovalTask.orderNo }}</strong>
+          </div>
+          <div>
+            <label>生产任务</label>
+            <strong>{{ activeReplenishmentApprovalTask.productionTaskNo }}</strong>
+          </div>
+          <div>
+            <label>零件</label>
+            <strong>{{ activeReplenishmentApprovalTask.partName }}</strong>
+          </div>
+          <div>
+            <label>报废数量</label>
+            <strong>{{ formatQuantity(activeReplenishmentApprovalCompletion.scrapQuantity || 0, activeReplenishmentApprovalTask.unit) }}</strong>
+          </div>
+          <div>
+            <label>申请补齐</label>
+            <strong>{{ formatQuantity(activeReplenishmentApprovalCompletion.shortageQuantity || 0, activeReplenishmentApprovalTask.unit) }}</strong>
+          </div>
+        </div>
+        <el-alert
+          title="该补单来源为生产过程报废。主管确认后，系统才会生成生产报废补单任务；订单页面的补单仍用于销售或计划决定的数量增加。"
+          type="warning"
+          :closable="false"
+          class="mt-16"
+        />
+        <el-form label-width="128px" class="mt-16">
+          <el-form-item label="申请单号">
+            <span>{{ activeReplenishmentApprovalCompletion.replenishmentRequestNo || '待生成' }}</span>
+          </el-form-item>
+          <el-form-item label="主管姓名" required>
+            <el-input v-model="replenishmentApprovalForm.managerName" placeholder="请输入车间主管姓名" style="width: 260px" />
+          </el-form-item>
+          <el-form-item label="确认说明">
+            <el-input
+              v-model="replenishmentApprovalForm.remark"
+              type="textarea"
+              :rows="3"
+              placeholder="例如：确认因生产报废导致缺件，同意生成补单"
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="replenishmentApprovalVisible = false">取消</el-button>
+        <el-button type="primary" :loading="replenishmentApprovalSaving" @click="saveReplenishmentApproval">
+          确认生成报废补单
         </el-button>
       </template>
     </el-dialog>
@@ -905,6 +1131,7 @@ import type {
   ProductionNotice,
   ProductionOperator,
   ProductionProcessCompletion,
+  ProductionReplenishmentRequest,
   ProductionScrapRecord,
   ProductionShortageMode,
   ProductionStatus,
@@ -926,19 +1153,32 @@ const acknowledgeVisible = ref(false);
 const acknowledgeSaving = ref(false);
 const productionNotices = ref<ProductionNotice[]>([]);
 const activeProductionNotice = ref<ProductionNotice>();
+const replenishmentRequestVisible = ref(false);
+const replenishmentRequestLoading = ref(false);
+const productionReplenishmentRequests = ref<ProductionReplenishmentRequest[]>([]);
+const replenishmentRequestStatusFilter = ref<ProductionReplenishmentRequest['status'] | 'ALL'>('PENDING');
+const replenishmentRequestKeyword = ref('');
+const replenishmentRejectVisible = ref(false);
+const replenishmentRejectSaving = ref(false);
+const activeReplenishmentRejectRequest = ref<ProductionReplenishmentRequest>();
 const scrapVisible = ref(false);
 const scrapLoading = ref(false);
 const scrapRecords = ref<ProductionScrapRecord[]>([]);
+const scrapOrderOptions = ref<OrderSummary[]>([]);
 const scrapDateRange = ref<string[]>([]);
 const processVisible = ref(false);
 const processSaving = ref(false);
 const finalConfirmVisible = ref(false);
 const finalSaving = ref(false);
+const replenishmentApprovalVisible = ref(false);
+const replenishmentApprovalSaving = ref(false);
 const withdrawVisible = ref(false);
 const withdrawSaving = ref(false);
 const printPreviewVisible = ref(false);
 const activeTask = ref<ProductionTask>();
 const activeFinalTask = ref<ProductionTask>();
+const activeReplenishmentApprovalTask = ref<ProductionTask>();
+const activeReplenishmentApprovalCompletion = ref<ProductionProcessCompletion>();
 const activeWithdrawTask = ref<ProductionTask>();
 const activeProcessName = ref('');
 const batchProcessNames = ref<string[]>([]);
@@ -958,6 +1198,7 @@ const filters = reactive<{
 }>({});
 
 const scrapFilters = reactive<{
+  customerId?: string;
   orderNo?: string;
 }>({});
 
@@ -965,7 +1206,7 @@ const processForm = reactive({
   isCompleted: true,
   completedQuantity: 1,
   scrapQuantity: 0,
-  shortageMode: 'REPLENISHMENT' as ProductionShortageMode,
+  shortageMode: 'REPLENISHMENT_REQUEST' as ProductionShortageMode,
   managerName: '',
   shortageReason: '',
   quantityOverrideReason: '',
@@ -976,10 +1217,20 @@ const finalForm = reactive({
   completedQuantity: 1,
   operatorCodes: [] as string[],
   scrapQuantity: 0,
-  shortageMode: 'REPLENISHMENT' as ProductionShortageMode,
+  shortageMode: 'REPLENISHMENT_REQUEST' as ProductionShortageMode,
   managerName: '',
   shortageReason: '',
   remark: ''
+});
+
+const replenishmentApprovalForm = reactive({
+  managerName: '',
+  remark: ''
+});
+
+const replenishmentRejectForm = reactive({
+  managerName: '',
+  reason: ''
 });
 
 const withdrawForm = reactive({
@@ -1009,6 +1260,40 @@ const counts = computed(() => ({
   RECEIVED: tasks.value.filter((task) => effectiveProductionStatus(task) === 'RECEIVED').length
 }));
 const pendingNoticeCount = computed(() => productionNotices.value.filter((notice) => notice.status === 'PENDING').length);
+const pendingReplenishmentRequestCount = computed(
+  () => productionReplenishmentRequests.value.filter((request) => request.status === 'PENDING').length
+);
+const replenishmentRequestCounts = computed(() => ({
+  PENDING: productionReplenishmentRequests.value.filter((request) => request.status === 'PENDING').length,
+  APPROVED: productionReplenishmentRequests.value.filter((request) => request.status === 'APPROVED').length,
+  REJECTED: productionReplenishmentRequests.value.filter((request) => request.status === 'REJECTED').length
+}));
+const filteredProductionReplenishmentRequests = computed(() => {
+  const keyword = replenishmentRequestKeyword.value.trim().toLowerCase();
+  return productionReplenishmentRequests.value.filter((request) => {
+    if (replenishmentRequestStatusFilter.value !== 'ALL' && request.status !== replenishmentRequestStatusFilter.value) {
+      return false;
+    }
+    if (!keyword) {
+      return true;
+    }
+    return [
+      request.requestNo,
+      request.orderNo,
+      request.productionTaskNo,
+      request.partCode,
+      request.partName,
+      request.reason,
+      request.requestedByCode,
+      request.requestedByName,
+      request.supervisorName,
+      request.supervisorRemark,
+      request.replenishmentTaskNo
+    ]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(keyword));
+  });
+});
 
 const filteredTasks = computed(() => {
   if (activeStatus.value === 'ALL') {
@@ -1174,7 +1459,11 @@ function taskQueryParams() {
 }
 
 async function loadCustomers() {
-  customers.value = await erpApi.customers();
+  try {
+    customers.value = await erpApi.customers();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败');
+  }
 }
 
 async function loadOperators() {
@@ -1187,26 +1476,36 @@ async function loadOperators() {
 }
 
 async function loadOrderOptions() {
-  orderOptions.value = await erpApi.orders({
-    customerId: filters.customerId,
-    dateFrom: dateRange.value[0],
-    dateTo: dateRange.value[1]
-  });
+  try {
+    orderOptions.value = await erpApi.orders({
+      customerId: filters.customerId,
+      dateFrom: dateRange.value[0],
+      dateTo: dateRange.value[1]
+    });
 
-  if (filters.orderNo && !orderOptions.value.some((item) => item.orderNo === filters.orderNo)) {
-    filters.orderNo = undefined;
+    if (filters.orderNo && !orderOptions.value.some((item) => item.orderNo === filters.orderNo)) {
+      filters.orderNo = undefined;
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败');
   }
 }
 
 async function loadTasks() {
-  // 生产任务按客户、订单日期和订单号过滤，避免任务列表混在一起难以操作。
-  tasks.value = await erpApi.productionTasks(taskQueryParams());
+  try {
+    // 生产任务按客户、订单日期和订单号过滤，避免任务列表混在一起难以操作。
+    tasks.value = await erpApi.productionTasks(taskQueryParams());
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产任务加载失败');
+  }
 }
 
 async function loadProductionNotices() {
   noticeLoading.value = true;
   try {
     productionNotices.value = await erpApi.productionNotices(undefined, 'PRODUCTION');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产通知加载失败');
   } finally {
     noticeLoading.value = false;
   }
@@ -1217,28 +1516,84 @@ async function openNotices() {
   await loadProductionNotices();
 }
 
+async function loadProductionReplenishmentRequests(showLoading = false, useServerKeyword = false) {
+  if (showLoading) {
+    replenishmentRequestLoading.value = true;
+  }
+  try {
+    productionReplenishmentRequests.value = await erpApi.productionReplenishmentRequests({
+      keyword: useServerKeyword ? replenishmentRequestKeyword.value : undefined
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产报废补单申请加载失败');
+  } finally {
+    if (showLoading) {
+      replenishmentRequestLoading.value = false;
+    }
+  }
+}
+
+async function openReplenishmentRequests() {
+  replenishmentRequestStatusFilter.value = pendingReplenishmentRequestCount.value > 0 ? 'PENDING' : 'ALL';
+  replenishmentRequestKeyword.value = '';
+  replenishmentRequestVisible.value = true;
+  await loadProductionReplenishmentRequests(true);
+}
+
+async function queryReplenishmentRequests() {
+  await loadProductionReplenishmentRequests(true, true);
+}
+
+async function resetReplenishmentRequestFilters() {
+  replenishmentRequestStatusFilter.value = pendingReplenishmentRequestCount.value > 0 ? 'PENDING' : 'ALL';
+  replenishmentRequestKeyword.value = '';
+  await loadProductionReplenishmentRequests(true);
+}
+
 async function loadScrapRecords() {
   scrapLoading.value = true;
   try {
     scrapRecords.value = await erpApi.productionScrapRecords({
+      customerId: scrapFilters.customerId,
       orderNo: scrapFilters.orderNo?.trim() || undefined,
       dateFrom: scrapDateRange.value[0],
       dateTo: scrapDateRange.value[1]
     });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '报废统计加载失败');
   } finally {
     scrapLoading.value = false;
   }
 }
 
+async function loadScrapOrderOptions() {
+  try {
+    scrapOrderOptions.value = await erpApi.orders({
+      customerId: scrapFilters.customerId
+    });
+    if (scrapFilters.orderNo && !scrapOrderOptions.value.some((item) => item.orderNo === scrapFilters.orderNo)) {
+      scrapFilters.orderNo = undefined;
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '报废统计订单选项加载失败');
+  }
+}
+
 async function openScrapRecords() {
   scrapVisible.value = true;
-  await loadScrapRecords();
+  await Promise.all([loadScrapOrderOptions(), loadScrapRecords()]);
 }
 
 async function resetScrapFilters() {
+  scrapFilters.customerId = undefined;
   scrapFilters.orderNo = undefined;
   scrapDateRange.value = [];
-  await loadScrapRecords();
+  await Promise.all([loadScrapOrderOptions(), loadScrapRecords()]);
+}
+
+async function handleScrapCustomerChange() {
+  scrapFilters.orderNo = undefined;
+  await loadScrapOrderOptions();
 }
 
 async function queryTasks() {
@@ -1246,7 +1601,7 @@ async function queryTasks() {
   try {
     await loadOrderOptions();
     await loadTasks();
-    await loadProductionNotices();
+    await Promise.all([loadProductionNotices(), loadProductionReplenishmentRequests()]);
   } finally {
     loading.value = false;
   }
@@ -1501,7 +1856,7 @@ function openProcessCompletion(row: ProductionTask, processName: string) {
   processForm.isCompleted = true;
   processForm.completedQuantity = completion?.isCompleted ? completion.completedQuantity : expectedProcessQuantity(row, processName);
   processForm.scrapQuantity = completion?.scrapQuantity || 0;
-  processForm.shortageMode = completion?.shortageMode || 'REPLENISHMENT';
+  processForm.shortageMode = completion?.shortageMode || 'REPLENISHMENT_REQUEST';
   processForm.managerName = completion?.managerName || '';
   processForm.shortageReason = completion?.shortageReason || '';
   processForm.quantityOverrideReason = completion?.quantityOverrideReason || '';
@@ -1783,7 +2138,6 @@ function buildShortagePayloadFromForm() {
   return {
     scrapQuantity: Number(processForm.scrapQuantity),
     shortageMode: processForm.shortageMode,
-    createReplenishment: processForm.shortageMode === 'REPLENISHMENT',
     managerName: processForm.shortageMode === 'MANAGER_APPROVED' ? processForm.managerName.trim() : undefined,
     shortageReason: processForm.shortageMode === 'MANAGER_APPROVED' ? processForm.shortageReason.trim() : undefined
   };
@@ -1809,7 +2163,7 @@ async function confirmCompletedTask(row: ProductionTask) {
   finalForm.completedQuantity = finalCompletion?.completedQuantity || row.completedQuantity || row.plannedQuantity;
   finalForm.operatorCodes = operatorCodesFromCompletion(finalCompletion);
   finalForm.scrapQuantity = finalCompletion?.scrapQuantity || 0;
-  finalForm.shortageMode = finalCompletion?.shortageMode || 'REPLENISHMENT';
+  finalForm.shortageMode = finalCompletion?.shortageMode || 'REPLENISHMENT_REQUEST';
   finalForm.managerName = finalCompletion?.managerName || '';
   finalForm.shortageReason = finalCompletion?.shortageReason || '';
   finalForm.remark = finalCompletion?.remark || row.remark || '';
@@ -1857,7 +2211,6 @@ function buildFinalShortagePayload() {
   return {
     scrapQuantity: Number(finalForm.scrapQuantity),
     shortageMode: finalForm.shortageMode,
-    createReplenishment: finalForm.shortageMode === 'REPLENISHMENT',
     managerName: finalForm.shortageMode === 'MANAGER_APPROVED' ? finalForm.managerName.trim() : undefined,
     shortageReason: finalForm.shortageMode === 'MANAGER_APPROVED' ? finalForm.shortageReason.trim() : undefined
   };
@@ -1989,14 +2342,175 @@ function finalProcessCompletion(row: ProductionTask) {
   return finalProcessName ? getProcessCompletion(row, finalProcessName) : undefined;
 }
 
+function pendingProductionReplenishmentRequest(row: ProductionTask) {
+  return row.processCompletions?.find(
+    (completion) =>
+      completion.id &&
+      completion.shortageMode === 'REPLENISHMENT_REQUEST' &&
+      completion.shortageQuantity > 0 &&
+      (!completion.replenishmentRequestStatus || completion.replenishmentRequestStatus === 'PENDING') &&
+      !completion.replenishmentTaskNo
+  );
+}
+
+function replenishmentRequestStatusTag(status: ProductionReplenishmentRequest['status']) {
+  if (status === 'APPROVED') {
+    return 'COMPLETED';
+  }
+  if (status === 'REJECTED') {
+    return 'CANCELLED';
+  }
+  return 'PENDING';
+}
+
+function replenishmentRequestStatusText(status: ProductionReplenishmentRequest['status']) {
+  const labels: Record<ProductionReplenishmentRequest['status'], string> = {
+    PENDING: '待主管确认',
+    APPROVED: '已生成报废补单',
+    REJECTED: '已驳回'
+  };
+  return labels[status] || status;
+}
+
+function replenishmentSourceTypeText(sourceType?: string) {
+  if (sourceType === 'PRODUCTION_SCRAP') {
+    return '生产报废补单';
+  }
+  return sourceType || '生产报废补单';
+}
+
+function openReplenishmentApproval(row: ProductionTask) {
+  const completion = pendingProductionReplenishmentRequest(row);
+  if (!completion) {
+    ElMessage.warning('当前任务没有待主管确认的生产报废补单申请');
+    return;
+  }
+  activeReplenishmentApprovalTask.value = row;
+  activeReplenishmentApprovalCompletion.value = completion;
+  replenishmentApprovalForm.managerName = '';
+  replenishmentApprovalForm.remark = '';
+  replenishmentApprovalVisible.value = true;
+}
+
+async function openReplenishmentApprovalFromRequest(request: ProductionReplenishmentRequest) {
+  if (!request.processCompletionId) {
+    ElMessage.warning('该补单申请缺少工序完成记录，不能确认');
+    return;
+  }
+
+  let task = tasks.value.find((item) => item.productionTaskNo === request.productionTaskNo);
+  if (!task) {
+    try {
+      const relatedTasks = await erpApi.productionTasks({ orderNo: request.orderNo });
+      task = relatedTasks.find((item) => item.productionTaskNo === request.productionTaskNo);
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : '补单申请关联任务加载失败');
+      return;
+    }
+  }
+
+  const completion = task?.processCompletions.find(
+    (item) => item.id === request.processCompletionId || item.replenishmentRequestNo === request.requestNo
+  );
+  if (!task || !completion) {
+    ElMessage.warning('没有找到该补单申请对应的生产任务，请刷新后重试');
+    return;
+  }
+
+  activeReplenishmentApprovalTask.value = task;
+  activeReplenishmentApprovalCompletion.value = completion;
+  replenishmentApprovalForm.managerName = '';
+  replenishmentApprovalForm.remark = '';
+  replenishmentApprovalVisible.value = true;
+}
+
+async function saveReplenishmentApproval() {
+  const completion = activeReplenishmentApprovalCompletion.value;
+  if (!completion?.id) {
+    return;
+  }
+  if (!replenishmentApprovalForm.managerName.trim()) {
+    ElMessage.warning('请输入车间主管姓名');
+    return;
+  }
+
+  replenishmentApprovalSaving.value = true;
+  try {
+    await erpApi.approveProductionReplenishmentRequest(completion.id, {
+      managerName: replenishmentApprovalForm.managerName.trim(),
+      remark: replenishmentApprovalForm.remark.trim() || undefined
+    });
+    ElMessage.success('主管已确认，系统已生成生产报废补单任务');
+    replenishmentApprovalVisible.value = false;
+    await queryTasks();
+    if (replenishmentRequestVisible.value) {
+      await loadProductionReplenishmentRequests(true);
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '主管确认补单失败');
+  } finally {
+    replenishmentApprovalSaving.value = false;
+  }
+}
+
+function openReplenishmentReject(request: ProductionReplenishmentRequest) {
+  if (!request.processCompletionId) {
+    ElMessage.warning('该补单申请缺少工序完成记录，不能驳回');
+    return;
+  }
+  activeReplenishmentRejectRequest.value = request;
+  replenishmentRejectForm.managerName = '';
+  replenishmentRejectForm.reason = '';
+  replenishmentRejectVisible.value = true;
+}
+
+async function saveReplenishmentReject() {
+  const request = activeReplenishmentRejectRequest.value;
+  if (!request?.processCompletionId) {
+    return;
+  }
+  if (!replenishmentRejectForm.managerName.trim()) {
+    ElMessage.warning('请输入车间主管姓名');
+    return;
+  }
+  if (!replenishmentRejectForm.reason.trim()) {
+    ElMessage.warning('请填写驳回原因');
+    return;
+  }
+
+  replenishmentRejectSaving.value = true;
+  try {
+    await erpApi.rejectProductionReplenishmentRequest(request.processCompletionId, {
+      managerName: replenishmentRejectForm.managerName.trim(),
+      reason: replenishmentRejectForm.reason.trim()
+    });
+    ElMessage.success('已驳回生产报废补单申请，并记录为管理确认缺货完成');
+    replenishmentRejectVisible.value = false;
+    await queryTasks();
+    if (replenishmentRequestVisible.value) {
+      await loadProductionReplenishmentRequests(true);
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '驳回补单申请失败');
+  } finally {
+    replenishmentRejectSaving.value = false;
+  }
+}
+
 function taskRelationText(row: ProductionTask) {
   if (row.isReplenishment && row.sourceProductionTaskNo) {
-    return `补单来源：${row.sourceProductionTaskNo}`;
+    const sourceRequest = row.replenishmentSourceRequestNo ? ` / 来源单 ${row.replenishmentSourceRequestNo}` : '';
+    return `${replenishmentTaskTypeText(row)}：源任务 ${row.sourceProductionTaskNo}${sourceRequest}`;
   }
   if (row.isReplenishment) {
-    return '补单任务';
+    const sourceRequest = row.replenishmentSourceRequestNo ? `：来源单 ${row.replenishmentSourceRequestNo}` : '';
+    return `${replenishmentTaskTypeText(row)}${sourceRequest}`;
   }
   return '';
+}
+
+function replenishmentTaskTypeText(row: ProductionTask) {
+  return row.replenishmentSourceLabel || (row.replenishmentSourceType === 'PRODUCTION_SCRAP' ? '生产报废补单' : '订单补单');
 }
 
 function shortageSummary(row: ProductionTask) {
@@ -2007,8 +2521,12 @@ function shortageSummary(row: ProductionTask) {
 
   const shortage = formatQuantity(completion.shortageQuantity, row.unit);
   const scrap = formatQuantity(completion.scrapQuantity || 0, row.unit);
+  if (completion.shortageMode === 'REPLENISHMENT_REQUEST' && !completion.replenishmentTaskNo) {
+    return `缺 ${shortage}，报废 ${scrap}，生产报废补单申请待主管确认${completion.replenishmentRequestNo ? `：${completion.replenishmentRequestNo}` : ''}`;
+  }
   if (completion.shortageMode === 'REPLENISHMENT') {
-    return `缺 ${shortage}，报废 ${scrap}，补单 ${completion.replenishmentTaskNo || '-'}`;
+    const sourceText = completion.replenishmentSource === 'PRODUCTION_SCRAP' ? '生产报废补单' : '补单';
+    return `缺 ${shortage}，报废 ${scrap}，${sourceText} ${completion.replenishmentTaskNo || '-'}`;
   }
 
   return `缺 ${shortage}，报废 ${scrap}，${completion.managerName || '-'}确认：${completion.shortageReason || '-'}`;
@@ -2042,8 +2560,14 @@ function formatProcessLog(snapshot?: Record<string, unknown> | null) {
   const role = snapshot.operatorRole ? ` / ${snapshot.operatorRole}` : '';
   const completedAt = snapshot.completedAt ? `，时间 ${formatDateTime(String(snapshot.completedAt))}` : '';
   const shortageQuantity = Number(snapshot.shortageQuantity || 0);
-  const shortageMode = snapshot.shortageMode === 'REPLENISHMENT' ? '生成补单' : '管理确认缺货完成';
+  const shortageMode =
+    snapshot.shortageMode === 'REPLENISHMENT_REQUEST'
+      ? '生产报废补单申请'
+      : snapshot.shortageMode === 'REPLENISHMENT'
+        ? '生成补单'
+        : '管理确认缺货完成';
   const replenishmentTaskNo = snapshot.replenishmentTaskNo ? `，补单任务 ${snapshot.replenishmentTaskNo}` : '';
+  const requestNo = snapshot.replenishmentRequestNo ? `，申请单 ${snapshot.replenishmentRequestNo}` : '';
   const manager = snapshot.managerName ? `，确认主管 ${snapshot.managerName}` : '';
   const reason = snapshot.shortageReason ? `，缺货理由 ${snapshot.shortageReason}` : '';
   const shortage =
@@ -2051,7 +2575,7 @@ function formatProcessLog(snapshot?: Record<string, unknown> | null) {
       ? `，缺少 ${formatQuantity(shortageQuantity, String(snapshot.unit || '件'))}，报废 ${formatQuantity(
           Number(snapshot.scrapQuantity || 0),
           String(snapshot.unit || '件')
-        )}，处理 ${shortageMode}${replenishmentTaskNo}${manager}${reason}`
+        )}，处理 ${shortageMode}${requestNo}${replenishmentTaskNo}${manager}${reason}`
       : '';
   const quantityOverrideReason = snapshot.quantityOverrideReason ? `，数量原因 ${snapshot.quantityOverrideReason}` : '';
   const remark = snapshot.remark ? `，备注 ${snapshot.remark}` : '';
@@ -2672,6 +3196,85 @@ onMounted(async () => {
   font-weight: 700;
 }
 
+.replenishment-request-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.replenishment-request-search {
+  width: min(360px, 100%);
+  margin-left: auto;
+}
+
+.replenishment-request-list {
+  display: grid;
+  gap: 12px;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+}
+
+.replenishment-request-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.replenishment-request-main {
+  min-width: 0;
+}
+
+.replenishment-request-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.replenishment-request-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.replenishment-request-grid p,
+.replenishment-request-reason {
+  margin: 0;
+  color: #334155;
+  line-height: 22px;
+}
+
+.replenishment-request-grid span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.replenishment-request-reason {
+  margin-top: 10px;
+}
+
+.replenishment-request-item small {
+  display: block;
+  margin-top: 8px;
+  color: #64748b;
+}
+
+.replenishment-request-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .print-preview-toolbar {
   display: flex;
   align-items: center;
@@ -2812,8 +3415,67 @@ onMounted(async () => {
     justify-content: flex-start;
   }
 
+  .dialog-filter-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
   .process-info-grid {
     grid-template-columns: 1fr;
+  }
+
+  .replenishment-request-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .replenishment-request-toolbar :deep(.el-radio-group) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .replenishment-request-toolbar :deep(.el-radio-button__inner) {
+    width: 100%;
+    border-left: 1px solid var(--el-border-color);
+    border-radius: 4px;
+  }
+
+  .replenishment-request-search {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .replenishment-request-item {
+    flex-direction: column;
+  }
+
+  .replenishment-request-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .replenishment-request-actions {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .replenishment-request-actions .el-button {
+    width: 100%;
+  }
+
+  .process-info-grid strong,
+  .process-operator-name,
+  .drawing-file-toolbar span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .unit-text {
+    display: block;
+    margin: 6px 0 0;
   }
 
   .operator-hint {
@@ -2825,6 +3487,37 @@ onMounted(async () => {
   .process-operator-row {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .process-operator-select {
+    width: 100%;
+  }
+
+  .batch-process-group {
+    gap: 8px;
+  }
+
+  .batch-process-group .el-checkbox {
+    flex: 1 1 128px;
+    min-height: 36px;
+  }
+
+  .drawing-file-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .drawing-file-toolbar :deep(.drawing-preview-button) {
+    align-self: flex-start;
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .drawing-file-preview img,
+  .drawing-file-preview iframe,
+  .drawing-file-empty {
+    min-height: 190px;
+    max-height: 280px;
   }
 
   .shortage-panel,
@@ -2839,6 +3532,10 @@ onMounted(async () => {
   .print-preview-toolbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .print-preview-frame {
+    padding: 10px;
   }
 }
 

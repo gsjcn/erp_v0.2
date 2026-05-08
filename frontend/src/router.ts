@@ -4,6 +4,7 @@ import InventoryView from './views/InventoryView.vue';
 import OrderDetailView from './views/OrderDetailView.vue';
 import OrdersListView from './views/OrdersListView.vue';
 import ProcessSelectionView from './views/ProcessSelectionView.vue';
+import ProcessTemplatesView from './views/ProcessTemplatesView.vue';
 import ProductionView from './views/ProductionView.vue';
 import StatisticsView from './views/StatisticsView.vue';
 import WarehouseView from './views/WarehouseView.vue';
@@ -16,6 +17,7 @@ export const router = createRouter({
     { path: '/orders', component: OrdersListView, meta: { title: '订单总列表' } },
     { path: '/orders/:orderNo', component: OrderDetailView, meta: { title: '订单明细' } },
     { path: '/processes', component: ProcessSelectionView, meta: { title: '零件生产流程选择' } },
+    { path: '/process-templates', component: ProcessTemplatesView, meta: { title: '流程记忆' } },
     { path: '/production', component: ProductionView, meta: { title: '生产页面' } },
     { path: '/statistics', component: StatisticsView, meta: { title: '统计表' } },
     { path: '/warehouses', component: WarehouseView, meta: { title: '仓库页面' } },

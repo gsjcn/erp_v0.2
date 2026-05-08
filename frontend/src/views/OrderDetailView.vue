@@ -9,12 +9,12 @@
             <el-button :disabled="!canAddAdditionalMaterial" @click="openAdditionalMaterial">新增补单物料</el-button>
           </span>
         </el-tooltip>
-        <el-tooltip :content="cancelStartedOrderDisabledReason" :disabled="canCancelStartedOrder" placement="bottom">
+        <el-tooltip :content="cancelOrderDisabledReason" :disabled="canCancelOrder" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button type="danger" plain :disabled="!canCancelStartedOrder" @click="openCancelStartedOrder">取消订单</el-button>
+            <el-button type="danger" plain :disabled="!canCancelOrder" @click="openCancelOrder">取消订单</el-button>
           </span>
         </el-tooltip>
-        <el-button @click="goProcess">选择生产流程</el-button>
+        <el-button @click="goProcess">工序设定</el-button>
         <el-button type="primary" :disabled="!order || order.status !== 'DRAFT'" @click="submitOrder">提交生产</el-button>
       </div>
     </div>
@@ -77,6 +77,9 @@
             <span class="muted">订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
           </div>
           <div class="muted">来源 {{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</div>
+          <div v-if="stockSourceSummary(line)" class="stock-source-summary">
+            库存来源：{{ stockSourceSummary(line) }}
+          </div>
           <div class="muted">交期 {{ formatDate(line.deliveryDate || order.deliveryDate) }}</div>
           <div class="muted">{{ line.partCode }} / {{ line.drawingNo || '-' }} / 版本 {{ line.drawingVersion || '-' }}</div>
           <div class="muted">厚度 {{ line.partThickness }} mm / 成品规格 {{ line.partSpecification || '-' }}</div>
@@ -96,7 +99,7 @@
           <div class="line-actions">
             <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
               <span class="action-tooltip-wrap">
-                <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openReplenishment(line)">补单</el-button>
+                <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openReplenishment(line)">订单补单</el-button>
               </span>
             </el-tooltip>
             <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
@@ -104,6 +107,16 @@
                 <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openQuantityChange(line)">数量变更</el-button>
               </span>
             </el-tooltip>
+            <el-button
+              v-for="task in cancelableReplenishmentTasks(line)"
+              :key="task.productionTaskNo"
+              size="small"
+              type="danger"
+              plain
+              @click="openCancelReplenishment(line, task)"
+            >
+              取消补单 {{ task.productionTaskNo }}
+            </el-button>
           </div>
         </article>
       </div>
@@ -144,6 +157,14 @@
           <el-table-column label="库存/生产方式" width="130">
             <template #default="{ row }">{{ fulfillmentModeLabel(row.fulfillmentMode) }}</template>
           </el-table-column>
+          <el-table-column label="已选库存来源" min-width="260">
+            <template #default="{ row }">
+              <span v-if="stockSourceSummary(row)" class="stock-source-summary-inline">
+                {{ stockSourceSummary(row) }}
+              </span>
+              <span v-else class="muted">-</span>
+            </template>
+          </el-table-column>
           <el-table-column label="完成数量" width="120">
             <template #default="{ row }">
               {{ row.completedQuantity ? formatQuantity(row.completedQuantity, row.unit) : '-' }}
@@ -174,11 +195,11 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="生产变更" width="150" fixed="right">
+          <el-table-column label="生产数量变更" width="210" fixed="right">
             <template #default="{ row }">
               <el-tooltip :content="productionChangeDisabledReason(row)" :disabled="canCreateProductionChange(row)" placement="top">
                 <span class="action-tooltip-wrap">
-                  <el-button link type="primary" :disabled="!canCreateProductionChange(row)" @click="openReplenishment(row)">补单</el-button>
+                  <el-button link type="primary" :disabled="!canCreateProductionChange(row)" @click="openReplenishment(row)">订单补单</el-button>
                 </span>
               </el-tooltip>
               <el-tooltip :content="productionChangeDisabledReason(row)" :disabled="canCreateProductionChange(row)" placement="top">
@@ -186,6 +207,15 @@
                   <el-button link type="primary" :disabled="!canCreateProductionChange(row)" @click="openQuantityChange(row)">变更</el-button>
                 </span>
               </el-tooltip>
+              <el-button
+                v-for="task in cancelableReplenishmentTasks(row)"
+                :key="task.productionTaskNo"
+                link
+                type="danger"
+                @click="openCancelReplenishment(row, task)"
+              >
+                取消补单
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -287,6 +317,11 @@
                   {{ item }}
                 </el-button>
               </div>
+              <div class="additional-process-create">
+                <el-input v-model="newAdditionalProcessName" placeholder="新建标准工序，例如 抛丸、抛光" maxlength="30" />
+                <el-button :loading="creatingProcess" @click="createAdditionalProcessDefinition">新建工序</el-button>
+                <el-button @click="processDefinitionManagerVisible = true">管理工序</el-button>
+              </div>
               <div class="additional-process-steps">
                 <div
                   v-for="(step, index) in additionalMaterialProcessSteps"
@@ -333,7 +368,27 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="replenishmentVisible" title="创建补单" width="min(520px, calc(100vw - 32px))">
+    <el-dialog
+      v-model="processDefinitionManagerVisible"
+      title="标准工序维护"
+      width="min(900px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <ProcessDefinitionManager
+        title="订单明细标准工序"
+        hint="这里维护补单物料和生产流程可选的标准工序；修改后会刷新当前页面的工序下拉列表。"
+        @updated="handleProcessDefinitionsUpdated"
+      />
+    </el-dialog>
+
+    <el-dialog v-model="replenishmentVisible" title="创建订单补单" width="min(560px, calc(100vw - 32px))">
+      <el-alert
+        title="这里用于销售或计划决定的客户追加、订单数量增加。生产过程中因报废缺件需要补齐时，必须在生产页面提交生产报废补单申请，由车间主管确认。"
+        type="info"
+        :closable="false"
+        class="mb-16"
+      />
       <el-form label-width="96px">
         <el-form-item label="订单号">
           <strong>{{ order?.orderNo }}</strong>
@@ -352,12 +407,45 @@
           <el-input v-model="replenishmentForm.managerName" placeholder="可选" />
         </el-form-item>
         <el-form-item label="补单原因" required>
-          <el-input v-model="replenishmentForm.reason" type="textarea" :rows="3" placeholder="例如：客户追加、生产缺件补足" />
+          <el-input v-model="replenishmentForm.reason" type="textarea" :rows="3" placeholder="例如：客户追加数量、销售漏下物料、计划数量调整" />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="replenishmentVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveReplenishment">确认补单</el-button>
+        <el-button type="primary" :loading="saving" @click="saveReplenishment">生成订单补单</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="cancelReplenishmentVisible" title="取消补单" width="min(620px, calc(100vw - 32px))">
+      <el-alert
+        title="只允许取消未开始生产的补单。补单已经开工后不能直接删除，必须到生产页面走管理撤回。"
+        type="warning"
+        :closable="false"
+        class="mb-16"
+      />
+      <el-form label-width="116px">
+        <el-form-item label="订单号">
+          <strong>{{ order?.orderNo }}</strong>
+        </el-form-item>
+        <el-form-item label="补单任务">
+          <strong>{{ activeReplenishmentTask?.productionTaskNo }}</strong>
+        </el-form-item>
+        <el-form-item label="物料">
+          <strong>{{ activeLine?.partCode }} / {{ activeLine?.partName }}</strong>
+        </el-form-item>
+        <el-form-item label="补单数量">
+          <span>{{ activeReplenishmentTask ? formatQuantity(activeReplenishmentTask.plannedQuantity, activeLine?.unit || order?.unit || '件') : '-' }}</span>
+        </el-form-item>
+        <el-form-item label="管理人员" required>
+          <el-input v-model="cancelReplenishmentForm.managerName" placeholder="填写管理人员姓名" />
+        </el-form-item>
+        <el-form-item label="取消原因" required>
+          <el-input v-model="cancelReplenishmentForm.reason" type="textarea" :rows="4" placeholder="例如：重复补单、客户取消追加数量" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cancelReplenishmentVisible = false">返回</el-button>
+        <el-button type="danger" :loading="saving" @click="saveCancelReplenishment">确认取消补单</el-button>
       </template>
     </el-dialog>
 
@@ -399,9 +487,9 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="cancelOrderVisible" title="取消已生产订单" width="min(620px, calc(100vw - 32px))">
+    <el-dialog v-model="cancelOrderVisible" title="取消订单" width="min(980px, calc(100vw - 32px))">
       <el-alert
-        title="只允许取消已经开始生产的订单。取消后客户订单数量归零，未开始的生产任务会删除，已开始生产的任务会通知生产和仓库确认转库存或销毁。"
+        :title="cancelOrderNoticeText"
         type="warning"
         :closable="false"
         class="mb-16"
@@ -413,8 +501,49 @@
         <el-form-item label="当前生产">
           <span>{{ orderProgressHint }}</span>
         </el-form-item>
-        <el-form-item label="管理人员">
-          <el-input v-model="cancelOrderForm.managerName" placeholder="可选" />
+        <el-form-item label="取消日期">
+          <el-input v-model="cancelOrderForm.cancelAt" disabled />
+          <div class="form-hint">提交时由系统自动记录，操作人员不需要手工回填。</div>
+        </el-form-item>
+        <el-form-item label="生产状态" required>
+          <el-radio-group v-model="cancelOrderForm.productionCancelState">
+            <el-radio-button label="NOT_PRODUCED">未生产取消</el-radio-button>
+            <el-radio-button label="PRODUCED">已生产取消</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">必须人工确认。已生产取消后，仓库需要逐项确认转库存或报废。</div>
+        </el-form-item>
+        <div v-if="cancelOrderForm.productionCancelState === 'PRODUCED'" class="cancel-handling-section">
+          <div class="cancel-handling-title">
+            <strong>已生产零件处理计划</strong>
+            <span>仓库确认时仍可修改，最终以仓库实物清点为准。</span>
+          </div>
+          <div v-if="cancelHandlingPlanRows.length" class="cancel-handling-list">
+            <article v-for="row in cancelHandlingPlanRows" :key="row.productionTaskNo" class="cancel-handling-row">
+              <div class="cancel-handling-main">
+                <strong>{{ row.partCode }} / {{ row.partName }}</strong>
+                <span>{{ row.productionTaskNo }}，已完成 {{ formatQuantity(row.completedQuantity, row.unit) }} / 计划 {{ formatQuantity(row.plannedQuantity, row.unit) }}</span>
+              </div>
+              <el-radio-group v-model="row.handlingMode" @change="handleCancelHandlingModeChange(row)">
+                <el-radio-button label="STOCK">转库存</el-radio-button>
+                <el-radio-button label="SCRAP">报废</el-radio-button>
+                <el-radio-button label="NONE">无实物</el-radio-button>
+              </el-radio-group>
+              <el-input-number
+                v-model="row.handlingQuantity"
+                :min="0"
+                :max="Math.max(row.completedQuantity, row.plannedQuantity)"
+                :precision="3"
+                :controls="false"
+                class="cancel-handling-quantity"
+                :disabled="row.handlingMode === 'NONE'"
+              />
+              <el-input v-model="row.remark" maxlength="120" show-word-limit placeholder="处理说明，可修改" />
+            </article>
+          </div>
+          <el-alert v-else title="该订单未发现已开始生产的零件；请选择“未生产取消”或刷新订单后重试。" type="warning" :closable="false" />
+        </div>
+        <el-form-item label="管理人员" required>
+          <el-input v-model="cancelOrderForm.managerName" placeholder="填写管理人员姓名" />
         </el-form-item>
         <el-form-item label="取消原因" required>
           <el-input v-model="cancelOrderForm.reason" type="textarea" :rows="4" placeholder="例如：客户取消订单、客户项目暂停" />
@@ -422,7 +551,7 @@
       </el-form>
       <template #footer>
         <el-button @click="cancelOrderVisible = false">返回</el-button>
-        <el-button type="danger" :loading="saving" @click="saveCancelStartedOrder">确认取消订单</el-button>
+        <el-button type="danger" :loading="saving" @click="saveCancelOrder">确认取消订单</el-button>
       </template>
     </el-dialog>
   </section>
@@ -437,10 +566,11 @@ import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import OrderLineEditor from '../components/OrderLineEditor.vue';
+import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import StatusTag from '../components/StatusTag.vue';
 import { standardProcessOptions } from '../config/processes';
-import type { InventorySummaryRow, OrderDetail, OrderLine, ProcessStepDetail } from '../types/erp';
-import { formatDate, formatQuantity } from '../utils/format';
+import type { InventorySummaryRow, OrderDetail, OrderLine, OrderLineProductionTask, ProcessStepDetail } from '../types/erp';
+import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
 import {
   confirmDuplicateDrawingFiles,
   confirmDuplicateDrawingNos,
@@ -448,6 +578,14 @@ import {
   confirmExistingDrawingNos
 } from '../utils/orderLineDuplicateChecks';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
+import {
+  findUnreviewedStockSourceLine,
+  normalizeSelectedStockSources,
+  restoreSavedStockSourceReview,
+  sanitizeOrderLinePayload,
+  validateReviewedStockSourceLines
+} from '../utils/stockSourceReview';
+import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
 
 const route = useRoute();
 const router = useRouter();
@@ -458,9 +596,12 @@ const saving = ref(false);
 const editVisible = ref(false);
 const additionalMaterialVisible = ref(false);
 const replenishmentVisible = ref(false);
+const cancelReplenishmentVisible = ref(false);
 const quantityChangeVisible = ref(false);
 const cancelOrderVisible = ref(false);
+const processDefinitionManagerVisible = ref(false);
 const activeLine = ref<OrderLine>();
+const activeReplenishmentTask = ref<OrderLineProductionTask>();
 const checkingOrderNo = ref(false);
 const orderNoAvailable = ref(false);
 const orderNoCheckText = ref('');
@@ -486,7 +627,13 @@ const replenishmentForm = ref({
   managerName: '',
   reason: ''
 });
-const processOptions: string[] = [...standardProcessOptions];
+const cancelReplenishmentForm = ref({
+  managerName: '',
+  reason: ''
+});
+const processOptions = ref<string[]>([...standardProcessOptions]);
+const newAdditionalProcessName = ref('');
+const creatingProcess = ref(false);
 const quantityChangeForm = ref({
   quantity: 0,
   productionPlanQuantity: 0,
@@ -494,9 +641,25 @@ const quantityChangeForm = ref({
   reason: ''
 });
 const cancelOrderForm = ref({
+  cancelAt: '',
   managerName: '',
+  productionCancelState: 'NOT_PRODUCED' as 'NOT_PRODUCED' | 'PRODUCED',
   reason: ''
 });
+type CancelHandlingMode = '' | 'STOCK' | 'SCRAP' | 'NONE';
+type CancelHandlingPlanRow = {
+  orderLineId: string;
+  productionTaskNo: string;
+  partCode: string;
+  partName: string;
+  plannedQuantity: number;
+  completedQuantity: number;
+  unit: string;
+  handlingMode: CancelHandlingMode;
+  handlingQuantity: number;
+  remark: string;
+};
+const cancelHandlingPlanRows = ref<CancelHandlingPlanRow[]>([]);
 const canAddAdditionalMaterial = computed(() =>
   Boolean(
     order.value &&
@@ -506,17 +669,36 @@ const canAddAdditionalMaterial = computed(() =>
       order.value.lines.some((line) => canCreateProductionChange(line))
   )
 );
-const canCancelStartedOrder = computed(() =>
+const canCancelOrder = computed(() =>
   Boolean(
     order.value &&
-      order.value.status !== 'DRAFT' &&
       order.value.status !== 'CANCELLED' &&
-      order.value.status !== 'COMPLETED' &&
-      order.value.lines.some((line) => canCreateProductionChange(line))
+      order.value.status !== 'COMPLETED'
   )
 );
 const additionalMaterialDisabledReason = computed(() => orderProductionChangeDisabledReason('新增补单物料'));
-const cancelStartedOrderDisabledReason = computed(() => orderProductionChangeDisabledReason('取消订单'));
+const cancelOrderDisabledReason = computed(() => {
+  if (!order.value) {
+    return '订单数据未加载';
+  }
+  if (order.value.status === 'CANCELLED') {
+    return '订单已取消';
+  }
+  if (order.value.status === 'COMPLETED') {
+    return '已完成订单第一阶段不允许直接取消';
+  }
+  return '';
+});
+const cancelOrderNoticeText = computed(() => {
+  if (!order.value) {
+    return '';
+  }
+  const hasStartedProduction = order.value.lines.some((line) => line.productionStatus && line.productionStatus !== 'PENDING');
+  if (hasStartedProduction) {
+    return '取消后客户订单数量归零，未开始的生产任务会删除，已开始生产的任务会通知生产和仓库确认转库存或销毁。';
+  }
+  return '订单尚未开始生产，取消后系统会删除未开工生产任务，并释放已占用的订单库存。';
+});
 const productionChangeBlockingText = computed(() => {
   if (
     !order.value ||
@@ -527,7 +709,7 @@ const productionChangeBlockingText = computed(() => {
   ) {
     return '';
   }
-  return '当前订单已提交但还没有任何零件开始生产。需要补单、数量变化或取消时，应先修改订单；只有生产开始后才走生产变更流程。';
+  return '当前订单已提交但还没有任何零件开始生产。需要补单、数量变化或取消时，应先修改订单；只有生产开始后才走生产数量变更流程。';
 });
 const showProductionChangeHelp = computed(() =>
   Boolean(
@@ -547,12 +729,16 @@ const orderProgressHint = computed(() => {
     .map((line) => `${line.partCode} ${line.productionStatus}`)
     .join('；');
 });
+const orderProgressStarted = computed(() => orderProgressHint.value !== '尚未开始生产');
 
 async function loadOrder() {
   const orderNo = String(route.params.orderNo);
   loading.value = true;
   try {
     order.value = await erpApi.order(orderNo);
+  } catch (error) {
+    order.value = undefined;
+    ElMessage.error(error instanceof Error ? error.message : '订单明细加载失败');
   } finally {
     loading.value = false;
   }
@@ -560,35 +746,47 @@ async function loadOrder() {
 
 function goProcess() {
   if (order.value) {
-    void router.push(`/processes?orderNo=${order.value.orderNo}`);
+    void router.push({
+      path: '/processes',
+      query: {
+        orderNo: order.value.orderNo,
+        open: 'edit',
+        returnTo: `/orders/${encodeURIComponent(order.value.orderNo)}`
+      }
+    });
   }
 }
 
-function openEdit() {
+async function openEdit() {
   if (!order.value || order.value.status !== 'DRAFT') {
     return;
   }
-  void loadInventorySummary();
+  if (!(await loadInventorySummary())) {
+    return;
+  }
+  const lines = order.value.lines.map((line) => ({
+    partCode: line.partCode,
+    partName: line.partName,
+    drawingNo: line.drawingNo,
+    drawingVersion: line.drawingVersion || 'A',
+    drawingFileName: line.drawingFileName || '',
+    drawingFileUrl: line.drawingFileUrl || '',
+    partThickness: line.partThickness || 1,
+    partSpecification: line.partSpecification || '',
+    quantity: line.quantity,
+    productionPlanQuantity: line.productionPlanQuantity,
+    fulfillmentMode: line.fulfillmentMode || 'PRODUCTION',
+    unit: line.unit,
+    deliveryDate: line.deliveryDate?.slice(0, 10),
+    remark: line.remark,
+    selectedStockSources: line.selectedStockSources || [],
+    processSteps: line.processStepDetails?.length ? line.processStepDetails : line.processSteps.map((processName) => ({ processName }))
+  }));
+  lines.forEach(restoreSavedStockSourceReview);
   editForm.value = {
     orderNo: order.value.orderNo,
     deliveryDate: order.value.deliveryDate?.slice(0, 10),
-    lines: order.value.lines.map((line) => ({
-      partCode: line.partCode,
-      partName: line.partName,
-      drawingNo: line.drawingNo,
-      drawingVersion: line.drawingVersion || 'A',
-      drawingFileName: line.drawingFileName || '',
-      drawingFileUrl: line.drawingFileUrl || '',
-      partThickness: line.partThickness || 1,
-      partSpecification: line.partSpecification || '',
-      quantity: line.quantity,
-      productionPlanQuantity: line.productionPlanQuantity,
-      fulfillmentMode: line.fulfillmentMode || 'PRODUCTION',
-      unit: line.unit,
-      deliveryDate: line.deliveryDate?.slice(0, 10),
-      remark: line.remark,
-      processSteps: line.processStepDetails?.length ? line.processStepDetails : line.processSteps.map((processName) => ({ processName }))
-    }))
+    lines
   };
   orderNoAvailable.value = true;
   orderNoCheckText.value = '订单号未修改';
@@ -621,7 +819,7 @@ function orderProductionChangeDisabledReason(actionName: string) {
     return `订单已完成，不能${actionName}`;
   }
   if (!order.value.lines.some((line) => canCreateProductionChange(line))) {
-    return `订单尚未开始生产，${actionName}应先修改订单，不能走生产变更`;
+    return `订单尚未开始生产，${actionName}应先修改订单，不能走生产数量变更`;
   }
   return '';
 }
@@ -661,7 +859,9 @@ async function openAdditionalMaterial() {
     ElMessage.warning('订单还没有开始生产，请编辑订单，不要创建新增物料补单');
     return;
   }
-  await loadInventorySummary();
+  if (!(await loadInventorySummary())) {
+    return;
+  }
   const line = newLine(order.value.lines.length);
   line.partCode = `P-${Date.now().toString().slice(-4)}-A`;
   line.deliveryDate = order.value.deliveryDate?.slice(0, 10);
@@ -685,7 +885,7 @@ function normalizeAdditionalMaterialProcessSteps(steps: ProcessStepDetail[]) {
   const result: ProcessStepDetail[] = [];
   steps.forEach((step) => {
     const processName = step.processName.trim();
-    if (processName && processOptions.includes(processName) && !result.some((item) => item.processName === processName)) {
+    if (processName && processOptions.value.includes(processName)) {
       const processRemark = step.processRemark?.trim();
       result.push({
         processName,
@@ -696,8 +896,50 @@ function normalizeAdditionalMaterialProcessSteps(steps: ProcessStepDetail[]) {
   return result;
 }
 
+async function loadProcessDefinitions() {
+  try {
+    const rows = await erpApi.processDefinitions(undefined, 'ENABLED');
+    processOptions.value = rows.map((row) => row.processName);
+  } catch {
+    processOptions.value = [...standardProcessOptions];
+  }
+}
+
+async function handleProcessDefinitionsUpdated() {
+  await loadProcessDefinitions();
+}
+
+async function createAdditionalProcessDefinition() {
+  const processName = newAdditionalProcessName.value.trim();
+  if (!processName) {
+    ElMessage.warning('请填写标准工序名称');
+    return;
+  }
+  if (processOptions.value.some((item) => item.toLocaleLowerCase() === processName.toLocaleLowerCase())) {
+    ElMessage.warning(`标准工序“${processName}”已存在，请勿重复创建`);
+    return;
+  }
+
+  creatingProcess.value = true;
+  try {
+    const created = await erpApi.createProcessDefinition({ processName });
+    await loadProcessDefinitions();
+    newAdditionalProcessName.value = '';
+    ElMessage.success('标准工序已创建');
+    addAdditionalMaterialProcess(created.processName);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '标准工序创建失败，请确认是否重复');
+  } finally {
+    creatingProcess.value = false;
+  }
+}
+
 function normalizeAdditionalMaterialProcesses() {
   additionalMaterialProcessSteps.value = normalizeAdditionalMaterialProcessSteps(additionalMaterialProcessSteps.value);
+  const duplicates = duplicateAdditionalMaterialProcessNames(additionalMaterialProcessSteps.value);
+  if (duplicates.length > 0) {
+    ElMessage.warning(`新增物料流程存在重复工序：${duplicates.join('、')}，请把次数或特殊要求写入参数备注`);
+  }
 }
 
 function addAdditionalMaterialProcess(processName: string) {
@@ -721,6 +963,23 @@ function moveAdditionalMaterialProcess(index: number, offset: number) {
 
 function removeAdditionalMaterialProcess(index: number) {
   additionalMaterialProcessSteps.value.splice(index, 1);
+}
+
+function duplicateAdditionalMaterialProcessNames(steps: ProcessStepDetail[]) {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const step of steps) {
+    const processName = step.processName.trim();
+    if (!processName) {
+      continue;
+    }
+    const key = processName.replace(/\s+/g, '').toLocaleLowerCase();
+    if (seen.has(key)) {
+      duplicates.add(processName);
+    }
+    seen.add(key);
+  }
+  return [...duplicates];
 }
 
 function openReplenishment(line: OrderLine) {
@@ -752,19 +1011,106 @@ function openQuantityChange(line: OrderLine) {
   quantityChangeVisible.value = true;
 }
 
-function openCancelStartedOrder() {
-  if (!order.value) {
+function cancelableReplenishmentTasks(line: OrderLine) {
+  return (line.productionTasks || []).filter(
+    (task) => task.isReplenishment && task.replenishmentSourceType !== 'PRODUCTION_SCRAP' && task.canCancelReplenishment
+  );
+}
+
+function openCancelReplenishment(line: OrderLine, task: OrderLineProductionTask) {
+  if (!task.canCancelReplenishment) {
+    ElMessage.warning('补单已经开始生产，请到生产页面使用管理撤回');
     return;
   }
-  if (!canCancelStartedOrder.value) {
-    ElMessage.warning('订单还没有开始生产，请编辑订单，不要走生产取消流程');
-    return;
-  }
-  cancelOrderForm.value = {
+  activeLine.value = line;
+  activeReplenishmentTask.value = task;
+  cancelReplenishmentForm.value = {
     managerName: '',
     reason: ''
   };
+  cancelReplenishmentVisible.value = true;
+}
+
+function openCancelOrder() {
+  if (!order.value) {
+    return;
+  }
+  if (!canCancelOrder.value) {
+    ElMessage.warning(cancelOrderDisabledReason.value || '当前订单不能取消');
+    return;
+  }
+  cancelOrderForm.value = {
+    cancelAt: formatDateTime(new Date().toISOString()),
+    managerName: '',
+    productionCancelState: orderProgressStarted.value ? 'PRODUCED' : 'NOT_PRODUCED',
+    reason: ''
+  };
+  cancelHandlingPlanRows.value = buildCancelHandlingPlanRows(order.value);
   cancelOrderVisible.value = true;
+}
+
+function taskHasProductionProgress(task: OrderLineProductionTask) {
+  return task.status !== 'PENDING' || task.completedQuantity > 0;
+}
+
+function buildCancelHandlingPlanRows(orderDetail: OrderDetail) {
+  return orderDetail.lines.flatMap((line: OrderLine) =>
+    (line.productionTasks || [])
+      .filter(taskHasProductionProgress)
+      .map((task) => ({
+        orderLineId: line.id,
+        productionTaskNo: task.productionTaskNo,
+        partCode: line.partCode,
+        partName: line.partName,
+        plannedQuantity: task.plannedQuantity,
+        completedQuantity: task.completedQuantity,
+        unit: line.unit,
+        handlingMode: '' as CancelHandlingMode,
+        handlingQuantity: 0,
+        remark: ''
+      }))
+  );
+}
+
+function handleCancelHandlingModeChange(row: CancelHandlingPlanRow) {
+  if (row.handlingMode === 'NONE') {
+    row.handlingQuantity = 0;
+    return;
+  }
+  if (row.handlingQuantity <= 0) {
+    row.handlingQuantity = row.completedQuantity > 0 ? row.completedQuantity : row.plannedQuantity;
+  }
+}
+
+function collectCancelHandlingPlan() {
+  if (cancelOrderForm.value.productionCancelState !== 'PRODUCED') {
+    return undefined;
+  }
+  if (cancelHandlingPlanRows.value.length === 0) {
+    ElMessage.warning('已生产取消必须先加载并选择零件处理方式');
+    return false;
+  }
+  for (const row of cancelHandlingPlanRows.value) {
+    if (!row.handlingMode) {
+      ElMessage.warning(`请选择 ${row.partCode} / ${row.productionTaskNo} 的处理方式`);
+      return false;
+    }
+    if ((row.handlingMode === 'STOCK' || row.handlingMode === 'SCRAP') && row.handlingQuantity <= 0) {
+      ElMessage.warning(`请填写 ${row.partCode} / ${row.productionTaskNo} 的处理数量`);
+      return false;
+    }
+    if (row.handlingMode === 'NONE' && !row.remark.trim()) {
+      ElMessage.warning(`请填写 ${row.partCode} / ${row.productionTaskNo} 无实物处理说明`);
+      return false;
+    }
+  }
+  return cancelHandlingPlanRows.value.map((row) => ({
+    orderLineId: row.orderLineId,
+    productionTaskNo: row.productionTaskNo,
+    handlingMode: row.handlingMode as 'STOCK' | 'SCRAP' | 'NONE',
+    handlingQuantity: row.handlingMode === 'NONE' ? 0 : row.handlingQuantity,
+    remark: row.remark.trim() || undefined
+  }));
 }
 
 function newLine(index: number): CreateOrderLinePayload {
@@ -782,7 +1128,8 @@ function newLine(index: number): CreateOrderLinePayload {
     fulfillmentMode: 'PRODUCTION',
     unit: '件',
     deliveryDate: '',
-    processSteps: []
+    processSteps: [],
+    selectedStockSources: []
   };
 }
 
@@ -822,10 +1169,22 @@ async function saveEdit() {
     ElMessage.warning('请补齐订单零件、厚度等必填信息');
     return;
   }
-  await loadInventorySummary();
+  if (!(await loadInventorySummary())) {
+    return;
+  }
   const stockCheck = validateStockModeLines(editForm.value.lines, inventorySummary.value);
   if (!stockCheck.ok) {
     ElMessage.warning(`草稿可先保存；${stockCheck.message}，提交生产前必须补足`);
+  }
+  const unreviewedStockLine = findUnreviewedStockSourceLine(editForm.value.lines);
+  if (unreviewedStockLine) {
+    ElMessage.warning(`请先核对 ${unreviewedStockLine.partCode || unreviewedStockLine.partName} 的库存来源、图号和版本`);
+    return;
+  }
+  const reviewedStockCheck = validateReviewedStockSourceLines(editForm.value.lines);
+  if (!reviewedStockCheck.ok) {
+    ElMessage.warning(reviewedStockCheck.message);
+    return;
   }
   if (!(await confirmDuplicateDrawingNos(editForm.value.lines))) {
     return;
@@ -856,6 +1215,8 @@ async function saveEdit() {
     if (order.value.orderNo !== previousOrderNo) {
       await router.replace(`/orders/${encodeURIComponent(order.value.orderNo)}`);
     }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '订单保存失败');
   } finally {
     saving.value = false;
   }
@@ -890,15 +1251,19 @@ async function saveAdditionalMaterial() {
     return;
   }
   additionalMaterialProcessSteps.value = processSteps;
+  const duplicateProcesses = duplicateAdditionalMaterialProcessNames(processSteps);
+  if (duplicateProcesses.length > 0) {
+    ElMessage.warning(`新增物料流程存在重复工序：${duplicateProcesses.join('、')}，请删除重复项或写入参数备注`);
+    return;
+  }
   if (!additionalMaterialForm.value.reason.trim()) {
     ElMessage.warning('请填写新增物料原因');
     return;
   }
 
   const payload = {
-    ...line,
+    ...sanitizeOrderLinePayload(line, order.value.deliveryDate?.slice(0, 10)),
     processSteps,
-    deliveryDate: line.deliveryDate || order.value.deliveryDate?.slice(0, 10),
     fulfillmentMode: 'PRODUCTION' as const,
     productionPlanQuantity: Math.max(line.productionPlanQuantity || line.quantity, line.quantity),
     reason: additionalMaterialForm.value.reason.trim(),
@@ -1014,13 +1379,7 @@ function syncPlanQuantity(line: CreateOrderLinePayload) {
 }
 
 function normalizedLines() {
-  return editForm.value.lines.map((line) => ({
-    ...line,
-    deliveryDate: line.deliveryDate || editForm.value.deliveryDate,
-    fulfillmentMode: line.fulfillmentMode || 'PRODUCTION',
-    productionPlanQuantity:
-      line.fulfillmentMode === 'STOCK' ? 0 : Math.max(line.productionPlanQuantity || line.quantity, line.quantity)
-  }));
+  return editForm.value.lines.map((line) => sanitizeOrderLinePayload(line, editForm.value.deliveryDate));
 }
 
 function fulfillmentModeLabel(mode?: string) {
@@ -1033,8 +1392,50 @@ function fulfillmentModeLabel(mode?: string) {
   return '重新生产';
 }
 
+function stockSourceSummary(line: OrderLine | CreateOrderLinePayload) {
+  const sources = normalizeSelectedStockSources(line as CreateOrderLinePayload);
+  if (sources.length === 0) {
+    return '';
+  }
+
+  return sources
+    .map((source) => {
+      const sourcePart = source.partCode && source.partCode !== line.partCode ? `${source.partCode} / ` : '';
+      const replenishmentText = stockSourceReplenishmentText(source);
+      const replenishmentMark = replenishmentText ? ` / ${replenishmentText}` : '';
+      const manualText = source.manualConfirmedBy ? ` / 人工确认：${source.manualConfirmedBy}` : '';
+      const reasonText = source.compatibilityStatus && source.compatibilityStatus !== 'MATCHED' && source.compatibilityReason
+        ? ` / ${source.compatibilityReason}`
+        : '';
+      return `${source.batchNo || source.batchId} ${sourcePart}${formatQuantity(source.quantity, source.unit || line.unit || '件')}${replenishmentMark}${manualText}${reasonText}`;
+    })
+    .join('；');
+}
+
+function stockSourceReplenishmentText(source: ReturnType<typeof normalizeSelectedStockSources>[number]) {
+  if (source.replenishmentSourceLabel) {
+    return source.replenishmentSourceLabel;
+  }
+  if (!source.replenishmentSourceType) {
+    return '';
+  }
+  const sourceTypeText =
+    source.replenishmentSourceType === 'PRODUCTION_SCRAP'
+      ? '生产报废补单'
+      : source.replenishmentSourceType === 'ORDER_CHANGE'
+        ? '订单数量补单'
+        : source.replenishmentSourceType;
+  return source.replenishmentSourceRequestNo ? `${sourceTypeText}：${source.replenishmentSourceRequestNo}` : sourceTypeText;
+}
+
 async function loadInventorySummary() {
-  inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+  try {
+    inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+    return true;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存汇总加载失败');
+    return false;
+  }
 }
 
 function formatLineWarehouseText(line: OrderLine) {
@@ -1049,7 +1450,7 @@ function formatLineWarehouseText(line: OrderLine) {
 }
 
 function formatLineProductionProgressText(line: OrderLine) {
-  // 已生产订单的补单、数量变更必须先看到当前工序进度，防止误把生产变更当作草稿修改。
+  // 已生产订单的补单、数量变更必须先看到当前工序进度，防止误把生产数量变更当作草稿修改。
   if (line.productionProgressText) {
     return line.productionProgressText;
   }
@@ -1072,6 +1473,10 @@ function formatLineShortageText(line: OrderLine) {
 
   const shortage = formatQuantity(line.productionShortageQuantity, line.unit);
   const scrap = formatQuantity(line.productionScrapQuantity || 0, line.unit);
+  if (line.productionShortageMode === 'REPLENISHMENT_REQUEST') {
+    const requestNos = line.productionReplenishmentRequestNos?.length ? line.productionReplenishmentRequestNos.join('、') : '-';
+    return `短缺 ${shortage}，报废 ${scrap}，生产报废补单申请待主管确认 ${requestNos}`;
+  }
   if (line.productionShortageMode === 'REPLENISHMENT') {
     const taskNos = line.productionReplenishmentTaskNos?.length ? line.productionReplenishmentTaskNos.join('、') : '-';
     return `短缺 ${shortage}，报废 ${scrap}，补单 ${taskNos}`;
@@ -1114,6 +1519,35 @@ async function saveReplenishment() {
   }
 }
 
+async function saveCancelReplenishment() {
+  if (!order.value || !activeReplenishmentTask.value) {
+    return;
+  }
+  if (!cancelReplenishmentForm.value.reason.trim()) {
+    ElMessage.warning('请填写取消补单原因');
+    return;
+  }
+  if (!cancelReplenishmentForm.value.managerName.trim()) {
+    ElMessage.warning('请填写管理人员姓名');
+    return;
+  }
+
+  saving.value = true;
+  try {
+    order.value = await erpApi.cancelReplenishment(order.value.orderNo, activeReplenishmentTask.value.productionTaskNo, {
+      reason: cancelReplenishmentForm.value.reason.trim(),
+      managerName: cancelReplenishmentForm.value.managerName.trim()
+    });
+    ElMessage.success('补单已取消');
+    cancelReplenishmentVisible.value = false;
+    activeReplenishmentTask.value = undefined;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消补单失败');
+  } finally {
+    saving.value = false;
+  }
+}
+
 async function saveQuantityChange() {
   if (!order.value || !activeLine.value) {
     return;
@@ -1144,22 +1578,32 @@ async function saveQuantityChange() {
   }
 }
 
-async function saveCancelStartedOrder() {
+async function saveCancelOrder() {
   if (!order.value) {
+    return;
+  }
+  if (!cancelOrderForm.value.managerName.trim()) {
+    ElMessage.warning('请填写管理人员姓名');
     return;
   }
   if (!cancelOrderForm.value.reason.trim()) {
     ElMessage.warning('请填写取消订单原因');
     return;
   }
+  const handlingPlan = collectCancelHandlingPlan();
+  if (handlingPlan === false) {
+    return;
+  }
 
   saving.value = true;
   try {
-    order.value = await erpApi.cancelOrderAfterProductionStarted(order.value.orderNo, {
+    order.value = await erpApi.cancelOrder(order.value.orderNo, {
       reason: cancelOrderForm.value.reason.trim(),
-      managerName: cancelOrderForm.value.managerName.trim() || undefined
+      managerName: cancelOrderForm.value.managerName.trim(),
+      productionCancelState: cancelOrderForm.value.productionCancelState,
+      handlingPlan
     });
-    ElMessage.success('订单已取消，并已同步生产和仓库通知');
+    ElMessage.success('订单已取消；如有已开工任务，通知已同步生产和仓库');
     cancelOrderVisible.value = false;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '取消订单失败');
@@ -1173,10 +1617,17 @@ async function submitOrder() {
     return;
   }
   try {
-    await loadInventorySummary();
+    if (!(await loadInventorySummary())) {
+      return;
+    }
     const stockCheck = validateStockModeLines(order.value.lines, inventorySummary.value);
     if (!stockCheck.ok) {
       ElMessage.warning(stockCheck.message);
+      return;
+    }
+    const sourceCheck = await validateSubmitStockSources(order.value.lines);
+    if (!sourceCheck.ok) {
+      ElMessage.warning(sourceCheck.message);
       return;
     }
     order.value = await erpApi.submitOrder(order.value.orderNo);
@@ -1187,7 +1638,10 @@ async function submitOrder() {
 }
 
 watch(() => route.params.orderNo, loadOrder);
-onMounted(loadOrder);
+onMounted(async () => {
+  await loadProcessDefinitions();
+  await loadOrder();
+});
 onBeforeUnmount(() => {
   if (editOrderNoCheckTimer) {
     window.clearTimeout(editOrderNoCheckTimer);
@@ -1305,6 +1759,23 @@ onBeforeUnmount(() => {
   border-radius: 6px;
 }
 
+.stock-source-summary {
+  margin-top: 8px;
+  padding: 8px 10px;
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 20px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+}
+
+.stock-source-summary-inline {
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 20px;
+}
+
 .line-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1330,6 +1801,13 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.additional-process-create {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) auto auto;
+  gap: 10px;
+  align-items: center;
 }
 
 .additional-process-steps {
@@ -1378,11 +1856,107 @@ onBeforeUnmount(() => {
   color: #60708a;
 }
 
+.form-hint {
+  width: 100%;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.cancel-handling-section {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px 116px;
+}
+
+.cancel-handling-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.cancel-handling-title span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.cancel-handling-list {
+  display: grid;
+  gap: 8px;
+}
+
+.cancel-handling-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto 130px minmax(180px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.cancel-handling-main {
+  display: grid;
+  gap: 3px;
+}
+
+.cancel-handling-main span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.cancel-handling-quantity {
+  width: 130px;
+}
+
 .mb-16 {
   margin-bottom: 16px;
 }
 
 @media (max-width: 900px) {
+  .order-summary {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .order-edit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dialog-subtitle {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .dialog-subtitle > .el-button {
+    width: 100%;
+  }
+
+  .line-actions,
+  .additional-process-actions {
+    align-items: stretch;
+  }
+
+  .line-actions .el-button,
+  .action-tooltip-wrap,
+  .action-tooltip-wrap .el-button {
+    flex: 1 1 128px;
+    min-width: 0;
+  }
+
+  .additional-process-picker .el-button {
+    flex: 1 1 120px;
+    margin-left: 0;
+  }
+
+  .additional-process-create {
+    grid-template-columns: 1fr;
+  }
+
   .additional-process-row {
     grid-template-columns: 32px minmax(0, 1fr);
   }
@@ -1394,6 +1968,29 @@ onBeforeUnmount(() => {
 
   .additional-process-actions {
     justify-content: flex-start;
+  }
+
+  .form-unit {
+    display: block;
+    margin: 6px 0 0;
+  }
+
+  .cancel-handling-section {
+    margin-left: 0;
+  }
+
+  .cancel-handling-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .cancel-handling-row {
+    grid-template-columns: 1fr;
+  }
+
+  .cancel-handling-quantity {
+    width: 100%;
   }
 }
 

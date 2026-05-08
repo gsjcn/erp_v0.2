@@ -1,6 +1,6 @@
 import { InventoryStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { IsEnum, IsIn, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class InventoryQueryDto {
   @IsOptional()
@@ -32,6 +32,20 @@ export class MaterialSuggestionQueryDto {
   @IsOptional()
   @IsString()
   warehouseId?: string;
+}
+
+export class InventorySourceDetailQueryDto {
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
+
+  @IsOptional()
+  @IsIn(['ALL', 'ORDER', 'STOCK'])
+  sourceType?: 'ALL' | 'ORDER' | 'STOCK';
 }
 
 export class AdjustInventoryBatchDto {

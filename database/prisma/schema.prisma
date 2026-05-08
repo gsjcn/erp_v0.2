@@ -121,6 +121,48 @@ model Material {
   @@index([status])
 }
 
+/// 流程记忆模板只保存可复用工序组合，不绑定客户、订单或零件号。
+model ProcessDefinition {
+  id                    String       @id @default(uuid())
+  processName           String
+  processNameNormalized String       @unique
+  searchText            String       @default("")
+  remark                String?
+  status                CommonStatus @default(ENABLED)
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  @@index([status, processName])
+}
+
+model ProcessTemplate {
+  id                     String   @id @default(uuid())
+  templateName           String
+  templateNameNormalized String   @unique
+  steps                  Json
+  remark                 String?
+  searchText             String   @default("")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([templateName])
+  @@index([searchText])
+}
+
+/// 订单号永久占用表。订单取消、归档或未来迁移后，订单号仍然不能被其他订单复用。
+model OrderNoReservation {
+  id                String   @id @default(uuid())
+  orderNo           String
+  orderNoNormalized String   @unique
+  sourceOrderId     String?
+  reservedReason    String   @default("ORDER_CREATED")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([orderNo])
+  @@index([sourceOrderId])
+}
+
 /// 客户订单总表，只保存订单汇总信息；订单零件必须进入 OrderLine。
 model CustomerOrder {
   id               String           @id @default(uuid())
@@ -166,6 +208,7 @@ model OrderLine {
   deliveryDate    DateTime?
   remark          String?
   processSnapshot Json?
+  stockSourceSelections Json?
   processSteps    OrderLineProcessStep[]
   productionTasks ProductionTask[]
   inventoryBatches InventoryBatch[]
@@ -211,6 +254,8 @@ model ProductionTask {
   processSnapshot  Json
   isReplenishment  Boolean          @default(false)
   sourceProductionTaskNo String?
+  replenishmentSourceType String?
+  replenishmentSourceRequestNo String?
   startedAt        DateTime?
   completedAt      DateTime?
   remark           String?
@@ -225,6 +270,8 @@ model ProductionTask {
   @@index([partCode])
   @@index([isReplenishment])
   @@index([sourceProductionTaskNo])
+  @@index([replenishmentSourceType])
+  @@index([replenishmentSourceRequestNo])
 }
 
 /// 生产操作人员基础账号，第一阶段只做工序确认需要的账号 ID、姓名、岗位和搜索字段。
@@ -269,6 +316,7 @@ model ProductionProcessCompletion {
   completedAt       DateTime?
   quantityOverrideReason String?
   remark            String?
+  replenishmentRequests ProductionReplenishmentRequest[]
   logs              ProductionProcessCompletionLog[]
   createdAt         DateTime                       @default(now())
   updatedAt         DateTime                       @updatedAt
@@ -298,6 +346,43 @@ model ProductionProcessCompletionLog {
   @@index([createdAt])
 }
 
+/// 生产过程中因报废、缺件发起的补单申请；和订单页面由销售/计划发起的数量增加补单分开记录。
+model ProductionReplenishmentRequest {
+  id                    String                       @id @default(uuid())
+  requestNo             String                       @unique
+  sourceType            String                       @default("PRODUCTION_SCRAP")
+  status                String                       @default("PENDING")
+  orderId               String?
+  orderNo               String
+  orderLineId           String?
+  productionTaskId      String?
+  productionTaskNo      String?
+  processCompletionId   String?                      @unique
+  processCompletion     ProductionProcessCompletion? @relation(fields: [processCompletionId], references: [id], onDelete: SetNull)
+  partCode              String
+  partName              String
+  requestQuantity       Decimal                      @db.Decimal(18, 3)
+  scrapQuantity         Decimal                      @default(0) @db.Decimal(18, 3)
+  unit                  String
+  reason                String
+  requestedByCode       String?
+  requestedByName       String?
+  supervisorName        String?
+  supervisorRemark      String?
+  approvedAt            DateTime?
+  reviewedAt            DateTime?
+  replenishmentTaskNo   String?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+
+  @@index([status])
+  @@index([sourceType])
+  @@index([orderNo])
+  @@index([productionTaskNo])
+  @@index([partCode])
+  @@index([createdAt])
+}
+
 model ProductionNotice {
   id                 String                 @id @default(uuid())
   noticeNo           String                 @unique
@@ -317,6 +402,7 @@ model ProductionNotice {
   unit               String?
   reason             String
   managerName        String?
+  handlingPlan       Json?
   acknowledgedBy     String?
   acknowledgedAt     DateTime?
   createdAt          DateTime               @default(now())
@@ -398,6 +484,9 @@ model InventoryBatch {
   productionTaskId       String?                @unique
   productionTask         ProductionTask?        @relation(fields: [productionTaskId], references: [id])
   sourceProductionTaskNo String?
+  sourceKind             String                 @default("NORMAL_ORDER")
+  replenishmentSourceType String?
+  replenishmentSourceRequestNo String?
   quantity               Decimal                @db.Decimal(18, 3)
   unit                   String
   warehouseId            String
@@ -413,6 +502,10 @@ model InventoryBatch {
   @@index([partCode])
   @@index([sourceOrderNo])
   @@index([sourceOrderLineId])
+  @@index([sourceProductionTaskNo])
+  @@index([sourceKind])
+  @@index([replenishmentSourceType])
+  @@index([replenishmentSourceRequestNo])
   @@index([warehouseId])
   @@index([status])
 }

@@ -9,7 +9,6 @@ import {
   ProductionStatus
 } from '@prisma/client';
 import {
-  STANDARD_PROCESS_NAMES,
   decimalToNumber,
   processSnapshotToArray,
   processSnapshotToDetails,
@@ -18,6 +17,7 @@ import {
 import { buildPinyinSearchText } from '../../common/pinyin-search';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
+import { ProcessDefinitionsService } from '../process-definitions/process-definitions.service';
 import {
   CancelOrderDto,
   CancelReplenishmentDto,
@@ -34,18 +34,41 @@ import {
 } from './dto';
 import { randomUUID } from 'node:crypto';
 
+type NormalizedCancelHandlingPlanItem = {
+  orderLineId: string;
+  productionTaskNo: string;
+  handlingMode: 'STOCK' | 'SCRAP' | 'NONE';
+  handlingQuantity: number;
+  remark?: string;
+};
+
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly processDefinitionsService: ProcessDefinitionsService
+  ) {}
 
   async findAll(query: OrderQueryDto) {
     const where: Prisma.CustomerOrderWhereInput = {};
+    const orderStatuses = this.parseEnumList<OrderStatus>(
+      query.statuses,
+      Object.values(OrderStatus) as OrderStatus[],
+      '订单状态'
+    );
+    const productionStatuses = this.parseEnumList<ProductionStatus>(
+      query.productionStatuses,
+      Object.values(ProductionStatus) as ProductionStatus[],
+      '生产状态'
+    );
 
     if (query.customerId) {
       where.customerId = query.customerId;
     }
 
-    if (query.status) {
+    if (orderStatuses.length > 0) {
+      where.status = { in: orderStatuses };
+    } else if (query.status) {
       where.status = query.status;
     }
 
@@ -78,7 +101,12 @@ export class OrdersService {
       orderBy: [{ orderDate: 'desc' }, { orderNo: 'desc' }]
     });
 
-    return orders.map((order) => this.toSummary(order));
+    const summaries = orders.map((order) => this.toSummary(order));
+    if (productionStatuses.length === 0) {
+      return summaries;
+    }
+
+    return summaries.filter((order) => productionStatuses.includes(order.productionStatus));
   }
 
   async findOne(orderNo: string) {
@@ -101,6 +129,11 @@ export class OrdersService {
                   include: { warehouse: true, location: true }
                 },
                 processCompletions: {
+                  include: {
+                    replenishmentRequests: {
+                      orderBy: { createdAt: 'desc' }
+                    }
+                  },
                   orderBy: { stepNo: 'asc' }
                 }
               },
@@ -113,12 +146,16 @@ export class OrdersService {
     });
 
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException('订单不存在');
     }
 
     const taskNos = order.lines.flatMap((line) => line.productionTasks.map((task) => task.productionTaskNo));
     const stockQuantityByTaskNo = await this.getStockQuantityByTaskNo(taskNos);
-    return this.toDetail(order, stockQuantityByTaskNo);
+    const selectedStockBatchIds = order.lines.flatMap((line) =>
+      this.jsonToStockSourceSelections(line.stockSourceSelections).map((source) => source.batchId)
+    );
+    const stockSourceInfoByBatchId = await this.getStockSourceInfoByBatchId(selectedStockBatchIds);
+    return this.toDetail(order, stockQuantityByTaskNo, stockSourceInfoByBatchId);
   }
 
   async nextOrderNo(query: NextOrderNoQueryDto) {
@@ -149,86 +186,91 @@ export class OrdersService {
 
     const customer = await this.prisma.customer.findUnique({ where: { id: dto.customerId } });
     if (!customer) {
-      throw new NotFoundException('Customer not found');
+      throw new NotFoundException('客户不存在');
     }
     if (customer.status !== CommonStatus.ENABLED) {
-      throw new BadRequestException('Only enabled customers can create orders');
+      throw new BadRequestException('只有启用状态的客户可以创建订单');
     }
 
     const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date();
     const orderNo = dto.orderNo?.trim() ? this.normalizeOrderNo(dto.orderNo) : await this.generateOrderNo(orderDate);
     await this.ensureOrderNoAvailable(orderNo);
+    const normalizedLineSteps = await Promise.all(dto.lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)));
 
     try {
       const created = await this.prisma.$transaction(async (tx) => {
+        await this.reserveOrderNo(tx, orderNo, undefined, 'ORDER_CREATED');
         await this.upsertMaterials(tx, dto.lines);
-        return tx.customerOrder.create({
-        data: {
-          orderNo,
-          customerId: customer.id,
-          customerCode: customer.customerCode,
-          customerName: customer.customerName,
-          customerSnapshot: {
+        const createdOrder = await tx.customerOrder.create({
+          data: {
+            orderNo,
+            customerId: customer.id,
             customerCode: customer.customerCode,
             customerName: customer.customerName,
-            contactName: customer.contactName,
-            contactPhone: customer.contactPhone
-          },
-          orderDate,
-          deliveryDate: dto.deliveryDate ? new Date(dto.deliveryDate) : null,
-          remark: dto.remark,
-          status: OrderStatus.DRAFT,
-          lines: {
-            create: dto.lines.map((line, index) => ({
-              lineNo: index + 1,
-              partCode: line.partCode.trim(),
-              partName: line.partName.trim(),
-              drawingNo: line.drawingNo?.trim(),
-              drawingVersion: line.drawingVersion?.trim(),
-              drawingFileName: line.drawingFileName?.trim(),
-              drawingFileUrl: line.drawingFileUrl?.trim(),
-              partThickness: line.partThickness,
-              partSpecification: line.partSpecification?.trim(),
-              quantity: line.quantity,
-              productionPlanQuantity: this.resolveProductionPlanQuantity(line),
-              fulfillmentMode: this.normalizeFulfillmentMode(line.fulfillmentMode),
-              unit: line.unit.trim(),
-              deliveryDate: line.deliveryDate ? new Date(line.deliveryDate) : dto.deliveryDate ? new Date(dto.deliveryDate) : null,
-              remark: line.remark,
-              processSnapshot: this.processStepsToJson(this.normalizeProcessSteps(line.processSteps, false)),
-              processSteps: {
-                create: this.normalizeProcessSteps(line.processSteps, false).map((processStep, stepIndex) => ({
-                  stepNo: stepIndex + 1,
-                  processName: processStep.processName,
-                  processRemark: processStep.processRemark
-                }))
-              }
-            }))
-          }
-        },
-      include: {
-        customer: true,
-        inventoryBatches: true,
-        lines: {
-          include: {
-            processSteps: { orderBy: { stepNo: 'asc' } },
-            inventoryBatches: {
-              include: { warehouse: true, location: true },
-              orderBy: { createdAt: 'asc' }
+            customerSnapshot: {
+              customerCode: customer.customerCode,
+              customerName: customer.customerName,
+              contactName: customer.contactName,
+              contactPhone: customer.contactPhone
             },
-            productionTasks: {
-              include: {
-                inventoryBatch: {
-                  include: { warehouse: true, location: true }
+            orderDate,
+            deliveryDate: dto.deliveryDate ? new Date(dto.deliveryDate) : null,
+            remark: dto.remark,
+            status: OrderStatus.DRAFT,
+            lines: {
+              create: dto.lines.map((line, index) => ({
+                lineNo: index + 1,
+                partCode: line.partCode.trim(),
+                partName: line.partName.trim(),
+                drawingNo: line.drawingNo?.trim(),
+                drawingVersion: line.drawingVersion?.trim(),
+                drawingFileName: line.drawingFileName?.trim(),
+                drawingFileUrl: line.drawingFileUrl?.trim(),
+                partThickness: line.partThickness,
+                partSpecification: line.partSpecification?.trim(),
+                quantity: line.quantity,
+                productionPlanQuantity: this.resolveProductionPlanQuantity(line),
+                fulfillmentMode: this.normalizeFulfillmentMode(line.fulfillmentMode),
+                unit: line.unit.trim(),
+                deliveryDate: line.deliveryDate ? new Date(line.deliveryDate) : dto.deliveryDate ? new Date(dto.deliveryDate) : null,
+                remark: line.remark,
+                processSnapshot: this.processStepsToJson(normalizedLineSteps[index]),
+                stockSourceSelections: this.stockSourceSelectionsToJson(line.selectedStockSources),
+                processSteps: {
+                  create: normalizedLineSteps[index].map((processStep, stepIndex) => ({
+                    stepNo: stepIndex + 1,
+                    processName: processStep.processName,
+                    processRemark: processStep.processRemark
+                  }))
                 }
-              },
-              orderBy: { productionTaskNo: 'asc' }
+              }))
             }
           },
-          orderBy: { lineNo: 'asc' }
-        }
-      }
+          include: {
+            customer: true,
+            inventoryBatches: true,
+            lines: {
+              include: {
+                processSteps: { orderBy: { stepNo: 'asc' } },
+                inventoryBatches: {
+                  include: { warehouse: true, location: true },
+                  orderBy: { createdAt: 'asc' }
+                },
+                productionTasks: {
+                  include: {
+                    inventoryBatch: {
+                      include: { warehouse: true, location: true }
+                    }
+                  },
+                  orderBy: { productionTaskNo: 'asc' }
+                }
+              },
+              orderBy: { lineNo: 'asc' }
+            }
+          }
         });
+        await this.linkOrderNoReservation(tx, orderNo, createdOrder.id, 'ORDER_CREATED');
+        return createdOrder;
       });
 
       return this.toDetail(created);
@@ -249,20 +291,26 @@ export class OrdersService {
       include: { lines: true }
     });
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException('订单不存在');
     }
     if (order.status !== OrderStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT orders can be edited');
+      throw new BadRequestException('只有草稿订单可以编辑');
     }
 
     const nextOrderNo = dto.orderNo?.trim() ? this.normalizeOrderNo(dto.orderNo) : order.orderNo;
     if (nextOrderNo !== order.orderNo) {
       await this.ensureOrderNoAvailable(nextOrderNo, order.orderNo);
     }
+    const normalizedLineSteps = await Promise.all(dto.lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)));
 
     // DRAFT 订单还没有进入生产，允许修改订单号和整体替换订单零件，保持订单总表和明细表边界清晰。
     try {
       const updated = await this.prisma.$transaction(async (tx) => {
+        if (nextOrderNo !== order.orderNo) {
+          await this.reserveOrderNo(tx, nextOrderNo, order.id, 'DRAFT_ORDER_RENUMBERED');
+        } else {
+          await this.linkOrderNoReservation(tx, nextOrderNo, order.id, 'ORDER_CREATED');
+        }
         await this.upsertMaterials(tx, dto.lines);
         await tx.orderLine.deleteMany({ where: { orderId: order.id } });
         return tx.customerOrder.update({
@@ -288,9 +336,10 @@ export class OrdersService {
                 unit: line.unit.trim(),
                 deliveryDate: line.deliveryDate ? new Date(line.deliveryDate) : dto.deliveryDate ? new Date(dto.deliveryDate) : null,
                 remark: line.remark,
-                processSnapshot: this.processStepsToJson(this.normalizeProcessSteps(line.processSteps, false)),
+                processSnapshot: this.processStepsToJson(normalizedLineSteps[index]),
+                stockSourceSelections: this.stockSourceSelectionsToJson(line.selectedStockSources),
                 processSteps: {
-                  create: this.normalizeProcessSteps(line.processSteps, false).map((processStep, stepIndex) => ({
+                  create: normalizedLineSteps[index].map((processStep, stepIndex) => ({
                     stepNo: stepIndex + 1,
                     processName: processStep.processName,
                     processRemark: processStep.processRemark
@@ -334,24 +383,24 @@ export class OrdersService {
   }
 
   async updateLineProcess(orderNo: string, lineId: string, dto: UpdateLineProcessDto) {
-    const steps = this.normalizeProcessSteps(dto.steps, true);
+    const steps = await this.normalizeProcessSteps(dto.steps, true);
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const order = await this.prisma.customerOrder.findFirst({
       where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } }
     });
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException('订单不存在');
     }
     if (order.status !== OrderStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT orders can update process steps');
+      throw new BadRequestException('只有草稿订单可以修改生产流程');
     }
 
     const line = await this.prisma.orderLine.findFirst({ where: { id: lineId, orderId: order.id } });
     if (!line) {
-      throw new NotFoundException('Order line not found');
+      throw new NotFoundException('订单零件不存在');
     }
     if (line.fulfillmentMode === OrderLineFulfillmentMode.STOCK) {
-      throw new BadRequestException('Stock order line does not require production process steps');
+      throw new BadRequestException('使用库存的订单零件不需要设置生产流程');
     }
 
     // 保存某个订单零件的独立生产流程，并同步未完成的生产任务快照。
@@ -382,30 +431,34 @@ export class OrdersService {
 
   async createLineReplenishment(orderNo: string, lineId: string, dto: CreateLineReplenishmentDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
-    await this.prisma.$transaction(async (tx) => {
-      const { order, line, baseTask } = await this.findStartedOrderLineTask(tx, normalizedOrderNo, lineId);
-      this.assertOrderAcceptsProductionChange(order);
-      const quantity = this.normalizeQuantity(dto.quantity, 'Replenishment quantity');
-      const reason = dto.reason.trim();
-      if (!reason) {
-        throw new BadRequestException('Replenishment reason is required');
-      }
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const { order, line, baseTask } = await this.findStartedOrderLineTask(tx, normalizedOrderNo, lineId);
+        this.assertOrderAcceptsProductionChange(order);
+        const quantity = this.normalizeQuantity(dto.quantity, '补单数量');
+        const reason = dto.reason.trim();
+        if (!reason) {
+          throw new BadRequestException('补单原因不能为空');
+        }
 
-      const taskNo = await this.createReplenishmentTaskForLine(tx, order, line, baseTask, quantity, reason);
-      const progressText = await this.describeOrderProductionProgress(tx, order.id);
-      await this.createProductionNotice(tx, {
-        noticeType: 'QUANTITY_INCREASE',
-        target: ProductionNoticeTarget.PRODUCTION,
-        order,
-        line,
-        productionTaskNo: taskNo,
-        beforeQuantity: decimalToNumber(line.quantity),
-        afterQuantity: this.roundQuantity(decimalToNumber(line.quantity) + quantity),
-        deltaQuantity: quantity,
-        reason: `补单：${reason}。${progressText}`,
-        managerName: dto.managerName?.trim()
-      });
-    });
+        const taskNo = await this.createReplenishmentTaskForLine(tx, order, line, baseTask, quantity, reason);
+        const progressText = await this.describeOrderProductionProgress(tx, order.id);
+        await this.createProductionNotice(tx, {
+          noticeType: 'QUANTITY_INCREASE',
+          target: ProductionNoticeTarget.PRODUCTION,
+          order,
+          line,
+          productionTaskNo: taskNo,
+          beforeQuantity: decimalToNumber(line.quantity),
+          afterQuantity: this.roundQuantity(decimalToNumber(line.quantity) + quantity),
+          deltaQuantity: quantity,
+          reason: `补单：${reason}。${progressText}`,
+          managerName: dto.managerName?.trim()
+        });
+      },
+      '当前订单生产任务正在被其他操作修改，请刷新后重新创建补单'
+    );
 
     return this.findOne(normalizedOrderNo);
   }
@@ -414,10 +467,12 @@ export class OrdersService {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const normalizedTaskNo = productionTaskNo.trim().toUpperCase();
     if (!normalizedTaskNo) {
-      throw new BadRequestException('Production task number is required');
+      throw new BadRequestException('生产任务号不能为空');
     }
 
-    await this.prisma.$transaction(async (tx) => {
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
       const task = await tx.productionTask.findFirst({
         where: {
           productionTaskNo: { equals: normalizedTaskNo, mode: 'insensitive' },
@@ -436,26 +491,30 @@ export class OrdersService {
         }
       });
       if (!task) {
-        throw new NotFoundException('Replenishment task not found');
+        throw new NotFoundException('补单任务不存在');
       }
       if (!task.isReplenishment) {
-        throw new BadRequestException('Only replenishment task can be cancelled here');
+        throw new BadRequestException('这里只能取消补单任务');
       }
       if (task.order.status === OrderStatus.CANCELLED) {
-        throw new BadRequestException('Order is already cancelled');
+        throw new BadRequestException('订单已经取消');
       }
       if (task.order.status === OrderStatus.COMPLETED) {
-        throw new BadRequestException('Completed order cannot cancel replenishment');
+        throw new BadRequestException('已完成订单不能取消补单');
       }
       const reason = dto.reason.trim();
       if (!reason) {
-        throw new BadRequestException('Cancel reason is required');
+        throw new BadRequestException('取消原因不能为空');
+      }
+      const managerName = dto.managerName?.trim();
+      if (!managerName) {
+        throw new BadRequestException('管理人员姓名不能为空');
       }
       if (task.inventoryBatch) {
-        throw new BadRequestException('Replenishment task has entered warehouse and cannot be cancelled');
+        throw new BadRequestException('补单任务已入库，不能取消');
       }
       if (this.isStartedProductionTask(task)) {
-        throw new BadRequestException('Started replenishment task cannot be cancelled directly. Please use production withdraw');
+        throw new BadRequestException('已开始生产的补单不能直接取消，请走生产撤回流程');
       }
 
       const onlyThisTaskOnLine = task.orderLine.productionTasks.length === 1;
@@ -480,18 +539,22 @@ export class OrdersService {
         data: {
           remark: this.appendRemark(
             task.order.remark,
-            `取消补单 ${task.productionTaskNo}：${reason}${dto.managerName?.trim() ? `（${dto.managerName.trim()}）` : ''}`
+            `取消补单 ${task.productionTaskNo}：${reason}（管理人员：${managerName}）`
           )
         }
       });
-    });
+      },
+      '当前补单任务正在被其他操作修改，请刷新后重新取消补单'
+    );
 
     return this.findOne(normalizedOrderNo);
   }
 
   async createAdditionalMaterial(orderNo: string, dto: CreateAdditionalMaterialDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
-    await this.prisma.$transaction(async (tx) => {
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
       const order = await tx.customerOrder.findFirst({
         where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
         include: {
@@ -503,26 +566,26 @@ export class OrdersService {
         }
       });
       if (!order) {
-        throw new NotFoundException('Order not found');
+        throw new NotFoundException('订单不存在');
       }
       if (order.status === OrderStatus.DRAFT) {
-        throw new BadRequestException('DRAFT order should be edited directly instead of creating additional material');
+        throw new BadRequestException('草稿订单请直接编辑订单，不要创建补单物料');
       }
       this.assertOrderAcceptsProductionChange(order);
       const startedTask = order.productionTasks.find((task) => this.isStartedProductionTask(task));
       if (!startedTask) {
-        throw new BadRequestException('Order has not started production. Additional material is not allowed');
+        throw new BadRequestException('订单尚未开始生产，不能新增补单物料，请直接修改订单');
       }
 
       const reason = dto.reason.trim();
       if (!reason) {
-        throw new BadRequestException('Additional material reason is required');
+        throw new BadRequestException('新增补单物料原因不能为空');
       }
       const fulfillmentMode = this.normalizeFulfillmentMode(dto.fulfillmentMode);
       if (fulfillmentMode !== OrderLineFulfillmentMode.PRODUCTION) {
-        throw new BadRequestException('Additional material replenishment must use production mode');
+        throw new BadRequestException('新增补单物料必须使用重新生产方式');
       }
-      const steps = this.normalizeProcessSteps(dto.processSteps, true);
+      const steps = await this.normalizeProcessSteps(dto.processSteps, true);
       this.validateSingleOrderLine(dto);
       await this.upsertMaterials(tx, [dto]);
 
@@ -572,6 +635,8 @@ export class OrdersService {
           processSnapshot: this.processStepsToJson(steps),
           status: ProductionStatus.PENDING,
           isReplenishment: true,
+          replenishmentSourceType: 'ORDER_CHANGE',
+          replenishmentSourceRequestNo: order.orderNo,
           remark: `客户新增物料：${reason}`
         }
       });
@@ -589,36 +654,40 @@ export class OrdersService {
         reason: `客户新增物料：${reason}。${progressText}`,
         managerName: dto.managerName?.trim()
       });
-    });
+      },
+      '当前订单生产任务正在被其他操作修改，请刷新后重新新增补单物料'
+    );
 
     return this.findOne(normalizedOrderNo);
   }
 
   async updateLineQuantityAfterProductionStarted(orderNo: string, lineId: string, dto: UpdateLineQuantityDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
-    await this.prisma.$transaction(async (tx) => {
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
       const { order, line, baseTask } = await this.findStartedOrderLineTask(tx, normalizedOrderNo, lineId);
       this.assertOrderAcceptsProductionChange(order);
       const oldQuantity = decimalToNumber(line.quantity);
-      const nextQuantity = this.normalizeQuantity(dto.quantity, 'Customer order quantity', true);
+      const nextQuantity = this.normalizeQuantity(dto.quantity, '客户订单数量', true);
       const reason = dto.reason.trim();
       if (!reason) {
-        throw new BadRequestException('Quantity change reason is required');
+        throw new BadRequestException('生产数量变更原因不能为空');
       }
       if (oldQuantity === nextQuantity) {
-        throw new BadRequestException('Quantity is not changed');
+        throw new BadRequestException('数量没有变化');
       }
 
       const deltaQuantity = this.roundQuantity(nextQuantity - oldQuantity);
       const currentPlanQuantity = decimalToNumber(line.productionPlanQuantity);
       const nextPlanQuantity =
         dto.productionPlanQuantity !== undefined
-          ? this.normalizeQuantity(dto.productionPlanQuantity, 'Production plan quantity', true)
+          ? this.normalizeQuantity(dto.productionPlanQuantity, '生产计划数量', true)
           : deltaQuantity > 0
             ? this.roundQuantity(currentPlanQuantity + deltaQuantity)
             : Math.max(currentPlanQuantity, nextQuantity);
       if (nextPlanQuantity < nextQuantity) {
-        throw new BadRequestException('Production plan quantity cannot be less than customer order quantity');
+        throw new BadRequestException('生产计划数量不能小于客户订单数量');
       }
 
       await tx.orderLine.update({
@@ -678,128 +747,161 @@ export class OrdersService {
           managerName: dto.managerName?.trim()
         });
       }
-    });
+      },
+      '当前订单生产任务正在被其他操作修改，请刷新后重新变更数量'
+    );
 
     return this.findOne(normalizedOrderNo);
   }
 
   async cancelOrder(orderNo: string, dto: CancelOrderDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
-    await this.prisma.$transaction(async (tx) => {
-      const order = await tx.customerOrder.findFirst({
-        where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
-        include: {
-          lines: {
-            include: {
-              inventoryBatches: true,
-              processSteps: { orderBy: { stepNo: 'asc' } },
-              productionTasks: {
-                include: { processCompletions: true, inventoryBatch: true },
-                orderBy: { productionTaskNo: 'asc' }
-              }
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const order = await tx.customerOrder.findFirst({
+          where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
+          include: {
+            lines: {
+              include: {
+                inventoryBatches: true,
+                processSteps: { orderBy: { stepNo: 'asc' } },
+                productionTasks: {
+                  include: { processCompletions: true, inventoryBatch: true },
+                  orderBy: { productionTaskNo: 'asc' }
+                }
+              },
+              orderBy: { lineNo: 'asc' }
             },
-            orderBy: { lineNo: 'asc' }
-          },
-          productionTasks: {
-            include: { processCompletions: true, inventoryBatch: true },
-            orderBy: { productionTaskNo: 'asc' }
-          },
-          inventoryBatches: true
+            productionTasks: {
+              include: { processCompletions: true, inventoryBatch: true },
+              orderBy: { productionTaskNo: 'asc' }
+            },
+            inventoryBatches: true
+          }
+        });
+        if (!order) {
+          throw new NotFoundException('订单不存在');
         }
-      });
-      if (!order) {
-        throw new NotFoundException('Order not found');
-      }
-      if (order.status === OrderStatus.CANCELLED) {
-        throw new BadRequestException('Order is already cancelled');
-      }
-      if (order.status === OrderStatus.COMPLETED) {
-        throw new BadRequestException('Completed order cannot be cancelled in first stage');
-      }
-
-      const reason = dto.reason.trim();
-      if (!reason) {
-        throw new BadRequestException('Cancel reason is required');
-      }
-
-      const startedTasks = order.productionTasks.filter((task) => this.isStartedProductionTask(task));
-      const shippedBatches = order.inventoryBatches.filter((batch) => batch.sourceOrderId && batch.status === 'USED');
-      if (shippedBatches.length > 0) {
-        throw new BadRequestException('Order has shipped inventory and cannot be cancelled directly');
-      }
-
-      const progressText = await this.describeOrderProductionProgress(tx, order.id);
-      const noticeReason =
-        startedTasks.length > 0
-          ? `客户取消整张订单：${reason}。${progressText}。请管理人员确认已生产物料转库存或销毁处理，并同步仓库。`
-          : `客户取消整张订单：${reason}。订单尚未开始生产，系统取消未开始任务并释放未发货库存。`;
-
-      // 整单取消后，客户订单数量归零；生产任务保留已有进度，未开始的待生产任务删除，避免误开工。
-      await tx.customerOrder.update({
-        where: { id: order.id },
-        data: {
-          status: OrderStatus.CANCELLED,
-          remark: this.appendRemark(order.remark, `客户取消整单：${reason}`)
+        if (order.status === OrderStatus.CANCELLED) {
+          throw new BadRequestException('订单已经取消');
         }
-      });
-
-      for (const line of order.lines) {
-        const oldQuantity = decimalToNumber(line.quantity);
-        const lineStartedTasks = line.productionTasks.filter((task) => this.isStartedProductionTask(task));
-        if (lineStartedTasks.length === 0) {
-          await this.releaseUnstartedLineStock(tx, order, line, reason);
+        if (order.status === OrderStatus.COMPLETED) {
+          throw new BadRequestException('已完成订单不能在第一阶段取消');
         }
 
-        if (oldQuantity > 0) {
-          await tx.orderLine.update({
-            where: { id: line.id },
-            data: { quantity: 0 }
-          });
+        const reason = dto.reason.trim();
+        if (!reason) {
+          throw new BadRequestException('取消原因不能为空');
+        }
+        const managerName = dto.managerName?.trim();
+        if (!managerName) {
+          throw new BadRequestException('管理人员姓名不能为空');
         }
 
-        const pendingTaskIds = line.productionTasks
-          .filter((task) => !this.isStartedProductionTask(task))
-          .map((task) => task.id);
-        if (pendingTaskIds.length > 0) {
-          await tx.productionNotice.deleteMany({
-            where: {
-              status: ProductionNoticeStatus.PENDING,
-              productionTaskId: { in: pendingTaskIds }
-            }
-          });
-          await tx.productionTask.deleteMany({ where: { id: { in: pendingTaskIds } } });
+        const startedTasks = order.productionTasks.filter((task) => this.isStartedProductionTask(task));
+        const productionCancelState =
+          dto.productionCancelState || (startedTasks.length > 0 ? 'PRODUCED' : 'NOT_PRODUCED');
+        if (productionCancelState === 'NOT_PRODUCED' && startedTasks.length > 0) {
+          throw new BadRequestException('订单已经有生产进度，请选择已生产取消');
+        }
+        if (productionCancelState === 'PRODUCED' && startedTasks.length === 0) {
+          throw new BadRequestException('订单没有生产进度，请选择未生产取消');
+        }
+        const cancelHandlingPlanMap = this.normalizeCancelHandlingPlan(
+          dto.handlingPlan,
+          startedTasks,
+          productionCancelState
+        );
+        const cancelHandledAt = new Date();
+        const shippedBatches = order.inventoryBatches.filter((batch) => batch.sourceOrderId && batch.status === 'USED');
+        if (shippedBatches.length > 0) {
+          throw new BadRequestException('订单已有发货库存，不能直接取消');
         }
 
-        for (const task of lineStartedTasks) {
-          await this.createProductionNotice(tx, {
-            noticeType: 'ORDER_CANCELLED',
-            target: ProductionNoticeTarget.PRODUCTION,
-            order,
-            line,
-            productionTaskId: task.id,
-            productionTaskNo: task.productionTaskNo,
-            beforeQuantity: oldQuantity,
-            afterQuantity: 0,
-            deltaQuantity: -oldQuantity,
-            reason: noticeReason,
-            managerName: dto.managerName?.trim()
-          });
-          await this.createProductionNotice(tx, {
-            noticeType: 'ORDER_CANCELLED',
-            target: ProductionNoticeTarget.WAREHOUSE,
-            order,
-            line,
-            productionTaskId: task.id,
-            productionTaskNo: task.productionTaskNo,
-            beforeQuantity: oldQuantity,
-            afterQuantity: 0,
-            deltaQuantity: -oldQuantity,
-            reason: `${noticeReason} 仓库需等待转库存或销毁结果；未确认前不得进入可用库存。`,
-            managerName: dto.managerName?.trim()
-          });
+        const progressText = await this.describeOrderProductionProgress(tx, order.id);
+        const noticeReason =
+          startedTasks.length > 0
+            ? `客户取消整张订单：${reason}。${progressText}。请管理人员确认已生产物料转库存或销毁处理，并同步仓库。`
+            : `客户取消整张订单：${reason}。订单尚未开始生产，系统取消未开始任务并释放未发货库存。`;
+
+        // 整单取消会释放订单库存和退回备货库存，必须放在 Serializable 事务内，避免和发货/提交订单并发造成库存账不一致。
+        await tx.customerOrder.update({
+          where: { id: order.id },
+          data: {
+            status: OrderStatus.CANCELLED,
+            remark: this.appendRemark(order.remark, `客户取消整单：${reason}（管理人员：${managerName}）`)
+          }
+        });
+
+        for (const line of order.lines) {
+          const oldQuantity = decimalToNumber(line.quantity);
+          const lineStartedTasks = line.productionTasks.filter((task) => this.isStartedProductionTask(task));
+          if (lineStartedTasks.length === 0) {
+            await this.releaseUnstartedLineStock(tx, order, line, reason);
+          }
+
+          if (oldQuantity > 0) {
+            await tx.orderLine.update({
+              where: { id: line.id },
+              data: { quantity: 0 }
+            });
+          }
+
+          const pendingTaskIds = line.productionTasks
+            .filter((task) => !this.isStartedProductionTask(task))
+            .map((task) => task.id);
+          if (pendingTaskIds.length > 0) {
+            await tx.productionNotice.deleteMany({
+              where: {
+                status: ProductionNoticeStatus.PENDING,
+                productionTaskId: { in: pendingTaskIds }
+              }
+            });
+            await tx.productionTask.deleteMany({ where: { id: { in: pendingTaskIds } } });
+          }
+
+          for (const task of lineStartedTasks) {
+            const taskPlan = cancelHandlingPlanMap.get(task.productionTaskNo.toUpperCase());
+            const plannedNoticeReason = taskPlan
+              ? `${noticeReason} 取消处理计划：${this.formatCancelHandlingPlan(taskPlan, line.unit)}。`
+              : noticeReason;
+            const handlingPlanJson = taskPlan
+              ? this.cancelHandlingPlanToJson(taskPlan, managerName, cancelHandledAt)
+              : undefined;
+            await this.createProductionNotice(tx, {
+              noticeType: 'ORDER_CANCELLED',
+              target: ProductionNoticeTarget.PRODUCTION,
+              order,
+              line,
+              productionTaskId: task.id,
+              productionTaskNo: task.productionTaskNo,
+              beforeQuantity: oldQuantity,
+              afterQuantity: 0,
+              deltaQuantity: -oldQuantity,
+              reason: plannedNoticeReason,
+              managerName,
+              handlingPlan: handlingPlanJson
+            });
+            await this.createProductionNotice(tx, {
+              noticeType: 'ORDER_CANCELLED',
+              target: ProductionNoticeTarget.WAREHOUSE,
+              order,
+              line,
+              productionTaskId: task.id,
+              productionTaskNo: task.productionTaskNo,
+              beforeQuantity: oldQuantity,
+              afterQuantity: 0,
+              deltaQuantity: -oldQuantity,
+              reason: `${plannedNoticeReason} 仓库需等待转库存或销毁结果；未确认前不得进入可用库存。`,
+              managerName,
+              handlingPlan: handlingPlanJson
+            });
+          }
         }
-      }
-    });
+      },
+      '当前订单或库存正在被其他操作修改，请刷新后重新取消订单'
+    );
 
     return this.findOne(normalizedOrderNo);
   }
@@ -826,19 +928,19 @@ export class OrdersService {
         });
 
         if (!order) {
-          throw new NotFoundException('Order not found');
+          throw new NotFoundException('订单不存在');
         }
         if (order.lines.length === 0) {
-          throw new BadRequestException('Order lines are required');
+          throw new BadRequestException('订单至少需要一个零件');
         }
         if (order.status !== OrderStatus.DRAFT) {
-          throw new BadRequestException('Only DRAFT orders can be submitted');
+          throw new BadRequestException('只有草稿订单可以提交生产');
         }
         const missingProcessLine = order.lines.find(
           (line) => line.fulfillmentMode !== OrderLineFulfillmentMode.STOCK && line.processSteps.length === 0
         );
         if (missingProcessLine) {
-          throw new BadRequestException(`Process steps are required for part ${missingProcessLine.partCode}`);
+          throw new BadRequestException(`零件 ${missingProcessLine.partCode} 必须先设置生产流程`);
         }
 
         // 订单提交会占用备货库存或生成生产任务，所有判断必须在事务内基于最新订单状态执行。
@@ -894,7 +996,7 @@ export class OrdersService {
       where: { orderNo: { equals: orderNo, mode: 'insensitive' } }
     });
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException('订单不存在');
     }
     this.assertOrderAcceptsProductionChange(order);
 
@@ -909,12 +1011,12 @@ export class OrdersService {
       }
     });
     if (!line) {
-      throw new NotFoundException('Order line not found');
+      throw new NotFoundException('订单零件不存在');
     }
 
     const baseTask = line.productionTasks.find((task) => !task.isReplenishment && this.isStartedProductionTask(task));
     if (!baseTask) {
-      throw new BadRequestException('Order line has not started production. Please edit the order instead of creating replenishment');
+      throw new BadRequestException('该订单零件尚未开始生产，请修改订单，不要创建补单');
     }
 
     return { order, line, baseTask };
@@ -922,10 +1024,10 @@ export class OrdersService {
 
   private assertOrderAcceptsProductionChange(order: { status: OrderStatus }) {
     if (order.status === OrderStatus.CANCELLED) {
-      throw new BadRequestException('Cancelled order cannot create replenishment or production quantity change');
+      throw new BadRequestException('已取消订单不能创建补单或生产数量变更');
     }
     if (order.status === OrderStatus.COMPLETED) {
-      throw new BadRequestException('Completed order cannot create replenishment or production quantity change');
+      throw new BadRequestException('已完成订单不能创建补单或生产数量变更');
     }
   }
 
@@ -964,6 +1066,7 @@ export class OrdersService {
         orderLineId: line.id,
         isReplenishment: true,
         sourceProductionTaskNo,
+        replenishmentSourceType: 'ORDER_CHANGE',
         status: ProductionStatus.PENDING
       },
       orderBy: { productionTaskNo: 'asc' }
@@ -976,6 +1079,8 @@ export class OrdersService {
         data: {
           plannedQuantity,
           processSnapshot: this.processStepsToJson(steps),
+          replenishmentSourceType: 'ORDER_CHANGE',
+          replenishmentSourceRequestNo: order.orderNo,
           remark: reason
         }
       });
@@ -987,12 +1092,13 @@ export class OrdersService {
         orderLineId: line.id,
         isReplenishment: true,
         sourceProductionTaskNo,
+        replenishmentSourceType: 'ORDER_CHANGE',
         status: { not: ProductionStatus.PENDING }
       },
       orderBy: { productionTaskNo: 'desc' }
     });
     if (existingStarted) {
-      throw new BadRequestException('Existing replenishment task has started. Create a new customer change record after manager review');
+      throw new BadRequestException('已有补单任务已开始生产，请管理人员确认后再创建新的客户变更记录');
     }
 
     const productionTaskNo = await this.generateNextReplenishmentTaskNo(tx, sourceProductionTaskNo);
@@ -1011,6 +1117,8 @@ export class OrdersService {
         status: ProductionStatus.PENDING,
         isReplenishment: true,
         sourceProductionTaskNo,
+        replenishmentSourceType: 'ORDER_CHANGE',
+        replenishmentSourceRequestNo: order.orderNo,
         remark: reason
       }
     });
@@ -1037,7 +1145,7 @@ export class OrdersService {
         return `${prefix}${String(index).padStart(2, '0')}`;
       }
     }
-    throw new BadRequestException('No available replenishment task number');
+    throw new BadRequestException('没有可用的补单任务号');
   }
 
   private async describeOrderProductionProgress(tx: Prisma.TransactionClient, orderId: string) {
@@ -1067,6 +1175,95 @@ export class OrdersService {
     return `当前订单生产进度：${summaries.join('；')}`;
   }
 
+  private normalizeCancelHandlingPlan(
+    items: CancelOrderDto['handlingPlan'],
+    startedTasks: any[],
+    productionCancelState: 'NOT_PRODUCED' | 'PRODUCED'
+  ) {
+    const planMap = new Map<string, NormalizedCancelHandlingPlanItem>();
+    if (productionCancelState !== 'PRODUCED') {
+      return planMap;
+    }
+    if (startedTasks.length === 0) {
+      return planMap;
+    }
+    if (!items || items.length === 0) {
+      throw new BadRequestException('已生产取消必须填写已生产零件的处理方案');
+    }
+
+    const taskMap = new Map(startedTasks.map((task) => [task.productionTaskNo.toUpperCase(), task]));
+    for (const item of items) {
+      const taskNo = item.productionTaskNo.trim().toUpperCase();
+      const task = taskMap.get(taskNo);
+      if (!task || task.orderLineId !== item.orderLineId) {
+        throw new BadRequestException(`取消处理方案包含无效任务 ${item.productionTaskNo}`);
+      }
+      if (planMap.has(taskNo)) {
+        throw new BadRequestException(`取消处理方案存在重复任务 ${item.productionTaskNo}`);
+      }
+
+      const handlingQuantity = this.roundQuantity(decimalToNumber(item.handlingQuantity));
+      if ((item.handlingMode === 'STOCK' || item.handlingMode === 'SCRAP') && handlingQuantity <= 0) {
+        throw new BadRequestException(`任务 ${item.productionTaskNo} 的处理数量必须大于 0`);
+      }
+      if (item.handlingMode === 'NONE' && handlingQuantity > 0) {
+        throw new BadRequestException(`任务 ${item.productionTaskNo} 选择无实物处理时，处理数量必须为 0`);
+      }
+      if (item.handlingMode === 'NONE' && !item.remark?.trim()) {
+        throw new BadRequestException(`任务 ${item.productionTaskNo} 选择无实物处理时必须填写说明`);
+      }
+
+      const maxQuantity = Math.max(
+        decimalToNumber(task.completedQuantity),
+        decimalToNumber(task.plannedQuantity),
+        0
+      );
+      if (handlingQuantity > maxQuantity) {
+        throw new BadRequestException(`任务 ${item.productionTaskNo} 的处理数量不能超过生产任务数量`);
+      }
+
+      planMap.set(taskNo, {
+        orderLineId: item.orderLineId,
+        productionTaskNo: task.productionTaskNo,
+        handlingMode: item.handlingMode,
+        handlingQuantity,
+        remark: item.remark?.trim() || undefined
+      });
+    }
+
+    const missingTask = startedTasks.find((task) => !planMap.has(task.productionTaskNo.toUpperCase()));
+    if (missingTask) {
+      throw new BadRequestException(`取消处理方案缺少任务 ${missingTask.productionTaskNo}`);
+    }
+    return planMap;
+  }
+
+  private formatCancelHandlingPlan(plan: NormalizedCancelHandlingPlanItem, unit?: string) {
+    const quantityText = `${this.roundQuantity(plan.handlingQuantity)} ${unit || '件'}`;
+    const remarkText = plan.remark ? `，说明：${plan.remark}` : '';
+    if (plan.handlingMode === 'STOCK') {
+      return `管理人员建议转备货库存 ${quantityText}${remarkText}`;
+    }
+    if (plan.handlingMode === 'SCRAP') {
+      return `管理人员建议报废 ${quantityText}${remarkText}`;
+    }
+    return `管理人员确认无实物处理${remarkText}`;
+  }
+
+  private cancelHandlingPlanToJson(
+    plan: NormalizedCancelHandlingPlanItem,
+    managerName: string,
+    plannedAt: Date
+  ): Prisma.InputJsonValue {
+    return {
+      handlingMode: plan.handlingMode,
+      handlingQuantity: plan.handlingQuantity,
+      remark: plan.remark || '',
+      plannedBy: managerName,
+      plannedAt: plannedAt.toISOString()
+    };
+  }
+
   private async createProductionNotice(
     tx: Prisma.TransactionClient,
     data: {
@@ -1081,6 +1278,7 @@ export class OrdersService {
       deltaQuantity?: number;
       reason: string;
       managerName?: string;
+      handlingPlan?: Prisma.InputJsonValue;
     }
   ) {
     const target = data.target || ProductionNoticeTarget.PRODUCTION;
@@ -1110,7 +1308,8 @@ export class OrdersService {
       deltaQuantity: data.deltaQuantity,
       unit: data.line?.unit,
       reason: data.reason,
-      managerName: data.managerName || null
+      managerName: data.managerName || null,
+      ...(data.handlingPlan !== undefined ? { handlingPlan: data.handlingPlan } : {})
     };
 
     if (existingPendingNotice) {
@@ -1157,32 +1356,109 @@ export class OrdersService {
     requiredQuantity: number,
     purpose: 'STOCK' | 'REWORK'
   ) {
+    const selectedSources = this.jsonToStockSourceSelections(line.stockSourceSelections);
+    if (purpose === 'STOCK') {
+      this.validateDirectStockOrderLineInfo(line, selectedSources);
+    }
+    this.validateSelectedStockSourceManualConfirmations(selectedSources);
+    const hasManualSelections = selectedSources.length > 0;
     const stockBatches = await tx.inventoryBatch.findMany({
-      where: {
-        sourceOrderId: null,
-        partCode: { equals: line.partCode, mode: 'insensitive' },
-        unit: line.unit,
-        quantity: { gt: 0 },
-        status: 'AVAILABLE'
+      where: hasManualSelections
+        ? {
+            id: { in: selectedSources.map((source) => source.batchId) },
+            sourceOrderId: null,
+            quantity: { gt: 0 },
+            status: 'AVAILABLE'
+          }
+        : {
+            sourceOrderId: null,
+            partCode: { equals: line.partCode, mode: 'insensitive' },
+            unit: line.unit,
+            quantity: { gt: 0 },
+            status: 'AVAILABLE'
+          },
+      include: {
+        sourceOrderLine: true,
+        productionTask: { include: { orderLine: true } }
       },
       orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
     });
-    const availableQuantity = stockBatches.reduce((sum, batch) => sum + decimalToNumber(batch.quantity), 0);
-    if (availableQuantity + 0.0001 < requiredQuantity) {
-      throw new BadRequestException(
-        `Available stock is not enough for part ${line.partCode}. Required ${requiredQuantity}, available ${availableQuantity}`
-      );
+    const sourceTaskMap = await this.findStockSourceTaskMap(tx, stockBatches);
+    const selectedSourceMap = new Map(selectedSources.map((source) => [source.batchId, source]));
+    const foundBatchIds = new Set(stockBatches.map((batch) => batch.id));
+    const missingSelection = selectedSources.find((source) => !foundBatchIds.has(source.batchId));
+    if (missingSelection) {
+      throw new BadRequestException(`已选库存批次 ${missingSelection.batchNo || missingSelection.batchId} 不存在或当前不可用`);
+    }
+    if (hasManualSelections) {
+      const selectedTotal = selectedSources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
+      if (selectedTotal > requiredQuantity + 0.0001) {
+        throw new BadRequestException(
+          `零件 ${line.partCode} 已选库存数量超过本次需要数量：需要 ${requiredQuantity}，已选 ${selectedTotal}`
+        );
+      }
+    }
+
+    const sortedStockBatches = hasManualSelections
+      ? selectedSources
+          .map((source) => stockBatches.find((batch) => batch.id === source.batchId))
+          .filter(Boolean)
+      : this.sortStockBatchesForOrderLine(line, stockBatches, sourceTaskMap);
+    const candidateBatches = hasManualSelections
+      ? sortedStockBatches.map((batch) => ({
+          ...batch,
+          selectedQuantity: selectedSourceMap.get(batch.id)?.quantity || 0
+        }))
+      : purpose === 'STOCK'
+        ? sortedStockBatches.filter((batch) => this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap))
+        : sortedStockBatches;
+
+    for (const batch of candidateBatches) {
+      if (batch.unit !== line.unit) {
+        throw new BadRequestException(`已选库存批次 ${batch.batchNo} 的单位 ${batch.unit} 与订单单位 ${line.unit} 不一致`);
+      }
+      if (hasManualSelections && decimalToNumber(batch.quantity) + 0.0001 < Number(batch.selectedQuantity || 0)) {
+        throw new BadRequestException(`已选库存批次 ${batch.batchNo} 的使用数量超过当前可用库存`);
+      }
+      const selectedSource = hasManualSelections ? selectedSourceMap.get(batch.id) : undefined;
+      if (
+        hasManualSelections &&
+        !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) &&
+        !this.stockSourceManualConfirmationComplete(selectedSource)
+      ) {
+        // 后端必须按真实库存来源重新核对，不能只相信前端提交的 compatibilityStatus。
+        throw new BadRequestException(`已选库存批次 ${batch.batchNo} 与本次订单资料不完全匹配，必须填写人工确认记录`);
+      }
+    }
+
+    const availableQuantity = candidateBatches.reduce((sum, batch) => sum + decimalToNumber(batch.quantity), 0);
+    const selectedAvailableQuantity = hasManualSelections
+      ? candidateBatches.reduce((sum, batch) => sum + Math.min(decimalToNumber(batch.quantity), Number(batch.selectedQuantity || 0)), 0)
+      : availableQuantity;
+    if (selectedAvailableQuantity + 0.0001 < requiredQuantity) {
+      if (hasManualSelections) {
+        throw new BadRequestException(
+          `零件 ${line.partCode} 已选库存不足：需要 ${requiredQuantity}，已选 ${selectedAvailableQuantity}`
+        );
+      }
+      if (purpose === 'STOCK' && stockBatches.length > 0) {
+        throw new BadRequestException(
+          `零件 ${line.partCode} 图纸匹配库存不足：需要 ${requiredQuantity}，匹配 ${availableQuantity}。请选择库存再加工或重新生产`
+        );
+      }
+      throw new BadRequestException(`零件 ${line.partCode} 可用库存不足：需要 ${requiredQuantity}，可用 ${availableQuantity}`);
     }
 
     let remainingQuantity = this.roundQuantity(requiredQuantity);
     let sequence = 1;
-    for (const batch of stockBatches) {
+    for (const batch of candidateBatches) {
       if (remainingQuantity <= 0) {
         break;
       }
 
       const batchQuantity = decimalToNumber(batch.quantity);
-      const usedQuantity = this.roundQuantity(Math.min(batchQuantity, remainingQuantity));
+      const selectedLimit = hasManualSelections ? Number(batch.selectedQuantity || 0) : batchQuantity;
+      const usedQuantity = this.roundQuantity(Math.min(batchQuantity, selectedLimit, remainingQuantity));
       if (usedQuantity <= 0) {
         continue;
       }
@@ -1203,7 +1479,7 @@ export class OrdersService {
           partCode: batch.partCode,
           partName: batch.partName,
           orderNo: null,
-          productionTaskNo: null,
+          productionTaskNo: batch.sourceProductionTaskNo,
           quantity: usedQuantity,
           unit: batch.unit,
           warehouseId: batch.warehouseId,
@@ -1215,6 +1491,7 @@ export class OrdersService {
       });
 
       if (purpose === 'STOCK') {
+        const sourceTask = batch.sourceProductionTaskNo ? sourceTaskMap.get(batch.sourceProductionTaskNo) : null;
         const orderBatch = await tx.inventoryBatch.create({
           data: {
             batchNo: `IB-ALLOC-${order.orderNo}-${suffix}`,
@@ -1225,7 +1502,12 @@ export class OrdersService {
             sourceOrderNo: order.orderNo,
             sourceCustomerName: order.customerName,
             productionTaskId: null,
-            sourceProductionTaskNo: null,
+            // 备货库存转成订单待发库存时仍要保留原生产任务号，用于核对原订单、图号和版本。
+            sourceProductionTaskNo: batch.sourceProductionTaskNo,
+            sourceKind: batch.sourceKind || 'NORMAL_ORDER',
+            // 订单占用库存后不能丢失原批次的补单来源，否则发货和库存来源核对会看不出是订单补单还是生产报废补单。
+            replenishmentSourceType: batch.replenishmentSourceType || sourceTask?.replenishmentSourceType,
+            replenishmentSourceRequestNo: batch.replenishmentSourceRequestNo || sourceTask?.replenishmentSourceRequestNo,
             quantity: usedQuantity,
             unit: line.unit,
             warehouseId: batch.warehouseId,
@@ -1242,7 +1524,7 @@ export class OrdersService {
             partCode: line.partCode,
             partName: line.partName,
             orderNo: order.orderNo,
-            productionTaskNo: null,
+            productionTaskNo: batch.sourceProductionTaskNo,
             quantity: usedQuantity,
             unit: line.unit,
             warehouseId: batch.warehouseId,
@@ -1257,6 +1539,142 @@ export class OrdersService {
       remainingQuantity = this.roundQuantity(remainingQuantity - usedQuantity);
       sequence += 1;
     }
+  }
+
+  private validateDirectStockOrderLineInfo(line: any, selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>) {
+    const missingFields = [
+      !String(line.drawingNo || '').trim() ? '图号' : '',
+      !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
+      !String(line.partSpecification || '').trim() ? '成品规格' : '',
+      decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
+    ].filter(Boolean);
+    if (missingFields.length === 0) {
+      return;
+    }
+
+    const manualOverrideOk =
+      selectedSources.length > 0 && selectedSources.every((source) => this.stockSourceManualConfirmationComplete(source));
+    if (manualOverrideOk) {
+      return;
+    }
+
+    // 直接使用库存必须有本次订单的关键图纸资料；否则后端无法可靠判断旧库存是否适用。
+    throw new BadRequestException(
+      `零件 ${line.partCode} 直接使用库存前必须补齐图纸资料：${missingFields.join('、')}`
+    );
+  }
+
+  private validateSelectedStockSourceManualConfirmations(selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>) {
+    const incompleteSource = selectedSources.find(
+      (source) => source.compatibilityStatus && source.compatibilityStatus !== 'MATCHED' && !this.stockSourceManualConfirmationComplete(source)
+    );
+    if (!incompleteSource) {
+      return;
+    }
+
+    throw new BadRequestException(
+      `已选库存批次 ${incompleteSource.batchNo || incompleteSource.batchId} 与本次订单资料不完全匹配，必须填写人工确认记录`
+    );
+  }
+
+  private stockSourceManualConfirmationComplete(source?: ReturnType<OrdersService['jsonToStockSourceSelections']>[number]) {
+    const confirmedAt = source?.manualConfirmedAt?.trim();
+    return Boolean(
+      source?.manualConfirmedBy?.trim() &&
+        confirmedAt &&
+        !Number.isNaN(new Date(confirmedAt).getTime()) &&
+        source?.manualConfirmRemark?.trim()
+    );
+  }
+
+  private async findStockSourceTaskMap(tx: Prisma.TransactionClient, batches: any[]) {
+    const taskNos = [...new Set(batches.map((batch) => batch.sourceProductionTaskNo).filter(Boolean))] as string[];
+    if (taskNos.length === 0) {
+      return new Map<string, any>();
+    }
+
+    const tasks = await tx.productionTask.findMany({
+      where: { productionTaskNo: { in: taskNos } },
+      include: { orderLine: true }
+    });
+    return new Map(tasks.map((task) => [task.productionTaskNo, task]));
+  }
+
+  private resolveStockBatchSourceLine(batch: any, sourceTaskMap: Map<string, any>) {
+    const sourceTask = batch.sourceProductionTaskNo ? sourceTaskMap.get(batch.sourceProductionTaskNo) : null;
+    if (sourceTask?.orderLine) {
+      // 备货库存可能后来被分配给新订单，图纸匹配必须取原生产任务的订单零件信息。
+      return sourceTask.orderLine;
+    }
+    return batch.sourceOrderLine || batch.productionTask?.orderLine || null;
+  }
+
+  private sortStockBatchesForOrderLine(line: any, batches: any[], sourceTaskMap: Map<string, any>) {
+    return batches
+      .map((batch, index) => ({
+        batch,
+        index,
+        rank: this.stockBatchCompatibilityRank(line, batch, sourceTaskMap)
+      }))
+      .sort((left, right) => left.rank - right.rank || left.index - right.index)
+      .map((item) => item.batch);
+  }
+
+  private stockBatchCompatibilityRank(line: any, batch: any, sourceTaskMap: Map<string, any>) {
+    const sourceLine = this.resolveStockBatchSourceLine(batch, sourceTaskMap);
+    if (this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap)) {
+      return 0;
+    }
+    if (!sourceLine) {
+      return 2;
+    }
+    return 1;
+  }
+
+  private stockBatchMatchesOrderLine(line: any, batch: any, sourceTaskMap: Map<string, any>) {
+    const sourceLine = this.resolveStockBatchSourceLine(batch, sourceTaskMap);
+    if (!sourceLine) {
+      // 旧备货库存没有来源图纸时不能直接作为“使用库存”，只能让操作员选择库存再加工或重新生产。
+      return false;
+    }
+
+    return (
+      this.sourceLineHasDirectStockDrawingInfo(sourceLine) &&
+      this.requiredTextMatches(line.partCode, batch.partCode) &&
+      this.requiredTextMatches(line.drawingNo, sourceLine.drawingNo) &&
+      this.requiredTextMatches(line.drawingVersion, sourceLine.drawingVersion) &&
+      this.requiredTextMatches(line.partSpecification, sourceLine.partSpecification) &&
+      this.requiredNumberMatches(line.partThickness, sourceLine.partThickness)
+    );
+  }
+
+  private sourceLineHasDirectStockDrawingInfo(sourceLine: any) {
+    // 直接使用库存必须能追到原生产图纸文件；没有图纸文件的库存只能走库存再加工或重新生产。
+    return Boolean(
+      String(sourceLine.drawingNo || '').trim() &&
+        String(sourceLine.drawingVersion || '').trim() &&
+        String(sourceLine.drawingFileUrl || '').trim()
+    );
+  }
+
+  private requiredTextMatches(required?: string | null, actual?: string | null) {
+    const normalizedRequired = String(required ?? '').trim().toLocaleLowerCase();
+    if (!normalizedRequired) {
+      return true;
+    }
+    return normalizedRequired === String(actual ?? '').trim().toLocaleLowerCase();
+  }
+
+  private requiredNumberMatches(required?: number | Prisma.Decimal | null, actual?: number | Prisma.Decimal | null) {
+    const requiredNumber = decimalToNumber(required);
+    if (!requiredNumber) {
+      return true;
+    }
+    const actualNumber = decimalToNumber(actual);
+    if (!actualNumber) {
+      return false;
+    }
+    return Math.abs(requiredNumber - actualNumber) < 0.0001;
   }
 
   private async releaseUnstartedLineStock(tx: Prisma.TransactionClient, order: any, line: any, reason: string) {
@@ -1326,7 +1744,7 @@ export class OrdersService {
           partCode: transaction.partCode,
           partName: transaction.partName,
           orderNo: null,
-          productionTaskNo: null,
+          productionTaskNo: transaction.productionTaskNo,
           quantity,
           unit: transaction.unit,
           warehouseId: transaction.warehouseId,
@@ -1405,32 +1823,98 @@ export class OrdersService {
   private async generateOrderNo(orderDate: Date) {
     const dateKey = orderDate.toISOString().slice(0, 10).replace(/-/g, '');
     const prefix = `SO-${dateKey}-`;
-    const existingOrders = await this.prisma.customerOrder.findMany({
-      where: { orderNo: { startsWith: prefix } },
-      select: { orderNo: true }
-    });
-    const usedOrderNos = new Set(existingOrders.map((order) => order.orderNo));
+    const [existingOrders, reservedOrderNos] = await Promise.all([
+      this.prisma.customerOrder.findMany({
+        where: { orderNo: { startsWith: prefix } },
+        select: { orderNo: true }
+      }),
+      this.prisma.orderNoReservation.findMany({
+        where: { orderNoNormalized: { startsWith: prefix } },
+        select: { orderNoNormalized: true }
+      })
+    ]);
+    const usedOrderNos = new Set([
+      ...existingOrders.map((order) => this.normalizeOrderNo(order.orderNo)),
+      ...reservedOrderNos.map((reservation) => this.normalizeOrderNo(reservation.orderNoNormalized))
+    ]);
 
-    // 自动生成时按日期前缀递增，并跳过已存在编号，避免删除旧单后再次生成重复号。
+    // 自动生成时按日期前缀递增，并跳过所有已占用编号；取消订单的编号也会永久保留。
     for (let index = 1; index < 10000; index += 1) {
       const orderNo = `${prefix}${String(index).padStart(3, '0')}`;
       if (!usedOrderNos.has(orderNo)) {
         return orderNo;
       }
     }
-    throw new BadRequestException('No available order number for this date');
+    throw new BadRequestException('当前日期没有可用订单号');
+  }
+
+  private async reserveOrderNo(
+    tx: Prisma.TransactionClient,
+    orderNo: string,
+    sourceOrderId?: string,
+    reservedReason = 'ORDER_CREATED'
+  ) {
+    const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    try {
+      await tx.orderNoReservation.create({
+        data: {
+          orderNo: normalizedOrderNo,
+          orderNoNormalized: normalizedOrderNo,
+          sourceOrderId,
+          reservedReason
+        }
+      });
+    } catch (error) {
+      if (this.isDuplicateOrderNoReservationError(error)) {
+        throw new BadRequestException(`订单号 ${normalizedOrderNo} 已被占用，请修改后再保存`);
+      }
+      throw error;
+    }
+  }
+
+  private async linkOrderNoReservation(
+    tx: Prisma.TransactionClient,
+    orderNo: string,
+    sourceOrderId: string,
+    reservedReason = 'ORDER_CREATED'
+  ) {
+    const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    await tx.orderNoReservation.upsert({
+      where: { orderNoNormalized: normalizedOrderNo },
+      create: {
+        orderNo: normalizedOrderNo,
+        orderNoNormalized: normalizedOrderNo,
+        sourceOrderId,
+        reservedReason
+      },
+      update: {
+        sourceOrderId,
+        reservedReason
+      }
+    });
   }
 
   private async orderNoExists(orderNo: string, excludeOrderNo?: string) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const normalizedExcludeOrderNo = excludeOrderNo?.trim() ? this.normalizeOrderNo(excludeOrderNo) : undefined;
+    const reservation = await this.prisma.orderNoReservation.findFirst({
+      where: {
+        orderNoNormalized: normalizedOrderNo,
+        NOT: normalizedExcludeOrderNo ? { orderNoNormalized: normalizedExcludeOrderNo } : undefined
+      },
+      select: { id: true }
+    });
+    if (reservation) {
+      return true;
+    }
+
     const existing = await this.prisma.customerOrder.findFirst({
       where: {
         // 订单号查重必须大小写不敏感，避免 SO-xxx 和 so-xxx 被当成两个订单。
         orderNo: { equals: normalizedOrderNo, mode: 'insensitive' },
         NOT: normalizedExcludeOrderNo ? { orderNo: { equals: normalizedExcludeOrderNo, mode: 'insensitive' } } : undefined
       },
-      select: { id: true }
+      select: { orderNo: true }
     });
     return Boolean(existing);
   }
@@ -1446,7 +1930,7 @@ export class OrdersService {
     // 手工输入订单号时统一转成大写，保证 URL、查重、生产任务编号使用同一套订单号。
     const normalizedOrderNo = orderNo.trim().toUpperCase();
     if (!normalizedOrderNo) {
-      throw new BadRequestException('Order number is required');
+      throw new BadRequestException('订单号不能为空');
     }
     return normalizedOrderNo;
   }
@@ -1461,23 +1945,33 @@ export class OrdersService {
     );
   }
 
+  private isDuplicateOrderNoReservationError(error: unknown) {
+    return (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002' &&
+      (Array.isArray(error.meta?.target)
+        ? error.meta.target.includes('orderNoNormalized')
+        : JSON.stringify(error.meta || {}).includes('OrderNoReservation_orderNoNormalized_key'))
+    );
+  }
+
   private validateOrderLines(lines: CreateOrderDto['lines']) {
     // 新增订单默认给 3 行方便录入，但允许删除误填行；业务上只要求订单至少保留 1 个零件。
     if (!lines || lines.length < 1) {
-      throw new BadRequestException('At least 1 order line is required');
+      throw new BadRequestException('订单至少需要一个零件');
     }
 
     lines.forEach((line, index) => {
-      this.validateSingleOrderLine(line, `Order line ${index + 1}`);
+      this.validateSingleOrderLine(line, `第 ${index + 1} 个零件`);
     });
   }
 
   private validateSingleOrderLine(line: CreateOrderLineDto, label = 'Order line') {
     if (!line.partCode?.trim() || !line.partName?.trim() || !line.unit?.trim()) {
-      throw new BadRequestException(`${label} is incomplete`);
+      throw new BadRequestException(`${label}资料不完整`);
     }
     if (!Number.isFinite(Number(line.partThickness)) || Number(line.partThickness) <= 0) {
-      throw new BadRequestException(`${label} thickness must be greater than 0`);
+      throw new BadRequestException(`${label}厚度必须大于 0`);
     }
     const orderQuantity = this.normalizeQuantity(line.quantity, `${label} quantity`);
     const fulfillmentMode = this.normalizeFulfillmentMode(line.fulfillmentMode);
@@ -1488,14 +1982,13 @@ export class OrdersService {
     );
     if (fulfillmentMode === OrderLineFulfillmentMode.STOCK) {
       if (productionPlanQuantity !== 0) {
-        throw new BadRequestException(`${label} production plan quantity must be 0 when using stock`);
+        throw new BadRequestException(`${label}使用库存时生产计划数量必须为 0`);
       }
     } else {
       if (productionPlanQuantity < orderQuantity) {
-        throw new BadRequestException(`${label} production plan quantity cannot be less than order quantity`);
+        throw new BadRequestException(`${label}生产计划数量不能小于客户订单数量`);
       }
     }
-    this.normalizeProcessSteps(line.processSteps, false);
   }
 
   private normalizeFulfillmentMode(mode?: OrderLineFulfillmentMode | string) {
@@ -1509,7 +2002,7 @@ export class OrdersService {
     ) {
       return mode;
     }
-    throw new BadRequestException('Invalid order line fulfillment mode');
+    throw new BadRequestException('库存/生产方式无效');
   }
 
   private resolveProductionPlanQuantity(line: CreateOrderDto['lines'][number]) {
@@ -1527,33 +2020,31 @@ export class OrdersService {
   private normalizeQuantity(value: unknown, label: string, allowZero = false) {
     const quantity = this.roundQuantity(Number(value));
     if (!Number.isFinite(quantity)) {
-      throw new BadRequestException(`${label} must be a valid number`);
+      throw new BadRequestException(`${label}必须是有效数字`);
     }
     if (allowZero ? quantity < 0 : quantity <= 0) {
       throw new BadRequestException(
-        allowZero ? `${label} cannot be less than 0` : `${label} must be greater than 0`
+        allowZero ? `${label}不能小于 0` : `${label}必须大于 0`
       );
     }
     return quantity;
   }
 
-  private normalizeProcessSteps(steps: CreateOrderLineDto['processSteps'] | undefined, requireOne = false): ProcessStepSnapshot[] {
+  private async normalizeProcessSteps(steps: CreateOrderLineDto['processSteps'] | undefined, requireOne = false): Promise<ProcessStepSnapshot[]> {
     const normalized = processSnapshotToDetails(steps || []).filter((step) => step.processName);
     if (requireOne && normalized.length === 0) {
-      throw new BadRequestException('At least one process step is required');
+      throw new BadRequestException('至少需要一道生产工序');
     }
 
     const seen = new Set<string>();
     for (const step of normalized) {
-      if (!(STANDARD_PROCESS_NAMES as readonly string[]).includes(step.processName)) {
-        throw new BadRequestException(`Invalid standard process step ${step.processName}`);
-      }
       const key = step.processName.toLocaleLowerCase();
       if (seen.has(key)) {
-        throw new BadRequestException(`Duplicate process step ${step.processName}`);
+        throw new BadRequestException(`生产流程存在重复工序：${step.processName}`);
       }
       seen.add(key);
     }
+    await this.processDefinitionsService.ensureActiveNames(normalized.map((step) => step.processName));
 
     return normalized;
   }
@@ -1567,6 +2058,92 @@ export class OrdersService {
       processName: step.processName,
       ...(step.processRemark ? { processRemark: step.processRemark } : {})
     })) as Prisma.InputJsonValue;
+  }
+
+  private normalizeStockSourceSelections(selections: CreateOrderLineDto['selectedStockSources'] | undefined) {
+    const normalized = new Map<
+      string,
+      {
+        batchId: string;
+        batchNo?: string;
+        partCode?: string;
+        partName?: string;
+        quantity: number;
+        unit?: string;
+        replenishmentSourceType?: string;
+        replenishmentSourceRequestNo?: string;
+        replenishmentSourceLabel?: string;
+        compatibilityStatus?: 'MATCHED' | 'NEEDS_CONFIRMATION' | 'INCOMPLETE' | 'UNKNOWN';
+        compatibilityReason?: string;
+        manualConfirmedBy?: string;
+        manualConfirmedAt?: string;
+        manualConfirmRemark?: string;
+      }
+    >();
+    for (const selection of selections || []) {
+      const batchId = selection.batchId?.trim();
+      const quantity = this.roundQuantity(Number(selection.quantity || 0));
+      if (!batchId || quantity <= 0) {
+        continue;
+      }
+      const current = normalized.get(batchId);
+      normalized.set(batchId, {
+        batchId,
+        batchNo: selection.batchNo?.trim() || current?.batchNo,
+        partCode: selection.partCode?.trim() || current?.partCode,
+        partName: selection.partName?.trim() || current?.partName,
+        quantity: this.roundQuantity((current?.quantity || 0) + quantity),
+        unit: selection.unit?.trim() || current?.unit,
+        replenishmentSourceType: selection.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
+        replenishmentSourceRequestNo: selection.replenishmentSourceRequestNo?.trim() || current?.replenishmentSourceRequestNo,
+        replenishmentSourceLabel: selection.replenishmentSourceLabel?.trim() || current?.replenishmentSourceLabel,
+        compatibilityStatus: selection.compatibilityStatus || current?.compatibilityStatus,
+        compatibilityReason: selection.compatibilityReason?.trim() || current?.compatibilityReason,
+        manualConfirmedBy: selection.manualConfirmedBy?.trim() || current?.manualConfirmedBy,
+        manualConfirmedAt: selection.manualConfirmedAt?.trim() || current?.manualConfirmedAt,
+        manualConfirmRemark: selection.manualConfirmRemark?.trim() || current?.manualConfirmRemark
+      });
+    }
+    return [...normalized.values()];
+  }
+
+  private stockSourceSelectionsToJson(selections: CreateOrderLineDto['selectedStockSources'] | undefined): Prisma.InputJsonValue | undefined {
+    const normalized = this.normalizeStockSourceSelections(selections);
+    return normalized.length > 0 ? (normalized as Prisma.InputJsonValue) : undefined;
+  }
+
+  private jsonToStockSourceSelections(value: Prisma.JsonValue | null | undefined) {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return this.normalizeStockSourceSelections(
+      value.map((item) => {
+        const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+        return {
+          batchId: String(row.batchId || ''),
+          batchNo: row.batchNo ? String(row.batchNo) : undefined,
+          partCode: row.partCode ? String(row.partCode) : undefined,
+          partName: row.partName ? String(row.partName) : undefined,
+          quantity: Number(row.quantity || 0),
+          unit: row.unit ? String(row.unit) : undefined,
+          replenishmentSourceType: row.replenishmentSourceType ? String(row.replenishmentSourceType) : undefined,
+          replenishmentSourceRequestNo: row.replenishmentSourceRequestNo ? String(row.replenishmentSourceRequestNo) : undefined,
+          replenishmentSourceLabel: row.replenishmentSourceLabel ? String(row.replenishmentSourceLabel) : undefined,
+          compatibilityStatus: this.normalizeStockCompatibilityStatus(row.compatibilityStatus),
+          compatibilityReason: row.compatibilityReason ? String(row.compatibilityReason) : undefined,
+          manualConfirmedBy: row.manualConfirmedBy ? String(row.manualConfirmedBy) : undefined,
+          manualConfirmedAt: row.manualConfirmedAt ? String(row.manualConfirmedAt) : undefined,
+          manualConfirmRemark: row.manualConfirmRemark ? String(row.manualConfirmRemark) : undefined
+        };
+      })
+    );
+  }
+
+  private normalizeStockCompatibilityStatus(value: unknown) {
+    if (value === 'MATCHED' || value === 'NEEDS_CONFIRMATION' || value === 'INCOMPLETE' || value === 'UNKNOWN') {
+      return value;
+    }
+    return undefined;
   }
 
   private async findDuplicateOrderLines(field: 'drawingNo' | 'drawingFileName', value: string, excludeOrderNo?: string) {
@@ -1633,6 +2210,7 @@ export class OrdersService {
       totalQuantity,
       totalProductionPlanQuantity,
       unit: order.lines[0]?.unit || '件',
+      productionStatus: this.toOrderProductionStatus(order),
       warehouseStage: this.toOrderWarehouseStage(order),
       remark: order.remark,
       createdAt: order.createdAt,
@@ -1640,7 +2218,11 @@ export class OrdersService {
     };
   }
 
-  private toDetail(order: any, stockQuantityByTaskNo = new Map<string, number>()) {
+  private toDetail(
+    order: any,
+    stockQuantityByTaskNo = new Map<string, number>(),
+    stockSourceInfoByBatchId = new Map<string, ReturnType<OrdersService['toStockSourceSelectionInfo']>>()
+  ) {
     return {
       ...this.toSummary(order),
       customer: order.customer,
@@ -1661,12 +2243,68 @@ export class OrdersService {
         unit: line.unit,
         deliveryDate: line.deliveryDate,
         remark: line.remark,
+        selectedStockSources: this.enrichSelectedStockSources(
+          this.jsonToStockSourceSelections(line.stockSourceSelections),
+          stockSourceInfoByBatchId
+        ),
         processSteps: this.processRowsToSnapshots(line.processSteps).map((step) => step.processName),
         processStepDetails: this.processRowsToSnapshots(line.processSteps),
         productionTasks: this.toLineProductionTasks(line.productionTasks || [], stockQuantityByTaskNo),
         ...this.toLineWarehouseInfo(line, stockQuantityByTaskNo)
       }))
     };
+  }
+
+  private async getStockSourceInfoByBatchId(batchIds: string[]) {
+    const ids = [...new Set(batchIds.filter(Boolean))];
+    if (ids.length === 0) {
+      return new Map<string, ReturnType<OrdersService['toStockSourceSelectionInfo']>>();
+    }
+
+    const batches = await this.prisma.inventoryBatch.findMany({
+      where: { id: { in: ids } },
+      include: { productionTask: true }
+    });
+
+    return new Map(batches.map((batch) => [batch.id, this.toStockSourceSelectionInfo(batch)]));
+  }
+
+  private toStockSourceSelectionInfo(batch: any) {
+    const replenishmentSourceType = batch.replenishmentSourceType || batch.productionTask?.replenishmentSourceType || undefined;
+    const replenishmentSourceRequestNo =
+      batch.replenishmentSourceRequestNo || batch.productionTask?.replenishmentSourceRequestNo || undefined;
+    return {
+      batchId: batch.id,
+      batchNo: batch.batchNo,
+      partCode: batch.partCode,
+      partName: batch.partName,
+      unit: batch.unit,
+      replenishmentSourceType,
+      replenishmentSourceRequestNo,
+      replenishmentSourceLabel: this.stockSourceReplenishmentSourceLabel(replenishmentSourceType, replenishmentSourceRequestNo)
+    };
+  }
+
+  private enrichSelectedStockSources(
+    selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>,
+    stockSourceInfoByBatchId: Map<string, ReturnType<OrdersService['toStockSourceSelectionInfo']>>
+  ) {
+    return selectedSources.map((source) => {
+      const sourceInfo = stockSourceInfoByBatchId.get(source.batchId);
+      if (!sourceInfo) {
+        return source;
+      }
+      return {
+        ...source,
+        batchNo: source.batchNo || sourceInfo.batchNo,
+        partCode: source.partCode || sourceInfo.partCode,
+        partName: source.partName || sourceInfo.partName,
+        unit: source.unit || sourceInfo.unit,
+        replenishmentSourceType: source.replenishmentSourceType || sourceInfo.replenishmentSourceType,
+        replenishmentSourceRequestNo: source.replenishmentSourceRequestNo || sourceInfo.replenishmentSourceRequestNo,
+        replenishmentSourceLabel: source.replenishmentSourceLabel || sourceInfo.replenishmentSourceLabel
+      };
+    });
   }
 
   private toLineProductionTasks(tasks: any[], stockQuantityByTaskNo = new Map<string, number>()) {
@@ -1676,15 +2314,59 @@ export class OrdersService {
       status: this.toEffectiveTaskProductionStatus(task),
       isReplenishment: task.isReplenishment,
       sourceProductionTaskNo: task.sourceProductionTaskNo,
+      replenishmentSourceType: this.resolveTaskReplenishmentSourceType(task),
+      replenishmentSourceRequestNo: task.replenishmentSourceRequestNo,
+      replenishmentSourceLabel: this.resolveTaskReplenishmentSourceLabel(task),
       plannedQuantity: decimalToNumber(task.plannedQuantity),
       completedQuantity: this.toEffectiveTaskCompletedQuantity(
         task,
         stockQuantityByTaskNo.get(task.productionTaskNo) || 0
       ),
       canCancelReplenishment: Boolean(
-        task.isReplenishment && !task.inventoryBatch && !this.isStartedProductionTask(task)
+        task.isReplenishment &&
+          this.resolveTaskReplenishmentSourceType(task) !== 'PRODUCTION_SCRAP' &&
+          !task.inventoryBatch &&
+          !this.isStartedProductionTask(task)
       )
     }));
+  }
+
+  private resolveTaskReplenishmentSourceType(task: any) {
+    if (!task?.isReplenishment) {
+      return null;
+    }
+    if (task.replenishmentSourceType) {
+      return task.replenishmentSourceType;
+    }
+    const remark = String(task.remark || '');
+    if (remark.includes('生产报废') || remark.includes('PRODUCTION_SCRAP')) {
+      return 'PRODUCTION_SCRAP';
+    }
+    return 'ORDER_CHANGE';
+  }
+
+  private resolveTaskReplenishmentSourceLabel(task: any) {
+    const sourceType = this.resolveTaskReplenishmentSourceType(task);
+    if (sourceType === 'PRODUCTION_SCRAP') {
+      return '生产报废补单';
+    }
+    if (sourceType === 'ORDER_CHANGE') {
+      return '订单补单';
+    }
+    return null;
+  }
+
+  private stockSourceReplenishmentSourceLabel(sourceType?: string | null, sourceRequestNo?: string | null) {
+    if (!sourceType) {
+      return undefined;
+    }
+    const sourceTypeText =
+      sourceType === 'PRODUCTION_SCRAP'
+        ? '生产报废补单'
+        : sourceType === 'ORDER_CHANGE'
+          ? '订单数量补单'
+          : sourceType;
+    return sourceRequestNo ? `${sourceTypeText}：${sourceRequestNo}` : sourceTypeText;
   }
 
   private toOrderWarehouseStage(order: any) {
@@ -1731,6 +2413,48 @@ export class OrdersService {
     return 'WAITING_PRODUCTION';
   }
 
+  private toOrderProductionStatus(order: any): ProductionStatus {
+    if (order.status === OrderStatus.COMPLETED) {
+      return ProductionStatus.COMPLETED;
+    }
+
+    const tasks = order.productionTasks || [];
+    if (tasks.length === 0) {
+      return ProductionStatus.PENDING;
+    }
+
+    const taskStatuses = tasks.map((task: any) => this.toEffectiveTaskProductionStatus(task));
+    if (taskStatuses.every((status: ProductionStatus) => status === ProductionStatus.COMPLETED)) {
+      return ProductionStatus.COMPLETED;
+    }
+    // 只要已有任务开工或部分任务完成，订单级生产状态就不再显示为待生产。
+    if (taskStatuses.some((status: ProductionStatus) => status !== ProductionStatus.PENDING)) {
+      return ProductionStatus.IN_PROGRESS;
+    }
+    return ProductionStatus.PENDING;
+  }
+
+  private parseEnumList<T extends string>(value: string | undefined, allowedValues: T[], fieldName: string) {
+    if (!value) {
+      return [];
+    }
+
+    const values = Array.from(
+      new Set(
+        value
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    );
+    const invalidValues = values.filter((item) => !allowedValues.includes(item as T));
+    if (invalidValues.length > 0) {
+      throw new BadRequestException(`${fieldName}不正确：${invalidValues.join('、')}`);
+    }
+
+    return values as T[];
+  }
+
   private toLineWarehouseInfo(line: any, stockQuantityByTaskNo = new Map<string, number>()) {
     const tasks = line.productionTasks || [];
     const lineBatches = (line.inventoryBatches || []).filter((batch: any) => batch.sourceOrderId);
@@ -1749,6 +2473,7 @@ export class OrdersService {
           productionScrapQuantity: 0,
           productionShortageMode: null,
           productionReplenishmentTaskNos: [],
+          productionReplenishmentRequestNos: [],
           productionShortageReasons: [],
           productionProgressText: '使用库存，无生产工序',
           warehouseStage: visibleLineBatch.status === 'AVAILABLE' ? 'WAITING_SHIPMENT' : 'SHIPPED',
@@ -1767,6 +2492,7 @@ export class OrdersService {
         productionScrapQuantity: 0,
         productionShortageMode: null,
         productionReplenishmentTaskNos: [],
+        productionReplenishmentRequestNos: [],
         productionShortageReasons: [],
         productionProgressText: '尚未生成生产任务',
         warehouseStage: 'ORDER_DRAFT',
@@ -1824,7 +2550,7 @@ export class OrdersService {
   }
 
   private formatLineProductionProgress(tasks: any[]) {
-    // 订单变更和补单必须让操作人员先看到当前零件进行到哪一道工序，避免把已生产变更误当成草稿修改。
+    // 订单变更和补单必须让操作人员先看到当前零件进行到哪一道工序，避免把已生产数量变更误当成草稿修改。
     if (tasks.length === 0) {
       return '尚未生成生产任务';
     }
@@ -1927,6 +2653,7 @@ export class OrdersService {
               scrapQuantity: decimalToNumber(finalCompletion.scrapQuantity),
               shortageMode: finalCompletion.shortageMode,
               replenishmentTaskNo: finalCompletion.replenishmentTaskNo,
+              replenishmentRequestNo: finalCompletion.replenishmentRequests?.[0]?.requestNo,
               managerName: finalCompletion.managerName,
               shortageReason: finalCompletion.shortageReason
             }
@@ -1936,6 +2663,9 @@ export class OrdersService {
 
     const productionReplenishmentTaskNos = shortageRecords
       .map((record: any) => record.replenishmentTaskNo)
+      .filter(Boolean);
+    const productionReplenishmentRequestNos = shortageRecords
+      .map((record: any) => record.replenishmentRequestNo)
       .filter(Boolean);
     const productionShortageReasons = shortageRecords
       .filter((record: any) => record.shortageMode === 'MANAGER_APPROVED')
@@ -1955,8 +2685,11 @@ export class OrdersService {
           ? null
           : shortageRecords.some((record: any) => record.shortageMode === 'REPLENISHMENT')
             ? 'REPLENISHMENT'
-            : 'MANAGER_APPROVED',
+            : shortageRecords.some((record: any) => record.shortageMode === 'REPLENISHMENT_REQUEST')
+              ? 'REPLENISHMENT_REQUEST'
+              : 'MANAGER_APPROVED',
       productionReplenishmentTaskNos,
+      productionReplenishmentRequestNos,
       productionShortageReasons
     };
   }

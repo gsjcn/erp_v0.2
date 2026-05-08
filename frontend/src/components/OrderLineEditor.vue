@@ -8,6 +8,8 @@
           value-key="partCode"
           placeholder="搜索物料"
           clearable
+          popper-class="material-suggestion-popper"
+          @input="handlePartCodeInput(row)"
           @select="(item: InventoryMaterialSuggestion) => selectMaterialSuggestion(row, item)"
         >
           <template #default="{ item }">
@@ -25,7 +27,7 @@
     </el-table-column>
     <el-table-column label="库存/生产方式" width="170">
       <template #default="{ row }">
-        <el-select v-model="row.fulfillmentMode" @change="handleFulfillmentModeChange(row)">
+        <el-select v-model="row.fulfillmentMode" placeholder="选择方式" @change="handleFulfillmentModeChange(row)">
           <el-option label="重新生产" value="PRODUCTION" />
           <el-option label="使用库存" value="STOCK" />
           <el-option label="库存再加工" value="REWORK" />
@@ -39,26 +41,57 @@
             {{ formatStockQuantity(row) }}
           </el-tag>
           <small :class="{ warning: stockGapQuantity(row) > 0 }">{{ stockStatusHint(row) }}</small>
+          <el-button class="stock-detail-button" link type="primary" @click="openStockDetails(row)">
+            查看库存来源
+          </el-button>
+          <el-tooltip
+            v-if="stockSourceReviewRequired(row)"
+            :content="stockSourceReviewHint(row)"
+            placement="top"
+          >
+            <el-tag :type="isStockSourceReviewed(row) ? 'success' : 'warning'" effect="plain">
+              {{ isStockSourceReviewed(row) ? '已核对来源' : '未核对来源' }}
+            </el-tag>
+          </el-tooltip>
+          <el-tooltip v-if="selectedSourceSummary(row)" :content="selectedSourceSummary(row)" placement="top">
+            <small class="selected-source-summary">
+              {{ selectedSourceSummary(row) }}
+            </small>
+          </el-tooltip>
         </div>
       </template>
     </el-table-column>
     <el-table-column label="厚度(mm)*" width="120">
       <template #default="{ row }">
-        <el-input-number v-model="row.partThickness" :min="0.001" :precision="3" :controls="false" style="width: 96px" />
+        <el-input-number
+          v-model="row.partThickness"
+          :min="0.001"
+          :precision="3"
+          :controls="false"
+          style="width: 96px"
+          @change="handleStockComparableChange(row)"
+        />
       </template>
     </el-table-column>
     <el-table-column label="成品规格" width="190">
       <template #default="{ row }">
-        <el-select v-model="row.partSpecification" filterable allow-create default-first-option placeholder="例如 120mm x 204mm x 10mm">
+        <el-select
+          v-model="row.partSpecification"
+          filterable
+          allow-create
+          default-first-option
+          placeholder="例如 120mm x 204mm x 10mm"
+          @change="handleStockComparableChange(row)"
+        >
           <el-option v-for="item in specificationOptions" :key="item" :label="item" :value="item" />
         </el-select>
       </template>
     </el-table-column>
     <el-table-column label="图号" width="130">
-      <template #default="{ row }"><el-input v-model="row.drawingNo" /></template>
+      <template #default="{ row }"><el-input v-model="row.drawingNo" @input="handleStockComparableChange(row)" /></template>
     </el-table-column>
     <el-table-column label="版本" width="90">
-      <template #default="{ row }"><el-input v-model="row.drawingVersion" placeholder="A" /></template>
+      <template #default="{ row }"><el-input v-model="row.drawingVersion" placeholder="A" @input="handleStockComparableChange(row)" /></template>
     </el-table-column>
     <el-table-column label="图纸" width="170">
       <template #default="{ row }">
@@ -100,11 +133,12 @@
           :disabled="row.fulfillmentMode === 'STOCK'"
           :controls="false"
           style="width: 110px"
+          @change="handlePlanQuantityChange(row)"
         />
       </template>
     </el-table-column>
     <el-table-column label="单位" width="100">
-      <template #default="{ row }"><el-input v-model="row.unit" /></template>
+      <template #default="{ row }"><el-input v-model="row.unit" @input="handleUnitInput(row)" /></template>
     </el-table-column>
     <el-table-column label="操作" width="96" fixed="right" align="center">
       <template #default="{ $index }">
@@ -136,6 +170,8 @@
             value-key="partCode"
             placeholder="搜索物料"
             clearable
+            popper-class="material-suggestion-popper"
+            @input="handlePartCodeInput(line)"
             @select="(item: InventoryMaterialSuggestion) => selectMaterialSuggestion(line, item)"
           >
             <template #default="{ item }">
@@ -153,7 +189,7 @@
         </label>
         <label>
           <span>库存/生产方式</span>
-          <el-select v-model="line.fulfillmentMode" @change="handleFulfillmentModeChange(line)">
+          <el-select v-model="line.fulfillmentMode" placeholder="选择方式" @change="handleFulfillmentModeChange(line)">
             <el-option label="重新生产" value="PRODUCTION" />
             <el-option label="使用库存" value="STOCK" />
             <el-option label="库存再加工" value="REWORK" />
@@ -166,23 +202,53 @@
               {{ formatStockQuantity(line) }}
             </el-tag>
             <small :class="{ warning: stockGapQuantity(line) > 0 }">{{ stockStatusHint(line) }}</small>
+            <el-button class="stock-detail-button" link type="primary" @click="openStockDetails(line)">
+              查看库存来源
+            </el-button>
+            <el-tooltip
+              v-if="stockSourceReviewRequired(line)"
+              :content="stockSourceReviewHint(line)"
+              placement="top"
+            >
+              <el-tag :type="isStockSourceReviewed(line) ? 'success' : 'warning'" effect="plain">
+                {{ isStockSourceReviewed(line) ? '已核对来源' : '未核对来源' }}
+              </el-tag>
+            </el-tooltip>
+            <el-tooltip v-if="selectedSourceSummary(line)" :content="selectedSourceSummary(line)" placement="top">
+              <small class="selected-source-summary">
+                {{ selectedSourceSummary(line) }}
+              </small>
+            </el-tooltip>
           </div>
         </label>
         <label>
           <span>图号</span>
-          <el-input v-model="line.drawingNo" />
+          <el-input v-model="line.drawingNo" @input="handleStockComparableChange(line)" />
         </label>
         <label>
           <span>图纸版本</span>
-          <el-input v-model="line.drawingVersion" placeholder="A" />
+          <el-input v-model="line.drawingVersion" placeholder="A" @input="handleStockComparableChange(line)" />
         </label>
         <label>
           <span>零件厚度(mm)*</span>
-          <el-input-number v-model="line.partThickness" :min="0.001" :precision="3" :controls="false" />
+          <el-input-number
+            v-model="line.partThickness"
+            :min="0.001"
+            :precision="3"
+            :controls="false"
+            @change="handleStockComparableChange(line)"
+          />
         </label>
         <label>
           <span>成品规格</span>
-          <el-select v-model="line.partSpecification" filterable allow-create default-first-option placeholder="例如 120mm x 204mm x 10mm">
+          <el-select
+            v-model="line.partSpecification"
+            filterable
+            allow-create
+            default-first-option
+            placeholder="例如 120mm x 204mm x 10mm"
+            @change="handleStockComparableChange(line)"
+          >
             <el-option v-for="item in specificationOptions" :key="item" :label="item" :value="item" />
           </el-select>
         </label>
@@ -215,29 +281,52 @@
             :min="productionPlanMin(line)"
             :disabled="line.fulfillmentMode === 'STOCK'"
             :controls="false"
+            @change="handlePlanQuantityChange(line)"
           />
         </label>
         <label>
           <span>单位</span>
-          <el-input v-model="line.unit" />
+          <el-input v-model="line.unit" @input="handleUnitInput(line)" />
         </label>
       </div>
     </article>
   </div>
+
+  <InventorySourceDetailsDialog
+    v-model="sourceDetailsVisible"
+    :loading="sourceDetailsLoading"
+    :detail="sourceDetails"
+    :expected="sourceExpected"
+    :selected-sources="currentSourceLine?.selectedStockSources || []"
+    review-mode
+    :reviewed="Boolean(currentSourceLine && isStockSourceReviewed(currentSourceLine))"
+    @source-search="loadStockDetailsForPart"
+    @selection-change="handleStockSourceSelectionChange"
+    @confirm-reviewed="handleStockSourceReviewed"
+  />
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import type { UploadRequestOptions } from 'element-plus';
 import { Delete } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
-import type { CreateOrderLinePayload } from '../api/erp';
-import type { InventoryMaterialSuggestion, InventorySummaryRow } from '../types/erp';
+import type { CreateOrderLinePayload, StockSourceSelectionPayload } from '../api/erp';
+import type { InventoryMaterialSuggestion, InventorySourceDetailResponse, InventorySourceExpected, InventorySummaryRow } from '../types/erp';
 import DrawingPreviewLink from './DrawingPreviewLink.vue';
+import InventorySourceDetailsDialog from './InventorySourceDetailsDialog.vue';
 import { confirmUploadDrawingFileName } from '../utils/orderLineDuplicateChecks';
 import { formatQuantity } from '../utils/format';
 import { availableStockQuantity as getAvailableStockQuantity, matchedStockSummary } from '../utils/orderLineStockChecks';
+import {
+  isStockSourceReviewed,
+  markStockSourceReviewed,
+  normalizeSelectedStockSources,
+  selectedStockSourceQuantity,
+  stockSourceRequiredQuantity,
+  stockSourceReviewRequired
+} from '../utils/stockSourceReview';
 
 const props = withDefaults(
   defineProps<{
@@ -258,6 +347,12 @@ const props = withDefaults(
 const lines = computed(() => props.lines);
 const defaultDeliveryDate = computed(() => props.defaultDeliveryDate);
 const removeButtonText = computed(() => (props.lines.length > props.minLines ? '删除' : '清空'));
+const sourceDetailsVisible = ref(false);
+const sourceDetailsLoading = ref(false);
+const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
+const sourceExpected = ref<InventorySourceExpected | null>(null);
+const currentSourceLine = ref<CreateOrderLinePayload | null>(null);
+const materialSuggestionRequestSeq = ref(0);
 
 const emit = defineEmits<{
   remove: [index: number];
@@ -271,6 +366,7 @@ function emitRemove(index: number) {
 }
 
 function emitQuantityChange(line: CreateOrderLinePayload) {
+  invalidateStockSourceReview(line);
   // 客户订单数量变化时由父页面统一同步生产计划数量，避免创建和编辑逻辑分叉。
   emit('quantityChange', line);
 }
@@ -282,9 +378,39 @@ function productionPlanMin(line: CreateOrderLinePayload) {
 function handleFulfillmentModeChange(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
     line.productionPlanQuantity = 0;
+    invalidateStockSourceReview(line);
+    void openStockDetails(line);
     return;
   }
+  if (line.fulfillmentMode === 'REWORK') {
+    invalidateStockSourceReview(line);
+    void openStockDetails(line);
+    return;
+  }
+  invalidateStockSourceReview(line, true);
   emitQuantityChange(line);
+}
+
+function invalidateStockSourceReview(line: CreateOrderLinePayload, clearSources = false, markSourcesForRecheck = false) {
+  // 零件、数量或使用方式变化后必须重新核对库存来源，防止沿用旧批次记录。
+  line.stockSourceReviewed = false;
+  line.stockSourceReviewSignature = '';
+  line.stockSourceAvailableQuantity = 0;
+  line.stockSourceMatchedQuantity = 0;
+  if (clearSources) {
+    line.selectedStockSources = [];
+    return;
+  }
+  if (markSourcesForRecheck && line.selectedStockSources?.length) {
+    line.selectedStockSources = line.selectedStockSources.map((source) => ({
+      ...source,
+      compatibilityStatus: 'UNKNOWN',
+      compatibilityReason: '订单图纸或规格资料已变更，需要重新核对库存来源',
+      manualConfirmedBy: undefined,
+      manualConfirmedAt: undefined,
+      manualConfirmRemark: undefined
+    }));
+  }
 }
 
 function availableStockQuantity(line: CreateOrderLinePayload) {
@@ -292,14 +418,8 @@ function availableStockQuantity(line: CreateOrderLinePayload) {
 }
 
 function stockRequiredQuantity(line: CreateOrderLinePayload) {
-  if (line.fulfillmentMode === 'STOCK') {
-    return Number(line.quantity || 0);
-  }
-  if (line.fulfillmentMode === 'REWORK') {
-    // 库存再加工按生产计划领料；客户只要 100 件但计划改 200 件时，需要先确认有 200 件备货库存。
-    return Number(line.productionPlanQuantity || line.quantity || 0);
-  }
-  return 0;
+  // STOCK 按客户订单数量占用库存；REWORK 按生产计划数量领料。
+  return stockSourceRequiredQuantity(line);
 }
 
 function stockDemandKey(line: CreateOrderLinePayload) {
@@ -323,6 +443,9 @@ function stockAggregateRequiredQuantity(line: CreateOrderLinePayload) {
 }
 
 function stockGapQuantity(line: CreateOrderLinePayload) {
+  if ((line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && isStockSourceReviewed(line)) {
+    return Math.max(stockAggregateRequiredQuantity(line) - selectedStockSourceQuantity(line), 0);
+  }
   return Math.max(stockAggregateRequiredQuantity(line) - availableStockQuantity(line), 0);
 }
 
@@ -338,37 +461,200 @@ function stockStatusHint(line: CreateOrderLinePayload) {
   const gap = stockGapQuantity(line);
   const requiredQuantity = stockAggregateRequiredQuantity(line);
   if (line.fulfillmentMode === 'STOCK') {
+    if (isStockSourceReviewed(line)) {
+      const matchedQuantity = selectedStockSourceQuantity(line);
+      return matchedQuantity + 0.0001 >= requiredQuantity
+        ? `已选库存 ${formatQuantity(matchedQuantity, line.unit || '件')}，需 ${formatQuantity(requiredQuantity, line.unit || '件')}`
+        : `已选库存不足，已选 ${formatQuantity(matchedQuantity, line.unit || '件')}，需 ${formatQuantity(requiredQuantity, line.unit || '件')}`;
+    }
     return gap > 0
-      ? `合计需要 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}`
-      : `可用，合计需要 ${formatQuantity(requiredQuantity, line.unit || '件')}`;
+      ? `总备货需 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}，仍需核对图纸`
+      : `总备货够用，需核对图纸来源`;
   }
   if (line.fulfillmentMode === 'REWORK') {
+    if (isStockSourceReviewed(line)) {
+      return `已选库存 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}`;
+    }
     return gap > 0
       ? `合计领料 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}`
-      : `可领库存再加工，合计 ${formatQuantity(requiredQuantity, line.unit || '件')}`;
+      : `可领库存再加工，仍需核对来源`;
   }
   return availableStockQuantity(line) > 0 ? '有备货库存' : '无备货库存';
 }
 
+function stockSourceReviewHint(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'STOCK') {
+    return '使用库存必须核对来源订单、任务号、图号、版本、规格、厚度和图纸文件；不匹配不能直接使用库存。';
+  }
+  if (line.fulfillmentMode === 'REWORK') {
+    return '库存再加工必须核对库存来源并保留记录；图纸或规格不一致时需要按再加工处理。';
+  }
+  return '';
+}
+
 function formatStockQuantity(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'STOCK' && isStockSourceReviewed(line)) {
+    return `已选 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}`;
+  }
+  if (line.fulfillmentMode === 'REWORK' && isStockSourceReviewed(line)) {
+    return `已选 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}`;
+  }
   return formatQuantity(availableStockQuantity(line), line.unit || '件');
+}
+
+function selectedSourceSummary(line: CreateOrderLinePayload) {
+  const sources = normalizeSelectedStockSources(line);
+  if (!sources.length) {
+    return '';
+  }
+  return sources
+    .map((source) => {
+      const label = source.batchNo || source.partCode || source.batchId;
+      const replenishmentMark = selectedSourceReplenishmentText(source);
+      const manualMark = source.compatibilityStatus && source.compatibilityStatus !== 'MATCHED' ? ' / 人工确认' : '';
+      const sourceMark = replenishmentMark ? ` / ${replenishmentMark}` : '';
+      return `${label} ${formatQuantity(source.quantity, source.unit || line.unit || '件')}${sourceMark}${manualMark}`;
+    })
+    .join('；');
+}
+
+function selectedSourceReplenishmentText(source: ReturnType<typeof normalizeSelectedStockSources>[number]) {
+  if (source.replenishmentSourceLabel) {
+    return source.replenishmentSourceLabel;
+  }
+  if (!source.replenishmentSourceType) {
+    return '';
+  }
+  const sourceTypeText =
+    source.replenishmentSourceType === 'PRODUCTION_SCRAP'
+      ? '生产报废补单'
+      : source.replenishmentSourceType === 'ORDER_CHANGE'
+        ? '订单数量补单'
+        : source.replenishmentSourceType;
+  return source.replenishmentSourceRequestNo ? `${sourceTypeText}：${source.replenishmentSourceRequestNo}` : sourceTypeText;
+}
+
+async function openStockDetails(line: CreateOrderLinePayload) {
+  if (!line.partCode?.trim()) {
+    ElMessage.warning('请先选择物料编码');
+    return;
+  }
+  currentSourceLine.value = line;
+  sourceDetailsVisible.value = true;
+  sourceDetailsLoading.value = true;
+  sourceDetails.value = null;
+  sourceExpected.value = {
+    partCode: line.partCode,
+    partName: line.partName,
+    drawingNo: line.drawingNo,
+    drawingVersion: line.drawingVersion,
+    drawingFileName: line.drawingFileName,
+    drawingFileUrl: line.drawingFileUrl,
+    partThickness: line.partThickness,
+    partSpecification: line.partSpecification,
+    requiredQuantity: stockRequiredQuantity(line),
+    unit: line.unit,
+    fulfillmentMode: line.fulfillmentMode
+  };
+  await loadStockDetailsForPart(line.partCode.trim());
+}
+
+async function loadStockDetailsForPart(partCode: string) {
+  if (!currentSourceLine.value || !partCode.trim()) {
+    return;
+  }
+  sourceDetailsLoading.value = true;
+  sourceDetails.value = null;
+  try {
+    sourceDetails.value = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
+      unit: currentSourceLine.value.unit,
+      sourceType: 'STOCK'
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败');
+  } finally {
+    sourceDetailsLoading.value = false;
+  }
+}
+
+function handleStockSourceSelectionChange(sources: StockSourceSelectionPayload[]) {
+  if (!currentSourceLine.value) {
+    return;
+  }
+  currentSourceLine.value.selectedStockSources = sources;
+  currentSourceLine.value.stockSourceReviewed = false;
+  currentSourceLine.value.stockSourceReviewSignature = '';
+  currentSourceLine.value.stockSourceAvailableQuantity = sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
+  currentSourceLine.value.stockSourceMatchedQuantity = currentSourceLine.value.stockSourceAvailableQuantity;
+}
+
+function handleStockSourceReviewed() {
+  if (!currentSourceLine.value) {
+    return;
+  }
+  const selectedQuantity = selectedStockSourceQuantity(currentSourceLine.value);
+  if (selectedQuantity <= 0) {
+    ElMessage.warning('当前没有可用库存来源，不能确认');
+    return;
+  }
+  if (selectedQuantity + 0.0001 < stockRequiredQuantity(currentSourceLine.value)) {
+    ElMessage.warning('已选库存数量不足，不能确认');
+    return;
+  }
+  currentSourceLine.value.stockSourceAvailableQuantity = selectedQuantity;
+  currentSourceLine.value.stockSourceMatchedQuantity = selectedQuantity;
+  markStockSourceReviewed(currentSourceLine.value);
+  sourceDetailsVisible.value = false;
+  ElMessage.success('库存来源已核对');
 }
 
 async function queryMaterialSuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
   const normalizedKeyword = keyword.trim();
+  const requestId = ++materialSuggestionRequestSeq.value;
+  callback([]);
   try {
-    callback(await erpApi.inventoryMaterialSuggestions(normalizedKeyword));
+    const result = await erpApi.inventoryMaterialSuggestions(normalizedKeyword);
+    if (requestId === materialSuggestionRequestSeq.value) {
+      callback(result);
+    }
   } catch {
-    callback([]);
+    if (requestId === materialSuggestionRequestSeq.value) {
+      callback([]);
+    }
   }
 }
 
 function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryMaterialSuggestion) {
+  invalidateStockSourceReview(line, true);
   line.partCode = item.partCode;
   line.partName = item.partName;
   line.unit = item.unit || line.unit || '件';
   if (!line.partSpecification && item.partSpecification) {
     line.partSpecification = item.partSpecification;
+  }
+}
+
+function handlePartCodeInput(line: CreateOrderLinePayload) {
+  if (line.selectedStockSources?.length || line.stockSourceReviewed) {
+    invalidateStockSourceReview(line, true);
+  }
+}
+
+function handleStockComparableChange(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK' || line.selectedStockSources?.length) {
+    invalidateStockSourceReview(line, false, true);
+  }
+}
+
+function handlePlanQuantityChange(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'REWORK' || line.selectedStockSources?.length) {
+    invalidateStockSourceReview(line);
+  }
+}
+
+function handleUnitInput(line: CreateOrderLinePayload) {
+  if (line.selectedStockSources?.length || line.stockSourceReviewed) {
+    invalidateStockSourceReview(line, true);
   }
 }
 
@@ -389,6 +675,7 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
     // 图纸先上传到后端文件目录，订单保存时只保存文件名和访问地址。
     line.drawingFileName = result.fileName;
     line.drawingFileUrl = result.fileUrl;
+    invalidateStockSourceReview(line, false, true);
     options.onSuccess?.(result);
     ElMessage.success('图纸已上传');
   } catch (error) {
@@ -464,6 +751,21 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   color: #dc2626;
 }
 
+.selected-source-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  max-width: 220px;
+  color: #2563eb !important;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.stock-detail-button {
+  justify-self: start;
+  padding: 0;
+  font-size: 12px;
+}
+
 .drawing-upload-cell :deep(.drawing-preview-button) {
   overflow: hidden;
   color: #2563eb;
@@ -492,5 +794,44 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
 .material-suggestion small {
   color: #64748b;
   font-size: 12px;
+}
+
+:global(.material-suggestion-popper .el-autocomplete-suggestion__wrap) {
+  max-height: 340px;
+}
+
+:global(.material-suggestion-popper .el-autocomplete-suggestion li) {
+  min-height: 58px;
+  padding: 6px 14px;
+}
+
+@media (max-width: 900px) {
+  .stock-status-cell {
+    align-items: stretch;
+  }
+
+  .stock-status-cell :deep(.el-tag) {
+    width: fit-content;
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .selected-source-summary {
+    max-width: 100%;
+    -webkit-line-clamp: 3;
+  }
+
+  .stock-detail-button {
+    justify-self: stretch;
+    min-height: 36px;
+    border: 1px solid #dbeafe;
+    border-radius: 6px;
+    background: #f8fbff;
+  }
+
+  .drawing-upload-cell :deep(.drawing-preview-button) {
+    max-width: 100%;
+    white-space: normal;
+  }
 }
 </style>

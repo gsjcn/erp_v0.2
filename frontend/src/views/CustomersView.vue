@@ -251,6 +251,7 @@ const codeCheckText = ref('');
 let nameCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let codeCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let customerSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
+let customerSuggestionSequence = 0;
 
 const form = reactive<CustomerForm>(blankForm());
 
@@ -309,6 +310,8 @@ async function loadCustomers() {
   loading.value = true;
   try {
     customers.value = await erpApi.customers(keyword.value, statusFilter.value);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败');
   } finally {
     loading.value = false;
   }
@@ -321,11 +324,17 @@ function reset() {
 }
 
 async function queryCustomerSuggestions(queryString: string, callback: (items: CustomerSearchSuggestion[]) => void) {
+  const requestId = ++customerSuggestionSequence;
+  callback([]);
   try {
     const result = await erpApi.customers(queryString, statusFilter.value);
-    callback(result);
+    if (requestId === customerSuggestionSequence) {
+      callback(result);
+    }
   } catch {
-    callback([]);
+    if (requestId === customerSuggestionSequence) {
+      callback([]);
+    }
   }
 }
 
@@ -755,13 +764,34 @@ onBeforeUnmount(clearCheckTimers);
 }
 
 @media (max-width: 900px) {
+  .customer-form-grid {
+    grid-template-columns: 1fr;
+  }
+
   .check-field {
     flex-direction: column;
     align-items: stretch;
   }
 
+  .form-section-title {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .form-section-title .el-button {
+    width: 100%;
+  }
+
   .contact-row {
     grid-template-columns: 1fr;
+  }
+
+  .customer-suggestion {
+    height: auto;
+    min-height: 40px;
+    line-height: 20px;
+    white-space: normal;
   }
 }
 </style>
