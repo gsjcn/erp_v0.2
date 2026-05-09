@@ -18,7 +18,7 @@
         <div class="order-option">
           <div class="order-option-main">
             <strong>{{ order.orderNo }}</strong>
-            <StatusTag :value="order.status" compact />
+            <StatusTag :value="orderDisplayStatus(order)" compact />
           </div>
           <span>{{ order.customerName }}</span>
           <small>订单 {{ formatDate(order.orderDate) }} / 交期 {{ formatDate(order.deliveryDate) }} / {{ order.partCount }} 个零件</small>
@@ -26,7 +26,7 @@
       </el-option>
     </el-select>
     <div v-if="selectedOrder" class="order-select-summary">
-      {{ selectedOrder.customerName }}（{{ selectedOrder.customerCode }}） / 订单 {{ formatDate(selectedOrder.orderDate) }} / 交期 {{ formatDate(selectedOrder.deliveryDate) }} /
+      {{ selectedOrder.customerName }} / 订单 {{ formatDate(selectedOrder.orderDate) }} / 交期 {{ formatDate(selectedOrder.deliveryDate) }} /
       {{ selectedOrder.partCount }} 个零件
     </div>
   </div>
@@ -37,6 +37,7 @@ import { computed, ref, watch } from 'vue';
 import StatusTag from './StatusTag.vue';
 import type { OrderSummary } from '../types/erp';
 import { formatDate } from '../utils/format';
+import { orderDisplayStatus } from '../utils/orderStatus';
 import { pinyinSearchMatches } from '../utils/pinyinSearch';
 
 const props = withDefaults(

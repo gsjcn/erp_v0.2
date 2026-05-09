@@ -1,7 +1,7 @@
 <template>
   <section class="page">
     <div class="page-header">
-      <h2 class="page-title">生产任务</h2>
+      <h2 class="page-title">生产管理</h2>
       <div class="page-actions">
         <el-badge :value="pendingNoticeCount" :hidden="pendingNoticeCount === 0" class="notice-badge">
           <el-button :icon="Bell" @click="openNotices">通知</el-button>
@@ -14,8 +14,8 @@
         <el-button :icon="Document" @click="openReplenishmentRequests">生产报废补单</el-button>
         </el-badge>
         <el-button :icon="Document" @click="openScrapRecords">报废统计</el-button>
-        <el-button :icon="Download" :disabled="filteredTasks.length === 0" @click="exportExcel">导出 Excel</el-button>
-        <el-button :icon="Printer" :disabled="filteredTasks.length === 0" @click="openPrintPreview">打印预览</el-button>
+        <el-button :icon="Download" :disabled="printableRowCount === 0" @click="exportExcel">导出 Excel</el-button>
+        <el-button :icon="Printer" :disabled="printableRowCount === 0" @click="openPrintPreview">打印预览</el-button>
         <el-button :icon="Refresh" :loading="loading" @click="queryTasks">刷新</el-button>
       </div>
     </div>
@@ -38,7 +38,13 @@
 
       <div class="filter-field">
         <label>订单</label>
-        <OrderSelect v-model="filters.orderNo" :orders="orderOptions" placeholder="全部订单" width="320px" @change="queryTasks" />
+        <OrderSelect
+          v-model="filters.orderNo"
+          :orders="orderOptions"
+          placeholder="全部订单"
+          width="320px"
+          @change="handleOrderFilterChange"
+        />
       </div>
 
       <el-button type="primary" :loading="loading" @click="queryTasks">查询</el-button>
@@ -46,39 +52,252 @@
     </div>
 
     <div class="stat-grid">
-      <div class="stat-card">
-        <div class="stat-label">待生产</div>
-        <div class="stat-value">{{ counts.PENDING }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">生产中</div>
-        <div class="stat-value">{{ counts.IN_PROGRESS }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">待确认完成</div>
-        <div class="stat-value">{{ counts.READY_TO_COMPLETE }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">已完成</div>
-        <div class="stat-value">{{ counts.COMPLETED }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">已入库</div>
-        <div class="stat-value">{{ counts.RECEIVED }}</div>
+      <button
+        v-for="item in productionStatCards"
+        :key="item.key"
+        type="button"
+        :class="['stat-card', 'stat-card-button', { active: isProductionStatActive(item.key) }]"
+        @click="handleProductionStatClick(item.key)"
+      >
+        <div class="stat-label">{{ item.label }}</div>
+        <div class="stat-value">{{ item.value }}</div>
+      </button>
+    </div>
+
+    <div class="production-view-toolbar">
+      <el-radio-group v-model="viewMode" size="large" @change="handleViewModeChange">
+        <el-radio-button value="ORDER_SUMMARY">订单汇总</el-radio-button>
+        <el-radio-button value="TASK_DETAIL">零件任务明细</el-radio-button>
+      </el-radio-group>
+      <div v-if="selectedProductionOrderNo" class="detail-scope">
+        <span>当前订单：{{ selectedProductionOrderNo }}</span>
+        <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
+        <el-button size="small" @click="backToOrderSummary">返回订单汇总</el-button>
+        <el-button
+          type="primary"
+          plain
+          size="small"
+          :disabled="selectedOrderPendingTasks.length === 0"
+          @click="openBatchStartForCurrentOrder"
+        >
+          批量开始待确认生产
+        </el-button>
+        <el-button
+          type="primary"
+          size="small"
+          :disabled="selectedStartableTasks.length === 0"
+          @click="openBatchStartForSelected"
+        >
+          批量开始所选
+        </el-button>
       </div>
     </div>
 
-    <el-tabs v-model="activeStatus" class="mt-16">
-      <el-tab-pane label="全部" name="ALL" />
-      <el-tab-pane label="待生产" name="PENDING" />
-      <el-tab-pane label="生产中" name="IN_PROGRESS" />
-      <el-tab-pane label="待确认完成" name="READY_TO_COMPLETE" />
-      <el-tab-pane label="已完成" name="COMPLETED" />
-      <el-tab-pane label="已入库" name="RECEIVED" />
-    </el-tabs>
+    <section v-if="selectedProductionOrderNo && selectedOrderOverview" class="order-production-overview">
+      <div class="order-overview-title">
+        <span>订单生产概况</span>
+        <strong><OrderNoLink :order-no="selectedOrderOverview.orderNo" /></strong>
+        <small>
+          {{ selectedOrderOverview.customerName }} / 订单 {{ formatDate(selectedOrderOverview.orderDate) }} / 交期
+          {{ formatDate(selectedOrderOverview.deliveryDate) }}
+        </small>
+      </div>
+      <div class="order-overview-metrics">
+        <div>
+          <span>零件 / 任务</span>
+          <strong>{{ selectedOrderOverview.partCount }} / {{ selectedOrderOverview.taskCount }}</strong>
+        </div>
+        <div>
+          <span>生产数量</span>
+          <strong>{{ orderSummaryQuantityText(selectedOrderOverview) }}</strong>
+        </div>
+        <div>
+          <span>整体进度</span>
+          <strong>{{ selectedOrderOverview.progressPercent }}%</strong>
+        </div>
+        <div>
+          <span>当前进度</span>
+          <strong>{{ orderSummaryProgressItems(selectedOrderOverview).join('、') || '-' }}</strong>
+        </div>
+      </div>
+      <div class="order-overview-progress">
+        <el-progress :percentage="selectedOrderOverview.progressPercent" :stroke-width="10" />
+        <div class="summary-status-chain">
+          <span v-if="selectedOrderOverview.pendingCount">待确认生产 {{ selectedOrderOverview.pendingCount }}</span>
+          <span v-if="selectedOrderOverview.inProgressCount">生产中 {{ selectedOrderOverview.inProgressCount }}</span>
+          <span v-if="selectedOrderOverview.readyToCompleteCount">待确认完成 {{ selectedOrderOverview.readyToCompleteCount }}</span>
+          <span v-if="selectedOrderOverview.completedCount">已完成 {{ selectedOrderOverview.completedCount }}</span>
+          <span v-if="selectedOrderOverview.receivedCount">已入库 {{ selectedOrderOverview.receivedCount }}</span>
+        </div>
+      </div>
+    </section>
+
+    <template v-if="viewMode === 'ORDER_SUMMARY'">
+      <el-tabs v-model="activeOrderStatus" class="mt-16">
+        <el-tab-pane label="全部" name="ALL" />
+        <el-tab-pane label="待处理" name="ACTIVE" />
+        <el-tab-pane label="待确认生产" name="PENDING" />
+        <el-tab-pane label="生产中" name="IN_PROGRESS" />
+        <el-tab-pane label="待确认完成" name="READY_TO_COMPLETE" />
+        <el-tab-pane label="已完成" name="COMPLETED" />
+        <el-tab-pane label="已入库" name="RECEIVED" />
+      </el-tabs>
+
+      <div class="table-card desktop-table">
+        <el-table v-loading="loading" :data="filteredOrderSummaries" max-height="max(300px, calc(100vh - 430px))">
+          <el-table-column label="订单号" min-width="170">
+            <template #default="{ row }">
+              <OrderNoLink :order-no="row.orderNo" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="customerName" label="客户" min-width="170" />
+          <el-table-column label="订单日期" width="115">
+            <template #default="{ row }">{{ formatDate(row.orderDate) }}</template>
+          </el-table-column>
+          <el-table-column label="交期" width="115">
+            <template #default="{ row }">{{ formatDate(row.deliveryDate) }}</template>
+          </el-table-column>
+          <el-table-column label="零件/任务" width="110">
+            <template #default="{ row }">{{ row.partCount }} / {{ row.taskCount }}</template>
+          </el-table-column>
+          <el-table-column label="生产数量" min-width="190">
+            <template #default="{ row }">{{ orderSummaryQuantityText(row) }}</template>
+          </el-table-column>
+          <el-table-column label="订单进度" min-width="160">
+            <template #default="{ row }">
+              <el-progress :percentage="row.progressPercent" :stroke-width="10" />
+            </template>
+          </el-table-column>
+          <el-table-column label="当前进度" min-width="220">
+            <template #default="{ row }">
+              <div class="summary-status-chain">
+                <span v-for="item in orderSummaryProgressItems(row)" :key="item">{{ item }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态分布" min-width="230">
+            <template #default="{ row }">
+              <div class="summary-status-chain">
+                <span v-if="row.pendingCount">待确认生产 {{ row.pendingCount }}</span>
+                <span v-if="row.inProgressCount">生产中 {{ row.inProgressCount }}</span>
+                <span v-if="row.readyToCompleteCount">待确认完成 {{ row.readyToCompleteCount }}</span>
+                <span v-if="row.completedCount">已完成 {{ row.completedCount }}</span>
+                <span v-if="row.receivedCount">已入库 {{ row.receivedCount }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="订单状态" width="130">
+            <template #default="{ row }">
+              <el-tag :type="productionStatusTagType(row.status)" effect="light" round>
+                {{ productionStatusLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="220" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="openOrderProductionDetail(row)">进入生产详情</el-button>
+              <el-button v-if="row.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(row)">
+                批量开始生产
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div v-loading="loading" class="mobile-card-list">
+        <article v-for="summary in filteredOrderSummaries" :key="summary.orderId" class="mobile-card">
+          <div class="mobile-card-header">
+            <div class="mobile-card-title">
+              <strong><OrderNoLink :order-no="summary.orderNo" /></strong>
+              <small>{{ summary.customerName }}</small>
+            </div>
+            <el-tag :type="productionStatusTagType(summary.status)" effect="light" round>
+              {{ productionStatusLabel(summary.status) }}
+            </el-tag>
+          </div>
+          <div class="mobile-card-fields">
+            <div class="mobile-field">
+              <label>订单日期</label>
+              <span>{{ formatDate(summary.orderDate) }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>交期</label>
+              <span>{{ formatDate(summary.deliveryDate) }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>零件/任务</label>
+              <span>{{ summary.partCount }} / {{ summary.taskCount }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>进度</label>
+              <span>{{ summary.progressPercent }}%</span>
+            </div>
+            <div class="mobile-field mobile-full">
+              <label>生产数量</label>
+              <span>{{ orderSummaryQuantityText(summary) }}</span>
+            </div>
+            <div class="mobile-field mobile-full">
+              <label>当前进度</label>
+              <span>{{ orderSummaryProgressItems(summary).join('、') || '-' }}</span>
+            </div>
+          </div>
+          <div class="mobile-card-actions">
+            <el-button link type="primary" @click="openOrderProductionDetail(summary)">进入生产详情</el-button>
+            <el-button v-if="summary.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(summary)">
+              批量开始生产
+            </el-button>
+          </div>
+        </article>
+        <div v-if="!filteredOrderSummaries.length && !loading" class="mobile-empty">暂无生产订单</div>
+      </div>
+    </template>
+
+    <template v-else>
+      <el-tabs v-model="activeStatus" class="mt-16">
+        <el-tab-pane label="全部" name="ALL" />
+        <el-tab-pane label="待确认生产" name="PENDING" />
+        <el-tab-pane label="生产中" name="IN_PROGRESS" />
+        <el-tab-pane label="待确认完成" name="READY_TO_COMPLETE" />
+        <el-tab-pane label="已完成" name="COMPLETED" />
+        <el-tab-pane label="已入库" name="RECEIVED" />
+      </el-tabs>
+
+      <el-alert
+        v-if="selectedProductionOrderNo && !scopedTasks.length && !loading"
+        class="mt-16"
+        type="info"
+        :closable="false"
+        show-icon
+      >
+        <template #title>
+          该订单当前没有需要车间处理的生产任务
+        </template>
+        <template #default>
+          <div class="empty-production-hint">
+            <span>
+              {{ selectedProductionOrderNo }} 可能已全量使用库存，订单库存已进入仓库待发货。可查看订单明细或到仓库待发货继续处理。
+            </span>
+            <div class="empty-production-actions">
+              <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
+              <el-button size="small" type="primary" @click="goSelectedOrderWarehouse">到仓库待发货</el-button>
+            </div>
+          </div>
+        </template>
+      </el-alert>
 
     <div class="table-card desktop-table">
-      <el-table v-loading="loading" :data="filteredTasks" max-height="max(300px, calc(100vh - 430px))">
+      <el-table
+        v-loading="loading"
+        :data="filteredTasks"
+        max-height="max(300px, calc(100vh - 430px))"
+        @selection-change="handleTaskSelectionChange"
+      >
+        <el-table-column
+          v-if="selectedProductionOrderNo"
+          type="selection"
+          width="48"
+          :selectable="canBatchSelectTask"
+        />
         <el-table-column label="任务号" min-width="190">
           <template #default="{ row }">
             <div class="cell-main">{{ row.productionTaskNo }}</div>
@@ -134,9 +353,15 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="当前工序" min-width="140">
+          <template #default="{ row }">
+            <div class="cell-main">{{ currentProcessText(row) }}</div>
+            <div class="cell-subtext">{{ processProgressText(row) }}</div>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
-            <StatusTag :value="effectiveProductionStatus(row)" />
+            <StatusTag :value="effectiveProductionStatus(row)" :label-override="productionStatusLabel(effectiveProductionStatus(row))" />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
@@ -182,11 +407,22 @@
             <small>{{ task.productionTaskNo }}</small>
             <small v-if="taskRelationText(task)">{{ taskRelationText(task) }}</small>
           </div>
+          <el-checkbox
+            v-if="selectedProductionOrderNo && shouldShowStartAction(task)"
+            :model-value="selectedStartableTaskIds.includes(task.id)"
+            :value="task.id"
+            class="mobile-start-checkbox"
+            @change="toggleMobileStartSelection(task, Boolean($event))"
+          >
+            勾选生产
+          </el-checkbox>
         </div>
         <div class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
-            <span><StatusTag :value="effectiveProductionStatus(task)" /></span>
+            <span>
+              <StatusTag :value="effectiveProductionStatus(task)" :label-override="productionStatusLabel(effectiveProductionStatus(task))" />
+            </span>
           </div>
           <div class="mobile-field mobile-full">
             <label>订单号</label>
@@ -240,6 +476,14 @@
               </button>
             </div>
           </div>
+          <div class="mobile-field">
+            <label>当前工序</label>
+            <span>{{ currentProcessText(task) }}</span>
+          </div>
+          <div class="mobile-field">
+            <label>工序进度</label>
+            <span>{{ processProgressText(task) }}</span>
+          </div>
         </div>
         <div class="mobile-card-actions">
           <el-button
@@ -274,12 +518,17 @@
       </article>
       <div v-if="!filteredTasks.length && !loading" class="mobile-empty">暂无生产任务</div>
     </div>
+    </template>
 
     <el-dialog
       v-model="startConfirmVisible"
       title="开始生产确认"
       width="min(640px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!startSaving"
+      :close-on-press-escape="!startSaving"
+      :show-close="!startSaving"
+      @closed="resetStartDialog"
     >
       <div v-if="activeStartTask" class="start-confirm-panel">
         <el-alert
@@ -313,7 +562,7 @@
                 </div>
               </el-option>
             </el-select>
-            <div class="form-help-text">开始生产必须由车间主任确认；提交生产仍由下计划操作员处理。</div>
+            <div class="form-help-text">开始生产必须由车间主任确认；提交生产仍由下单/计划操作员处理。</div>
           </el-form-item>
         </el-form>
         <div class="process-info-grid">
@@ -348,9 +597,91 @@
         </div>
       </div>
       <template #footer>
-        <el-button :disabled="startSaving" @click="startConfirmVisible = false">取消</el-button>
+        <el-button :disabled="startSaving" @click="closeStartDialog">取消</el-button>
         <el-button type="primary" :loading="startSaving" :disabled="!startSupervisorCode" @click="confirmStartProduction">
           确认开始生产
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="batchStartVisible"
+      title="批量开始生产确认"
+      width="min(720px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!batchStartSaving"
+      :close-on-press-escape="!batchStartSaving"
+      :show-close="!batchStartSaving"
+      @closed="resetBatchStartDialog"
+    >
+      <div class="start-confirm-panel">
+        <el-alert
+          title="批量开始后，所选任务会统一进入生产中。车间主任仍可在订单生产详情内逐个填写工序记录。"
+          type="warning"
+          :closable="false"
+        />
+        <el-form label-width="96px" class="supervisor-form">
+          <el-form-item label="车间主任" required>
+            <el-select
+              v-model="batchStartSupervisorCode"
+              filterable
+              remote
+              clearable
+              reserve-keyword
+              placeholder="选择车间主任，支持姓名 / 拼音 / 首字母 / 账号ID"
+              :remote-method="searchBatchStartSupervisors"
+              :loading="isOperatorLoading(batchStartSupervisorScope)"
+              style="width: min(360px, 100%)"
+              @visible-change="handleBatchStartSupervisorSelectVisible"
+            >
+              <el-option
+                v-for="operator in batchStartSupervisorOptionRows"
+                :key="operator.code"
+                :label="operatorOptionLabel(operator)"
+                :value="operator.code"
+              >
+                <div class="operator-option">
+                  <strong>{{ operator.name }}</strong>
+                  <span>{{ operator.accountId || operator.code }} / {{ operator.role }}</span>
+                </div>
+              </el-option>
+            </el-select>
+            <div class="form-help-text">批量开始生产只能由车间主任确认。</div>
+          </el-form-item>
+        </el-form>
+        <div class="batch-start-heading">
+          <div>
+            <strong>{{ batchStartOrderNo }}</strong>
+            <span>已选择 {{ batchStartSelectedTaskIds.length }} / {{ batchStartTasks.length }} 项待确认生产任务</span>
+          </div>
+          <div class="batch-start-actions">
+            <el-button size="small" :disabled="batchStartSelectedTaskIds.length === batchStartTasks.length" @click="selectAllBatchStartTasks">
+              全选
+            </el-button>
+            <el-button size="small" :disabled="batchStartSelectedTaskIds.length === 0" @click="clearBatchStartTasks">
+              清空
+            </el-button>
+          </div>
+        </div>
+        <el-checkbox-group v-model="batchStartSelectedTaskIds" class="batch-task-list">
+          <el-checkbox v-for="task in batchStartTasks" :key="task.id" :value="task.id" class="batch-task-item">
+            <div>
+              <strong>{{ task.partName }}</strong>
+              <span>{{ task.productionTaskNo }} / {{ formatQuantity(task.plannedQuantity, task.unit) }}</span>
+            </div>
+            <small>{{ task.processSteps.map((step) => processStepDisplay(task, step)).join(' → ') || '未配置生产流程' }}</small>
+          </el-checkbox>
+        </el-checkbox-group>
+      </div>
+      <template #footer>
+        <el-button :disabled="batchStartSaving" @click="closeBatchStartDialog">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="batchStartSaving"
+          :disabled="!batchStartSupervisorCode || batchStartSelectedTaskIds.length === 0"
+          @click="confirmBatchStartProduction"
+        >
+          确认批量开始生产
         </el-button>
       </template>
     </el-dialog>
@@ -372,7 +703,7 @@
           >
             确认已知晓
           </el-button>
-          <StatusTag v-else value="COMPLETED" compact />
+          <StatusTag v-else value="ACKNOWLEDGED" compact />
         </article>
       </div>
       <template #footer>
@@ -395,10 +726,10 @@
     <el-dialog v-model="replenishmentRequestVisible" title="生产报废补单申请" width="min(980px, calc(100vw - 32px))">
       <div class="replenishment-request-toolbar">
         <el-radio-group v-model="replenishmentRequestStatusFilter" size="small">
-          <el-radio-button label="ALL">全部 {{ productionReplenishmentRequests.length }}</el-radio-button>
-          <el-radio-button label="PENDING">待确认 {{ replenishmentRequestCounts.PENDING }}</el-radio-button>
-          <el-radio-button label="APPROVED">已生成报废补单 {{ replenishmentRequestCounts.APPROVED }}</el-radio-button>
-          <el-radio-button label="REJECTED">已驳回 {{ replenishmentRequestCounts.REJECTED }}</el-radio-button>
+          <el-radio-button value="ALL">全部 {{ productionReplenishmentRequests.length }}</el-radio-button>
+          <el-radio-button value="PENDING">待确认 {{ replenishmentRequestCounts.PENDING }}</el-radio-button>
+          <el-radio-button value="APPROVED">已生成报废补单 {{ replenishmentRequestCounts.APPROVED }}</el-radio-button>
+          <el-radio-button value="REJECTED">已驳回 {{ replenishmentRequestCounts.REJECTED }}</el-radio-button>
         </el-radio-group>
         <el-input
           v-model="replenishmentRequestKeyword"
@@ -420,7 +751,11 @@
           <div class="replenishment-request-main">
             <div class="replenishment-request-title">
               <strong>{{ request.requestNo }}</strong>
-              <StatusTag :value="replenishmentRequestStatusTag(request.status)" compact />
+              <StatusTag
+                :value="replenishmentRequestStatusTag(request.status)"
+                :label-override="replenishmentRequestStatusText(request.status)"
+                compact
+              />
             </div>
             <div class="replenishment-request-grid">
               <p><span>订单号</span><OrderNoLink :order-no="request.orderNo" /></p>
@@ -663,8 +998,8 @@
           />
           <el-form-item :label="`当前工序 ${activeProcessLabel}`" required>
             <el-radio-group v-model="processForm.isCompleted" :disabled="activeProcessReadonly">
-              <el-radio-button :label="true">已完成</el-radio-button>
-              <el-radio-button :label="false" :disabled="activeTask.status === 'COMPLETED'">未完成</el-radio-button>
+              <el-radio-button :value="true">已完成</el-radio-button>
+              <el-radio-button :value="false" :disabled="activeTask.status === 'COMPLETED'">未完成</el-radio-button>
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="!activeProcessReadonly && batchProcessOptions.length > 1 && processForm.isCompleted" label="同时完成">
@@ -727,8 +1062,8 @@
             </el-form-item>
             <el-form-item label="处理方式" required>
               <el-radio-group v-model="processForm.shortageMode" :disabled="activeProcessReadonly">
-                <el-radio-button label="REPLENISHMENT_REQUEST">生产报废补单申请</el-radio-button>
-                <el-radio-button label="MANAGER_APPROVED">管理确认缺货完成</el-radio-button>
+                <el-radio-button value="REPLENISHMENT_REQUEST">生产报废补单申请</el-radio-button>
+                <el-radio-button value="MANAGER_APPROVED">管理确认缺货完成</el-radio-button>
               </el-radio-group>
             </el-form-item>
             <el-alert
@@ -844,6 +1179,10 @@
       v-model="finalConfirmVisible"
       :title="finalConfirmTitle"
       width="min(720px, calc(100vw - 32px))"
+      :close-on-click-modal="!finalSaving"
+      :close-on-press-escape="!finalSaving"
+      :show-close="!finalSaving"
+      @closed="resetFinalConfirmDialog"
     >
       <div v-if="activeFinalTask" class="final-confirm-panel">
         <div class="process-info-grid">
@@ -953,8 +1292,8 @@
             </el-form-item>
             <el-form-item label="处理方式" required>
               <el-radio-group v-model="finalForm.shortageMode">
-                <el-radio-button label="REPLENISHMENT_REQUEST">生产报废补单申请</el-radio-button>
-                <el-radio-button label="MANAGER_APPROVED">管理确认缺货完成</el-radio-button>
+                <el-radio-button value="REPLENISHMENT_REQUEST">生产报废补单申请</el-radio-button>
+                <el-radio-button value="MANAGER_APPROVED">管理确认缺货完成</el-radio-button>
               </el-radio-group>
             </el-form-item>
             <el-alert
@@ -1012,7 +1351,7 @@
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="finalConfirmVisible = false">取消</el-button>
+        <el-button :disabled="finalSaving" @click="closeFinalConfirmDialog">取消</el-button>
         <el-button type="primary" :loading="finalSaving" :disabled="!finalSupervisorCode" @click="saveFinalProductionCompletion">
           {{ activeFinalTask?.status === 'COMPLETED' ? '保存修改' : '确认完成' }}
         </el-button>
@@ -1116,7 +1455,7 @@
         </div>
 
         <el-alert
-          title="撤回会清空当前任务的工序完成记录并退回待生产。请选择已经做出的零件转库存、报废，或确认无实物处理。保存前可以反复修改本表单，确认后再提交。"
+          title="撤回会清空当前任务的工序完成记录并退回待确认生产。请选择已经做出的零件转库存、报废，或确认无实物处理。保存前可以反复修改本表单，确认后再提交。"
           type="warning"
           :closable="false"
           class="mt-16"
@@ -1144,9 +1483,9 @@
           </el-form-item>
           <el-form-item label="处理方式" required>
             <el-radio-group v-model="withdrawForm.handlingMode" @change="handleWithdrawModeChange">
-              <el-radio-button label="STOCK">零件入库存</el-radio-button>
-              <el-radio-button label="SCRAP">零件报废</el-radio-button>
-              <el-radio-button label="NONE">无实物处理</el-radio-button>
+              <el-radio-button value="STOCK">零件入库存</el-radio-button>
+              <el-radio-button value="SCRAP">零件报废</el-radio-button>
+              <el-radio-button value="NONE">无实物处理</el-radio-button>
             </el-radio-group>
           </el-form-item>
           <el-form-item label="处理数量" required>
@@ -1178,28 +1517,71 @@
 
     <el-dialog
       v-model="printPreviewVisible"
-      title="生产计划表打印预览"
+      :title="`${printDocumentTitle}打印预览`"
       width="min(1220px, calc(100vw - 24px))"
       top="3vh"
     >
       <div class="print-preview-toolbar">
-        <span>A4 横版，建议页边距 8mm，当前按 {{ filteredTasks.length }} 条任务预览。</span>
+        <span>A4 横版，建议页边距 8mm，当前按 {{ printableRowCount }} 条{{ printRecordLabel }}预览。</span>
         <el-button type="primary" :icon="Printer" @click="printProductionPlan">打印</el-button>
       </div>
       <div class="print-preview-frame">
         <article class="production-print-page">
           <header class="production-print-header">
             <div>
-              <h1>生产计划表</h1>
+              <h1>{{ printDocumentTitle }}</h1>
               <p>{{ printScopeText }}</p>
             </div>
             <div class="production-print-meta">
               <span>制表日期：{{ printDateTime }}</span>
-              <span>任务数量：{{ filteredTasks.length }}</span>
+              <span>{{ printRecordLabel }}数量：{{ printableRowCount }}</span>
             </div>
           </header>
 
-          <table class="production-print-table">
+          <table v-if="viewMode === 'ORDER_SUMMARY'" class="production-print-table">
+            <colgroup>
+              <col class="print-col-index" />
+              <col class="print-col-order" />
+              <col class="print-col-customer" />
+              <col class="print-col-date" />
+              <col class="print-col-delivery" />
+              <col class="print-col-part" />
+              <col class="print-col-quantity" />
+              <col class="print-col-current" />
+              <col class="print-col-process" />
+              <col class="print-col-status" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>序号</th>
+                <th>订单号</th>
+                <th>客户</th>
+                <th>订单日期</th>
+                <th>交期</th>
+                <th>零件/任务</th>
+                <th>生产数量</th>
+                <th>订单进度</th>
+                <th>当前进度</th>
+                <th>订单状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in filteredOrderSummaries" :key="row.orderId">
+                <td>{{ index + 1 }}</td>
+                <td>{{ row.orderNo }}</td>
+                <td>{{ row.customerName }}</td>
+                <td>{{ formatDate(row.orderDate) }}</td>
+                <td>{{ formatDate(row.deliveryDate) }}</td>
+                <td>{{ row.partCount }} / {{ row.taskCount }}</td>
+                <td>{{ orderSummaryQuantityText(row) }}</td>
+                <td>{{ row.progressPercent }}%</td>
+                <td>{{ orderSummaryProgressItems(row).join('、') || '-' }}</td>
+                <td>{{ productionStatusLabel(row.status) }}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <table v-else class="production-print-table">
             <colgroup>
               <col class="print-col-index" />
               <col class="print-col-task" />
@@ -1211,6 +1593,7 @@
               <col class="print-col-customer-order" />
               <col class="print-col-quantity" />
               <col class="print-col-process" />
+              <col class="print-col-current" />
               <col class="print-col-status" />
             </colgroup>
             <thead>
@@ -1225,6 +1608,7 @@
                 <th>客户订单</th>
                 <th>完成/生产计划</th>
                 <th>生产流程</th>
+                <th>当前工序</th>
                 <th>状态</th>
               </tr>
             </thead>
@@ -1246,6 +1630,10 @@
                   <small v-if="shortageSummary(row)" class="print-subtext warning">{{ shortageSummary(row) }}</small>
                 </td>
                 <td>{{ formatProcessSteps(row) }}</td>
+                <td>
+                  <div>{{ currentProcessText(row) }}</div>
+                  <small class="print-subtext">{{ processProgressText(row) }}</small>
+                </td>
                 <td>{{ productionStatusLabel(effectiveProductionStatus(row)) }}</td>
               </tr>
             </tbody>
@@ -1261,7 +1649,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Bell, Document, Download, Printer, Refresh } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
@@ -1277,21 +1666,31 @@ import type {
   OrderSummary,
   ProductionNotice,
   ProductionOperator,
+  ProductionOrderSummary,
+  ProductionOrderSummaryTask,
+  ProductionOrderSummaryStatus,
   ProductionProcessCompletion,
   ProductionReplenishmentRequest,
   ProductionScrapRecord,
   ProductionShortageMode,
-  ProductionStatus,
   ProductionTask
 } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
 import { downloadHtmlAsExcel, escapeHtml, formatFileDateTime, openPrintHtml } from '../utils/tableExport';
 
-type ProductionDisplayStatus = ProductionStatus | 'READY_TO_COMPLETE' | 'RECEIVED';
+type ProductionDisplayStatus = ProductionOrderSummaryStatus;
+type ProductionViewMode = 'ORDER_SUMMARY' | 'TASK_DETAIL';
+type ProductionOrderStatusFilter = ProductionDisplayStatus | 'ACTIVE' | 'ALL';
+type ProductionStatCardKey = ProductionDisplayStatus | 'ACTIVE' | 'ALL';
+type BatchStartTask = ProductionOrderSummaryTask &
+  Partial<Pick<ProductionTask, 'status' | 'orderStatus' | 'inventoryBatchNo' | 'processCompletions'>>;
 
+const route = useRoute();
+const router = useRouter();
 const customers = ref<Customer[]>([]);
 const orderOptions = ref<OrderSummary[]>([]);
 const tasks = ref<ProductionTask[]>([]);
+const orderSummaries = ref<ProductionOrderSummary[]>([]);
 const dateRange = ref<string[]>([]);
 const loading = ref(false);
 const noticeVisible = ref(false);
@@ -1300,6 +1699,8 @@ const acknowledgeVisible = ref(false);
 const acknowledgeSaving = ref(false);
 const startConfirmVisible = ref(false);
 const startSaving = ref(false);
+const batchStartVisible = ref(false);
+const batchStartSaving = ref(false);
 const productionNotices = ref<ProductionNotice[]>([]);
 const activeProductionNotice = ref<ProductionNotice>();
 const replenishmentRequestVisible = ref(false);
@@ -1326,6 +1727,9 @@ const withdrawVisible = ref(false);
 const withdrawSaving = ref(false);
 const printPreviewVisible = ref(false);
 const activeStartTask = ref<ProductionTask>();
+const batchStartTasks = ref<BatchStartTask[]>([]);
+const batchStartSelectedTaskIds = ref<string[]>([]);
+const selectedTaskRows = ref<ProductionTask[]>([]);
 const activeTask = ref<ProductionTask>();
 const activeFinalTask = ref<ProductionTask>();
 const activeReplenishmentApprovalTask = ref<ProductionTask>();
@@ -1335,14 +1739,19 @@ const activeProcessName = ref('');
 const batchProcessNames = ref<string[]>([]);
 const processOperatorCodes = reactive<Record<string, string[]>>({});
 const startSupervisorScope = 'start-supervisor';
+const batchStartSupervisorScope = 'batch-start-supervisor';
 const finalSupervisorScope = 'final-supervisor';
 const finalOperatorScope = 'final';
 const startSupervisorCode = ref('');
+const batchStartSupervisorCode = ref('');
 const finalSupervisorCode = ref('');
 const operatorLoadingByScope = reactive<Record<string, boolean>>({});
 const operatorOptionsByScope = reactive<Record<string, ProductionOperator[]>>({});
 const operatorKeywordByScope = reactive<Record<string, string>>({});
 const activeStatus = ref<ProductionDisplayStatus | 'ALL'>('ALL');
+const activeOrderStatus = ref<ProductionOrderStatusFilter>('ALL');
+const viewMode = ref<ProductionViewMode>('ORDER_SUMMARY');
+const selectedProductionOrderNo = ref('');
 const printDateTime = ref('');
 let operatorSearchRequestSequence = 0;
 let quantityOverrideResolver: ((confirmed: boolean) => void) | undefined;
@@ -1401,12 +1810,23 @@ const withdrawForm = reactive({
 const operatorOptions = ref<ProductionOperator[]>([]);
 const operatorCache = reactive<Record<string, ProductionOperator>>({});
 
-const counts = computed(() => ({
-  PENDING: tasks.value.filter((task) => effectiveProductionStatus(task) === 'PENDING').length,
-  IN_PROGRESS: tasks.value.filter((task) => effectiveProductionStatus(task) === 'IN_PROGRESS').length,
-  READY_TO_COMPLETE: tasks.value.filter((task) => effectiveProductionStatus(task) === 'READY_TO_COMPLETE').length,
-  COMPLETED: tasks.value.filter((task) => effectiveProductionStatus(task) === 'COMPLETED').length,
-  RECEIVED: tasks.value.filter((task) => effectiveProductionStatus(task) === 'RECEIVED').length
+const scopedTasks = computed(() => {
+  if (!selectedProductionOrderNo.value) {
+    return tasks.value;
+  }
+  return tasks.value.filter((task) => task.orderNo === selectedProductionOrderNo.value);
+});
+const selectedProductionOrderOption = computed(() =>
+  selectedProductionOrderNo.value ? orderOptions.value.find((item) => item.orderNo === selectedProductionOrderNo.value) : undefined
+);
+
+const counts = computed(() => productionTaskStatusCounts(scopedTasks.value));
+const orderCounts = computed(() => ({
+  PENDING: orderSummaries.value.filter((summary) => summary.status === 'PENDING').length,
+  IN_PROGRESS: orderSummaries.value.filter((summary) => summary.status === 'IN_PROGRESS').length,
+  READY_TO_COMPLETE: orderSummaries.value.filter((summary) => summary.status === 'READY_TO_COMPLETE').length,
+  COMPLETED: orderSummaries.value.filter((summary) => summary.status === 'COMPLETED').length,
+  RECEIVED: orderSummaries.value.filter((summary) => summary.status === 'RECEIVED').length
 }));
 const pendingNoticeCount = computed(() => productionNotices.value.filter((notice) => notice.status === 'PENDING').length);
 const pendingReplenishmentRequestCount = computed(
@@ -1445,11 +1865,117 @@ const filteredProductionReplenishmentRequests = computed(() => {
 });
 
 const filteredTasks = computed(() => {
+  const rows = scopedTasks.value;
   if (activeStatus.value === 'ALL') {
-    return tasks.value;
+    return rows;
   }
-  return tasks.value.filter((task) => effectiveProductionStatus(task) === activeStatus.value);
+  return rows.filter((task) => effectiveProductionStatus(task) === activeStatus.value);
 });
+
+const filteredOrderSummaries = computed(() => {
+  if (activeOrderStatus.value === 'ALL') {
+    return orderSummaries.value;
+  }
+  if (activeOrderStatus.value === 'ACTIVE') {
+    return orderSummaries.value.filter((summary) =>
+      ['PENDING', 'IN_PROGRESS', 'READY_TO_COMPLETE'].includes(summary.status)
+    );
+  }
+  return orderSummaries.value.filter((summary) => summary.status === activeOrderStatus.value);
+});
+
+const activeOrderSummary = computed(() =>
+  selectedProductionOrderNo.value
+    ? orderSummaries.value.find((summary) => summary.orderNo === selectedProductionOrderNo.value)
+    : undefined
+);
+
+const selectedOrderOverview = computed<ProductionOrderSummary | undefined>(() => {
+  if (activeOrderSummary.value) {
+    return activeOrderSummary.value;
+  }
+  if (!selectedProductionOrderNo.value || scopedTasks.value.length === 0) {
+    return undefined;
+  }
+  return buildOrderSummaryFromTasks(scopedTasks.value);
+});
+
+const productionStatCards = computed<Array<{ key: ProductionStatCardKey; label: string; value: number }>>(() => {
+  const isOrderSummary = viewMode.value === 'ORDER_SUMMARY';
+  const countSource =
+    !isOrderSummary && selectedProductionOrderNo.value && selectedOrderOverview.value
+      ? orderSummaryStatusCounts(selectedOrderOverview.value)
+      : isOrderSummary
+        ? orderCounts.value
+        : counts.value;
+
+  const allCount =
+    countSource.PENDING +
+    countSource.IN_PROGRESS +
+    countSource.READY_TO_COMPLETE +
+    countSource.COMPLETED +
+    countSource.RECEIVED;
+  const allCard: { key: ProductionStatCardKey; label: string; value: number } = {
+    key: 'ALL',
+    label: '全部',
+    value: allCount
+  };
+  const cards: Array<{ key: ProductionStatCardKey; label: string; value: number }> = [
+    { key: 'PENDING', label: '待确认生产', value: countSource.PENDING },
+    { key: 'IN_PROGRESS', label: '生产中', value: countSource.IN_PROGRESS },
+    { key: 'READY_TO_COMPLETE', label: '待确认完成', value: countSource.READY_TO_COMPLETE },
+    { key: 'COMPLETED', label: '已完成', value: countSource.COMPLETED },
+    { key: 'RECEIVED', label: '已入库', value: countSource.RECEIVED }
+  ];
+  if (isOrderSummary) {
+    return [
+      allCard,
+      {
+        key: 'ACTIVE',
+        label: '待处理',
+        value: countSource.PENDING + countSource.IN_PROGRESS + countSource.READY_TO_COMPLETE
+      },
+      ...cards
+    ];
+  }
+  return [allCard, ...cards];
+});
+
+function isProductionStatActive(status: ProductionStatCardKey) {
+  if (status === 'ALL') {
+    return viewMode.value === 'ORDER_SUMMARY' ? activeOrderStatus.value === 'ALL' : activeStatus.value === 'ALL';
+  }
+  if (status === 'ACTIVE') {
+    return viewMode.value === 'ORDER_SUMMARY' && activeOrderStatus.value === 'ACTIVE';
+  }
+  return viewMode.value === 'ORDER_SUMMARY' ? activeOrderStatus.value === status : activeStatus.value === status;
+}
+
+function handleProductionStatClick(status: ProductionStatCardKey) {
+  if (viewMode.value === 'ORDER_SUMMARY') {
+    activeOrderStatus.value = status;
+    return;
+  }
+  if (status === 'ACTIVE') {
+    return;
+  }
+  activeStatus.value = status;
+}
+
+const selectedStartableTasks = computed(() => selectedTaskRows.value.filter((task) => shouldShowStartAction(task)));
+const selectedStartableTaskIds = computed<string[]>({
+  get: () => selectedStartableTasks.value.map((task) => task.id),
+  set: (ids) => {
+    const selectedIds = new Set(ids);
+    selectedTaskRows.value = scopedTasks.value.filter((task) => selectedIds.has(task.id) && shouldShowStartAction(task));
+  }
+});
+
+const selectedOrderPendingTasks = computed(() =>
+  selectedProductionOrderNo.value ? pendingTasksForOrder(selectedProductionOrderNo.value) : []
+);
+
+const batchStartOrderNo = computed(() => batchStartTasks.value[0]?.orderNo || activeOrderSummary.value?.orderNo || '-');
 
 const activeStatusLabel = computed(() => {
   if (activeStatus.value === 'ALL') {
@@ -1457,12 +1983,27 @@ const activeStatusLabel = computed(() => {
   }
   return productionStatusLabel(activeStatus.value);
 });
+const activeOrderStatusLabel = computed(() => {
+  if (activeOrderStatus.value === 'ALL') {
+    return '全部';
+  }
+  if (activeOrderStatus.value === 'ACTIVE') {
+    return '待处理';
+  }
+  return productionStatusLabel(activeOrderStatus.value);
+});
+const printDocumentTitle = computed(() => (viewMode.value === 'ORDER_SUMMARY' ? '生产订单汇总表' : '生产计划表'));
+const printRecordLabel = computed(() => (viewMode.value === 'ORDER_SUMMARY' ? '订单' : '任务'));
+const printableRowCount = computed(() =>
+  viewMode.value === 'ORDER_SUMMARY' ? filteredOrderSummaries.value.length : filteredTasks.value.length
+);
 
 const printScopeText = computed(() => {
   const customerName = customers.value.find((item) => item.id === filters.customerId)?.customerName || '全部客户';
-  const orderNo = filters.orderNo || '全部订单';
+  const orderNo = selectedProductionOrderNo.value || filters.orderNo || '全部订单';
   const dateText = dateRange.value.length === 2 ? `${dateRange.value[0]} 至 ${dateRange.value[1]}` : '全部订单日期';
-  return `客户：${customerName} | 订单日期：${dateText} | 订单：${orderNo} | 状态：${activeStatusLabel.value}`;
+  const statusText = viewMode.value === 'ORDER_SUMMARY' ? activeOrderStatusLabel.value : activeStatusLabel.value;
+  return `客户：${customerName} | 订单日期：${dateText} | 订单：${orderNo} | 状态：${statusText}`;
 });
 
 const activeProcessLabel = computed(() =>
@@ -1493,6 +2034,9 @@ const startProcessText = computed(() => {
 const finalOperatorOptionRows = computed(() => operatorOptionRowsWithSelectedCodes(finalForm.operatorCodes, finalOperatorScope));
 const startSupervisorOptionRows = computed(() =>
   supervisorOptionRowsWithSelectedCode(startSupervisorCode.value, startSupervisorScope)
+);
+const batchStartSupervisorOptionRows = computed(() =>
+  supervisorOptionRowsWithSelectedCode(batchStartSupervisorCode.value, batchStartSupervisorScope)
 );
 const finalSupervisorOptionRows = computed(() =>
   supervisorOptionRowsWithSelectedCode(finalSupervisorCode.value, finalSupervisorScope)
@@ -1680,6 +2224,14 @@ async function loadTasks() {
   }
 }
 
+async function loadOrderSummaries() {
+  try {
+    orderSummaries.value = await erpApi.productionOrderSummaries(taskQueryParams());
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产订单汇总加载失败');
+  }
+}
+
 async function loadProductionNotices() {
   noticeLoading.value = true;
   try {
@@ -1790,19 +2342,116 @@ async function handleScrapScopeChange() {
   await loadScrapRecords();
 }
 
+function queryStringValue(value: unknown) {
+  return String(Array.isArray(value) ? value[0] || '' : value || '').trim();
+}
+
+function productionRouteOrderNo() {
+  return queryStringValue(route.query.orderNo);
+}
+
+function productionRouteView() {
+  return queryStringValue(route.query.view);
+}
+
+function productionBaseQuery() {
+  const returnTo = queryStringValue(route.query.returnTo);
+  return returnTo ? { returnTo } : {};
+}
+
+function applyProductionRouteScope() {
+  const orderNo = productionRouteOrderNo();
+  if (orderNo) {
+    filters.orderNo = orderNo;
+    selectedProductionOrderNo.value = orderNo;
+    selectedTaskRows.value = [];
+    activeStatus.value = 'ALL';
+    viewMode.value = 'TASK_DETAIL';
+    return;
+  }
+
+  selectedProductionOrderNo.value = '';
+  selectedTaskRows.value = [];
+  viewMode.value = productionRouteView() === 'tasks' ? 'TASK_DETAIL' : 'ORDER_SUMMARY';
+}
+
+function pushProductionRouteForOrder(orderNo: string) {
+  void router.push({
+    path: '/production',
+    query: {
+      ...productionBaseQuery(),
+      orderNo
+    }
+  });
+}
+
+function pushProductionRouteForSummary() {
+  void router.push({
+    path: '/production',
+    query: productionBaseQuery()
+  });
+}
+
+function pushProductionRouteForTaskList() {
+  void router.push({
+    path: '/production',
+    query: {
+      ...productionBaseQuery(),
+      view: 'tasks'
+    }
+  });
+}
+
 async function queryTasks() {
   loading.value = true;
   try {
     await loadOrderOptions();
-    await loadTasks();
+    await Promise.all([loadTasks(), loadOrderSummaries()]);
+    normalizeOrderSummaryStatusFilter();
+    if (
+      selectedProductionOrderNo.value &&
+      !tasks.value.some((task) => task.orderNo === selectedProductionOrderNo.value) &&
+      !selectedProductionOrderOption.value
+    ) {
+      selectedProductionOrderNo.value = '';
+      selectedTaskRows.value = [];
+      viewMode.value = 'ORDER_SUMMARY';
+      if (productionRouteOrderNo()) {
+        pushProductionRouteForSummary();
+      }
+    }
     await Promise.all([loadProductionNotices(), loadProductionReplenishmentRequests()]);
   } finally {
     loading.value = false;
   }
 }
 
+function normalizeOrderSummaryStatusFilter() {
+  // 指定订单时必须默认展示该订单全量生产状态，避免已完成 / 已入库订单被“待处理”标签隐藏。
+  if (filters.orderNo && viewMode.value === 'ORDER_SUMMARY') {
+    activeOrderStatus.value = 'ALL';
+  }
+}
+
+async function handleOrderFilterChange() {
+  selectedProductionOrderNo.value = '';
+  selectedTaskRows.value = [];
+  viewMode.value = 'ORDER_SUMMARY';
+  normalizeOrderSummaryStatusFilter();
+  if (productionRouteOrderNo() || productionRouteView()) {
+    pushProductionRouteForSummary();
+  }
+  await queryTasks();
+}
+
 async function handleScopeChange() {
   filters.orderNo = undefined;
+  selectedProductionOrderNo.value = '';
+  selectedTaskRows.value = [];
+  viewMode.value = 'ORDER_SUMMARY';
+  if (productionRouteOrderNo() || productionRouteView()) {
+    pushProductionRouteForSummary();
+  }
   await queryTasks();
 }
 
@@ -1811,6 +2460,13 @@ async function resetFilters() {
   filters.orderNo = undefined;
   dateRange.value = [];
   activeStatus.value = 'ALL';
+  activeOrderStatus.value = 'ALL';
+  selectedProductionOrderNo.value = '';
+  selectedTaskRows.value = [];
+  viewMode.value = 'ORDER_SUMMARY';
+  if (productionRouteOrderNo() || productionRouteView()) {
+    pushProductionRouteForSummary();
+  }
   await queryTasks();
 }
 
@@ -1858,6 +2514,18 @@ function openStartDialog(row: ProductionTask) {
   void searchStartSupervisors('');
 }
 
+function closeStartDialog() {
+  if (startSaving.value) {
+    return;
+  }
+  startConfirmVisible.value = false;
+}
+
+function resetStartDialog() {
+  activeStartTask.value = undefined;
+  startSupervisorCode.value = '';
+}
+
 async function confirmStartProduction() {
   if (!activeStartTask.value) {
     return;
@@ -1874,13 +2542,181 @@ async function confirmStartProduction() {
     });
     ElMessage.success('已开始生产');
     startConfirmVisible.value = false;
-    activeStartTask.value = undefined;
-    startSupervisorCode.value = '';
-    await loadTasks();
+    await Promise.all([loadTasks(), loadOrderSummaries()]);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '开始生产失败');
   } finally {
     startSaving.value = false;
+  }
+}
+
+function handleViewModeChange() {
+  if (viewMode.value === 'ORDER_SUMMARY') {
+    selectedProductionOrderNo.value = '';
+    selectedTaskRows.value = [];
+    activeStatus.value = 'ALL';
+    pushProductionRouteForSummary();
+    return;
+  }
+
+  if (!selectedProductionOrderNo.value) {
+    pushProductionRouteForTaskList();
+  }
+}
+
+function openOrderProductionDetail(row: ProductionOrderSummary) {
+  selectedProductionOrderNo.value = row.orderNo;
+  selectedTaskRows.value = [];
+  activeStatus.value = 'ALL';
+  viewMode.value = 'TASK_DETAIL';
+  pushProductionRouteForOrder(row.orderNo);
+}
+
+function goSelectedOrderDetail() {
+  if (!selectedProductionOrderNo.value) {
+    return;
+  }
+  void router.push({
+    path: `/orders/${encodeURIComponent(selectedProductionOrderNo.value)}`,
+    query: {
+      returnTo: route.fullPath
+    }
+  });
+}
+
+function goSelectedOrderWarehouse() {
+  if (!selectedProductionOrderNo.value) {
+    return;
+  }
+  void router.push({
+    path: '/warehouses',
+    query: {
+      orderNo: selectedProductionOrderNo.value,
+      returnTo: route.fullPath
+    }
+  });
+}
+
+function backToOrderSummary() {
+  selectedProductionOrderNo.value = '';
+  selectedTaskRows.value = [];
+  activeStatus.value = 'ALL';
+  viewMode.value = 'ORDER_SUMMARY';
+  normalizeOrderSummaryStatusFilter();
+  pushProductionRouteForSummary();
+}
+
+function canBatchSelectTask(row: ProductionTask) {
+  return shouldShowStartAction(row);
+}
+
+function handleTaskSelectionChange(rows: ProductionTask[]) {
+  selectedTaskRows.value = rows;
+}
+
+function toggleMobileStartSelection(task: ProductionTask, checked: boolean) {
+  if (!shouldShowStartAction(task)) {
+    return;
+  }
+  const currentIds = new Set(selectedStartableTaskIds.value);
+  if (checked) {
+    currentIds.add(task.id);
+  } else {
+    currentIds.delete(task.id);
+  }
+  selectedStartableTaskIds.value = Array.from(currentIds);
+}
+
+function pendingTasksForOrder(orderNo: string) {
+  return tasks.value.filter((task) => task.orderNo === orderNo && shouldShowStartAction(task));
+}
+
+function isBatchStartCandidate(row: BatchStartTask) {
+  return row.status ? shouldShowStartAction(row as ProductionTask) : true;
+}
+
+function pendingSummaryTasksForBatch(row: ProductionOrderSummary): BatchStartTask[] {
+  return row.pendingTasks?.map((task) => ({ ...task, orderNo: task.orderNo || row.orderNo })) || [];
+}
+
+function openBatchStartDialog(_orderNo: string, rows: BatchStartTask[]) {
+  const startableRows = rows.filter((task) => isBatchStartCandidate(task));
+  if (startableRows.length === 0) {
+    ElMessage.warning('当前订单没有待确认生产的任务');
+    return;
+  }
+  batchStartTasks.value = startableRows;
+  batchStartSelectedTaskIds.value = startableRows.map((task) => task.id);
+  batchStartSupervisorCode.value = '';
+  batchStartVisible.value = true;
+  void searchBatchStartSupervisors('');
+}
+
+function closeBatchStartDialog() {
+  if (batchStartSaving.value) {
+    return;
+  }
+  batchStartVisible.value = false;
+}
+
+function resetBatchStartDialog() {
+  batchStartTasks.value = [];
+  batchStartSelectedTaskIds.value = [];
+  batchStartSupervisorCode.value = '';
+}
+
+function selectAllBatchStartTasks() {
+  batchStartSelectedTaskIds.value = batchStartTasks.value.map((task) => task.id);
+}
+
+function clearBatchStartTasks() {
+  batchStartSelectedTaskIds.value = [];
+}
+
+function openBatchStartForOrder(row: ProductionOrderSummary) {
+  const summaryPendingTasks = pendingSummaryTasksForBatch(row);
+  openBatchStartDialog(row.orderNo, summaryPendingTasks.length > 0 ? summaryPendingTasks : pendingTasksForOrder(row.orderNo));
+}
+
+function openBatchStartForCurrentOrder() {
+  if (!selectedProductionOrderNo.value) {
+    return;
+  }
+  openBatchStartDialog(selectedProductionOrderNo.value, selectedOrderPendingTasks.value);
+}
+
+function openBatchStartForSelected() {
+  if (selectedStartableTasks.value.length === 0) {
+    ElMessage.warning('请先勾选待确认生产任务');
+    return;
+  }
+  openBatchStartDialog(selectedProductionOrderNo.value, selectedStartableTasks.value);
+}
+
+async function confirmBatchStartProduction() {
+  if (!batchStartSupervisorCode.value) {
+    ElMessage.warning('请选择车间主任');
+    return;
+  }
+  if (batchStartSelectedTaskIds.value.length === 0) {
+    ElMessage.warning('请选择需要开始生产的任务');
+    return;
+  }
+
+  batchStartSaving.value = true;
+  try {
+    const result = await erpApi.batchStartProduction({
+      taskIds: batchStartSelectedTaskIds.value,
+      supervisorCode: batchStartSupervisorCode.value
+    });
+    ElMessage.success(`已开始 ${result.startedCount} 项生产任务`);
+    batchStartVisible.value = false;
+    selectedTaskRows.value = [];
+    await Promise.all([loadTasks(), loadOrderSummaries()]);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量开始生产失败');
+  } finally {
+    batchStartSaving.value = false;
   }
 }
 
@@ -1944,9 +2780,32 @@ function getProcessCompletion(row: ProductionTask, processName: string): Product
   return row.processCompletions?.find((item) => item.processName === processName);
 }
 
-function processStepDisplay(row: ProductionTask, processName: string) {
+function processStepDisplay(row: { processStepDetails?: ProductionTask['processStepDetails'] }, processName: string) {
   const remark = row.processStepDetails?.find((item) => item.processName === processName)?.processRemark?.trim();
   return remark ? `${processName}（${remark}）` : processName;
+}
+
+function processProgressText(row: ProductionTask) {
+  if (row.processSteps.length === 0) {
+    return '未配置生产流程';
+  }
+  const completedCount = row.processSteps.filter((step) => isProcessCompleted(row, step)).length;
+  return `${completedCount} / ${row.processSteps.length} 道`;
+}
+
+function currentProcessText(row: ProductionTask) {
+  const status = effectiveProductionStatus(row);
+  if (status === 'PENDING') {
+    return '待确认生产';
+  }
+  if (status === 'READY_TO_COMPLETE') {
+    return '待确认完成';
+  }
+  if (status === 'COMPLETED' || status === 'RECEIVED') {
+    return productionStatusLabel(status);
+  }
+  const current = nextIncompleteProcess(row);
+  return current ? processStepDisplay(row, current) : '待确认完成';
 }
 
 function expectedProcessQuantity(row: ProductionTask, processName: string) {
@@ -1995,21 +2854,21 @@ function isFinalProcess(row: ProductionTask, processName: string) {
 
 function shouldShowConfirmCompletedAction(row: ProductionTask) {
   // 工序走完后必须先进入“待确认完成”，由操作人员再填写最终完成数量。
-  return effectiveProductionStatus(row) === 'READY_TO_COMPLETE';
+  return row.orderStatus !== 'CANCELLED' && effectiveProductionStatus(row) === 'READY_TO_COMPLETE';
 }
 
 function shouldShowStartAction(row: ProductionTask) {
   // 操作入口必须按有效状态判断；已入库历史任务即使原始 status 异常，也不能再次开始生产。
-  return effectiveProductionStatus(row) === 'PENDING';
+  return row.orderStatus !== 'CANCELLED' && effectiveProductionStatus(row) === 'PENDING';
 }
 
 function shouldShowNextProcessAction(row: ProductionTask) {
-  return effectiveProductionStatus(row) === 'IN_PROGRESS' && Boolean(nextIncompleteProcess(row));
+  return row.orderStatus !== 'CANCELLED' && effectiveProductionStatus(row) === 'IN_PROGRESS' && Boolean(nextIncompleteProcess(row));
 }
 
 function canModifyFinalCompletion(row: ProductionTask) {
   // 已经入库的生产任务不能再改最终完成数量，否则会和库存批次数量不一致。
-  return row.status === 'COMPLETED' && !row.inventoryBatchNo;
+  return row.orderStatus !== 'CANCELLED' && row.status === 'COMPLETED' && !row.inventoryBatchNo;
 }
 
 function canWithdrawProduction(row: ProductionTask) {
@@ -2030,6 +2889,9 @@ function handleWithdrawModeChange() {
 }
 
 function canOpenProcess(row: ProductionTask, processName: string) {
+  if (row.orderStatus === 'CANCELLED') {
+    return false;
+  }
   if (row.inventoryBatchNo) {
     return isProcessCompleted(row, processName);
   }
@@ -2040,6 +2902,9 @@ function canOpenProcess(row: ProductionTask, processName: string) {
 }
 
 function processButtonTitle(row: ProductionTask, processName: string) {
+  if (row.orderStatus === 'CANCELLED') {
+    return '订单已取消，只能做管理撤回或查看通知';
+  }
   if (row.inventoryBatchNo) {
     return isProcessCompleted(row, processName) ? '已入库，只能查看工序记录' : '已入库，不能新增工序记录';
   }
@@ -2291,6 +3156,10 @@ function searchStartSupervisors(keyword: string) {
   return searchOperatorsForScope(startSupervisorScope, keyword);
 }
 
+function searchBatchStartSupervisors(keyword: string) {
+  return searchOperatorsForScope(batchStartSupervisorScope, keyword);
+}
+
 function searchFinalSupervisors(keyword: string) {
   return searchOperatorsForScope(finalSupervisorScope, keyword);
 }
@@ -2316,6 +3185,10 @@ function handleFinalOperatorSelectVisible(visible: boolean) {
 
 function handleStartSupervisorSelectVisible(visible: boolean) {
   handleOperatorSelectVisible(startSupervisorScope, visible);
+}
+
+function handleBatchStartSupervisorSelectVisible(visible: boolean) {
+  handleOperatorSelectVisible(batchStartSupervisorScope, visible);
 }
 
 function handleFinalSupervisorSelectVisible(visible: boolean) {
@@ -2435,6 +3308,25 @@ async function confirmCompletedTask(row: ProductionTask) {
   void searchFinalSupervisors('');
 }
 
+function closeFinalConfirmDialog() {
+  if (finalSaving.value) {
+    return;
+  }
+  finalConfirmVisible.value = false;
+}
+
+function resetFinalConfirmDialog() {
+  activeFinalTask.value = undefined;
+  finalSupervisorCode.value = '';
+  finalForm.completedQuantity = 1;
+  finalForm.operatorCodes = [];
+  finalForm.scrapQuantity = 0;
+  finalForm.shortageMode = 'REPLENISHMENT_REQUEST';
+  finalForm.managerName = '';
+  finalForm.shortageReason = '';
+  finalForm.remark = '';
+}
+
 function validateFinalCompletion() {
   if (!activeFinalTask.value) {
     return false;
@@ -2502,7 +3394,7 @@ async function saveFinalProductionCompletion() {
     ElMessage.success(activeFinalTask.value.status === 'COMPLETED' ? '生产完成确认已修改' : '生产已确认完成，请到仓库确认入库');
     finalConfirmVisible.value = false;
     finalSupervisorCode.value = '';
-    await loadTasks();
+    await Promise.all([loadTasks(), loadOrderSummaries()]);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '确认生产完成失败');
   } finally {
@@ -2560,7 +3452,7 @@ async function saveProcessCompletion() {
       ElMessage.success(`${activeProcessName.value}已保存`);
     }
     processVisible.value = false;
-    await loadTasks();
+    await Promise.all([loadTasks(), loadOrderSummaries()]);
     const updatedTask = tasks.value.find((task) => task.id === savedTaskId);
     if (shouldOpenFinalConfirmAfterSave && updatedTask && shouldShowConfirmCompletedAction(updatedTask)) {
       await confirmCompletedTask(updatedTask);
@@ -2574,13 +3466,24 @@ async function saveProcessCompletion() {
 
 function productionStatusLabel(status: ProductionDisplayStatus) {
   const labels: Record<ProductionDisplayStatus, string> = {
-    PENDING: '待生产',
+    PENDING: '待确认生产',
     IN_PROGRESS: '生产中',
     READY_TO_COMPLETE: '待确认完成',
     COMPLETED: '已完成',
     RECEIVED: '已入库'
   };
   return labels[status] || status;
+}
+
+function productionStatusTagType(status: ProductionDisplayStatus) {
+  const types: Record<ProductionDisplayStatus, 'success' | 'warning' | 'info' | 'primary' | 'danger'> = {
+    PENDING: 'info',
+    IN_PROGRESS: 'warning',
+    READY_TO_COMPLETE: 'primary',
+    COMPLETED: 'success',
+    RECEIVED: 'success'
+  };
+  return types[status] || 'info';
 }
 
 function formatProcessSteps(row: ProductionTask) {
@@ -2606,6 +3509,198 @@ function formatCustomerOrderQuantity(row: ProductionTask) {
 
 function formatCompletedPlan(row: ProductionTask) {
   return `${formatCompletedQuantity(row)} / ${formatQuantity(row.plannedQuantity, row.unit)}`;
+}
+
+function productionTaskStatusCounts(rows: ProductionTask[]) {
+  return {
+    PENDING: rows.filter((task) => effectiveProductionStatus(task) === 'PENDING').length,
+    IN_PROGRESS: rows.filter((task) => effectiveProductionStatus(task) === 'IN_PROGRESS').length,
+    READY_TO_COMPLETE: rows.filter((task) => effectiveProductionStatus(task) === 'READY_TO_COMPLETE').length,
+    COMPLETED: rows.filter((task) => effectiveProductionStatus(task) === 'COMPLETED').length,
+    RECEIVED: rows.filter((task) => effectiveProductionStatus(task) === 'RECEIVED').length
+  };
+}
+
+function orderSummaryStatusCounts(row: ProductionOrderSummary) {
+  // 订单详情模式优先使用订单汇总口径，确保顶部卡片和“订单生产概况”一致。
+  return {
+    PENDING: row.pendingCount,
+    IN_PROGRESS: row.inProgressCount,
+    READY_TO_COMPLETE: row.readyToCompleteCount,
+    COMPLETED: row.completedCount,
+    RECEIVED: row.receivedCount
+  };
+}
+
+function orderSummaryQuantityText(row: ProductionOrderSummary) {
+  if (row.quantityByUnit.length === 0) {
+    return `${formatQuantity(row.totalCompletedQuantity, row.unit)} / ${formatQuantity(row.totalPlannedQuantity, row.unit)}`;
+  }
+  return row.quantityByUnit
+    .map((item) => `${formatQuantity(item.completedQuantity, item.unit)} / ${formatQuantity(item.plannedQuantity, item.unit)}`)
+    .join('；');
+}
+
+function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSummary | undefined {
+  const first = rows[0];
+  if (!first) {
+    return undefined;
+  }
+  const counts = {
+    PENDING: 0,
+    IN_PROGRESS: 0,
+    READY_TO_COMPLETE: 0,
+    COMPLETED: 0,
+    RECEIVED: 0
+  };
+  const partKeys = new Set<string>();
+  const quantityByUnit = new Map<
+    string,
+    {
+      unit: string;
+      customerOrderQuantity: number;
+      plannedQuantity: number;
+      completedQuantity: number;
+    }
+  >();
+  const pendingTasks: ProductionOrderSummaryTask[] = [];
+  const customerOrderLineKeys = new Set<string>();
+
+  for (const task of rows) {
+    partKeys.add(`${task.partCode}__${task.partName}`);
+    const status = effectiveProductionStatus(task);
+    counts[status] += 1;
+    const quantityRow =
+      quantityByUnit.get(task.unit) ||
+      {
+        unit: task.unit,
+        customerOrderQuantity: 0,
+        plannedQuantity: 0,
+        completedQuantity: 0
+      };
+    const customerOrderLineKey = task.orderLineId || `${task.partCode}__${task.partName}__${task.unit}`;
+    if (!customerOrderLineKeys.has(customerOrderLineKey)) {
+      quantityRow.customerOrderQuantity += Number(task.customerOrderQuantity || 0);
+      customerOrderLineKeys.add(customerOrderLineKey);
+    }
+    quantityRow.plannedQuantity += Number(task.plannedQuantity || 0);
+    quantityRow.completedQuantity += Number(task.completedQuantity || 0);
+    quantityByUnit.set(task.unit, quantityRow);
+    if (status === 'PENDING') {
+      pendingTasks.push({
+        id: task.id,
+        orderLineId: task.orderLineId,
+        orderNo: task.orderNo,
+        orderStatus: task.orderStatus,
+        productionTaskNo: task.productionTaskNo,
+        partCode: task.partCode,
+        partName: task.partName,
+        plannedQuantity: task.plannedQuantity,
+        unit: task.unit,
+        processSteps: task.processSteps,
+        processStepDetails: task.processStepDetails
+      });
+    }
+  }
+
+  const totalPlannedQuantity = rows.reduce((sum, task) => sum + Number(task.plannedQuantity || 0), 0);
+  const totalCompletedQuantity = rows.reduce((sum, task) => sum + Number(task.completedQuantity || 0), 0);
+  const doneCount = counts.COMPLETED + counts.RECEIVED;
+  return {
+    orderId: first.orderId,
+    orderNo: first.orderNo,
+    orderStatus: first.orderStatus,
+    customerId: first.customerId,
+    customerName: first.customerName,
+    orderDate: first.orderDate,
+    deliveryDate: rows.reduce<string | undefined>((current, task) => pickEarlierDateText(current, task.deliveryDate), first.deliveryDate),
+    taskCount: rows.length,
+    partCount: partKeys.size,
+    pendingCount: counts.PENDING,
+    inProgressCount: counts.IN_PROGRESS,
+    readyToCompleteCount: counts.READY_TO_COMPLETE,
+    completedCount: counts.COMPLETED,
+    receivedCount: counts.RECEIVED,
+    totalPlannedQuantity,
+    totalCompletedQuantity,
+    unit: first.unit,
+    status: resolveOrderSummaryStatusFromCounts(rows.length, counts),
+    progressPercent: rows.length > 0 ? Math.round((doneCount / rows.length) * 100) : 0,
+    quantityByUnit: Array.from(quantityByUnit.values()),
+    pendingTaskIds: pendingTasks.map((task) => task.id),
+    pendingTasks
+  };
+}
+
+function pickEarlierDateText(current?: string, candidate?: string) {
+  if (!current) {
+    return candidate;
+  }
+  if (!candidate) {
+    return current;
+  }
+  return new Date(candidate).getTime() < new Date(current).getTime() ? candidate : current;
+}
+
+function resolveOrderSummaryStatusFromCounts(
+  taskCount: number,
+  counts: Record<ProductionDisplayStatus, number>
+): ProductionOrderSummaryStatus {
+  if (taskCount > 0 && counts.RECEIVED === taskCount) {
+    return 'RECEIVED';
+  }
+  if (taskCount > 0 && counts.COMPLETED + counts.RECEIVED === taskCount) {
+    return 'COMPLETED';
+  }
+  if (counts.READY_TO_COMPLETE > 0) {
+    return 'READY_TO_COMPLETE';
+  }
+  if (counts.IN_PROGRESS > 0) {
+    return 'IN_PROGRESS';
+  }
+  return 'PENDING';
+}
+
+function orderTasksForSummary(row: ProductionOrderSummary) {
+  return tasks.value.filter((task) => task.orderNo === row.orderNo);
+}
+
+function orderSummaryProgressItems(row: ProductionOrderSummary) {
+  if (row.progressItems?.length) {
+    return row.progressItems.map((item) => item.text || `${item.label} ${item.count}`);
+  }
+
+  const sourceTasks = orderTasksForSummary(row);
+  const buckets = new Map<string, number>();
+  const add = (label: string, count = 1) => {
+    if (count <= 0) {
+      return;
+    }
+    buckets.set(label, (buckets.get(label) || 0) + count);
+  };
+
+  if (sourceTasks.length === 0) {
+    add('待确认生产', row.pendingCount);
+    add('生产中', row.inProgressCount);
+    add('待确认完成', row.readyToCompleteCount);
+    add('已完成', row.completedCount);
+    add('已入库', row.receivedCount);
+  } else {
+    for (const task of sourceTasks) {
+      const status = effectiveProductionStatus(task);
+      if (status === 'PENDING') {
+        add('待确认生产');
+      } else if (status === 'IN_PROGRESS') {
+        add(currentProcessText(task));
+      } else if (status === 'READY_TO_COMPLETE') {
+        add('待确认完成');
+      } else {
+        add(productionStatusLabel(status));
+      }
+    }
+  }
+
+  return Array.from(buckets.entries()).map(([label, count]) => `${label} ${count}`);
 }
 
 function finalProcessCompletion(row: ProductionTask) {
@@ -2871,11 +3966,79 @@ function productionPlanRows() {
     quantityText: formatCompletedPlan(task),
     shortageText: shortageSummary(task),
     processSteps: formatProcessSteps(task),
+    currentProcessText: currentProcessText(task),
+    processProgressText: processProgressText(task),
     status: productionStatusLabel(effectiveProductionStatus(task))
   }));
 }
 
-function buildPrintTableHtml() {
+function productionOrderSummaryRows() {
+  return filteredOrderSummaries.value.map((summary, index) => ({
+    index: index + 1,
+    orderNo: summary.orderNo,
+    customerName: summary.customerName,
+    orderDate: formatDate(summary.orderDate),
+    deliveryDate: formatDate(summary.deliveryDate),
+    partTaskText: `${summary.partCount} / ${summary.taskCount}`,
+    quantityText: orderSummaryQuantityText(summary),
+    progressText: `${summary.progressPercent}%`,
+    currentProgressText: orderSummaryProgressItems(summary).join('、') || '-',
+    status: productionStatusLabel(summary.status)
+  }));
+}
+
+function buildOrderSummaryPrintTableHtml() {
+  const rows = productionOrderSummaryRows()
+    .map(
+      (row) => `
+        <tr>
+          <td>${row.index}</td>
+          <td>${escapeHtml(row.orderNo)}</td>
+          <td>${escapeHtml(row.customerName)}</td>
+          <td>${escapeHtml(row.orderDate)}</td>
+          <td>${escapeHtml(row.deliveryDate)}</td>
+          <td>${escapeHtml(row.partTaskText)}</td>
+          <td>${escapeHtml(row.quantityText)}</td>
+          <td>${escapeHtml(row.progressText)}</td>
+          <td>${escapeHtml(row.currentProgressText)}</td>
+          <td>${escapeHtml(row.status)}</td>
+        </tr>`
+    )
+    .join('');
+
+  return `
+    <table class="production-print-table">
+      <colgroup>
+        <col class="print-col-index" />
+        <col class="print-col-order" />
+        <col class="print-col-customer" />
+        <col class="print-col-date" />
+        <col class="print-col-delivery" />
+        <col class="print-col-part" />
+        <col class="print-col-quantity" />
+        <col class="print-col-current" />
+        <col class="print-col-process" />
+        <col class="print-col-status" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>序号</th>
+          <th>订单号</th>
+          <th>客户</th>
+          <th>订单日期</th>
+          <th>交期</th>
+          <th>零件/任务</th>
+          <th>生产数量</th>
+          <th>订单进度</th>
+          <th>当前进度</th>
+          <th>订单状态</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function buildTaskPrintTableHtml() {
   const rows = productionPlanRows()
     .map(
       (row) => `
@@ -2890,6 +4053,7 @@ function buildPrintTableHtml() {
           <td>${escapeHtml(row.customerOrderText)}</td>
           <td>${printMultiline(row.quantityText, row.shortageText)}</td>
           <td>${escapeHtml(row.processSteps)}</td>
+          <td>${printMultiline(row.currentProcessText, row.processProgressText)}</td>
           <td>${escapeHtml(row.status)}</td>
         </tr>`
     )
@@ -2908,6 +4072,7 @@ function buildPrintTableHtml() {
         <col class="print-col-customer-order" />
         <col class="print-col-quantity" />
         <col class="print-col-process" />
+        <col class="print-col-current" />
         <col class="print-col-status" />
       </colgroup>
       <thead>
@@ -2922,11 +4087,16 @@ function buildPrintTableHtml() {
           <th>客户订单</th>
           <th>完成/生产计划</th>
           <th>生产流程</th>
+          <th>当前工序</th>
           <th>状态</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
+}
+
+function buildPrintTableHtml() {
+  return viewMode.value === 'ORDER_SUMMARY' ? buildOrderSummaryPrintTableHtml() : buildTaskPrintTableHtml();
 }
 
 function printMultiline(mainText: string, subText?: string) {
@@ -2939,7 +4109,7 @@ function buildProductionPlanDocument() {
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>生产计划表</title>
+  <title>${escapeHtml(printDocumentTitle.value)}</title>
   <style>
     @page { size: A4 landscape; margin: 8mm; }
     * { box-sizing: border-box; }
@@ -3023,7 +4193,8 @@ function buildProductionPlanDocument() {
     .print-col-part { width: 24mm; }
     .print-col-customer-order { width: 18mm; }
     .print-col-quantity { width: 38mm; }
-    .print-col-process { width: 47mm; }
+    .print-col-process { width: 38mm; }
+    .print-col-current { width: 20mm; }
     .print-col-status { width: 15mm; }
   </style>
 </head>
@@ -3031,12 +4202,12 @@ function buildProductionPlanDocument() {
   <article class="production-print-page">
     <header class="production-print-header">
       <div>
-        <h1>生产计划表</h1>
+        <h1>${escapeHtml(printDocumentTitle.value)}</h1>
         <p>${escapeHtml(printScopeText.value)}</p>
       </div>
       <div class="production-print-meta">
         <span>制表日期：${escapeHtml(printDateTime.value)}</span>
-        <span>任务数量：${filteredTasks.value.length}</span>
+        <span>${escapeHtml(printRecordLabel.value)}数量：${printableRowCount.value}</span>
       </div>
     </header>
     ${buildPrintTableHtml()}
@@ -3046,19 +4217,19 @@ function buildProductionPlanDocument() {
 }
 
 function exportExcel() {
-  if (filteredTasks.value.length === 0) {
-    ElMessage.warning('当前没有可导出的生产任务');
+  if (printableRowCount.value === 0) {
+    ElMessage.warning(`当前没有可导出的生产${printRecordLabel.value}`);
     return;
   }
 
   refreshPrintDateTime();
   const documentHtml = buildProductionPlanDocument();
-  downloadHtmlAsExcel(documentHtml, `生产计划表_${formatFileDateTime()}.xls`);
+  downloadHtmlAsExcel(documentHtml, `${printDocumentTitle.value}_${formatFileDateTime()}.xls`);
 }
 
 function openPrintPreview() {
-  if (filteredTasks.value.length === 0) {
-    ElMessage.warning('当前没有可打印的生产任务');
+  if (printableRowCount.value === 0) {
+    ElMessage.warning(`当前没有可打印的生产${printRecordLabel.value}`);
     return;
   }
   refreshPrintDateTime();
@@ -3066,8 +4237,8 @@ function openPrintPreview() {
 }
 
 function printProductionPlan() {
-  if (filteredTasks.value.length === 0) {
-    ElMessage.warning('当前没有可打印的生产任务');
+  if (printableRowCount.value === 0) {
+    ElMessage.warning(`当前没有可打印的生产${printRecordLabel.value}`);
     return;
   }
 
@@ -3077,7 +4248,16 @@ function printProductionPlan() {
   }
 }
 
+watch(
+  () => [route.query.orderNo, route.query.view],
+  async () => {
+    applyProductionRouteScope();
+    await queryTasks();
+  }
+);
+
 onMounted(async () => {
+  applyProductionRouteScope();
   await loadCustomers();
   await loadOperators();
   await queryTasks();
@@ -3127,6 +4307,203 @@ onMounted(async () => {
 
 .notice-badge {
   margin-right: 4px;
+}
+
+.production-view-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.detail-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: #475569;
+  font-size: 14px;
+}
+
+.order-production-overview {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.8fr) minmax(360px, 1.5fr) minmax(260px, 1fr);
+  align-items: center;
+  gap: 18px;
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.order-overview-title,
+.order-overview-metrics > div,
+.order-overview-progress {
+  min-width: 0;
+}
+
+.order-overview-title {
+  display: grid;
+  gap: 4px;
+}
+
+.order-overview-title span,
+.order-overview-metrics span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.order-overview-title strong {
+  color: #0f172a;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.order-overview-title small {
+  color: #64748b;
+  line-height: 18px;
+}
+
+.order-overview-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.order-overview-metrics > div {
+  display: grid;
+  gap: 6px;
+}
+
+.order-overview-metrics strong {
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.order-overview-progress {
+  display: grid;
+  gap: 10px;
+}
+
+.link-button {
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 0;
+}
+
+.link-button.strong-link {
+  font-weight: 700;
+}
+
+.summary-status-chain {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-status-chain span {
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 8px;
+}
+
+.batch-start-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 8px;
+  color: #475569;
+}
+
+.batch-start-heading > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.batch-start-heading strong {
+  color: #0f172a;
+}
+
+.batch-start-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.batch-task-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.batch-task-item {
+  width: 100%;
+  min-height: 58px;
+  margin-right: 0;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.batch-task-item :deep(.el-checkbox__label) {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.batch-task-item :deep(.el-checkbox__label div) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.batch-task-item small {
+  color: #64748b;
+  white-space: normal;
+}
+
+.mobile-start-checkbox {
+  flex-shrink: 0;
+}
+
+.mobile-start-checkbox :deep(.el-checkbox__label) {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+.empty-production-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.empty-production-hint span {
+  min-width: 240px;
+  flex: 1;
+}
+
+.empty-production-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .notice-list {
@@ -3773,7 +5150,11 @@ onMounted(async () => {
 }
 
 .print-col-process {
-  width: 47mm;
+  width: 38mm;
+}
+
+.print-col-current {
+  width: 20mm;
 }
 
 .print-col-status {
@@ -3853,6 +5234,16 @@ onMounted(async () => {
     display: block;
     width: 100%;
     margin: 6px 0 0;
+  }
+
+  .order-production-overview {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .order-overview-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .process-operator-row {

@@ -95,6 +95,9 @@
         <el-table-column label="当前可用库存" width="150">
           <template #default="{ row }">{{ formatQuantity(row.availableQuantity, row.unit) }}</template>
         </el-table-column>
+        <el-table-column label="已预占" width="120">
+          <template #default="{ row }">{{ formatQuantity(row.reservedQuantity || 0, row.unit) }}</template>
+        </el-table-column>
         <el-table-column label="订单库存" width="140">
           <template #default="{ row }">{{ formatQuantity(row.orderInventoryQuantity, row.unit) }}</template>
         </el-table-column>
@@ -156,6 +159,10 @@
             <strong>{{ formatQuantity(row.availableQuantity, row.unit) }}</strong>
           </div>
           <div class="mobile-field">
+            <label>已预占</label>
+            <span>{{ formatQuantity(row.reservedQuantity || 0, row.unit) }}</span>
+          </div>
+          <div class="mobile-field">
             <label>批次 / 仓库</label>
             <span>{{ row.batchCount }} 批 / {{ row.warehouseCount }} 个</span>
           </div>
@@ -213,8 +220,14 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="当前剩余" width="120">
-          <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
+        <el-table-column label="可用 / 账面" width="145">
+          <template #default="{ row }">
+            <div>{{ formatQuantity(batchAvailableQuantity(row), row.unit) }}</div>
+            <div class="cell-subtext">账面 {{ formatQuantity(row.quantity, row.unit) }}</div>
+            <div v-if="row.reservedQuantity" class="cell-subtext warning-text">
+              预占 {{ formatQuantity(row.reservedQuantity, row.unit) }}
+            </div>
+          </template>
         </el-table-column>
         <el-table-column label="仓库 / 库位" min-width="170">
           <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
@@ -246,10 +259,13 @@
             <StatusTag :value="row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openSourceDetails(row.partCode, row.unit, 'ALL')">
               来源
+            </el-button>
+            <el-button link type="primary" @click="openReservationDialog(row)">
+              预占记录
             </el-button>
             <el-button link type="primary" :disabled="!canAdjustBatch(row)" @click="openAdjustDialog(row)">
               盘点调整
@@ -285,8 +301,15 @@
             <span>{{ batch.partCode }}</span>
           </div>
           <div class="mobile-field">
-            <label>当前剩余</label>
-            <span>{{ formatQuantity(batch.quantity, batch.unit) }}</span>
+            <label>可用库存</label>
+            <span>{{ formatQuantity(batchAvailableQuantity(batch), batch.unit) }}</span>
+          </div>
+          <div class="mobile-field">
+            <label>账面 / 预占</label>
+            <span>
+              {{ formatQuantity(batch.quantity, batch.unit) }}
+              <small v-if="batch.reservedQuantity" class="mobile-subtext">预占 {{ formatQuantity(batch.reservedQuantity, batch.unit) }}</small>
+            </span>
           </div>
           <div class="mobile-field mobile-full">
             <label>仓库 / 库位</label>
@@ -336,6 +359,9 @@
           <el-button size="small" type="primary" plain @click="openSourceDetails(batch.partCode, batch.unit, 'ALL')">
             来源/图纸
           </el-button>
+          <el-button size="small" type="primary" plain @click="openReservationDialog(batch)">
+            预占记录
+          </el-button>
           <el-button size="small" type="primary" plain :disabled="!canAdjustBatch(batch)" @click="openAdjustDialog(batch)">
             盘点调整
           </el-button>
@@ -350,11 +376,73 @@
       :detail="sourceDetails"
     />
 
-    <el-dialog v-model="adjustDialogVisible" title="库存盘点调整" width="640px" class="responsive-dialog">
+    <el-dialog
+      v-model="reservationDialogVisible"
+      title="库存预占记录"
+      width="min(920px, calc(100vw - 32px))"
+      class="responsive-dialog"
+    >
+      <div v-if="selectedReservationBatch" class="reservation-summary">
+        <strong>{{ selectedReservationBatch.partName }}</strong>
+        <span>{{ selectedReservationBatch.partCode }} / {{ selectedReservationBatch.batchNo }}</span>
+        <span>可用 {{ formatQuantity(batchAvailableQuantity(selectedReservationBatch), selectedReservationBatch.unit) }}</span>
+        <span>账面 {{ formatQuantity(selectedReservationBatch.quantity, selectedReservationBatch.unit) }}</span>
+        <span>预占 {{ formatQuantity(selectedReservationBatch.reservedQuantity || 0, selectedReservationBatch.unit) }}</span>
+      </div>
+      <el-table v-loading="reservationHistoryLoading" :data="reservationHistory" max-height="420">
+        <el-table-column label="状态" width="105">
+          <template #default="{ row }">
+            <el-tag :type="reservationStatusTagType(row.status)" effect="plain">
+              {{ reservationStatusText(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="订单 / 客户" min-width="210">
+          <template #default="{ row }">
+            <OrderNoLink v-if="row.orderNo" :order-no="row.orderNo" />
+            <span v-else class="muted">草稿订单</span>
+            <div class="cell-subtext">{{ row.customerName || '-' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="零件" min-width="190">
+          <template #default="{ row }">
+            <div class="cell-main">{{ row.partName || '-' }}</div>
+            <div class="cell-subtext">{{ row.partCode || '-' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="数量" width="110">
+          <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
+        </el-table-column>
+        <el-table-column label="时间" min-width="190">
+          <template #default="{ row }">
+            <div>预占 {{ formatDateTime(row.createdAt) }}</div>
+            <div v-if="row.consumedAt" class="cell-subtext">消费 {{ formatDateTime(row.consumedAt) }}</div>
+            <div v-if="row.releasedAt" class="cell-subtext">释放 {{ formatDateTime(row.releasedAt) }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="220">
+          <template #default="{ row }">{{ row.statusReason || '-' }}</template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="reservationDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="adjustDialogVisible"
+      title="库存盘点调整"
+      width="640px"
+      class="responsive-dialog"
+      :close-on-click-modal="false"
+      :before-close="handleAdjustDialogBeforeClose"
+      @closed="resetAdjustDialog"
+    >
       <div v-if="selectedBatch" class="adjustment-summary">
         <strong>{{ selectedBatch.partName }}</strong>
         <span>{{ selectedBatch.partCode }} / {{ selectedBatch.batchNo }}</span>
         <span>{{ selectedBatch.warehouseName }} / {{ selectedBatch.locationName || '-' }}</span>
+        <span v-if="adjustmentReservedQuantity > 0">已预占 {{ formatQuantity(adjustmentReservedQuantity, selectedBatch.unit) }}</span>
       </div>
       <el-form class="adjustment-form" label-width="110px">
         <el-form-item label="当前剩余">
@@ -363,7 +451,7 @@
         <el-form-item label="盘点后数量" required>
           <el-input-number
             v-model="adjustForm.afterQuantity"
-            :min="0"
+            :min="adjustmentMinQuantity"
             :precision="3"
             :step="1"
             controls-position="right"
@@ -372,6 +460,9 @@
           <span v-if="selectedBatch" class="adjustment-delta">
             差异：{{ formatSignedQuantity(adjustmentDelta, selectedBatch.unit) }}
           </span>
+          <div v-if="adjustmentReservedQuantity > 0" class="adjustment-hint">
+            该批次已有订单预占，盘点后数量不能低于 {{ formatQuantity(adjustmentReservedQuantity, selectedBatch?.unit || '件') }}。
+          </div>
         </el-form-item>
         <el-form-item label="清点人" required>
           <el-input v-model="adjustForm.countedBy" placeholder="库存清点人员" />
@@ -429,7 +520,7 @@
         </el-table>
       </div>
       <template #footer>
-        <el-button @click="adjustDialogVisible = false">取消</el-button>
+        <el-button :disabled="adjustSaving" @click="adjustDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="adjustSaving" @click="submitAdjustment">保存盘点</el-button>
       </template>
     </el-dialog>
@@ -449,6 +540,8 @@ import type {
   InventoryAdjustment,
   InventoryBatch,
   InventoryMaterialSuggestion,
+  InventoryReservationAudit,
+  InventoryReservationStatus,
   InventorySourceDetailResponse,
   InventoryStatus,
   InventorySummaryRow,
@@ -463,9 +556,13 @@ const loading = ref(false);
 const adjustDialogVisible = ref(false);
 const adjustSaving = ref(false);
 const selectedBatch = ref<InventoryBatch>();
+const selectedReservationBatch = ref<InventoryBatch>();
 const sourceDetailsVisible = ref(false);
 const sourceDetailsLoading = ref(false);
 const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
+const reservationDialogVisible = ref(false);
+const reservationHistory = ref<InventoryReservationAudit[]>([]);
+const reservationHistoryLoading = ref(false);
 const materialSuggestionRequestSeq = ref(0);
 const adjustmentFileInput = ref<HTMLInputElement>();
 const adjustmentFile = ref<File | null>(null);
@@ -499,8 +596,10 @@ const filters = reactive<{
 
 const availableQuantityText = computed(() => formatInventoryTotalByUnit('availableQuantity'));
 const stockedWarehouseCount = computed(
-  () => new Set(inventory.value.filter((item) => item.status === 'AVAILABLE' && item.quantity > 0).map((item) => item.warehouseId)).size
+  () => new Set(inventory.value.filter((item) => item.status === 'AVAILABLE' && batchAvailableQuantity(item) > 0).map((item) => item.warehouseId)).size
 );
+const adjustmentReservedQuantity = computed(() => Number(selectedBatch.value?.reservedQuantity || 0));
+const adjustmentMinQuantity = computed(() => adjustmentReservedQuantity.value);
 const adjustmentDelta = computed(() => (selectedBatch.value ? adjustForm.afterQuantity - selectedBatch.value.quantity : 0));
 const selectedWarehouseName = computed(() => warehouses.value.find((item) => item.id === filters.warehouseId)?.warehouseName);
 const inventoryQueryNoticeRows = computed(() => {
@@ -618,7 +717,7 @@ function stockSourceBreakdownText(row: InventorySummaryRow) {
 }
 
 function customerDisplay(row: InventoryBatch) {
-  return row.sourceCustomerName || (row.inventorySourceType === 'STOCK' ? '备货库存' : '-');
+  return row.sourceCustomerName || row.productionSourceCustomerName || (row.inventorySourceType === 'STOCK' ? '备货库存' : '-');
 }
 
 function inventorySourceOrderNo(row: InventoryBatch) {
@@ -661,6 +760,28 @@ function canAdjustBatch(row: InventoryBatch) {
   return Boolean(row.canAdjust);
 }
 
+function batchAvailableQuantity(row: InventoryBatch) {
+  return Number(row.availableQuantity ?? Math.max(Number(row.quantity || 0) - Number(row.reservedQuantity || 0), 0));
+}
+
+function reservationStatusText(status: InventoryReservationStatus) {
+  const map: Record<InventoryReservationStatus, string> = {
+    ACTIVE: '预占中',
+    RELEASED: '已释放',
+    CONSUMED: '已消费'
+  };
+  return map[status] || status;
+}
+
+function reservationStatusTagType(status: InventoryReservationStatus) {
+  const map: Record<InventoryReservationStatus, 'primary' | 'success' | 'info'> = {
+    ACTIVE: 'primary',
+    RELEASED: 'info',
+    CONSUMED: 'success'
+  };
+  return map[status] || 'info';
+}
+
 async function openSourceDetails(partCode: string, unit?: string, sourceType: 'ALL' | 'ORDER' | 'STOCK' = 'ALL') {
   if (!partCode?.trim()) {
     ElMessage.warning('请先选择零件');
@@ -682,6 +803,20 @@ async function openSourceDetails(partCode: string, unit?: string, sourceType: 'A
   }
 }
 
+async function openReservationDialog(row: InventoryBatch) {
+  selectedReservationBatch.value = row;
+  reservationHistory.value = [];
+  reservationDialogVisible.value = true;
+  reservationHistoryLoading.value = true;
+  try {
+    reservationHistory.value = await erpApi.inventoryBatchReservations(row.id);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '预占记录加载失败');
+  } finally {
+    reservationHistoryLoading.value = false;
+  }
+}
+
 function currentDateTimeValue() {
   const now = new Date();
   const localTime = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
@@ -690,7 +825,7 @@ function currentDateTimeValue() {
 
 function openAdjustDialog(row: InventoryBatch) {
   selectedBatch.value = row;
-  adjustForm.afterQuantity = row.quantity;
+  adjustForm.afterQuantity = Math.max(row.quantity, Number(row.reservedQuantity || 0));
   adjustForm.countedBy = '';
   adjustForm.countedAt = currentDateTimeValue();
   adjustForm.signatureName = '';
@@ -702,6 +837,27 @@ function openAdjustDialog(row: InventoryBatch) {
   adjustmentHistory.value = [];
   adjustDialogVisible.value = true;
   void loadAdjustmentHistory(row.id);
+}
+
+function handleAdjustDialogBeforeClose(done: () => void) {
+  if (adjustSaving.value) {
+    return;
+  }
+  done();
+}
+
+function resetAdjustDialog() {
+  selectedBatch.value = undefined;
+  adjustForm.afterQuantity = 0;
+  adjustForm.countedBy = '';
+  adjustForm.countedAt = '';
+  adjustForm.signatureName = '';
+  adjustForm.remark = '';
+  adjustmentFile.value = null;
+  adjustmentHistory.value = [];
+  if (adjustmentFileInput.value) {
+    adjustmentFileInput.value.value = '';
+  }
 }
 
 function onAdjustmentFileChange(event: Event) {
@@ -771,6 +927,12 @@ async function submitAdjustment() {
     ElMessage.warning('请上传盘点工单、照片或 PDF 附件');
     return;
   }
+  if (Number(adjustForm.afterQuantity) + 0.0001 < adjustmentMinQuantity.value) {
+    ElMessage.warning(
+      `盘点后数量不能低于已预占数量 ${formatQuantity(adjustmentMinQuantity.value, selectedBatch.value.unit)}`
+    );
+    return;
+  }
 
   adjustSaving.value = true;
   try {
@@ -816,6 +978,10 @@ onMounted(async () => {
   color: #64748b;
   font-size: 12px;
   line-height: 18px;
+}
+
+.warning-text {
+  color: #dc2626;
 }
 
 .source-tag {
@@ -926,6 +1092,24 @@ onMounted(async () => {
   color: #64748b;
   font-size: 12px;
   line-height: 18px;
+}
+
+.reservation-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #475569;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.reservation-summary strong {
+  color: #0f172a;
 }
 
 .adjustment-summary {

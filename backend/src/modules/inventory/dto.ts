@@ -50,6 +50,10 @@ export class InventorySourceDetailQueryDto {
   @IsOptional()
   @IsIn(['ALL', 'ORDER', 'STOCK'])
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
+
+  @IsOptional()
+  @IsString()
+  excludeOrderNo?: string;
 }
 
 export class AdjustInventoryBatchDto {

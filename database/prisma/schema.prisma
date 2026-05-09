@@ -65,6 +65,12 @@ enum InventoryTransactionType {
   OUT
 }
 
+enum InventoryReservationStatus {
+  ACTIVE
+  RELEASED
+  CONSUMED
+}
+
 model Customer {
   id           String          @id @default(uuid())
   customerCode String          @unique
@@ -179,6 +185,7 @@ model CustomerOrder {
   lines            OrderLine[]
   productionTasks  ProductionTask[]
   inventoryBatches InventoryBatch[]
+  inventoryReservations InventoryReservation[]
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -203,6 +210,12 @@ model OrderLine {
   partSpecification String?
   quantity        Decimal                @db.Decimal(18, 3)
   productionPlanQuantity Decimal          @db.Decimal(18, 3)
+  productionPlanSuggestedQuantity Decimal? @db.Decimal(18, 3)
+  productionPlanOverrideByCode String?
+  productionPlanOverrideByName String?
+  productionPlanOverrideByRole String?
+  productionPlanOverrideAt DateTime?
+  productionPlanOverrideReason String?
   fulfillmentMode OrderLineFulfillmentMode @default(PRODUCTION)
   unit            String
   deliveryDate    DateTime?
@@ -212,6 +225,7 @@ model OrderLine {
   processSteps    OrderLineProcessStep[]
   productionTasks ProductionTask[]
   inventoryBatches InventoryBatch[]
+  inventoryReservations InventoryReservation[]
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
@@ -496,6 +510,7 @@ model InventoryBatch {
   status                 InventoryStatus        @default(AVAILABLE)
   transactions           InventoryTransaction[]
   adjustments            InventoryAdjustment[]
+  reservations           InventoryReservation[]
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 
@@ -508,6 +523,34 @@ model InventoryBatch {
   @@index([replenishmentSourceRequestNo])
   @@index([warehouseId])
   @@index([status])
+}
+
+/// 订单保存后对备货库存的预占记录。草稿订单不直接扣库存，提交生产时把 ACTIVE 预占转为 CONSUMED 并生成库存流水。
+model InventoryReservation {
+  id           String                     @id @default(uuid())
+  batchId      String
+  batch        InventoryBatch             @relation(fields: [batchId], references: [id])
+  orderId      String
+  order        CustomerOrder              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderLineId  String?
+  orderLine    OrderLine?                 @relation(fields: [orderLineId], references: [id], onDelete: SetNull)
+  orderNo      String
+  partCode     String
+  partName     String
+  quantity     Decimal                    @db.Decimal(18, 3)
+  unit         String
+  status       InventoryReservationStatus @default(ACTIVE)
+  statusReason String?
+  releasedAt   DateTime?
+  consumedAt   DateTime?
+  createdAt    DateTime                   @default(now())
+  updatedAt    DateTime                   @updatedAt
+
+  @@index([batchId, status])
+  @@index([orderId, status])
+  @@index([orderLineId, status])
+  @@index([orderNo])
+  @@index([partCode])
 }
 
 /// 库存流水只追加记录，用于保留入库 / 出库数量变化。

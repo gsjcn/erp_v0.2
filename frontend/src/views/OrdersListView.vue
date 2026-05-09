@@ -103,12 +103,12 @@
         </el-table-column>
         <el-table-column label="订单状态" width="160">
           <template #default="{ row }">
-            <StatusTag :value="row.status" />
+            <StatusTag :value="orderDisplayStatus(row)" />
           </template>
         </el-table-column>
         <el-table-column label="生产状态" width="130">
           <template #default="{ row }">
-            <StatusTag :value="orderProductionStatusValue(row)" compact />
+            <StatusTag :value="orderProductionStatusValue(row)" :label-override="orderProductionStatusLabel(row)" compact />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="190" fixed="right">
@@ -135,11 +135,11 @@
         <div class="mobile-card-fields">
           <div class="mobile-field">
             <label>订单状态</label>
-            <span><StatusTag :value="order.status" compact /></span>
+            <span><StatusTag :value="orderDisplayStatus(order)" compact /></span>
           </div>
           <div class="mobile-field">
             <label>生产状态</label>
-            <span><StatusTag :value="orderProductionStatusValue(order)" compact /></span>
+            <span><StatusTag :value="orderProductionStatusValue(order)" :label-override="orderProductionStatusLabel(order)" compact /></span>
           </div>
           <div class="mobile-field">
             <label>订单日期</label>
@@ -281,7 +281,7 @@
           <span>{{ activeCancelOrder?.customerName }}</span>
         </el-form-item>
         <el-form-item label="订单状态">
-          <StatusTag v-if="activeCancelOrder" :value="activeCancelOrder.status" />
+          <StatusTag v-if="activeCancelOrder" :value="orderDisplayStatus(activeCancelOrder)" />
         </el-form-item>
         <el-form-item label="取消日期">
           <el-input v-model="cancelOrderForm.cancelAt" disabled />
@@ -289,8 +289,8 @@
         </el-form-item>
         <el-form-item label="生产状态" required>
           <el-radio-group v-model="cancelOrderForm.productionCancelState">
-            <el-radio-button label="NOT_PRODUCED">未生产取消</el-radio-button>
-            <el-radio-button label="PRODUCED">已生产取消</el-radio-button>
+            <el-radio-button value="NOT_PRODUCED">未生产取消</el-radio-button>
+            <el-radio-button value="PRODUCED">已生产取消</el-radio-button>
           </el-radio-group>
           <div class="form-hint">必须人工选择。若已生产，系统会同步通知仓库逐项确认转库存或报废。</div>
         </el-form-item>
@@ -306,9 +306,9 @@
                 <span>{{ row.productionTaskNo }}，已完成 {{ formatQuantity(row.completedQuantity, row.unit) }} / 计划 {{ formatQuantity(row.plannedQuantity, row.unit) }}</span>
               </div>
               <el-radio-group v-model="row.handlingMode" @change="handleCancelHandlingModeChange(row)">
-                <el-radio-button label="STOCK">转库存</el-radio-button>
-                <el-radio-button label="SCRAP">报废</el-radio-button>
-                <el-radio-button label="NONE">无实物</el-radio-button>
+                <el-radio-button value="STOCK">转库存</el-radio-button>
+                <el-radio-button value="SCRAP">报废</el-radio-button>
+                <el-radio-button value="NONE">无实物</el-radio-button>
               </el-radio-group>
               <el-input-number
                 v-model="row.handlingQuantity"
@@ -360,9 +360,9 @@ import type {
   OrderDetail,
   OrderLine,
   OrderLineProductionTask,
+  OrderProductionFilterStatus,
   OrderStatus,
-  OrderSummary,
-  ProductionStatus
+  OrderSummary
 } from '../types/erp';
 import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
 import {
@@ -372,7 +372,8 @@ import {
   confirmExistingDrawingNos
 } from '../utils/orderLineDuplicateChecks';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
-import { sanitizeOrderLinePayload, validateDraftStockSourceLines } from '../utils/stockSourceReview';
+import { orderDisplayStatus } from '../utils/orderStatus';
+import { sanitizeOrderLinePayload, selectedStockSourceQuantity, validateDraftStockSourceLines } from '../utils/stockSourceReview';
 
 const router = useRouter();
 const customers = ref<Customer[]>([]);
@@ -390,23 +391,26 @@ const activeCancelOrder = ref<OrderSummary>();
 const activeCancelOrderDetail = ref<OrderDetail>();
 
 const orderStatusOptions: Array<{ label: string; value: OrderStatus }> = [
-  { label: '草稿', value: 'DRAFT' },
-  { label: '已提交', value: 'SUBMITTED' },
-  { label: '生产/入库/发货中', value: 'IN_PRODUCTION' },
+  { label: '待提交生产', value: 'DRAFT' },
+  { label: '待确认生产', value: 'SUBMITTED' },
+  { label: '生产中', value: 'IN_PRODUCTION' },
   { label: '已完成', value: 'COMPLETED' },
   { label: '已取消', value: 'CANCELLED' }
 ];
-const productionStatusOptions: Array<{ label: string; value: ProductionStatus }> = [
-  { label: '待生产', value: 'PENDING' },
-  { label: '生产中', value: 'IN_PROGRESS' },
-  { label: '已完成', value: 'COMPLETED' }
+const productionStatusOptions: Array<{ label: string; value: OrderProductionFilterStatus }> = [
+  { label: '待提交生产', value: 'ORDER_DRAFT' },
+  { label: '待确认生产', value: 'WAITING_PRODUCTION' },
+  { label: '生产中', value: 'ORDER_IN_PRODUCTION' },
+  { label: '已完成未发货', value: 'ORDER_COMPLETED_UNSHIPPED' },
+  { label: '已完成发货', value: 'ORDER_SHIPPED_COMPLETED' },
+  { label: '已取消', value: 'ORDER_CANCELLED' }
 ];
 
 const filters = reactive<{
   customerId?: string;
   orderNo?: string;
   orderStatuses: OrderStatus[];
-  productionStatuses: ProductionStatus[];
+  productionStatuses: OrderProductionFilterStatus[];
 }>({
   orderStatuses: orderStatusOptions.map((option) => option.value),
   productionStatuses: productionStatusOptions.map((option) => option.value)
@@ -592,13 +596,12 @@ function selectedProductionStatusesForQuery() {
 }
 
 function orderProductionStatusValue(order: OrderSummary) {
-  if (order.status === 'DRAFT') {
-    return 'ORDER_DRAFT';
-  }
-  if (order.status === 'CANCELLED') {
-    return 'ORDER_CANCELLED';
-  }
-  return order.productionStatus;
+  return orderDisplayStatus(order);
+}
+
+function orderProductionStatusLabel(order: OrderSummary) {
+  void order;
+  return undefined;
 }
 
 function formatOrderQuantity(order: OrderSummary, field: 'totalQuantity' | 'totalProductionPlanQuantity') {
@@ -658,7 +661,7 @@ async function saveOrder() {
         !line.partName ||
         !line.partThickness ||
         !line.quantity ||
-        (line.fulfillmentMode !== 'STOCK' && !line.productionPlanQuantity) ||
+        (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) ||
         !line.unit
     )
   ) {
@@ -670,7 +673,7 @@ async function saveOrder() {
   }
   const stockCheck = validateStockModeLines(orderForm.lines, inventorySummary.value);
   if (!stockCheck.ok) {
-    ElMessage.warning(`草稿可先保存；${stockCheck.message}，提交生产前必须补足`);
+    ElMessage.warning(`待提交生产订单可先保存；${stockCheck.message}，提交生产前必须补足`);
   }
   const draftStockCheck = validateDraftStockSourceLines(orderForm.lines);
   if (!draftStockCheck.ok) {
@@ -708,7 +711,7 @@ async function saveOrder() {
     });
     ElMessage.success('订单已保存');
     dialogVisible.value = false;
-    await router.push(`/orders/${order.orderNo}`);
+    await router.push(orderDetailPath(order.orderNo));
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '订单保存失败');
   } finally {
@@ -841,11 +844,13 @@ async function checkOrderNo(silent = false, expectedSequence?: number) {
 
 function syncPlanQuantity(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
-    line.productionPlanQuantity = 0;
+    line.productionPlanQuantity = Math.max(Number(line.quantity || 0) - selectedStockSourceQuantity(line), 0);
+    line.productionPlanOverrideByCode = '';
+    line.productionPlanOverrideReason = '';
     return;
   }
-  // 客户订单数量变化时，生产计划不能低于客户订单；仍允许手工改大做库存。
-  if (!line.productionPlanQuantity || line.productionPlanQuantity < line.quantity) {
+  // 客户订单数量变化时只补默认值；少做或多做需要在订单行里填写偏差说明。
+  if (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) {
     line.productionPlanQuantity = line.quantity;
   }
 }
@@ -855,15 +860,40 @@ function normalizedLines() {
 }
 
 function goDetail(row: OrderSummary) {
-  void router.push(`/orders/${row.orderNo}`);
+  void router.push(orderDetailPath(row.orderNo));
+}
+
+function orderDetailPath(orderNo: string) {
+  return `/orders/${encodeURIComponent(orderNo)}`;
 }
 
 function goProcess(row: OrderSummary) {
-  void router.push({ path: '/processes', query: { orderNo: row.orderNo, returnTo: '/orders' } });
+  if (row.status === 'DRAFT') {
+    void router.push({ path: '/processes', query: { orderNo: row.orderNo, open: 'edit', returnTo: '/orders' } });
+    return;
+  }
+  if (orderWarehouseActionText(row)) {
+    void router.push({ path: '/warehouses', query: { orderNo: row.orderNo, returnTo: '/orders' } });
+    return;
+  }
+  void router.push({ path: '/production', query: { orderNo: row.orderNo, returnTo: '/orders' } });
 }
 
 function orderProcessActionText(row: OrderSummary) {
-  return row.status === 'DRAFT' ? '提交生产' : '生产流程';
+  if (row.status === 'DRAFT') {
+    return '提交生产';
+  }
+  return orderWarehouseActionText(row) || '生产详情';
+}
+
+function orderWarehouseActionText(row: OrderSummary) {
+  if (row.warehouseStage === 'WAITING_RECEIPT') {
+    return '仓库入库';
+  }
+  if (row.warehouseStage === 'WAITING_SHIPMENT' || row.warehouseStage === 'PARTIAL_SHIPPED') {
+    return '仓库发货';
+  }
+  return '';
 }
 
 function canCancelOrder(row: OrderSummary) {

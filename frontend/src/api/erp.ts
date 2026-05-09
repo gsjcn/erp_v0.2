@@ -5,6 +5,7 @@ import type {
   InventoryBatch,
   InventoryAdjustment,
   InventoryMaterialSuggestion,
+  InventoryReservationAudit,
   InventorySourceDetailResponse,
   InventorySummaryRow,
   InventoryStatus,
@@ -14,12 +15,14 @@ import type {
   ProcessStepDetail,
   OrderStatisticsResponse,
   OrderStatus,
+  OrderProductionFilterStatus,
   OrderSummary,
   ProductionAnnualSummaryRow,
   ProductionNotice,
   ProductionNoticeStatus,
   ProductionNoticeTarget,
   ProductionOperator,
+  ProductionOrderSummary,
   ProductionReplenishmentRequest,
   ProductionReplenishmentRequestStatus,
   ProcessTemplate,
@@ -44,6 +47,12 @@ export interface CreateOrderLinePayload {
   partSpecification?: string;
   quantity: number;
   productionPlanQuantity?: number;
+  productionPlanSuggestedQuantity?: number;
+  productionPlanOverrideByCode?: string;
+  productionPlanOverrideByName?: string;
+  productionPlanOverrideByRole?: string;
+  productionPlanOverrideAt?: string;
+  productionPlanOverrideReason?: string;
   fulfillmentMode?: OrderLineFulfillmentMode;
   unit: string;
   deliveryDate?: string;
@@ -121,7 +130,7 @@ export interface OrderFilters {
   dateTo?: string;
   status?: OrderStatus;
   statuses?: OrderStatus[];
-  productionStatuses?: ProductionStatus[];
+  productionStatuses?: OrderProductionFilterStatus[];
 }
 
 export interface InventoryFilters {
@@ -136,6 +145,7 @@ export interface InventorySourceDetailFilters {
   unit?: string;
   warehouseId?: string;
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
+  excludeOrderNo?: string;
 }
 
 export interface AdjustInventoryBatchPayload {
@@ -243,6 +253,11 @@ export interface StartProductionPayload {
   supervisorCode: string;
 }
 
+export interface BatchStartProductionPayload {
+  taskIds: string[];
+  supervisorCode: string;
+}
+
 export interface ApproveProductionReplenishmentRequestPayload {
   managerName: string;
   remark?: string;
@@ -267,6 +282,8 @@ export interface CreateAdditionalMaterialPayload extends CreateOrderLinePayload 
 export interface UpdateLineQuantityPayload {
   quantity: number;
   productionPlanQuantity?: number;
+  productionPlanOverrideByCode?: string;
+  productionPlanOverrideReason?: string;
   reason: string;
   managerName?: string;
 }
@@ -492,6 +509,17 @@ export const erpApi = {
       })}`
     );
   },
+  productionOrderSummaries(filters: ProductionTaskFilters = {}) {
+    return request<ProductionOrderSummary[]>(
+      `/production/tasks/order-summary${toQuery({
+        customerId: filters.customerId,
+        orderNo: filters.orderNo,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        status: filters.status
+      })}`
+    );
+  },
   productionAnnualSummary(year: number) {
     return request<ProductionAnnualSummaryRow[]>(`/production/tasks/annual-summary${toQuery({ year: String(year) })}`);
   },
@@ -541,6 +569,12 @@ export const erpApi = {
   },
   startProduction(id: string, payload: StartProductionPayload) {
     return request<ProductionTask>(`/production/tasks/${id}/start`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  batchStartProduction(payload: BatchStartProductionPayload) {
+    return request<{ orderId: string; orderNo: string; startedCount: number }>('/production/tasks/batch-start', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
@@ -600,7 +634,7 @@ export const erpApi = {
       })}`
     );
   },
-  confirmReceipt(productionTaskId: string, warehouseId?: string, locationId?: string, remark?: string) {
+  confirmReceipt(productionTaskId: string, warehouseId: string, locationId: string, remark?: string) {
     return request(`/warehouse/receipts/${productionTaskId}/confirm`, {
       method: 'POST',
       body: JSON.stringify({ warehouseId, locationId, remark })
@@ -688,7 +722,8 @@ export const erpApi = {
       `/inventory/materials/${encodeURIComponent(partCode)}/source-details${toQuery({
         unit: filters.unit,
         warehouseId: filters.warehouseId,
-        sourceType: filters.sourceType
+        sourceType: filters.sourceType,
+        excludeOrderNo: filters.excludeOrderNo
       })}`
     );
   },
@@ -712,5 +747,8 @@ export const erpApi = {
   },
   inventoryBatchAdjustments(batchId: string) {
     return request<InventoryAdjustment[]>(`/inventory/batches/${batchId}/adjustments`);
+  },
+  inventoryBatchReservations(batchId: string) {
+    return request<InventoryReservationAudit[]>(`/inventory/batches/${batchId}/reservations`);
   }
 };

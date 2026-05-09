@@ -174,7 +174,9 @@ const processMap: Record<string, SeedProcessStep[]> = {
   'P-4004': ['装配', '包装'],
   'P-4101': [{ processName: '冲压', processRemark: '首件确认后连续生产' }, '打磨', '包装'],
   'P-4102': ['激光切割', { processName: '折弯', processRemark: 'R角按图纸' }, '焊接', '包装'],
-  'P-4103': ['冲压', '喷涂', '包装']
+  'P-4103': ['冲压', '喷涂', '包装'],
+  'P-6001': ['激光切割', '折弯', '包装'],
+  'P-6002': ['冲压', '焊接', '包装']
 };
 
 const processTemplateSeeds: Array<{ templateName: string; steps: SeedProcessStep[]; remark?: string }> = [
@@ -226,7 +228,16 @@ const productionOperatorSeeds = [
     role: '生产计划员',
     pinyin: 'liujihua',
     pinyinInitials: 'ljh',
-    keywords: ['liu', 'jihua', 'ljh', '计划', '下计划'],
+    keywords: ['liu', 'jihua', 'ljh', '计划', '下计划', '下单', '订单'],
+    idCardBound: false
+  },
+  {
+    accountId: 'ORDER-001',
+    name: '孙下单',
+    role: '下单管理员',
+    pinyin: 'sunxiadan',
+    pinyinInitials: 'sxd',
+    keywords: ['sun', 'xiadan', 'sxd', '下单', '订单', '订单管理员'],
     idCardBound: false
   },
   {
@@ -236,6 +247,15 @@ const productionOperatorSeeds = [
     pinyin: 'chenzhuren',
     pinyinInitials: 'czr',
     keywords: ['chen', 'zhuren', 'czr', '车间主任', '主任', '车间', '主管'],
+    idCardBound: false
+  },
+  {
+    accountId: 'TECH-001',
+    name: '王工艺',
+    role: '技术工艺员',
+    pinyin: 'wanggongyi',
+    pinyinInitials: 'wgy',
+    keywords: ['wang', 'gongyi', 'wgy', '技术', '工艺', '流程'],
     idCardBound: false
   },
   {
@@ -545,6 +565,17 @@ async function seedOrders() {
         { partCode: 'P-3001', partName: '端盖', drawingNo: 'DRW-3001', quantity: 300, productionPlanQuantity: 320, unit: '件' },
         { partCode: 'P-3002', partName: '侧梁', drawingNo: 'DRW-3002', quantity: 360, productionPlanQuantity: 360, unit: '件' },
         { partCode: 'P-3003', partName: '连接板', drawingNo: 'DRW-3003', quantity: 300, productionPlanQuantity: 300, unit: '件' }
+      ]
+    },
+    {
+      orderNo: 'SO-20260506-006',
+      customer: customer2,
+      orderDate: new Date('2026-05-07T00:00:00.000Z'),
+      deliveryDate: new Date('2026-05-25T00:00:00.000Z'),
+      status: OrderStatus.COMPLETED,
+      lines: [
+        { partCode: 'P-6001', partName: '发货测试面板', drawingNo: 'DRW-6001', quantity: 40, productionPlanQuantity: 40, unit: '件' },
+        { partCode: 'P-6002', partName: '发货测试支架', drawingNo: 'DRW-6002', quantity: 60, productionPlanQuantity: 60, unit: '件' }
       ]
     },
     {
@@ -1032,8 +1063,9 @@ async function seedInventory() {
     include: { locations: true }
   });
   const completedTasks = await prisma.productionTask.findMany({
-    where: { orderNo: 'SO-20260506-003', status: ProductionStatus.COMPLETED },
-    include: { order: true, orderLine: true }
+    where: { status: ProductionStatus.COMPLETED },
+    include: { order: true, orderLine: true },
+    orderBy: [{ orderNo: 'asc' }, { productionTaskNo: 'asc' }]
   });
 
   for (const [index, task] of completedTasks.entries()) {
@@ -1119,7 +1151,7 @@ async function seedInventory() {
           sourceOrderId: null,
           sourceOrderLineId: null,
           sourceOrderNo: null,
-          sourceCustomerName: null,
+          sourceCustomerName: task.customerName,
           productionTaskId: null,
           sourceProductionTaskNo: task.productionTaskNo,
           sourceKind: 'NORMAL_ORDER',
@@ -1136,7 +1168,7 @@ async function seedInventory() {
           sourceOrderId: null,
           sourceOrderLineId: null,
           sourceOrderNo: null,
-          sourceCustomerName: null,
+          sourceCustomerName: task.customerName,
           productionTaskId: null,
           sourceProductionTaskNo: task.productionTaskNo,
           sourceKind: 'NORMAL_ORDER',
@@ -1178,6 +1210,24 @@ async function seedInventory() {
 
   const stockSeedItems = [
     {
+      batchNo: 'IB-STOCK-DEMO-P2001-SMALL',
+      transactionNo: 'IT-IN-STOCK-DEMO-P2001-SMALL',
+      partCode: 'P-2001',
+      partName: '设备门板',
+      quantity: 2,
+      unit: '件',
+      sourceProductionTaskNo: 'PT-SO-20260506-002-001'
+    },
+    {
+      batchNo: 'IB-STOCK-DEMO-P2001-LARGE',
+      transactionNo: 'IT-IN-STOCK-DEMO-P2001-LARGE',
+      partCode: 'P-2001',
+      partName: '设备门板',
+      quantity: 58,
+      unit: '件',
+      sourceProductionTaskNo: 'PT-SO-20260506-002-001'
+    },
+    {
       batchNo: 'IB-STOCK-DEMO-P4101',
       transactionNo: 'IT-IN-STOCK-DEMO-P4101',
       partCode: 'P-4101',
@@ -1216,7 +1266,7 @@ async function seedInventory() {
         sourceOrderNo: null,
         sourceCustomerName: null,
         productionTaskId: null,
-        sourceProductionTaskNo: null,
+        sourceProductionTaskNo: item.sourceProductionTaskNo ?? null,
         quantity: item.quantity,
         unit: item.unit,
         warehouseId: warehouse.id,
@@ -1232,7 +1282,7 @@ async function seedInventory() {
         sourceOrderNo: null,
         sourceCustomerName: null,
         productionTaskId: null,
-        sourceProductionTaskNo: null,
+        sourceProductionTaskNo: item.sourceProductionTaskNo ?? null,
         quantity: item.quantity,
         unit: item.unit,
         warehouseId: warehouse.id,
@@ -1245,6 +1295,7 @@ async function seedInventory() {
       where: { transactionNo: item.transactionNo },
       update: {
         batchId: batch.id,
+        productionTaskNo: item.sourceProductionTaskNo ?? null,
         quantity: item.quantity,
         warehouseId: warehouse.id,
         locationId: location.id
@@ -1256,7 +1307,7 @@ async function seedInventory() {
         partCode: item.partCode,
         partName: item.partName,
         orderNo: null,
-        productionTaskNo: null,
+        productionTaskNo: item.sourceProductionTaskNo ?? null,
         quantity: item.quantity,
         unit: item.unit,
         warehouseId: warehouse.id,
@@ -1268,13 +1319,436 @@ async function seedInventory() {
     });
   }
 
-  // 种子数据中的已入库库存还没有发货，所以订单不能直接显示为已完成。
+  await seedStockFulfillmentOrders();
+
+  // SO-20260506-003 用于验证已生产但未全量发货：先发一批，剩余批次继续待发货。
+  await seedOrderShipment('SO-20260506-003', 'PARTIAL', '种子数据：部分发货，用于验证已完成未发货状态');
+
+  // SO-20260506-006 用于验证已完成发货：订单库存全部发完后才进入 COMPLETED。
+  await seedOrderShipment('SO-20260506-006', 'FULL', '种子数据：整单发货，用于验证已完成发货状态');
+
+  // 种子数据中的已入库库存若还没有全量发货，订单不能直接显示为已完成发货。
   await prisma.customerOrder.updateMany({
     where: {
       orderNo: 'SO-20260506-003',
       inventoryBatches: { some: { status: 'AVAILABLE' } }
     },
     data: { status: OrderStatus.IN_PRODUCTION }
+  });
+}
+
+type SeedStockCustomer = {
+  id: string;
+  customerCode: string;
+  customerName: string;
+  contactName?: string | null;
+  contactPhone?: string | null;
+};
+
+async function seedStockFulfillmentOrders() {
+  const warehouse = await prisma.warehouse.findUniqueOrThrow({
+    where: { warehouseCode: 'WH-FG' },
+    include: { locations: true }
+  });
+  const customer = await prisma.customer.findUniqueOrThrow({ where: { customerCode: 'C-001' } });
+
+  await seedStockFulfillmentOrder({
+    orderNo: 'SO-20260508-002',
+    customer,
+    orderDate: new Date('2026-05-08T00:00:00.000Z'),
+    deliveryDate: new Date('2026-05-26T00:00:00.000Z'),
+    line: {
+      partCode: 'P-4102',
+      partName: '焊接测试支架',
+      drawingNo: 'DRW-4102',
+      quantity: 40,
+      productionPlanQuantity: 0,
+      unit: '件'
+    },
+    selectedBatchNo: 'IB-STOCK-DEMO-P4102',
+    selectedQuantity: 40,
+    locationId: warehouse.locations[0]?.id
+  });
+
+  await seedStockFulfillmentOrder({
+    orderNo: 'SO-20260508-003',
+    customer,
+    orderDate: new Date('2026-05-08T00:00:00.000Z'),
+    deliveryDate: new Date('2026-05-27T00:00:00.000Z'),
+    line: {
+      partCode: 'P-4103',
+      partName: '喷涂测试底座',
+      drawingNo: 'DRW-4103',
+      quantity: 100,
+      productionPlanQuantity: 40,
+      unit: '件'
+    },
+    selectedBatchNo: 'IB-STOCK-DEMO-P4103',
+    selectedQuantity: 60,
+    locationId: warehouse.locations[1]?.id || warehouse.locations[0]?.id
+  });
+}
+
+async function seedStockFulfillmentOrder(options: {
+  orderNo: string;
+  customer: SeedStockCustomer;
+  orderDate: Date;
+  deliveryDate: Date;
+  line: SeedOrderLine;
+  selectedBatchNo: string;
+  selectedQuantity: number;
+  locationId?: string;
+}) {
+  const savedOrder = await prisma.customerOrder.upsert({
+    where: { orderNo: options.orderNo },
+    update: {
+      customerId: options.customer.id,
+      customerCode: options.customer.customerCode,
+      customerName: options.customer.customerName,
+      customerSnapshot: {
+        customerCode: options.customer.customerCode,
+        customerName: options.customer.customerName,
+        contactName: options.customer.contactName,
+        contactPhone: options.customer.contactPhone
+      },
+      orderDate: options.orderDate,
+      deliveryDate: options.deliveryDate,
+      status: OrderStatus.SUBMITTED
+    },
+    create: {
+      orderNo: options.orderNo,
+      customerId: options.customer.id,
+      customerCode: options.customer.customerCode,
+      customerName: options.customer.customerName,
+      customerSnapshot: {
+        customerCode: options.customer.customerCode,
+        customerName: options.customer.customerName,
+        contactName: options.customer.contactName,
+        contactPhone: options.customer.contactPhone
+      },
+      orderDate: options.orderDate,
+      deliveryDate: options.deliveryDate,
+      status: OrderStatus.SUBMITTED
+    }
+  });
+
+  await prisma.orderNoReservation.upsert({
+    where: { orderNoNormalized: options.orderNo.toUpperCase() },
+    update: {
+      orderNo: options.orderNo.toUpperCase(),
+      sourceOrderId: savedOrder.id,
+      reservedReason: 'SEED_STOCK_ORDER_RESERVED'
+    },
+    create: {
+      orderNo: options.orderNo.toUpperCase(),
+      orderNoNormalized: options.orderNo.toUpperCase(),
+      sourceOrderId: savedOrder.id,
+      reservedReason: 'SEED_STOCK_ORDER_RESERVED'
+    }
+  });
+
+  const sourceBatch = await prisma.inventoryBatch.findUniqueOrThrow({
+    where: { batchNo: options.selectedBatchNo }
+  });
+  const sourceAvailableQuantity = decimalToNumber(sourceBatch.quantity);
+  if (sourceAvailableQuantity + 0.0001 < options.selectedQuantity) {
+    throw new Error(`Seed stock batch ${options.selectedBatchNo} quantity is not enough`);
+  }
+
+  const lineData = withPartDrawingDefaults(
+    {
+      ...options.line,
+      fulfillmentMode: OrderLineFulfillmentMode.STOCK
+    },
+    0
+  );
+  const productionPlanQuantity = Number(lineData.productionPlanQuantity || 0);
+  const processSteps = productionPlanQuantity > 0 ? normalizeSeedProcessSteps(processMap[lineData.partCode] || []) : [];
+  const selectedSources = [
+    {
+      batchId: sourceBatch.id,
+      batchNo: sourceBatch.batchNo,
+      partCode: sourceBatch.partCode,
+      partName: sourceBatch.partName,
+      quantity: options.selectedQuantity,
+      availableQuantity: sourceAvailableQuantity,
+      unit: sourceBatch.unit,
+      compatibilityStatus: 'MATCHED',
+      compatibilityReason: '种子数据：同零件库存来源已核对'
+    }
+  ];
+
+  const savedLine = await prisma.orderLine.upsert({
+    where: { orderId_lineNo: { orderId: savedOrder.id, lineNo: 1 } },
+    update: {
+      ...lineData,
+      productionPlanQuantity,
+      fulfillmentMode: OrderLineFulfillmentMode.STOCK,
+      processSnapshot: seedProcessSnapshot(processSteps),
+      stockSourceSelections: selectedSources as Prisma.InputJsonValue
+    },
+    create: {
+      orderId: savedOrder.id,
+      lineNo: 1,
+      ...lineData,
+      productionPlanQuantity,
+      fulfillmentMode: OrderLineFulfillmentMode.STOCK,
+      deliveryDate: options.deliveryDate,
+      processSnapshot: seedProcessSnapshot(processSteps),
+      stockSourceSelections: selectedSources as Prisma.InputJsonValue
+    }
+  });
+
+  await prisma.orderLineProcessStep.deleteMany({ where: { orderLineId: savedLine.id } });
+  for (const [stepIndex, processStep] of processSteps.entries()) {
+    await prisma.orderLineProcessStep.create({
+      data: {
+        orderLineId: savedLine.id,
+        stepNo: stepIndex + 1,
+        processName: processStep.processName,
+        processRemark: processStep.processRemark
+      }
+    });
+  }
+
+  const suffix = '001-01';
+  const remainingSourceQuantity = Math.max(sourceAvailableQuantity - options.selectedQuantity, 0);
+  // 使用库存订单的 seed 按真实业务写 OUT + IN 流水，避免测试数据绕过库存账。
+  await prisma.inventoryBatch.update({
+    where: { id: sourceBatch.id },
+    data: remainingSourceQuantity > 0 ? { quantity: remainingSourceQuantity } : { quantity: 0, status: 'USED' }
+  });
+
+  await prisma.inventoryTransaction.upsert({
+    where: { transactionNo: `IT-STOCK-OUT-${options.orderNo}-${suffix}` },
+    update: {
+      transactionType: 'OUT',
+      batchId: sourceBatch.id,
+      partCode: sourceBatch.partCode,
+      partName: sourceBatch.partName,
+      orderNo: null,
+      productionTaskNo: sourceBatch.sourceProductionTaskNo,
+      quantity: options.selectedQuantity,
+      unit: sourceBatch.unit,
+      warehouseId: sourceBatch.warehouseId,
+      locationId: sourceBatch.locationId,
+      remark: '种子数据：订单使用备货库存',
+      sourceRecordType: 'OrderLineSTOCK',
+      sourceRecordId: savedLine.id
+    },
+    create: {
+      transactionNo: `IT-STOCK-OUT-${options.orderNo}-${suffix}`,
+      transactionType: 'OUT',
+      batchId: sourceBatch.id,
+      partCode: sourceBatch.partCode,
+      partName: sourceBatch.partName,
+      orderNo: null,
+      productionTaskNo: sourceBatch.sourceProductionTaskNo,
+      quantity: options.selectedQuantity,
+      unit: sourceBatch.unit,
+      warehouseId: sourceBatch.warehouseId,
+      locationId: sourceBatch.locationId,
+      remark: '种子数据：订单使用备货库存',
+      sourceRecordType: 'OrderLineSTOCK',
+      sourceRecordId: savedLine.id
+    }
+  });
+
+  const orderBatch = await prisma.inventoryBatch.upsert({
+    where: { batchNo: `IB-ALLOC-${options.orderNo}-${suffix}` },
+    update: {
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      sourceOrderId: savedOrder.id,
+      sourceOrderLineId: savedLine.id,
+      sourceOrderNo: options.orderNo,
+      sourceCustomerName: options.customer.customerName,
+      productionTaskId: null,
+      sourceProductionTaskNo: sourceBatch.sourceProductionTaskNo,
+      sourceKind: sourceBatch.sourceKind,
+      replenishmentSourceType: sourceBatch.replenishmentSourceType,
+      replenishmentSourceRequestNo: sourceBatch.replenishmentSourceRequestNo,
+      quantity: options.selectedQuantity,
+      unit: lineData.unit,
+      warehouseId: sourceBatch.warehouseId,
+      locationId: options.locationId || sourceBatch.locationId,
+      status: 'AVAILABLE'
+    },
+    create: {
+      batchNo: `IB-ALLOC-${options.orderNo}-${suffix}`,
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      sourceOrderId: savedOrder.id,
+      sourceOrderLineId: savedLine.id,
+      sourceOrderNo: options.orderNo,
+      sourceCustomerName: options.customer.customerName,
+      productionTaskId: null,
+      sourceProductionTaskNo: sourceBatch.sourceProductionTaskNo,
+      sourceKind: sourceBatch.sourceKind,
+      replenishmentSourceType: sourceBatch.replenishmentSourceType,
+      replenishmentSourceRequestNo: sourceBatch.replenishmentSourceRequestNo,
+      quantity: options.selectedQuantity,
+      unit: lineData.unit,
+      warehouseId: sourceBatch.warehouseId,
+      locationId: options.locationId || sourceBatch.locationId,
+      status: 'AVAILABLE'
+    }
+  });
+
+  await prisma.inventoryTransaction.upsert({
+    where: { transactionNo: `IT-STOCK-IN-${options.orderNo}-${suffix}` },
+    update: {
+      transactionType: 'IN',
+      batchId: orderBatch.id,
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      orderNo: options.orderNo,
+      productionTaskNo: sourceBatch.sourceProductionTaskNo,
+      quantity: options.selectedQuantity,
+      unit: lineData.unit,
+      warehouseId: orderBatch.warehouseId,
+      locationId: orderBatch.locationId,
+      remark: '种子数据：备货库存转订单待发货库存',
+      sourceRecordType: 'OrderLineStockAllocation',
+      sourceRecordId: savedLine.id
+    },
+    create: {
+      transactionNo: `IT-STOCK-IN-${options.orderNo}-${suffix}`,
+      transactionType: 'IN',
+      batchId: orderBatch.id,
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      orderNo: options.orderNo,
+      productionTaskNo: sourceBatch.sourceProductionTaskNo,
+      quantity: options.selectedQuantity,
+      unit: lineData.unit,
+      warehouseId: orderBatch.warehouseId,
+      locationId: orderBatch.locationId,
+      remark: '种子数据：备货库存转订单待发货库存',
+      sourceRecordType: 'OrderLineStockAllocation',
+      sourceRecordId: savedLine.id
+    }
+  });
+
+  if (productionPlanQuantity <= 0) {
+    return;
+  }
+
+  const productionTaskNo = `PT-${options.orderNo}-001`;
+  const savedTask = await prisma.productionTask.upsert({
+    where: { productionTaskNo },
+    update: {
+      orderId: savedOrder.id,
+      orderLineId: savedLine.id,
+      orderNo: options.orderNo,
+      customerName: options.customer.customerName,
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      plannedQuantity: productionPlanQuantity,
+      completedQuantity: 0,
+      unit: lineData.unit,
+      status: ProductionStatus.PENDING,
+      processSnapshot: seedProcessSnapshot(processSteps),
+      startedAt: null,
+      completedAt: null
+    },
+    create: {
+      productionTaskNo,
+      orderId: savedOrder.id,
+      orderLineId: savedLine.id,
+      orderNo: options.orderNo,
+      customerName: options.customer.customerName,
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      plannedQuantity: productionPlanQuantity,
+      completedQuantity: 0,
+      unit: lineData.unit,
+      status: ProductionStatus.PENDING,
+      processSnapshot: seedProcessSnapshot(processSteps),
+      startedAt: null,
+      completedAt: null
+    }
+  });
+
+  await seedTaskProcessCompletions({
+    productionTaskId: savedTask.id,
+    taskStatus: ProductionStatus.PENDING,
+    steps: processSteps,
+    unit: lineData.unit,
+    completedQuantity: productionPlanQuantity,
+    partialCompletedStepCount: 0
+  });
+}
+
+async function seedOrderShipment(orderNo: string, mode: 'FULL' | 'PARTIAL', remark: string) {
+  const order = await prisma.customerOrder.findUniqueOrThrow({
+    where: { orderNo },
+    include: {
+      inventoryBatches: {
+        where: {
+          sourceOrderId: { not: null },
+          status: 'AVAILABLE'
+        },
+        include: { warehouse: true, location: true },
+        orderBy: [{ batchNo: 'asc' }]
+      }
+    }
+  });
+  const batches = mode === 'PARTIAL' ? order.inventoryBatches.slice(0, 1) : order.inventoryBatches;
+
+  for (const batch of batches) {
+    const shippedQuantity = decimalToNumber(batch.quantity);
+    if (shippedQuantity <= 0) {
+      continue;
+    }
+
+    await prisma.inventoryBatch.update({
+      where: { id: batch.id },
+      data: {
+        quantity: 0,
+        status: 'USED'
+      }
+    });
+
+    await prisma.inventoryTransaction.upsert({
+      where: { transactionNo: `IT-OUT-${batch.batchNo}` },
+      update: {
+        transactionType: 'OUT',
+        batchId: batch.id,
+        partCode: batch.partCode,
+        partName: batch.partName,
+        orderNo: batch.sourceOrderNo,
+        productionTaskNo: batch.sourceProductionTaskNo,
+        quantity: shippedQuantity,
+        unit: batch.unit,
+        warehouseId: batch.warehouseId,
+        locationId: batch.locationId,
+        remark,
+        sourceRecordType: 'InventoryBatch',
+        sourceRecordId: batch.id
+      },
+      create: {
+        transactionNo: `IT-OUT-${batch.batchNo}`,
+        transactionType: 'OUT',
+        batchId: batch.id,
+        partCode: batch.partCode,
+        partName: batch.partName,
+        orderNo: batch.sourceOrderNo,
+        productionTaskNo: batch.sourceProductionTaskNo,
+        quantity: shippedQuantity,
+        unit: batch.unit,
+        warehouseId: batch.warehouseId,
+        locationId: batch.locationId,
+        remark,
+        sourceRecordType: 'InventoryBatch',
+        sourceRecordId: batch.id
+      }
+    });
+  }
+
+  await prisma.customerOrder.update({
+    where: { id: order.id },
+    data: { status: mode === 'FULL' ? OrderStatus.COMPLETED : OrderStatus.IN_PRODUCTION }
   });
 }
 

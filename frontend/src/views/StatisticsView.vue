@@ -144,7 +144,7 @@
         </el-table-column>
         <el-table-column label="订单状态" width="150">
           <template #default="{ row }">
-            <StatusTag :value="row.status" />
+            <StatusTag :value="statisticsOrderStatus(row)" />
           </template>
         </el-table-column>
       </el-table>
@@ -162,7 +162,7 @@
         <div class="mobile-card-fields">
           <div class="mobile-field">
             <label>订单状态</label>
-            <span><StatusTag :value="row.status" compact /></span>
+            <span><StatusTag :value="statisticsOrderStatus(row)" compact /></span>
           </div>
           <div class="mobile-field">
             <label>订单日期</label>
@@ -200,6 +200,7 @@ import OrderNoLink from '../components/OrderNoLink.vue';
 import StatusTag from '../components/StatusTag.vue';
 import type { OrderStatisticsOrderRow, OrderStatisticsResponse, OrderStatisticsSummaryRow, StatisticsPeriod } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
+import { orderDisplayStatus } from '../utils/orderStatus';
 
 const activePeriod = ref<StatisticsPeriod>('year');
 const year = ref(new Date().getFullYear());
@@ -252,6 +253,10 @@ function formatOrderQuantity(row: OrderStatisticsOrderRow, field: 'totalQuantity
     return row.quantityByUnit.map((item) => formatQuantity(item[field], item.unit)).join(' / ');
   }
   return formatQuantity(row[field], row.unit);
+}
+
+function statisticsOrderStatus(row: OrderStatisticsOrderRow) {
+  return row.statisticsStatus || orderDisplayStatus(row);
 }
 
 async function loadStatistics() {

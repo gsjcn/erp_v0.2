@@ -14,7 +14,7 @@
             <el-button type="danger" plain :disabled="!canCancelOrder" @click="openCancelOrder">取消订单</el-button>
           </span>
         </el-tooltip>
-        <el-button @click="goProcess">工序设定</el-button>
+        <el-button @click="goProcess">{{ processActionText }}</el-button>
         <el-button type="primary" :disabled="!order || order.status !== 'DRAFT'" :loading="saving" @click="openSubmitOrderDialog">提交生产</el-button>
       </div>
     </div>
@@ -47,7 +47,7 @@
         </div>
         <div>
           <div class="muted">状态</div>
-          <StatusTag :value="order.status" />
+          <StatusTag :value="orderDisplayStatus(order)" />
         </div>
         <div>
           <div class="muted">库存/发货状态</div>
@@ -57,7 +57,7 @@
 
       <el-alert
         v-if="showProductionChangeHelp"
-        title="已开始生产的订单不能再当作草稿修改。补单、客户数量变更、新增物料都会同步通知生产；数量减少或取消会同时通知仓库等待转库存或报废处理。"
+        title="已开始生产的订单不能再按待提交生产状态修改。补单、客户数量变更、新增物料都会同步通知生产；数量减少或取消会同时通知仓库等待转库存或报废处理。"
         type="warning"
         :closable="false"
         class="mt-16"
@@ -80,6 +80,9 @@
           <div v-if="stockSourceSummary(line)" class="stock-source-summary">
             库存来源：{{ stockSourceSummary(line) }}
           </div>
+          <div v-if="stockFulfillmentHint(line)" class="stock-fulfillment-hint">
+            {{ stockFulfillmentHint(line) }}
+          </div>
           <div class="muted">交期 {{ formatDate(line.deliveryDate || order.deliveryDate) }}</div>
           <div class="muted">{{ line.partCode }} / {{ line.drawingNo || '-' }} / 版本 {{ line.drawingVersion || '-' }}</div>
           <div class="muted">厚度 {{ line.partThickness }} mm / 成品规格 {{ line.partSpecification || '-' }}</div>
@@ -94,7 +97,9 @@
           <DrawingPreviewLink :file-name="line.drawingFileName" :file-url="line.drawingFileUrl" :title="`${line.partName} 图纸预览`" />
           <div class="process-chain mt-16">
             <span v-for="step in line.processSteps" :key="step" class="process-pill">{{ processStepDisplay(line, step) }}</span>
-            <span v-if="line.processSteps.length === 0" class="muted">未选择生产流程</span>
+            <span v-if="line.processSteps.length === 0" class="muted">
+              {{ lineRequiresProductionProcess(line) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
+            </span>
           </div>
           <div class="line-actions">
             <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
@@ -152,7 +157,12 @@
             <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
           </el-table-column>
           <el-table-column label="生产计划数量" width="140">
-            <template #default="{ row }">{{ formatQuantity(row.productionPlanQuantity, row.unit) }}</template>
+            <template #default="{ row }">
+              <div>{{ formatQuantity(row.productionPlanQuantity, row.unit) }}</div>
+              <small v-if="stockFulfillmentHint(row)" class="stock-fulfillment-hint-inline">
+                {{ stockFulfillmentHint(row) }}
+              </small>
+            </template>
           </el-table-column>
           <el-table-column label="库存/生产方式" width="130">
             <template #default="{ row }">{{ fulfillmentModeLabel(row.fulfillmentMode) }}</template>
@@ -192,6 +202,9 @@
             <template #default="{ row }">
               <div class="process-chain">
                 <span v-for="step in row.processSteps" :key="step" class="process-pill">{{ processStepDisplay(row, step) }}</span>
+                <span v-if="row.processSteps.length === 0" class="muted">
+                  {{ lineRequiresProductionProcess(row) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
+                </span>
               </div>
             </template>
           </el-table-column>
@@ -227,7 +240,7 @@
         <div class="order-edit-grid">
           <el-form-item label="订单号">
             <div class="order-no-field">
-              <el-input v-model="editForm.orderNo" placeholder="草稿订单号可修改，系统自动查重" @input="scheduleEditOrderNoCheck" />
+              <el-input v-model="editForm.orderNo" placeholder="待提交生产订单号可修改，系统自动查重" @input="scheduleEditOrderNoCheck" />
             </div>
             <div
               v-if="orderNoCheckText"
@@ -403,15 +416,19 @@
       title="提交生产确认"
       width="min(760px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :show-close="!saving"
+      @closed="resetSubmitOrderDialog"
     >
       <div v-if="order" class="submit-order-confirm">
         <el-alert
-          title="提交后会生成生产任务；使用库存或库存再加工会在提交时重新校验库存来源并写入库存流水。提交后不能再按草稿编辑。"
+          title="提交后会生成生产任务；使用库存或库存再加工会在提交时重新校验库存来源并写入库存流水。提交后不能再按待提交生产状态编辑。"
           type="warning"
           :closable="false"
         />
         <el-form label-width="108px" class="submit-plan-form">
-          <el-form-item label="下计划操作员" required>
+          <el-form-item label="下单/计划操作员" required>
             <el-select
               v-model="submitPlanOperatorCode"
               filterable
@@ -420,11 +437,12 @@
               clearable
               :remote-method="loadSubmitPlanOperators"
               :loading="submitPlanOperatorLoading"
-              placeholder="选择生产计划员，车间主任不能提交"
+              placeholder="选择下单或计划人员，车间主任不能提交"
+              @change="handleSubmitPlanOperatorChange"
               @visible-change="(visible: boolean) => visible && loadSubmitPlanOperators('')"
             >
               <el-option
-                v-for="operator in submitPlanOperators"
+                v-for="operator in submitPlanOperatorOptionRows"
                 :key="operator.code"
                 :label="submitPlanOperatorLabel(operator)"
                 :value="operator.code"
@@ -435,7 +453,7 @@
                 </div>
               </el-option>
             </el-select>
-            <div class="form-help-text">提交生产属于下计划动作；车间主任只在生产页开始生产、确认生产。</div>
+            <div class="form-help-text">提交生产属于下单/计划动作；车间主任只在生产页开始生产、确认生产。</div>
           </el-form-item>
         </el-form>
         <div class="submit-order-summary">
@@ -463,14 +481,14 @@
               <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}，订单 {{ formatQuantity(line.quantity, line.unit) }}，生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
             </div>
             <small v-if="stockSourceSummary(line)">库存来源：{{ stockSourceSummary(line) }}</small>
-            <small v-if="line.fulfillmentMode !== 'STOCK' && line.processSteps.length === 0" class="submit-order-line-warning">
-              该零件尚未设置生产流程，提交时会被后端拒绝。
+            <small v-if="submitOrderLineWarning(line)" class="submit-order-line-warning">
+              {{ submitOrderLineWarning(line) }}
             </small>
           </article>
         </div>
       </div>
       <template #footer>
-        <el-button :disabled="saving" @click="submitOrderVisible = false">返回</el-button>
+        <el-button :disabled="saving" @click="closeSubmitOrderDialog">返回</el-button>
         <el-button type="primary" :disabled="!submitPlanOperatorCode" :loading="saving" @click="confirmSubmitOrder">确认提交生产</el-button>
       </template>
     </el-dialog>
@@ -542,9 +560,9 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="quantityChangeVisible" title="客户数量变更" width="min(560px, calc(100vw - 32px))">
+    <el-dialog v-model="quantityChangeVisible" title="客户数量变更" width="min(640px, calc(100vw - 32px))">
       <el-alert
-        title="已开始生产的订单不能按草稿编辑。数量减少或取消会通知生产管理确认已生产物料转库存或销毁；数量增加会生成补单任务。"
+        title="已开始生产的订单不能按待提交生产状态编辑。数量减少或取消会通知生产管理确认已生产物料转库存或销毁；数量增加会生成补单任务。"
         type="warning"
         :closable="false"
         class="mb-16"
@@ -566,7 +584,21 @@
         <el-form-item label="生产计划数量">
           <el-input-number v-model="quantityChangeForm.productionPlanQuantity" :min="0" :precision="3" :controls="false" />
           <span class="form-unit">{{ activeLine?.unit }}</span>
+          <div class="form-hint">{{ quantityChangePlanHint }}</div>
         </el-form-item>
+        <template v-if="quantityChangeNeedsPlanOverride">
+          <el-form-item label="调整操作员" required>
+            <el-input v-model="quantityChangeForm.productionPlanOverrideByCode" placeholder="填写下单/计划操作员账号，例如 PLAN-001" />
+          </el-form-item>
+          <el-form-item label="计划偏差说明" required>
+            <el-input
+              v-model="quantityChangeForm.productionPlanOverrideReason"
+              type="textarea"
+              :rows="3"
+              placeholder="例如：备货多做、找到其他替代不计入库存的产品、客户确认少做"
+            />
+          </el-form-item>
+        </template>
         <el-form-item label="管理人员">
           <el-input v-model="quantityChangeForm.managerName" placeholder="可选" />
         </el-form-item>
@@ -600,8 +632,8 @@
         </el-form-item>
         <el-form-item label="生产状态" required>
           <el-radio-group v-model="cancelOrderForm.productionCancelState">
-            <el-radio-button label="NOT_PRODUCED">未生产取消</el-radio-button>
-            <el-radio-button label="PRODUCED">已生产取消</el-radio-button>
+            <el-radio-button value="NOT_PRODUCED">未生产取消</el-radio-button>
+            <el-radio-button value="PRODUCED">已生产取消</el-radio-button>
           </el-radio-group>
           <div class="form-hint">必须人工确认。已生产取消后，仓库需要逐项确认转库存或报废。</div>
         </el-form-item>
@@ -617,9 +649,9 @@
                 <span>{{ row.productionTaskNo }}，已完成 {{ formatQuantity(row.completedQuantity, row.unit) }} / 计划 {{ formatQuantity(row.plannedQuantity, row.unit) }}</span>
               </div>
               <el-radio-group v-model="row.handlingMode" @change="handleCancelHandlingModeChange(row)">
-                <el-radio-button label="STOCK">转库存</el-radio-button>
-                <el-radio-button label="SCRAP">报废</el-radio-button>
-                <el-radio-button label="NONE">无实物</el-radio-button>
+                <el-radio-button value="STOCK">转库存</el-radio-button>
+                <el-radio-button value="SCRAP">报废</el-radio-button>
+                <el-radio-button value="NONE">无实物</el-radio-button>
               </el-radio-group>
               <el-input-number
                 v-model="row.handlingQuantity"
@@ -652,7 +684,7 @@
 
 <script setup lang="ts">
 import type { CreateOrderLinePayload } from '../api/erp';
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { WarningFilled } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -670,6 +702,7 @@ import type {
   ProductionOperator
 } from '../types/erp';
 import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
+import { orderDisplayStatus } from '../utils/orderStatus';
 import {
   confirmDuplicateDrawingFiles,
   confirmDuplicateDrawingNos,
@@ -682,6 +715,7 @@ import {
   normalizeSelectedStockSources,
   restoreSavedStockSourceReview,
   sanitizeOrderLinePayload,
+  selectedStockSourceQuantity,
   validateDraftStockSourceLines
 } from '../utils/stockSourceReview';
 import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
@@ -703,6 +737,7 @@ const submitOrderVisible = ref(false);
 const submitPlanOperatorCode = ref('');
 const submitPlanOperators = ref<ProductionOperator[]>([]);
 const submitPlanOperatorLoading = ref(false);
+const operatorCache = reactive<Record<string, ProductionOperator>>({});
 const activeLine = ref<OrderLine>();
 const activeReplenishmentTask = ref<OrderLineProductionTask>();
 const checkingOrderNo = ref(false);
@@ -742,6 +777,8 @@ const creatingProcess = ref(false);
 const quantityChangeForm = ref({
   quantity: 0,
   productionPlanQuantity: 0,
+  productionPlanOverrideByCode: '',
+  productionPlanOverrideReason: '',
   managerName: '',
   reason: ''
 });
@@ -765,6 +802,7 @@ type CancelHandlingPlanRow = {
   remark: string;
 };
 const cancelHandlingPlanRows = ref<CancelHandlingPlanRow[]>([]);
+const submitPlanOperatorOptionRows = computed(() => operatorRowsWithSelected(submitPlanOperators.value, submitPlanOperatorCode.value));
 const canAddAdditionalMaterial = computed(() =>
   Boolean(
     order.value &&
@@ -833,12 +871,47 @@ const orderProgressHint = computed(() => {
   if (startedLines.length === 0) {
     return '尚未开始生产';
   }
-  return startedLines
+  const visibleLines = startedLines
     .slice(0, 4)
-    .map((line) => `${line.partCode} ${line.productionStatus}`)
+    .map((line) => `${line.partCode} ${productionStatusText(line.productionStatus)}`)
     .join('；');
+  const hiddenCount = startedLines.length - 4;
+  return hiddenCount > 0 ? `${visibleLines}；另 ${hiddenCount} 个零件` : visibleLines;
 });
 const orderProgressStarted = computed(() => orderProgressHint.value !== '尚未开始生产');
+const processActionText = computed(() => {
+  if (order.value?.status === 'DRAFT') {
+    return '提交生产';
+  }
+  return order.value ? orderWarehouseActionText(order.value) || '生产详情' : '生产详情';
+});
+const quantityChangeSuggestedProductionQuantity = computed(() => {
+  const orderQuantity = Math.max(Number(quantityChangeForm.value.quantity || 0), 0);
+  if (activeLine.value?.fulfillmentMode !== 'STOCK') {
+    return orderQuantity;
+  }
+  const selectedStockQuantity = (activeLine.value.selectedStockSources || []).reduce(
+    (sum, source) => sum + Number(source.quantity || 0),
+    0
+  );
+  return Math.max(orderQuantity - selectedStockQuantity, 0);
+});
+const quantityChangeNeedsPlanOverride = computed(
+  () =>
+    Math.abs(
+      Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0) -
+        quantityChangeSuggestedProductionQuantity.value
+    ) > 0.0001
+);
+const quantityChangePlanHint = computed(() => {
+  const unit = activeLine.value?.unit || '件';
+  const suggested = quantityChangeSuggestedProductionQuantity.value;
+  const current = Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0);
+  if (quantityChangeNeedsPlanOverride.value) {
+    return `建议生产 ${formatQuantity(suggested, unit)}，当前计划 ${formatQuantity(current, unit)}；必须记录操作人员账号和说明。`;
+  }
+  return `建议生产 ${formatQuantity(suggested, unit)}。`;
+});
 
 async function loadOrder() {
   const orderNo = String(route.params.orderNo);
@@ -855,6 +928,26 @@ async function loadOrder() {
 
 function goProcess() {
   if (order.value) {
+    if (order.value.status !== 'DRAFT') {
+      if (orderWarehouseActionText(order.value)) {
+        void router.push({
+          path: '/warehouses',
+          query: {
+            orderNo: order.value.orderNo,
+            returnTo: `/orders/${encodeURIComponent(order.value.orderNo)}`
+          }
+        });
+        return;
+      }
+      void router.push({
+        path: '/production',
+        query: {
+          orderNo: order.value.orderNo,
+          returnTo: `/orders/${encodeURIComponent(order.value.orderNo)}`
+        }
+      });
+      return;
+    }
     void router.push({
       path: '/processes',
       query: {
@@ -884,6 +977,12 @@ async function openEdit() {
     partSpecification: line.partSpecification || '',
     quantity: line.quantity,
     productionPlanQuantity: line.productionPlanQuantity,
+    productionPlanSuggestedQuantity: line.productionPlanSuggestedQuantity,
+    productionPlanOverrideByCode: line.productionPlanOverrideByCode || '',
+    productionPlanOverrideByName: line.productionPlanOverrideByName || '',
+    productionPlanOverrideByRole: line.productionPlanOverrideByRole || '',
+    productionPlanOverrideAt: line.productionPlanOverrideAt || '',
+    productionPlanOverrideReason: line.productionPlanOverrideReason || '',
     fulfillmentMode: line.fulfillmentMode || 'PRODUCTION',
     unit: line.unit,
     deliveryDate: line.deliveryDate?.slice(0, 10),
@@ -919,7 +1018,7 @@ function orderProductionChangeDisabledReason(actionName: string) {
     return '订单数据未加载';
   }
   if (order.value.status === 'DRAFT') {
-    return `草稿订单还未提交生产，${actionName}前请直接编辑订单`;
+    return `待提交生产订单还未提交生产，${actionName}前请直接编辑订单`;
   }
   if (order.value.status === 'CANCELLED') {
     return `订单已取消，不能${actionName}`;
@@ -938,7 +1037,7 @@ function productionChangeDisabledReason(line: OrderLine) {
     return '订单数据未加载';
   }
   if (order.value.status === 'DRAFT') {
-    return '草稿订单还未提交生产，请直接编辑订单';
+    return '待提交生产订单还未提交生产，请直接编辑订单';
   }
   if (order.value.status === 'CANCELLED') {
     return '订单已取消，不能补单或数量变更';
@@ -1139,6 +1238,8 @@ function openQuantityChange(line: OrderLine) {
   quantityChangeForm.value = {
     quantity: line.quantity,
     productionPlanQuantity: line.productionPlanQuantity,
+    productionPlanOverrideByCode: line.productionPlanOverrideByCode || '',
+    productionPlanOverrideReason: line.productionPlanOverrideReason || '',
     managerName: '',
     reason: ''
   };
@@ -1296,7 +1397,7 @@ async function saveEdit() {
         !line.partName ||
         !line.partThickness ||
         !line.quantity ||
-        (line.fulfillmentMode !== 'STOCK' && !line.productionPlanQuantity) ||
+        (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) ||
         !line.unit
     )
   ) {
@@ -1308,7 +1409,7 @@ async function saveEdit() {
   }
   const stockCheck = validateStockModeLines(editForm.value.lines, inventorySummary.value);
   if (!stockCheck.ok) {
-    ElMessage.warning(`草稿可先保存；${stockCheck.message}，提交生产前必须补足`);
+    ElMessage.warning(`待提交生产订单可先保存；${stockCheck.message}，提交生产前必须补足`);
   }
   const draftStockCheck = validateDraftStockSourceLines(editForm.value.lines);
   if (!draftStockCheck.ok) {
@@ -1367,10 +1468,15 @@ async function saveAdditionalMaterial() {
     !line.partName ||
     !line.partThickness ||
     !line.quantity ||
-    !line.productionPlanQuantity ||
+    line.productionPlanQuantity === undefined ||
+    line.productionPlanQuantity === null ||
     !line.unit
   ) {
     ElMessage.warning('请补齐新增物料、厚度、数量等必填信息');
+    return;
+  }
+  if (Number(line.productionPlanQuantity || 0) <= 0) {
+    ElMessage.warning('新增物料生产计划数量必须大于 0');
     return;
   }
   if (line.fulfillmentMode !== 'PRODUCTION') {
@@ -1397,7 +1503,6 @@ async function saveAdditionalMaterial() {
     ...sanitizeOrderLinePayload(line, order.value.deliveryDate?.slice(0, 10)),
     processSteps,
     fulfillmentMode: 'PRODUCTION' as const,
-    productionPlanQuantity: Math.max(line.productionPlanQuantity || line.quantity, line.quantity),
     reason: additionalMaterialForm.value.reason.trim(),
     managerName: additionalMaterialForm.value.managerName.trim() || undefined
   };
@@ -1501,17 +1606,36 @@ async function checkEditOrderNo(silent = false, expectedSequence?: number) {
 
 function syncPlanQuantity(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
-    line.productionPlanQuantity = 0;
+    line.productionPlanQuantity = Math.max(Number(line.quantity || 0) - selectedStockSourceQuantity(line), 0);
+    line.productionPlanOverrideByCode = '';
+    line.productionPlanOverrideReason = '';
     return;
   }
-  // 编辑订单数量时，生产计划不能低于客户订单；生产计划仍可手工改为更大数量。
-  if (!line.productionPlanQuantity || line.productionPlanQuantity < line.quantity) {
+  // 编辑订单数量时只补默认值；少做或多做需要在订单行里填写偏差说明。
+  if (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) {
     line.productionPlanQuantity = line.quantity;
   }
 }
 
 function normalizedLines() {
   return editForm.value.lines.map((line) => sanitizeOrderLinePayload(line, editForm.value.deliveryDate));
+}
+
+function lineRequiresProductionProcess(line: OrderLine | CreateOrderLinePayload) {
+  return Number(line.productionPlanQuantity || 0) > 0;
+}
+
+function submitOrderLineWarning(line: OrderLine) {
+  if (
+    (line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') &&
+    selectedStockSourceQuantity(line as unknown as CreateOrderLinePayload) <= 0
+  ) {
+    return '该零件尚未选择库存批次，提交生产前必须完成库存来源核对。';
+  }
+  if (lineRequiresProductionProcess(line) && line.processSteps.length === 0) {
+    return '该零件尚未设置生产流程，提交时会被后端拒绝。';
+  }
+  return '';
 }
 
 function fulfillmentModeLabel(mode?: string) {
@@ -1549,6 +1673,25 @@ function stockSourceSummary(line: OrderLine | CreateOrderLinePayload) {
       return `${source.batchNo || source.batchId} ${sourcePart}${formatQuantity(source.quantity, source.unit || line.unit || '件')}${replenishmentMark}${manualText}${reasonText}`;
     })
     .join('；');
+}
+
+function stockFulfillmentHint(line: OrderLine | CreateOrderLinePayload) {
+  if (line.fulfillmentMode !== 'STOCK') {
+    return '';
+  }
+  const selectedQuantity = selectedStockSourceQuantity(line as CreateOrderLinePayload);
+  if (selectedQuantity <= 0) {
+    return '';
+  }
+  const orderQuantity = Number(line.quantity || 0);
+  const planQuantity = Math.max(Number(line.productionPlanQuantity || 0), 0);
+  if (planQuantity <= 0) {
+    return `客户要求 ${formatQuantity(orderQuantity, line.unit || '件')}，库存已覆盖，不生成生产任务`;
+  }
+  return `客户要求 ${formatQuantity(orderQuantity, line.unit || '件')}，库存已有 ${formatQuantity(
+    selectedQuantity,
+    line.unit || '件'
+  )}，按需生产 ${formatQuantity(planQuantity, line.unit || '件')}`;
 }
 
 function stockSourceReplenishmentText(source: ReturnType<typeof normalizeSelectedStockSources>[number]) {
@@ -1589,7 +1732,7 @@ function formatLineWarehouseText(line: OrderLine) {
 }
 
 function formatLineProductionProgressText(line: OrderLine) {
-  // 已生产订单的补单、数量变更必须先看到当前工序进度，防止误把生产数量变更当作草稿修改。
+  // 已生产订单的补单、数量变更必须先看到当前工序进度，防止误把生产数量变更当作待提交生产订单修改。
   if (line.productionProgressText) {
     return line.productionProgressText;
   }
@@ -1597,12 +1740,21 @@ function formatLineProductionProgressText(line: OrderLine) {
     return '尚未生成生产任务';
   }
   if (line.productionStatus === 'PENDING') {
-    return `${line.productionTaskNo} 待生产`;
+    return `${line.productionTaskNo} 待确认生产`;
   }
   if (line.productionStatus === 'COMPLETED') {
     return `${line.productionTaskNo} 已完成`;
   }
   return `${line.productionTaskNo} 生产中`;
+}
+
+function productionStatusText(status?: string) {
+  const labels: Record<string, string> = {
+    PENDING: '待确认生产',
+    IN_PROGRESS: '生产中',
+    COMPLETED: '已完成'
+  };
+  return status ? labels[status] || status : '-';
 }
 
 function formatLineShortageText(line: OrderLine) {
@@ -1699,12 +1851,26 @@ async function saveQuantityChange() {
     ElMessage.warning('请填写数量变更原因');
     return;
   }
+  if (quantityChangeNeedsPlanOverride.value && !quantityChangeForm.value.productionPlanOverrideByCode.trim()) {
+    ElMessage.warning('生产计划数量与建议数量不一致，请填写操作人员账号');
+    return;
+  }
+  if (quantityChangeNeedsPlanOverride.value && !quantityChangeForm.value.productionPlanOverrideReason.trim()) {
+    ElMessage.warning('生产计划数量与建议数量不一致，请填写调整说明');
+    return;
+  }
 
   saving.value = true;
   try {
     order.value = await erpApi.updateLineQuantityAfterProductionStarted(order.value.orderNo, activeLine.value.id, {
       quantity: quantityChangeForm.value.quantity,
       productionPlanQuantity: quantityChangeForm.value.productionPlanQuantity,
+      productionPlanOverrideByCode: quantityChangeNeedsPlanOverride.value
+        ? quantityChangeForm.value.productionPlanOverrideByCode.trim()
+        : undefined,
+      productionPlanOverrideReason: quantityChangeNeedsPlanOverride.value
+        ? quantityChangeForm.value.productionPlanOverrideReason.trim()
+        : undefined,
       managerName: quantityChangeForm.value.managerName.trim() || undefined,
       reason: quantityChangeForm.value.reason.trim()
     });
@@ -1756,7 +1922,7 @@ async function openSubmitOrderDialog() {
     return;
   }
   if (order.value.status !== 'DRAFT') {
-    ElMessage.warning('只有草稿订单允许提交生产');
+    ElMessage.warning('只有待提交生产订单允许提交生产');
     return;
   }
   submitPlanOperatorCode.value = '';
@@ -1764,12 +1930,23 @@ async function openSubmitOrderDialog() {
   submitOrderVisible.value = true;
 }
 
+function closeSubmitOrderDialog() {
+  if (saving.value) {
+    return;
+  }
+  submitOrderVisible.value = false;
+}
+
+function resetSubmitOrderDialog() {
+  submitPlanOperatorCode.value = '';
+}
+
 async function confirmSubmitOrder() {
   if (!order.value) {
     return;
   }
   if (!submitPlanOperatorCode.value) {
-    ElMessage.warning('请选择下计划操作员');
+    ElMessage.warning('请选择下单/计划操作员');
     return;
   }
   saving.value = true;
@@ -1787,9 +1964,28 @@ async function confirmSubmitOrder() {
       ElMessage.warning(sourceCheck.message);
       return;
     }
-    order.value = await erpApi.submitOrder(order.value.orderNo, { submittedByCode: submitPlanOperatorCode.value });
-    ElMessage.success('订单已提交生产');
+    const submittedOrderNo = order.value.orderNo;
+    order.value = await erpApi.submitOrder(submittedOrderNo, { submittedByCode: submitPlanOperatorCode.value });
     submitOrderVisible.value = false;
+    if (submittedOrderShouldGoWarehouse(order.value)) {
+      ElMessage.success('订单已提交生产，库存已进入仓库待发货');
+      await router.push({
+        path: '/warehouses',
+        query: {
+          orderNo: submittedOrderNo,
+          returnTo: `/orders/${encodeURIComponent(submittedOrderNo)}`
+        }
+      });
+      return;
+    }
+    ElMessage.success('订单已提交生产，已进入生产详情');
+    await router.push({
+      path: '/production',
+      query: {
+        orderNo: submittedOrderNo,
+        returnTo: `/orders/${encodeURIComponent(submittedOrderNo)}`
+      }
+    });
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '提交失败');
   } finally {
@@ -1797,22 +1993,63 @@ async function confirmSubmitOrder() {
   }
 }
 
+function submittedOrderShouldGoWarehouse(submittedOrder: OrderDetail) {
+  return submittedOrder.warehouseStage === 'WAITING_SHIPMENT';
+}
+
+function orderWarehouseActionText(currentOrder: OrderDetail) {
+  if (currentOrder.warehouseStage === 'WAITING_RECEIPT') {
+    return '仓库入库';
+  }
+  if (currentOrder.warehouseStage === 'WAITING_SHIPMENT' || currentOrder.warehouseStage === 'PARTIAL_SHIPPED') {
+    return '仓库发货';
+  }
+  return '';
+}
+
 function isSubmitPlanOperator(operator: ProductionOperator) {
-  return /计划/.test(operator.role || '') && !/车间主任|主任/.test(operator.role || '');
+  const role = operator.role || '';
+  return /计划|下单|订单/.test(role) && !/车间|主任|技术|工艺/.test(role);
 }
 
 function submitPlanOperatorLabel(operator: ProductionOperator) {
   return `${operator.name} / ${operator.accountId || operator.code} / ${operator.role}`;
 }
 
+function cacheOperators(operators: ProductionOperator[]) {
+  for (const operator of operators) {
+    operatorCache[operator.code] = operator;
+  }
+}
+
+function operatorRowsWithSelected(rows: ProductionOperator[], selectedCode: string) {
+  const merged = new Map<string, ProductionOperator>();
+  for (const operator of rows) {
+    merged.set(operator.code, operator);
+  }
+  const selected = selectedCode ? operatorCache[selectedCode] : undefined;
+  if (selected && !merged.has(selected.code)) {
+    merged.set(selected.code, selected);
+  }
+  return [...merged.values()];
+}
+
+function handleSubmitPlanOperatorChange(code?: string) {
+  const operator = submitPlanOperatorOptionRows.value.find((item) => item.code === code);
+  if (operator) {
+    cacheOperators([operator]);
+  }
+}
+
 async function loadSubmitPlanOperators(keyword = '') {
   submitPlanOperatorLoading.value = true;
   try {
     const operators = await erpApi.productionOperators(keyword.trim());
+    cacheOperators(operators);
     submitPlanOperators.value = operators.filter(isSubmitPlanOperator);
   } catch (error) {
     submitPlanOperators.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '下计划操作员加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '下单/计划操作员加载失败');
   } finally {
     submitPlanOperatorLoading.value = false;
   }
@@ -2059,6 +2296,25 @@ onBeforeUnmount(() => {
   color: #1e3a8a;
   font-size: 13px;
   line-height: 20px;
+}
+
+.stock-fulfillment-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  color: #92400e;
+  font-size: 13px;
+  line-height: 20px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+}
+
+.stock-fulfillment-hint-inline {
+  display: block;
+  margin-top: 4px;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .line-actions {

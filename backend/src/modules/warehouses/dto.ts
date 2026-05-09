@@ -1,6 +1,6 @@
 import { InventoryTransactionType, ProductionNoticeStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { ArrayNotEmpty, IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { ArrayNotEmpty, IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class CreateWarehouseDto {
   @IsOptional()
@@ -21,13 +21,13 @@ export class CreateWarehouseLocationDto {
 }
 
 export class ConfirmReceiptDto {
-  @IsOptional()
   @IsString()
-  warehouseId?: string;
+  @IsNotEmpty()
+  warehouseId!: string;
 
-  @IsOptional()
   @IsString()
-  locationId?: string;
+  @IsNotEmpty()
+  locationId!: string;
 
   @IsOptional()
   @IsString()

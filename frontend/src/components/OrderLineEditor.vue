@@ -131,11 +131,28 @@
         <el-input-number
           v-model="row.productionPlanQuantity"
           :min="productionPlanMin(row)"
-          :disabled="row.fulfillmentMode === 'STOCK'"
           :controls="false"
           style="width: 110px"
           @change="handlePlanQuantityChange(row)"
         />
+        <small v-if="stockProductionPlanHint(row)" class="stock-plan-hint">
+          {{ stockProductionPlanHint(row) }}
+        </small>
+      </template>
+    </el-table-column>
+    <el-table-column label="计划偏差说明" width="260">
+      <template #default="{ row }">
+        <div v-if="stockProductionPlanDiffers(row)" class="plan-override-cell">
+          <el-input v-model="row.productionPlanOverrideByCode" size="small" placeholder="操作人员账号" />
+          <el-input
+            v-model="row.productionPlanOverrideReason"
+            size="small"
+            type="textarea"
+            :rows="2"
+            placeholder="备货、替代品、客户确认少做或需多做备件"
+          />
+        </div>
+        <span v-else class="muted">-</span>
       </template>
     </el-table-column>
     <el-table-column label="单位" width="100">
@@ -281,9 +298,21 @@
           <el-input-number
             v-model="line.productionPlanQuantity"
             :min="productionPlanMin(line)"
-            :disabled="line.fulfillmentMode === 'STOCK'"
             :controls="false"
             @change="handlePlanQuantityChange(line)"
+          />
+          <small v-if="stockProductionPlanHint(line)" class="stock-plan-hint">
+            {{ stockProductionPlanHint(line) }}
+          </small>
+        </label>
+        <label v-if="stockProductionPlanDiffers(line)">
+          <span>计划偏差说明</span>
+          <el-input v-model="line.productionPlanOverrideByCode" placeholder="操作人员账号" />
+          <el-input
+            v-model="line.productionPlanOverrideReason"
+            type="textarea"
+            :rows="2"
+            placeholder="备货、替代品、客户确认少做或需多做备件"
           />
         </label>
         <label>
@@ -326,6 +355,7 @@ import {
   markStockSourceReviewed,
   normalizeSelectedStockSources,
   selectedStockSourceQuantity,
+  suggestedProductionPlanQuantity,
   stockSourceRequiredQuantity,
   stockSourceReviewRequired
 } from '../utils/stockSourceReview';
@@ -374,12 +404,12 @@ function emitQuantityChange(line: CreateOrderLinePayload) {
 }
 
 function productionPlanMin(line: CreateOrderLinePayload) {
-  return line.fulfillmentMode === 'STOCK' ? 0 : line.quantity || 1;
+  return 0;
 }
 
 function handleFulfillmentModeChange(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
-    line.productionPlanQuantity = 0;
+    syncStockProductionPlanQuantity(line);
     invalidateStockSourceReview(line);
     void openStockDetails(line);
     return;
@@ -396,10 +426,37 @@ function handleFulfillmentModeChange(line: CreateOrderLinePayload) {
 }
 
 function ensureProductionPlanQuantity(line: CreateOrderLinePayload) {
-  // 从 STOCK 切回 REWORK / PRODUCTION 时，生产计划数量必须恢复到不低于客户订单数量。
-  if (!line.productionPlanQuantity || line.productionPlanQuantity < line.quantity) {
+  // 切换生产方式时只补默认值；少做或多做由“计划偏差说明”记录操作人员和原因。
+  if (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) {
     line.productionPlanQuantity = line.quantity || 1;
   }
+}
+
+function stockShortageProductionQuantity(line: CreateOrderLinePayload) {
+  const customerQuantity = Number(line.quantity || 0);
+  const selectedQuantity = selectedStockSourceQuantity(line);
+  return Math.max(Math.round((customerQuantity - selectedQuantity + Number.EPSILON) * 1000) / 1000, 0);
+}
+
+function syncStockProductionPlanQuantity(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'STOCK') {
+    line.productionPlanQuantity = stockShortageProductionQuantity(line);
+    clearProductionPlanOverride(line);
+  }
+}
+
+function clearProductionPlanOverride(line: CreateOrderLinePayload) {
+  line.productionPlanOverrideByCode = '';
+  line.productionPlanOverrideByName = '';
+  line.productionPlanOverrideByRole = '';
+  line.productionPlanOverrideAt = '';
+  line.productionPlanOverrideReason = '';
+}
+
+function stockProductionPlanDiffers(line: CreateOrderLinePayload) {
+  const suggestedQuantity = suggestedProductionPlanQuantity(line);
+  const plannedQuantity = Number(line.productionPlanQuantity ?? suggestedQuantity);
+  return Math.abs(plannedQuantity - suggestedQuantity) > 0.0001;
 }
 
 function invalidateStockSourceReview(line: CreateOrderLinePayload, clearSources = false, markSourcesForRecheck = false) {
@@ -468,7 +525,14 @@ function stockGapQuantity(line: CreateOrderLinePayload) {
 }
 
 function stockTagType(line: CreateOrderLinePayload) {
-  if (line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') {
+  if (line.fulfillmentMode === 'STOCK') {
+    const selectedQuantity = selectedStockSourceQuantity(line);
+    if (selectedQuantity > 0) {
+      return stockShortageProductionQuantity(line) > 0 ? 'warning' : 'success';
+    }
+    return availableStockQuantity(line) > 0 ? 'warning' : 'danger';
+  }
+  if (line.fulfillmentMode === 'REWORK') {
     return stockGapQuantity(line) > 0 ? 'danger' : 'success';
   }
   return availableStockQuantity(line) > 0 ? 'info' : 'warning';
@@ -479,6 +543,13 @@ function stockStatusHint(line: CreateOrderLinePayload) {
   const gap = stockGapQuantity(line);
   const requiredQuantity = stockAggregateRequiredQuantity(line);
   if (line.fulfillmentMode === 'STOCK') {
+    const selectedQuantity = selectedStockSourceQuantity(line);
+    if (selectedQuantity > 0) {
+      const shortageQuantity = stockShortageProductionQuantity(line);
+      return shortageQuantity > 0
+        ? `此零件，客户要求 ${formatQuantity(line.quantity || 0, line.unit || '件')}，库存已有 ${formatQuantity(selectedQuantity, line.unit || '件')}，按需生产 ${formatQuantity(shortageQuantity, line.unit || '件')}`
+        : `此零件库存已覆盖客户数量，确认生产后进入待发货`;
+    }
     if (isStockSourceReviewed(line)) {
       const matchedQuantity = stockAggregateSelectedQuantity(line);
       return matchedQuantity + 0.0001 >= requiredQuantity
@@ -486,8 +557,8 @@ function stockStatusHint(line: CreateOrderLinePayload) {
         : `已选库存不足，已选 ${formatQuantity(matchedQuantity, line.unit || '件')}，需 ${formatQuantity(requiredQuantity, line.unit || '件')}`;
     }
     return gap > 0
-      ? `总备货需 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}，必须选择库存批次`
-      : `总备货够用，必须选择库存批次并核对来源`;
+      ? `当前库存可先使用，缺 ${formatQuantity(gap, line.unit || '件')} 会自动转生产计划`
+      : `库存可覆盖客户数量，必须选择库存批次并核对来源`;
   }
   if (line.fulfillmentMode === 'REWORK') {
     if (isStockSourceReviewed(line)) {
@@ -500,12 +571,31 @@ function stockStatusHint(line: CreateOrderLinePayload) {
   return availableStockQuantity(line) > 0 ? '有备货库存' : '无备货库存';
 }
 
+function stockProductionPlanHint(line: CreateOrderLinePayload) {
+  const suggestedQuantity = suggestedProductionPlanQuantity(line);
+  const plannedQuantity = Number(line.productionPlanQuantity ?? suggestedQuantity);
+  if (Math.abs(plannedQuantity - suggestedQuantity) > 0.0001) {
+    return `建议生产 ${formatQuantity(suggestedQuantity, line.unit || '件')}，当前计划 ${formatQuantity(plannedQuantity, line.unit || '件')}，需填写操作人员和说明`;
+  }
+  if (line.fulfillmentMode !== 'STOCK') {
+    return '';
+  }
+  const selectedQuantity = selectedStockSourceQuantity(line);
+  if (selectedQuantity <= 0) {
+    return '选择库存来源后自动计算';
+  }
+  if (suggestedQuantity <= 0) {
+    return `客户要求 ${formatQuantity(line.quantity || 0, line.unit || '件')}，库存已覆盖，不生成生产任务`;
+  }
+  return `客户要求 ${formatQuantity(line.quantity || 0, line.unit || '件')}，库存已有 ${formatQuantity(selectedQuantity, line.unit || '件')}，按需生产 ${formatQuantity(suggestedQuantity, line.unit || '件')}`;
+}
+
 function stockSourceReviewHint(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
-    return '使用库存保存前必须选择具体库存批次，并核对来源订单、任务号、图号、版本、规格、厚度和图纸文件。';
+    return '使用库存提交生产前必须选择具体库存批次，并核对来源订单、任务号、图号、版本、规格、厚度和图纸文件。';
   }
   if (line.fulfillmentMode === 'REWORK') {
-    return '库存再加工保存前必须选择具体库存批次，核对库存来源并保留记录。';
+    return '库存再加工提交生产前必须选择具体库存批次，核对库存来源并保留记录。';
   }
   return '';
 }
@@ -518,10 +608,7 @@ function stockSourceActionText(line: CreateOrderLinePayload) {
 }
 
 function formatStockQuantity(line: CreateOrderLinePayload) {
-  if (line.fulfillmentMode === 'STOCK' && isStockSourceReviewed(line)) {
-    return `已选 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}`;
-  }
-  if (line.fulfillmentMode === 'REWORK' && isStockSourceReviewed(line)) {
+  if ((line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && selectedStockSourceQuantity(line) > 0) {
     return `已选 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}`;
   }
   return formatQuantity(availableStockQuantity(line), line.unit || '件');
@@ -593,7 +680,8 @@ async function loadStockDetailsForPart(partCode: string) {
   try {
     sourceDetails.value = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
       unit: currentSourceLine.value.unit,
-      sourceType: 'STOCK'
+      sourceType: 'STOCK',
+      excludeOrderNo: props.excludeOrderNo
     });
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败');
@@ -611,6 +699,7 @@ function handleStockSourceSelectionChange(sources: StockSourceSelectionPayload[]
   currentSourceLine.value.stockSourceReviewSignature = '';
   currentSourceLine.value.stockSourceAvailableQuantity = sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
   currentSourceLine.value.stockSourceMatchedQuantity = currentSourceLine.value.stockSourceAvailableQuantity;
+  syncStockProductionPlanQuantity(currentSourceLine.value);
 }
 
 function handleStockSourceReviewed() {
@@ -622,10 +711,11 @@ function handleStockSourceReviewed() {
     ElMessage.warning('当前没有可用库存来源，不能确认');
     return;
   }
-  if (selectedQuantity + 0.0001 < stockRequiredQuantity(currentSourceLine.value)) {
+  if (currentSourceLine.value.fulfillmentMode !== 'STOCK' && selectedQuantity + 0.0001 < stockRequiredQuantity(currentSourceLine.value)) {
     ElMessage.warning('已选库存数量不足，不能确认');
     return;
   }
+  syncStockProductionPlanQuantity(currentSourceLine.value);
   currentSourceLine.value.stockSourceAvailableQuantity = selectedQuantity;
   currentSourceLine.value.stockSourceMatchedQuantity = selectedQuantity;
   markStockSourceReviewed(currentSourceLine.value);
@@ -681,6 +771,12 @@ function handleStockComparableChange(line: CreateOrderLinePayload) {
 }
 
 function handlePlanQuantityChange(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'STOCK') {
+    if (!stockProductionPlanDiffers(line)) {
+      clearProductionPlanOverride(line);
+    }
+    return;
+  }
   if (line.fulfillmentMode === 'REWORK' || line.selectedStockSources?.length) {
     invalidateStockSourceReview(line);
   }
@@ -792,6 +888,23 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   color: #2563eb !important;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.stock-plan-hint {
+  display: block;
+  margin-top: 4px;
+  color: #d97706;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.plan-override-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.muted {
+  color: #94a3b8;
 }
 
 .stock-detail-button {

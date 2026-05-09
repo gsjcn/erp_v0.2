@@ -3,7 +3,7 @@ import type { InventorySummaryRow } from '../types/erp';
 
 type StockCheckLine = Pick<
   CreateOrderLinePayload,
-  'partCode' | 'partName' | 'quantity' | 'productionPlanQuantity' | 'unit' | 'fulfillmentMode'
+  'partCode' | 'partName' | 'quantity' | 'productionPlanQuantity' | 'unit' | 'fulfillmentMode' | 'selectedStockSources'
 >;
 
 export function matchedStockSummary(line: StockCheckLine, inventorySummary: InventorySummaryRow[]) {
@@ -30,6 +30,7 @@ export function validateStockModeLines(lines: StockCheckLine[], inventorySummary
       unit: string;
       requiredQuantity: number;
       availableQuantity: number;
+      summaryAvailabilityCounted: boolean;
     }
   >();
 
@@ -39,6 +40,7 @@ export function validateStockModeLines(lines: StockCheckLine[], inventorySummary
     }
 
     const summary = matchedStockSummary(line, inventorySummary);
+    const selectedQuantity = selectedStockSourceQuantity(line);
     const key = summary
       ? `${summary.partCode}__${summary.unit}`
       : `${line.partCode || line.partName || 'UNKNOWN'}__${line.unit}`;
@@ -48,14 +50,24 @@ export function validateStockModeLines(lines: StockCheckLine[], inventorySummary
         partText: summary ? `${summary.partCode} / ${summary.partName}` : `${line.partCode || '-'} / ${line.partName || '-'}`,
         unit: summary?.unit || line.unit,
         requiredQuantity: 0,
-        availableQuantity: summary?.stockInventoryQuantity || 0
+        availableQuantity: 0,
+        summaryAvailabilityCounted: false
       };
-    // STOCK 只占用客户订单数量；REWORK 要按生产计划数量领用库存，避免多计划数量少扣库存。
-    row.requiredQuantity += line.fulfillmentMode === 'REWORK' ? Number(line.productionPlanQuantity || line.quantity || 0) : Number(line.quantity || 0);
+    // STOCK 允许库存不足，短缺数量会自动转生产计划；REWORK 必须按生产计划数量领用库存。
+    if (line.fulfillmentMode === 'REWORK') {
+      row.requiredQuantity += Number(line.productionPlanQuantity ?? line.quantity ?? 0);
+      // 已经选择具体库存批次时，应按已选批次数量校验，允许使用替代库存；否则才用同零件库存汇总做预提示。
+      if (selectedQuantity > 0) {
+        row.availableQuantity += selectedQuantity;
+      } else if (!row.summaryAvailabilityCounted) {
+        row.availableQuantity += summary?.stockInventoryQuantity || 0;
+        row.summaryAvailabilityCounted = true;
+      }
+    }
     requiredRows.set(key, row);
   }
 
-  const insufficient = [...requiredRows.values()].find((row) => row.requiredQuantity > row.availableQuantity);
+  const insufficient = [...requiredRows.values()].find((row) => row.requiredQuantity > 0 && row.requiredQuantity > row.availableQuantity);
   if (!insufficient) {
     return { ok: true, message: '' };
   }
@@ -64,4 +76,8 @@ export function validateStockModeLines(lines: StockCheckLine[], inventorySummary
     ok: false,
     message: `${insufficient.partText} 备货库存不足，当前 ${insufficient.availableQuantity} ${insufficient.unit}，需要 ${insufficient.requiredQuantity} ${insufficient.unit}`
   };
+}
+
+function selectedStockSourceQuantity(line: StockCheckLine) {
+  return (line.selectedStockSources || []).reduce((sum, source) => sum + Number(source.quantity || 0), 0);
 }

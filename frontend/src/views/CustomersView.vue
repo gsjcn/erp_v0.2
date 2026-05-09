@@ -139,8 +139,8 @@
         <div class="customer-form-grid">
           <el-form-item label="地区范围" required>
             <el-radio-group v-model="form.regionType" @change="handleRegionTypeChange">
-              <el-radio-button label="CHINA">中国</el-radio-button>
-              <el-radio-button label="OVERSEAS">国外</el-radio-button>
+              <el-radio-button value="CHINA">中国</el-radio-button>
+              <el-radio-button value="OVERSEAS">国外</el-radio-button>
             </el-radio-group>
           </el-form-item>
 
@@ -188,7 +188,7 @@
         </div>
         <div class="contacts-editor">
           <div v-for="(contact, index) in form.contacts" :key="index" class="contact-row">
-            <el-radio :model-value="primaryContactIndex" :label="index" @change="setPrimaryContact(index)">主要</el-radio>
+            <el-radio :model-value="primaryContactIndex" :value="index" @change="setPrimaryContact(index)">主要</el-radio>
             <el-input v-model="contact.contactName" placeholder="联系人姓名" />
             <el-input v-model="contact.contactPhone" placeholder="电话" />
             <el-input v-model="contact.title" placeholder="职务 / 角色" />

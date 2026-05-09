@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import {
   AcknowledgeProductionNoticeDto,
   ApproveProductionReplenishmentRequestDto,
+  BatchStartProductionDto,
   CompleteProcessStepDto,
   CompleteProcessStepsDto,
   CompleteProductionDto,
@@ -24,6 +25,11 @@ export class ProductionController {
   @Get()
   findTasks(@Query() query: ProductionTaskQueryDto) {
     return this.productionService.findTasks(query);
+  }
+
+  @Get('order-summary')
+  orderSummary(@Query() query: ProductionTaskQueryDto) {
+    return this.productionService.orderSummary(query);
   }
 
   @Get('annual-summary')
@@ -64,6 +70,11 @@ export class ProductionController {
   @Get('scrap-records')
   scrapRecords(@Query() query: ProductionScrapQueryDto) {
     return this.productionService.scrapRecords(query);
+  }
+
+  @Post('batch-start')
+  batchStart(@Body() dto: BatchStartProductionDto) {
+    return this.productionService.batchStart(dto);
   }
 
   @Post(':id/start')

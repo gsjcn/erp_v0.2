@@ -3,13 +3,12 @@ import type { OrderLine } from '../types/erp';
 import { formatQuantity } from './format';
 import {
   findOverSelectedStockSourceQuantity,
+  findProductionPlanOverrideIssue,
   findDirectStockSourceBlockedIssue,
   findMissingStockSourceManualConfirmation,
   findOverusedSelectedStockBatchIssue,
   findSelectedStockSourceQuantityIssue,
   selectedStockSourceQuantity,
-  stockSourceComparableKey,
-  stockSourceMissingOrderInfo,
   stockSourceRequiredQuantity
 } from './stockSourceReview';
 
@@ -25,6 +24,12 @@ function toStockSourcePayload(line: OrderLine): CreateOrderLinePayload {
     partSpecification: line.partSpecification,
     quantity: line.quantity,
     productionPlanQuantity: line.productionPlanQuantity,
+    productionPlanSuggestedQuantity: line.productionPlanSuggestedQuantity,
+    productionPlanOverrideByCode: line.productionPlanOverrideByCode,
+    productionPlanOverrideByName: line.productionPlanOverrideByName,
+    productionPlanOverrideByRole: line.productionPlanOverrideByRole,
+    productionPlanOverrideAt: line.productionPlanOverrideAt,
+    productionPlanOverrideReason: line.productionPlanOverrideReason,
     fulfillmentMode: line.fulfillmentMode,
     unit: line.unit,
     deliveryDate: line.deliveryDate,
@@ -35,11 +40,18 @@ function toStockSourcePayload(line: OrderLine): CreateOrderLinePayload {
 }
 
 export async function validateSubmitStockSources(lines: OrderLine[]) {
-  const stockLines = lines.filter((line) => line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK');
-  if (stockLines.length === 0) {
-    return { ok: true, message: '' };
+  const payloadLines = lines.map(toStockSourcePayload);
+  for (const line of payloadLines) {
+    const planOverrideIssue = findProductionPlanOverrideIssue(line);
+    if (planOverrideIssue) {
+      return {
+        ok: false,
+        message: planOverrideIssue
+      };
+    }
   }
-  const stockPayloadLines = stockLines.map(toStockSourcePayload);
+
+  const stockPayloadLines = payloadLines.filter((line) => line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK');
   const overusedBatchIssue = findOverusedSelectedStockBatchIssue(stockPayloadLines);
   if (overusedBatchIssue) {
     return {
@@ -68,16 +80,6 @@ export async function validateSubmitStockSources(lines: OrderLine[]) {
   >();
 
   for (const line of stockPayloadLines) {
-    if (line.fulfillmentMode === 'STOCK') {
-      const missingStockInfo = stockSourceMissingOrderInfo(line);
-      if (missingStockInfo.length > 0) {
-        return {
-          ok: false,
-          message: `${line.partCode} / ${line.partName} 直接使用库存前必须补齐：${missingStockInfo.join('、')}；否则请选择库存再加工或重新生产。`
-        };
-      }
-    }
-
     const missingManualConfirmation = findMissingStockSourceManualConfirmation(line);
     if (missingManualConfirmation) {
       return {
@@ -111,7 +113,7 @@ export async function validateSubmitStockSources(lines: OrderLine[]) {
     const partText = `${line.partCode} / ${line.partName}`;
     const selectedQuantity = selectedStockSourceQuantity(line);
     if (line.fulfillmentMode === 'STOCK') {
-      const requirementKey = `STOCK__${stockSourceComparableKey(line)}`;
+      const requirementKey = `STOCK__${line.partCode.trim().toLocaleLowerCase()}__${line.unit.trim().toLocaleLowerCase()}`;
       const row =
         stockRequirements.get(requirementKey) ??
         {
@@ -120,7 +122,7 @@ export async function validateSubmitStockSources(lines: OrderLine[]) {
           requiredQuantity: 0,
           matchedQuantity: 0
         };
-      // 提交生产前按图号、版本、规格、厚度合并校验，避免多行同时占用同一批匹配库存后超量。
+      // STOCK 允许只用部分库存；剩余数量会自动转为生产计划。这里仅保留统计行，重复批次超量由上面的批次校验拦截。
       row.requiredQuantity += requiredQuantity;
       row.matchedQuantity += selectedQuantity;
       stockRequirements.set(requirementKey, row);
@@ -140,17 +142,6 @@ export async function validateSubmitStockSources(lines: OrderLine[]) {
     row.requiredQuantity += requiredQuantity;
     row.availableQuantity += selectedQuantity;
     reworkRequirements.set(reworkKey, row);
-  }
-
-  const insufficientStock = [...stockRequirements.values()].find((row) => row.requiredQuantity > row.matchedQuantity);
-  if (insufficientStock) {
-    return {
-      ok: false,
-      message: `${insufficientStock.partText} 匹配库存不足：需要 ${formatQuantity(
-        insufficientStock.requiredQuantity,
-        insufficientStock.line.unit
-      )}，按图号/版本/规格/厚度匹配只有 ${formatQuantity(insufficientStock.matchedQuantity, insufficientStock.line.unit)}。请改为库存再加工或重新生产。`
-    };
   }
 
   const insufficientRework = [...reworkRequirements.values()].find((row) => row.requiredQuantity > row.availableQuantity);

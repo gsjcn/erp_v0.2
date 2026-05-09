@@ -96,6 +96,11 @@ export class InventoryController {
     return this.inventoryService.findBatchAdjustments(batchId);
   }
 
+  @Get('batches/:batchId/reservations')
+  batchReservations(@Param('batchId') batchId: string) {
+    return this.inventoryService.findBatchReservations(batchId);
+  }
+
   @Get()
   findAll(@Query() query: InventoryQueryDto) {
     return this.inventoryService.findAll(query);

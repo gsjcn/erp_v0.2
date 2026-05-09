@@ -1,5 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ProductionNoticeStatus, ProductionNoticeTarget, ProductionStatus } from '@prisma/client';
+import {
+  InventoryReservationStatus,
+  InventoryTransactionType,
+  Prisma,
+  ProductionNoticeStatus,
+  ProductionNoticeTarget,
+  ProductionStatus
+} from '@prisma/client';
 import { decimalToNumber } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -44,7 +51,7 @@ export class WarehousesService {
   async acknowledgeWarehouseNotice(id: string, dto: AcknowledgeWarehouseNoticeDto) {
     const acknowledgedBy = dto.acknowledgedBy.trim();
     if (!acknowledgedBy) {
-      throw new BadRequestException('Acknowledged by is required');
+      throw new BadRequestException('请填写仓库确认人员');
     }
 
     return runSerializableTransaction(
@@ -54,7 +61,7 @@ export class WarehousesService {
           where: { id, target: ProductionNoticeTarget.WAREHOUSE }
         });
         if (!notice) {
-          throw new NotFoundException('Warehouse notice not found');
+          throw new NotFoundException('仓库通知不存在');
         }
 
         if (this.requiresWithdrawStockReceipt(notice)) {
@@ -110,13 +117,13 @@ export class WarehousesService {
     const handlingQuantity = decimalToNumber(dto.handlingQuantity);
 
     if (!['STOCK', 'SCRAP', 'NONE'].includes(handlingMode)) {
-      throw new BadRequestException('Warehouse handling mode is required');
+      throw new BadRequestException('请选择仓库处理方式');
     }
     if (handlingMode !== 'NONE' && handlingQuantity <= 0) {
-      throw new BadRequestException('Handling quantity is required when parts are moved to stock or scrapped');
+      throw new BadRequestException('转库存或报废时必须填写处理数量');
     }
     if (handlingMode === 'NONE' && handlingQuantity > 0) {
-      throw new BadRequestException('Handling quantity must be 0 when no physical parts are handled');
+      throw new BadRequestException('确认无实物处理时，处理数量必须为 0');
     }
 
     if (handlingMode === 'STOCK') {
@@ -152,10 +159,13 @@ export class WarehousesService {
   ) {
     const quantity = options.requireQuantityFromNotice ? decimalToNumber(notice.afterQuantity) : decimalToNumber(options.handlingQuantity);
     if (!notice.partCode || !notice.partName || !notice.unit || !notice.productionTaskNo) {
-      throw new BadRequestException('Warehouse stock notice is missing part or production task information');
+      throw new BadRequestException('仓库转库存通知缺少零件或生产任务信息');
     }
     if (!dto.warehouseId?.trim()) {
-      throw new BadRequestException('warehouseId is required when withdraw parts are moved to stock');
+      throw new BadRequestException('转入库存时必须选择仓库');
+    }
+    if (!dto.locationId?.trim()) {
+      throw new BadRequestException('转入库存时必须选择库位');
     }
 
     const existingTransaction = await tx.inventoryTransaction.findFirst({
@@ -249,7 +259,7 @@ export class WarehousesService {
 
     if (existingMixedStock && !mergeConfirmed) {
       throw new BadRequestException(
-        `Stock source merge confirmation is required. Existing batch ${existingMixedStock.batchNo} has source ${existingMixedStock.sourceKind}`
+        `库存来源混合需要确认。已有批次 ${existingMixedStock.batchNo} 的来源类型为 ${existingMixedStock.sourceKind}`
       );
     }
   }
@@ -261,7 +271,7 @@ export class WarehousesService {
     quantity: number
   ) {
     if (!notice.partCode || !notice.partName || !notice.unit) {
-      throw new BadRequestException('Warehouse scrap notice is missing part information');
+      throw new BadRequestException('仓库报废通知缺少零件信息');
     }
 
     await tx.productionScrapRecord.upsert({
@@ -293,11 +303,11 @@ export class WarehousesService {
 
   async createWarehouse(dto: CreateWarehouseDto) {
     if (!dto.warehouseName?.trim()) {
-      throw new BadRequestException('warehouseName is required');
+      throw new BadRequestException('请填写仓库名称');
     }
 
     const warehouseCode = dto.warehouseCode?.trim()
-      ? this.normalizeBusinessCode(dto.warehouseCode, 'warehouseCode is required')
+      ? this.normalizeBusinessCode(dto.warehouseCode, '请填写仓库编码')
       : await this.generateWarehouseCode();
     await this.ensureWarehouseCodeAvailable(warehouseCode);
 
@@ -312,7 +322,7 @@ export class WarehousesService {
       });
     } catch (error) {
       if (this.isDuplicateWarehouseCodeError(error)) {
-        throw new BadRequestException(`Warehouse code ${warehouseCode} already exists`);
+        throw new BadRequestException(`仓库编码 ${warehouseCode} 已存在`);
       }
       throw error;
     }
@@ -321,10 +331,10 @@ export class WarehousesService {
   async createLocation(warehouseId: string, dto: CreateWarehouseLocationDto) {
     const warehouse = await this.prisma.warehouse.findUnique({ where: { id: warehouseId } });
     if (!warehouse) {
-      throw new NotFoundException('Warehouse not found');
+      throw new NotFoundException('仓库不存在');
     }
 
-    const locationCode = this.normalizeBusinessCode(dto.locationCode, 'locationCode is required');
+    const locationCode = this.normalizeBusinessCode(dto.locationCode, '请填写库位编码');
     await this.ensureLocationCodeAvailable(warehouseId, locationCode);
 
     // 库位只作为第一阶段库存定位字段，后续不在这里引入复杂库区规则。
@@ -338,7 +348,7 @@ export class WarehousesService {
       });
     } catch (error) {
       if (this.isDuplicateLocationCodeError(error)) {
-        throw new BadRequestException(`Location code ${locationCode} already exists in this warehouse`);
+        throw new BadRequestException(`当前仓库已存在库位编码 ${locationCode}`);
       }
       throw error;
     }
@@ -380,10 +390,10 @@ export class WarehousesService {
           include: { order: true, orderLine: true }
         });
         if (!task) {
-          throw new NotFoundException('Production task not found');
+          throw new NotFoundException('生产任务不存在');
         }
         if (task.status !== ProductionStatus.COMPLETED) {
-          throw new BadRequestException('Only completed production tasks can be received');
+          throw new BadRequestException('只有已完成生产的任务才能入库');
         }
 
         const existing = await tx.inventoryBatch.findUnique({
@@ -397,7 +407,7 @@ export class WarehousesService {
         const completedQuantity = decimalToNumber(task.completedQuantity);
         // 入库确认必须在同一个事务里重新计算订单剩余未入库数量，避免并发入库把多做数量误算进订单库存。
         if (completedQuantity <= 0) {
-          throw new BadRequestException('Completed quantity must be greater than 0 before receipt');
+          throw new BadRequestException('入库前完成数量必须大于 0');
         }
         const customerOrderQuantity = decimalToNumber(task.orderLine.quantity);
         const receivedOrderQuantity = await this.getReceivedOrderQuantity(task.orderLineId, tx);
@@ -462,7 +472,7 @@ export class WarehousesService {
               partName: task.partName,
               sourceOrderId: null,
               sourceOrderNo: null,
-              sourceCustomerName: null,
+              sourceCustomerName: task.customerName,
               productionTaskId: orderQuantity > 0 ? null : task.id,
               sourceProductionTaskNo: task.productionTaskNo,
               sourceKind: 'NORMAL_ORDER',
@@ -560,7 +570,7 @@ export class WarehousesService {
   async confirmBatchShipment(dto: ConfirmBatchShipmentDto) {
     const batchIds = Array.from(new Set(dto.batchIds.map((item) => item.trim()).filter(Boolean)));
     if (batchIds.length === 0) {
-      throw new BadRequestException('Batch ids are required');
+      throw new BadRequestException('请选择需要发货的库存批次');
     }
 
     return runSerializableTransaction(
@@ -571,13 +581,13 @@ export class WarehousesService {
           select: { id: true, sourceOrderId: true, sourceOrderNo: true }
         });
         if (batches.length !== batchIds.length) {
-          throw new NotFoundException('Some inventory batches were not found');
+          throw new NotFoundException('部分库存批次不存在');
         }
         const orderIds = Array.from(
           new Set(batches.map((batch) => batch.sourceOrderId).filter((value): value is string => Boolean(value)))
         );
         if (orderIds.length !== 1) {
-          throw new BadRequestException('Batch shipment can only include one order');
+          throw new BadRequestException('批量发货只能选择同一个订单的库存批次');
         }
 
         // 批量发货仍逐批写 OUT 流水，但必须放在同一事务里，保证同一订单多零件出库状态一致。
@@ -599,7 +609,7 @@ export class WarehousesService {
   async confirmOrderShipment(orderNo: string, dto: ConfirmShipmentDto) {
     const normalizedOrderNo = orderNo.trim();
     if (!normalizedOrderNo) {
-      throw new BadRequestException('Order number is required');
+      throw new BadRequestException('请提供订单号');
     }
 
     return runSerializableTransaction(
@@ -610,10 +620,10 @@ export class WarehousesService {
           select: { id: true, orderNo: true, status: true }
         });
         if (!order) {
-          throw new NotFoundException('Order not found');
+          throw new NotFoundException('订单不存在');
         }
         if (order.status === 'CANCELLED') {
-          throw new BadRequestException('Cancelled order cannot be shipped');
+          throw new BadRequestException('已取消订单不能发货');
         }
 
         const batches = await tx.inventoryBatch.findMany({
@@ -626,7 +636,7 @@ export class WarehousesService {
           orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
         });
         if (batches.length === 0) {
-          throw new BadRequestException('No pending shipment inventory for this order');
+          throw new BadRequestException('该订单没有待发货库存');
         }
 
         const shipped = [];
@@ -651,42 +661,84 @@ export class WarehousesService {
       where.transactionType = query.transactionType;
     }
 
-    const scopedOrderRefs = await this.findWarehouseTransactionOrderRefs(query);
-    if (scopedOrderRefs) {
-      const or: Prisma.InventoryTransactionWhereInput[] = [];
-      if (scopedOrderRefs.orderNos.length > 0) {
-        or.push({ orderNo: { in: scopedOrderRefs.orderNos } });
-      }
-      if (scopedOrderRefs.productionTaskNos.length > 0) {
-        or.push({ productionTaskNo: { in: scopedOrderRefs.productionTaskNos } });
-      }
-      where.OR = or.length > 0 ? or : [{ id: '__NO_WAREHOUSE_TRANSACTION_MATCH__' }];
+    const scopedWhere = await this.buildWarehouseTransactionScopeWhere(query);
+    if (scopedWhere) {
+      where.AND = Array.isArray(where.AND)
+        ? [...where.AND, scopedWhere]
+        : where.AND
+          ? [where.AND, scopedWhere]
+          : [scopedWhere];
     }
 
     const transactions = await this.prisma.inventoryTransaction.findMany({
       where,
-      include: { warehouse: true, location: true },
+      include: {
+        warehouse: true,
+        location: true,
+        batch: {
+          include: {
+            sourceOrder: true,
+            productionTask: { include: { order: true } },
+            reservations: {
+              where: { status: InventoryReservationStatus.ACTIVE },
+              select: { quantity: true }
+            }
+          }
+        }
+      },
       orderBy: { transactionTime: 'desc' }
     });
 
-    return transactions.map((item) => ({
-      id: item.id,
-      transactionNo: item.transactionNo,
-      transactionType: item.transactionType,
-      partCode: item.partCode,
-      partName: item.partName,
-      orderNo: item.orderNo,
-      productionTaskNo: item.productionTaskNo,
-      quantity: decimalToNumber(item.quantity),
-      unit: item.unit,
-      warehouseName: item.warehouse.warehouseName,
-      locationName: item.location?.locationName,
-      transactionTime: item.transactionTime,
-      remark: item.remark
-    }));
+    const sourceTaskMap = await this.findWarehouseSourceTaskMap(
+      transactions.flatMap((item) => [item.productionTaskNo, item.batch?.sourceProductionTaskNo])
+    );
+
+    return transactions.map((item) => {
+      const sourceTask = this.resolveWarehouseTransactionSourceTask(item, sourceTaskMap);
+      const batchPhysicalQuantity = item.batch?.status === 'AVAILABLE' ? decimalToNumber(item.batch.quantity) : 0;
+      const batchReservedQuantity =
+        item.batch && !item.batch.sourceOrderId
+          ? item.batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
+          : 0;
+      const batchAvailableQuantity = Math.max(
+        Math.round((batchPhysicalQuantity - batchReservedQuantity + Number.EPSILON) * 1000) / 1000,
+        0
+      );
+      const sourceOrderNo =
+        item.orderNo ||
+        item.batch?.sourceOrderNo ||
+        item.batch?.sourceOrder?.orderNo ||
+        item.batch?.productionTask?.orderNo ||
+        sourceTask?.orderNo ||
+        sourceTask?.order?.orderNo ||
+        null;
+      return {
+        id: item.id,
+        transactionNo: item.transactionNo,
+        transactionType: item.transactionType,
+        partCode: item.partCode,
+        partName: item.partName,
+        orderNo: item.orderNo,
+        sourceOrderNo,
+        productionSourceOrderNo: sourceTask?.orderNo || sourceTask?.order?.orderNo || item.batch?.productionTask?.orderNo || null,
+        batchId: item.batchId,
+        batchNo: item.batch?.batchNo,
+        batchStatus: item.batch?.status,
+        physicalQuantity: item.batch ? batchPhysicalQuantity : null,
+        reservedQuantity: item.batch ? batchReservedQuantity : null,
+        availableQuantity: item.batch ? batchAvailableQuantity : null,
+        productionTaskNo: item.productionTaskNo || item.batch?.sourceProductionTaskNo,
+        quantity: decimalToNumber(item.quantity),
+        unit: item.unit,
+        warehouseName: item.warehouse.warehouseName,
+        locationName: item.location?.locationName,
+        transactionTime: item.transactionTime,
+        remark: item.remark
+      };
+    });
   }
 
-  private async findWarehouseTransactionOrderRefs(query: WarehouseTransactionQueryDto) {
+  private async buildWarehouseTransactionScopeWhere(query: WarehouseTransactionQueryDto) {
     const hasOrderScope = Boolean(query.customerId || query.orderNo?.trim() || query.dateFrom || query.dateTo);
     if (!hasOrderScope) {
       return null;
@@ -694,28 +746,67 @@ export class WarehousesService {
 
     const orderWhere = this.buildOrderWhere(query);
     const orderNo = query.orderNo?.trim();
+    const scopedOrderWhere = { ...orderWhere };
     if (orderNo) {
-      orderWhere.orderNo = { contains: orderNo, mode: 'insensitive' };
+      scopedOrderWhere.orderNo = { contains: orderNo, mode: 'insensitive' };
     }
 
     const orders = await this.prisma.customerOrder.findMany({
-      where: orderWhere,
+      where: scopedOrderWhere,
       select: { orderNo: true }
     });
-    const orderNos = orders.map((order) => order.orderNo);
-    const tasks =
-      orderNos.length > 0
-        ? await this.prisma.productionTask.findMany({
-            where: { orderNo: { in: orderNos } },
-            select: { productionTaskNo: true }
-          })
-        : [];
+    const orderNos = new Set(orders.map((order) => order.orderNo));
 
-    // 仓库流水跟随页面顶部订单范围：订单库存流水看 orderNo，备货/多做库存流水看 productionTaskNo。
-    return {
-      orderNos,
-      productionTaskNos: tasks.map((task) => task.productionTaskNo)
-    };
+    const taskWhere: Prisma.ProductionTaskWhereInput = {};
+    if (Object.keys(orderWhere).length > 0) {
+      taskWhere.order = orderWhere;
+    }
+    if (orderNo) {
+      taskWhere.OR = [
+        { orderNo: { contains: orderNo, mode: 'insensitive' } },
+        { productionTaskNo: { contains: orderNo, mode: 'insensitive' } }
+      ];
+    }
+    const tasks = await this.prisma.productionTask.findMany({
+      where: taskWhere,
+      select: { orderNo: true, productionTaskNo: true }
+    });
+    const productionTaskNos = new Set(tasks.map((task) => task.productionTaskNo));
+    tasks.forEach((task) => orderNos.add(task.orderNo));
+
+    const orderNoList = [...orderNos].filter(Boolean);
+    const productionTaskNoList = [...productionTaskNos].filter(Boolean);
+    const or: Prisma.InventoryTransactionWhereInput[] = [];
+    if (orderNo) {
+      // 仓库流水可能是订单库存、备货库存、补单库存或订单库存发货，来源订单必须多字段兜底。
+      or.push(
+        { orderNo: { contains: orderNo, mode: 'insensitive' } },
+        { productionTaskNo: { contains: orderNo, mode: 'insensitive' } },
+        { batch: { sourceOrderNo: { contains: orderNo, mode: 'insensitive' } } },
+        { batch: { sourceProductionTaskNo: { contains: orderNo, mode: 'insensitive' } } },
+        { batch: { replenishmentSourceRequestNo: { contains: orderNo, mode: 'insensitive' } } },
+        { batch: { sourceOrder: { is: { orderNo: { contains: orderNo, mode: 'insensitive' } } } } },
+        { batch: { productionTask: { is: { orderNo: { contains: orderNo, mode: 'insensitive' } } } } },
+        { batch: { productionTask: { is: { productionTaskNo: { contains: orderNo, mode: 'insensitive' } } } } }
+      );
+    }
+    if (orderNoList.length > 0) {
+      or.push(
+        { orderNo: { in: orderNoList } },
+        { batch: { sourceOrderNo: { in: orderNoList } } },
+        { batch: { sourceOrder: { is: { orderNo: { in: orderNoList } } } } },
+        { batch: { productionTask: { is: { orderNo: { in: orderNoList } } } } }
+      );
+    }
+    if (productionTaskNoList.length > 0) {
+      or.push(
+        { productionTaskNo: { in: productionTaskNoList } },
+        { batch: { sourceProductionTaskNo: { in: productionTaskNoList } } },
+        { batch: { productionTask: { is: { productionTaskNo: { in: productionTaskNoList } } } } }
+      );
+    }
+
+    return { OR: or.length > 0 ? or : [{ id: '__NO_WAREHOUSE_TRANSACTION_MATCH__' }] };
   }
 
   private async resolveTargetLocation(dto: ConfirmReceiptDto) {
@@ -727,38 +818,32 @@ export class WarehousesService {
     warehouseId?: string,
     locationId?: string
   ) {
-    if (warehouseId) {
-      const warehouse = await client.warehouse.findUnique({
-        where: { id: warehouseId },
-        include: { locations: { orderBy: { locationCode: 'asc' } } }
-      });
-      if (!warehouse) {
-        throw new NotFoundException('Warehouse not found');
-      }
-
-      const location = locationId ? warehouse.locations.find((item) => item.id === locationId) : warehouse.locations[0];
-      if (locationId && !location) {
-        throw new BadRequestException('Warehouse location does not belong to selected warehouse');
-      }
-
-      return {
-        warehouseId: warehouse.id,
-        locationId: location?.id
-      };
+    if (!warehouseId?.trim()) {
+      throw new BadRequestException('请选择仓库');
+    }
+    if (!locationId?.trim()) {
+      throw new BadRequestException('请选择库位');
     }
 
-    const warehouse = await client.warehouse.findFirst({
-      where: { status: 'ENABLED' },
-      include: { locations: { where: { status: 'ENABLED' }, orderBy: { locationCode: 'asc' } } },
-      orderBy: { warehouseCode: 'asc' }
+    const warehouse = await client.warehouse.findUnique({
+      where: { id: warehouseId },
+      include: { locations: { where: { status: 'ENABLED' }, orderBy: { locationCode: 'asc' } } }
     });
     if (!warehouse) {
-      throw new NotFoundException('Enabled warehouse not found');
+      throw new NotFoundException('仓库不存在');
+    }
+    if (warehouse.status !== 'ENABLED') {
+      throw new BadRequestException('只有启用状态的仓库可以入库');
+    }
+
+    const location = warehouse.locations.find((item) => item.id === locationId);
+    if (!location) {
+      throw new BadRequestException('所选库位不属于当前启用仓库');
     }
 
     return {
       warehouseId: warehouse.id,
-      locationId: warehouse.locations[0]?.id
+      locationId: location.id
     };
   }
 
@@ -782,6 +867,28 @@ export class WarehousesService {
     }
 
     return orderWhere;
+  }
+
+  private async findWarehouseSourceTaskMap(taskNos: Array<string | null | undefined>) {
+    const uniqueTaskNos = [...new Set(taskNos.filter(Boolean))] as string[];
+    if (uniqueTaskNos.length === 0) {
+      return new Map<string, any>();
+    }
+
+    const tasks = await this.prisma.productionTask.findMany({
+      where: { productionTaskNo: { in: uniqueTaskNos } },
+      include: { order: true }
+    });
+    return new Map(tasks.map((task) => [task.productionTaskNo, task]));
+  }
+
+  private resolveWarehouseTransactionSourceTask(transaction: any, sourceTaskMap: Map<string, any>) {
+    return (
+      (transaction.productionTaskNo && sourceTaskMap.get(transaction.productionTaskNo)) ||
+      (transaction.batch?.sourceProductionTaskNo && sourceTaskMap.get(transaction.batch.sourceProductionTaskNo)) ||
+      transaction.batch?.productionTask ||
+      null
+    );
   }
 
   private async getReceivedOrderQuantity(orderLineId: string, client: WarehousePrismaClient = this.prisma) {
@@ -922,16 +1029,16 @@ export class WarehousesService {
       include: { warehouse: true, location: true }
     });
     if (!batch) {
-      throw new NotFoundException('Inventory batch not found');
+      throw new NotFoundException('库存批次不存在');
     }
     if (!batch.sourceOrderId) {
-      throw new BadRequestException('Only order inventory can be shipped from warehouse shipment');
+      throw new BadRequestException('只有订单库存可以从仓库发货');
     }
     if (batch.status !== 'AVAILABLE') {
-      throw new BadRequestException('Only AVAILABLE inventory can be shipped');
+      throw new BadRequestException('只有可用库存可以发货');
     }
     if (decimalToNumber(batch.quantity) <= 0) {
-      throw new BadRequestException('Only inventory quantity greater than 0 can be shipped');
+      throw new BadRequestException('库存数量必须大于 0 才能发货');
     }
 
     // 发货状态检查和出库流水必须共用同一份最新库存批次，防止重复点击把同一批库存出两次。
@@ -993,8 +1100,9 @@ export class WarehousesService {
       include: {
         lines: {
           include: {
-            inventoryBatches: true,
-            productionTasks: { include: { inventoryBatch: true } }
+            inventoryBatches: {
+              include: { transactions: true }
+            }
           }
         }
       }
@@ -1004,20 +1112,34 @@ export class WarehousesService {
     }
 
     return order.lines.every((line) => {
-      const orderBatches = line.inventoryBatches.filter((batch) => batch.sourceOrderId === orderId);
-      if (line.fulfillmentMode === 'STOCK') {
-        return orderBatches.length > 0 && orderBatches.every((batch) => batch.status === 'USED');
+      const customerQuantity = decimalToNumber(line.quantity);
+      if (customerQuantity <= 0) {
+        return true;
       }
-      return line.productionTasks.length > 0 && line.productionTasks.every((task) => this.isTaskShipmentClosed(task));
+      return this.toLineShippedQuantity(line, order.orderNo) + 0.0001 >= customerQuantity;
     });
   }
 
-  private isTaskShipmentClosed(task: any) {
-    // 发货完成判断以库存批次为准：历史任务即使 status 仍是 IN_PROGRESS，只要订单库存已出库，也应允许订单进入完成。
-    return Boolean(
-      task.inventoryBatch &&
-        (task.inventoryBatch.sourceOrderId === null || task.inventoryBatch.status === 'USED')
-    );
+  private toLineShippedQuantity(line: any, orderNo: string) {
+    // 整单是否发货完成必须按 OUT 流水累计数量判断，不能只看批次 USED；部分发货后批次剩余也会变 0。
+    return (line.inventoryBatches || []).reduce((sum: number, batch: any) => {
+      if (!batch.sourceOrderId) {
+        return sum;
+      }
+      return (
+        sum +
+        (batch.transactions || []).reduce((batchSum: number, transaction: any) => {
+          if (
+            transaction.transactionType !== InventoryTransactionType.OUT ||
+            transaction.sourceRecordType !== 'InventoryBatch' ||
+            transaction.orderNo !== orderNo
+          ) {
+            return batchSum;
+          }
+          return batchSum + decimalToNumber(transaction.quantity);
+        }, 0)
+      );
+    }, 0);
   }
 
   private toNotice(notice: any) {
@@ -1066,7 +1188,7 @@ export class WarehousesService {
         return code;
       }
     }
-    throw new BadRequestException('Unable to generate warehouseCode');
+    throw new BadRequestException('无法生成仓库编码，请手动填写');
   }
 
   private normalizeBusinessCode(value: string | undefined, message: string) {
@@ -1088,7 +1210,7 @@ export class WarehousesService {
   private async ensureWarehouseCodeAvailable(warehouseCode: string) {
     // 仓库编码大小写不敏感查重，避免 WH-FG 和 wh-fg 变成两个仓库。
     if (await this.warehouseCodeExists(warehouseCode)) {
-      throw new BadRequestException(`Warehouse code ${warehouseCode} already exists`);
+      throw new BadRequestException(`仓库编码 ${warehouseCode} 已存在`);
     }
   }
 
@@ -1106,7 +1228,7 @@ export class WarehousesService {
   private async ensureLocationCodeAvailable(warehouseId: string, locationCode: string) {
     // 同一仓库内库位编码必须大小写不敏感唯一，不同仓库可以使用相同库位编号。
     if (await this.locationCodeExists(warehouseId, locationCode)) {
-      throw new BadRequestException(`Location code ${locationCode} already exists in this warehouse`);
+      throw new BadRequestException(`当前仓库已存在库位编码 ${locationCode}`);
     }
   }
 

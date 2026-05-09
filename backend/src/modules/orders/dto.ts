@@ -163,6 +163,14 @@ export class CreateOrderLineDto {
   productionPlanQuantity?: number;
 
   @IsOptional()
+  @IsString()
+  productionPlanOverrideByCode?: string;
+
+  @IsOptional()
+  @IsString()
+  productionPlanOverrideReason?: string;
+
+  @IsOptional()
   @IsEnum(OrderLineFulfillmentMode)
   fulfillmentMode?: OrderLineFulfillmentMode;
 
@@ -283,6 +291,14 @@ export class UpdateLineQuantityDto {
   @IsNumber()
   @Min(0)
   productionPlanQuantity?: number;
+
+  @IsOptional()
+  @IsString()
+  productionPlanOverrideByCode?: string;
+
+  @IsOptional()
+  @IsString()
+  productionPlanOverrideReason?: string;
 
   @IsString()
   reason!: string;

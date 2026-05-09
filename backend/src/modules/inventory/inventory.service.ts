@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { InventoryReservationStatus, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
@@ -16,6 +16,8 @@ type InventorySummaryAccumulator = {
   unit: string;
   batchCount: number;
   warehouseIds: Set<string>;
+  physicalQuantity: number;
+  reservedQuantity: number;
   availableQuantity: number;
   usedQuantity: number;
   totalQuantity: number;
@@ -29,10 +31,18 @@ type InventorySummaryAccumulator = {
     {
       warehouseId: string;
       warehouseName: string;
+      reservedQuantity: number;
       availableQuantity: number;
       batchCount: number;
     }
   >;
+};
+
+type InventoryCustomerScope = {
+  customerId: string;
+  customerName?: string;
+  orderNos: string[];
+  productionTaskNos: string[];
 };
 
 const adjustmentAttachmentPrefix = '/uploads/inventory-adjustments/';
@@ -52,27 +62,74 @@ const genericUploadMimeTypes = new Set(['', 'application/octet-stream']);
 export class InventoryService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private buildInventoryWhere(query: InventoryQueryDto) {
+  private async resolveInventoryCustomerScope(customerId?: string): Promise<InventoryCustomerScope | null> {
+    const normalizedCustomerId = customerId?.trim();
+    if (!normalizedCustomerId) {
+      return null;
+    }
+
+    const [customer, orders, productionTasks] = await Promise.all([
+      this.prisma.customer.findUnique({
+        where: { id: normalizedCustomerId },
+        select: { customerName: true }
+      }),
+      this.prisma.customerOrder.findMany({
+        where: { customerId: normalizedCustomerId },
+        select: { orderNo: true }
+      }),
+      this.prisma.productionTask.findMany({
+        where: { order: { customerId: normalizedCustomerId } },
+        select: { productionTaskNo: true }
+      })
+    ]);
+
+    return {
+      customerId: normalizedCustomerId,
+      customerName: customer?.customerName?.trim() || undefined,
+      orderNos: orders.map((order) => order.orderNo).filter(Boolean),
+      productionTaskNos: productionTasks.map((task) => task.productionTaskNo).filter(Boolean)
+    };
+  }
+
+  private async buildInventoryWhere(query: InventoryQueryDto) {
     const where: Prisma.InventoryBatchWhereInput = {};
+    const andConditions: Prisma.InventoryBatchWhereInput[] = [];
 
     if (query.warehouseId) {
       where.warehouseId = query.warehouseId;
     }
 
-    if (query.customerId) {
-      // 客户筛选只作用于订单库存；多做的备货库存没有客户绑定，不混入客户订单统计。
-      where.sourceOrder = { customerId: query.customerId };
+    const customerScope = await this.resolveInventoryCustomerScope(query.customerId);
+    if (customerScope) {
+      // 客户筛选既要看到当前订单库存，也要看到该客户订单生产后转出的备货库存。
+      // 旧库存可能只保留 sourceProductionTaskNo / sourceOrderNo，没有 productionTaskId 关系，因此这里必须用多种来源字段兜底。
+      const customerOrConditions: Prisma.InventoryBatchWhereInput[] = [
+        { sourceOrder: { is: { customerId: customerScope.customerId } } },
+        { productionTask: { is: { order: { customerId: customerScope.customerId } } } }
+      ];
+      if (customerScope.orderNos.length > 0) {
+        customerOrConditions.push({ sourceOrderNo: { in: customerScope.orderNos } });
+      }
+      if (customerScope.productionTaskNos.length > 0) {
+        customerOrConditions.push({ sourceProductionTaskNo: { in: customerScope.productionTaskNos } });
+      }
+      if (customerScope.customerName) {
+        customerOrConditions.push({ sourceCustomerName: { equals: customerScope.customerName } });
+      }
+      andConditions.push({ OR: customerOrConditions });
     }
 
     const orderNo = query.orderNo?.trim();
     if (orderNo) {
       // 库存可能是当前订单库存，也可能是由历史生产任务转成的备货库存；订单号筛选必须同时覆盖这两类来源。
-      where.OR = [
-        { sourceOrderNo: { contains: orderNo, mode: 'insensitive' } },
-        { sourceProductionTaskNo: { contains: orderNo, mode: 'insensitive' } },
-        { replenishmentSourceRequestNo: { contains: orderNo, mode: 'insensitive' } },
-        { productionTask: { is: { orderNo: { contains: orderNo, mode: 'insensitive' } } } }
-      ];
+      andConditions.push({
+        OR: [
+          { sourceOrderNo: { contains: orderNo, mode: 'insensitive' } },
+          { sourceProductionTaskNo: { contains: orderNo, mode: 'insensitive' } },
+          { replenishmentSourceRequestNo: { contains: orderNo, mode: 'insensitive' } },
+          { productionTask: { is: { orderNo: { contains: orderNo, mode: 'insensitive' } } } }
+        ]
+      });
     }
 
     if (query.status) {
@@ -81,11 +138,14 @@ export class InventoryService {
         where.quantity = { gt: 0 };
       }
     }
+    if (andConditions.length > 0) {
+      where.AND = andConditions;
+    }
 
     return where;
   }
 
-  private buildInventoryOutTransactionWhere(query: InventoryQueryDto) {
+  private async buildInventoryOutTransactionWhere(query: InventoryQueryDto) {
     if (query.status === 'AVAILABLE') {
       return null;
     }
@@ -99,11 +159,37 @@ export class InventoryService {
       // 出库流水也要支持用生产任务号里的订单号反查，方便核对备货库存来源。
       where.OR = [
         { orderNo: { contains: orderNo, mode: 'insensitive' } },
-        { productionTaskNo: { contains: orderNo, mode: 'insensitive' } }
+        { productionTaskNo: { contains: orderNo, mode: 'insensitive' } },
+        { batch: { sourceOrderNo: { contains: orderNo, mode: 'insensitive' } } },
+        { batch: { sourceProductionTaskNo: { contains: orderNo, mode: 'insensitive' } } },
+        { batch: { productionTask: { is: { orderNo: { contains: orderNo, mode: 'insensitive' } } } } }
       ];
     }
-    if (query.customerId) {
-      where.batch = { sourceOrder: { customerId: query.customerId } };
+    const customerScope = await this.resolveInventoryCustomerScope(query.customerId);
+    if (customerScope) {
+      const customerOrConditions: Prisma.InventoryTransactionWhereInput[] = [
+        { batch: { sourceOrder: { is: { customerId: customerScope.customerId } } } },
+        { batch: { productionTask: { is: { order: { customerId: customerScope.customerId } } } } }
+      ];
+      if (customerScope.orderNos.length > 0) {
+        customerOrConditions.push({ orderNo: { in: customerScope.orderNos } });
+        customerOrConditions.push({ batch: { sourceOrderNo: { in: customerScope.orderNos } } });
+      }
+      if (customerScope.productionTaskNos.length > 0) {
+        customerOrConditions.push({ productionTaskNo: { in: customerScope.productionTaskNos } });
+        customerOrConditions.push({ batch: { sourceProductionTaskNo: { in: customerScope.productionTaskNos } } });
+      }
+      if (customerScope.customerName) {
+        customerOrConditions.push({ batch: { sourceCustomerName: { equals: customerScope.customerName } } });
+      }
+      const customerTransactionScope: Prisma.InventoryTransactionWhereInput = {
+        OR: customerOrConditions
+      };
+      where.AND = Array.isArray(where.AND)
+        ? [...where.AND, customerTransactionScope]
+        : where.AND
+          ? [where.AND, customerTransactionScope]
+          : [customerTransactionScope];
     }
     return where;
   }
@@ -138,8 +224,11 @@ export class InventoryService {
       sourceCustomerName?: string | null;
       unit?: string | null;
       warehouse?: { warehouseName?: string | null } | null;
+      sourceOrder?: { orderNo?: string | null; customerName?: string | null } | null;
+      productionTask?: { orderNo?: string | null; customerName?: string | null } | null;
     },
-    keyword?: string | null
+    keyword?: string | null,
+    extraSearchValues: Array<string | null | undefined> = []
   ) {
     const normalizedKeyword = normalizeSearchKeyword(keyword);
     if (!normalizedKeyword) {
@@ -156,7 +245,12 @@ export class InventoryService {
       batch.replenishmentSourceType,
       batch.replenishmentSourceRequestNo,
       batch.sourceCustomerName,
-      batch.warehouse?.warehouseName
+      batch.sourceOrder?.orderNo,
+      batch.sourceOrder?.customerName,
+      batch.productionTask?.orderNo,
+      batch.productionTask?.customerName,
+      batch.warehouse?.warehouseName,
+      ...extraSearchValues
     ], normalizedKeyword);
   }
 
@@ -167,9 +261,17 @@ export class InventoryService {
       unit?: string | null;
       orderNo?: string | null;
       productionTaskNo?: string | null;
-      batch?: { batchNo?: string | null; sourceCustomerName?: string | null } | null;
+      batch?: {
+        batchNo?: string | null;
+        sourceOrderNo?: string | null;
+        sourceProductionTaskNo?: string | null;
+        sourceCustomerName?: string | null;
+        sourceOrder?: { orderNo?: string | null; customerName?: string | null } | null;
+        productionTask?: { orderNo?: string | null; customerName?: string | null } | null;
+      } | null;
     },
-    keyword?: string | null
+    keyword?: string | null,
+    extraSearchValues: Array<string | null | undefined> = []
   ) {
     const normalizedKeyword = normalizeSearchKeyword(keyword);
     if (!normalizedKeyword) {
@@ -182,7 +284,14 @@ export class InventoryService {
       transaction.orderNo,
       transaction.productionTaskNo,
       transaction.batch?.batchNo,
-      transaction.batch?.sourceCustomerName
+      transaction.batch?.sourceOrderNo,
+      transaction.batch?.sourceProductionTaskNo,
+      transaction.batch?.sourceCustomerName,
+      transaction.batch?.sourceOrder?.orderNo,
+      transaction.batch?.sourceOrder?.customerName,
+      transaction.batch?.productionTask?.orderNo,
+      transaction.batch?.productionTask?.customerName,
+      ...extraSearchValues
     ], normalizedKeyword);
   }
 
@@ -193,6 +302,36 @@ export class InventoryService {
     }
     // 关键字查到物料但没有库存批次时，也要返回 0 库存行，方便仓库确认“数据库有此物料、当前仓库无库存”。
     return this.findMaterialsByKeyword(keyword);
+  }
+
+  private inventoryBatchSourceSearchValues(batch: { sourceProductionTaskNo?: string | null }, sourceTaskMap: Map<string, any>) {
+    const sourceTask = this.resolveInventorySourceTask(batch, sourceTaskMap);
+    const sourceOrder = sourceTask?.order;
+    return [
+      sourceTask?.productionTaskNo,
+      sourceTask?.orderNo,
+      sourceTask?.customerName,
+      sourceOrder?.orderNo,
+      sourceOrder?.customerName
+    ];
+  }
+
+  private inventoryTransactionSourceSearchValues(
+    transaction: { productionTaskNo?: string | null; batch?: { sourceProductionTaskNo?: string | null } | null },
+    sourceTaskMap: Map<string, any>
+  ) {
+    const taskNos = [...new Set([transaction.productionTaskNo, transaction.batch?.sourceProductionTaskNo].filter(Boolean))] as string[];
+    return taskNos.flatMap((taskNo) => {
+      const sourceTask = sourceTaskMap.get(taskNo);
+      const sourceOrder = sourceTask?.order;
+      return [
+        sourceTask?.productionTaskNo,
+        sourceTask?.orderNo,
+        sourceTask?.customerName,
+        sourceOrder?.orderNo,
+        sourceOrder?.customerName
+      ];
+    });
   }
 
   private materialSummaryKey(material: { partCode: string; unit: string }) {
@@ -206,6 +345,8 @@ export class InventoryService {
       unit: material.unit,
       batchCount: 0,
       warehouseIds: new Set<string>(),
+      physicalQuantity: 0,
+      reservedQuantity: 0,
       availableQuantity: 0,
       usedQuantity: 0,
       totalQuantity: 0,
@@ -228,7 +369,7 @@ export class InventoryService {
 
   async summary(query: InventoryQueryDto) {
     const batches = await this.prisma.inventoryBatch.findMany({
-      where: this.buildInventoryWhere(query),
+      where: await this.buildInventoryWhere(query),
       select: {
         batchNo: true,
         partCode: true,
@@ -244,36 +385,49 @@ export class InventoryService {
         replenishmentSourceRequestNo: true,
         sourceCustomerName: true,
         warehouseId: true,
-        warehouse: { select: { warehouseName: true } }
+        warehouse: { select: { warehouseName: true } },
+        sourceOrder: { select: { orderNo: true, customerName: true } },
+        productionTask: { select: { orderNo: true, customerName: true } },
+        reservations: {
+          where: { status: InventoryReservationStatus.ACTIVE },
+          select: { quantity: true }
+        }
       },
       orderBy: [{ partCode: 'asc' }, { partName: 'asc' }]
     });
+    const sourceTaskMap = await this.findSourceTaskMap(batches.map((batch) => batch.sourceProductionTaskNo));
 
     const summaryMap = new Map<string, InventorySummaryAccumulator>();
 
-    for (const batch of batches.filter((item) => this.inventoryBatchMatchesKeyword(item, query.keyword))) {
+    for (const batch of batches.filter((item) => this.inventoryBatchMatchesKeyword(item, query.keyword, this.inventoryBatchSourceSearchValues(item, sourceTaskMap)))) {
       const key = this.materialSummaryKey(batch);
       const row = summaryMap.get(key) ?? this.createSummaryAccumulator(batch);
 
       const quantity = decimalToNumber(batch.quantity);
       const isAvailable = batch.status === 'AVAILABLE' && quantity > 0;
+      const reservedQuantity = isAvailable && !batch.sourceOrderId
+        ? batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
+        : 0;
+      const availableQuantity = isAvailable ? Math.max(Math.round((quantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0) : 0;
       row.batchCount += 1;
       row.totalQuantity += quantity;
 
       if (isAvailable) {
-        row.availableQuantity += quantity;
+        row.physicalQuantity += quantity;
+        row.reservedQuantity += reservedQuantity;
+        row.availableQuantity += availableQuantity;
         row.warehouseIds.add(batch.warehouseId);
 
         if (batch.sourceOrderId) {
-          row.orderInventoryQuantity += quantity;
+          row.orderInventoryQuantity += availableQuantity;
         } else {
-          row.stockInventoryQuantity += quantity;
+          row.stockInventoryQuantity += availableQuantity;
           if (batch.sourceKind === 'CANCELLED_ORDER') {
-            row.cancelledOrderStockQuantity += quantity;
+            row.cancelledOrderStockQuantity += availableQuantity;
           } else if (batch.sourceKind === 'CUSTOMER_CHANGE') {
-            row.customerChangeStockQuantity += quantity;
+            row.customerChangeStockQuantity += availableQuantity;
           } else {
-            row.normalOrderStockQuantity += quantity;
+            row.normalOrderStockQuantity += availableQuantity;
           }
         }
       } else {
@@ -285,18 +439,20 @@ export class InventoryService {
         {
           warehouseId: batch.warehouseId,
           warehouseName: batch.warehouse.warehouseName,
+          reservedQuantity: 0,
           availableQuantity: 0,
           batchCount: 0
-        };
+      };
       warehouseRow.batchCount += 1;
       if (isAvailable) {
-        warehouseRow.availableQuantity += quantity;
+        warehouseRow.reservedQuantity += reservedQuantity;
+        warehouseRow.availableQuantity += availableQuantity;
       }
       row.warehouses.set(batch.warehouseId, warehouseRow);
       summaryMap.set(key, row);
     }
 
-    const outTransactionWhere = this.buildInventoryOutTransactionWhere(query);
+    const outTransactionWhere = await this.buildInventoryOutTransactionWhere(query);
     if (outTransactionWhere) {
       const outTransactions = await this.prisma.inventoryTransaction.findMany({
         where: outTransactionWhere,
@@ -307,11 +463,25 @@ export class InventoryService {
           quantity: true,
           orderNo: true,
           productionTaskNo: true,
-          batch: { select: { batchNo: true, sourceCustomerName: true } }
+          batch: {
+            select: {
+              batchNo: true,
+              sourceOrderNo: true,
+              sourceProductionTaskNo: true,
+              sourceCustomerName: true,
+              sourceOrder: { select: { orderNo: true, customerName: true } },
+              productionTask: { select: { orderNo: true, customerName: true } }
+            }
+          }
         }
       });
       const outQuantityMap = new Map<string, { quantity: number; partCode: string; partName: string; unit: string }>();
-      for (const transaction of outTransactions.filter((item) => this.inventoryTransactionMatchesKeyword(item, query.keyword))) {
+      const outSourceTaskMap = await this.findSourceTaskMap(
+        outTransactions.flatMap((transaction) => [transaction.productionTaskNo, transaction.batch?.sourceProductionTaskNo])
+      );
+      for (const transaction of outTransactions.filter((item) =>
+        this.inventoryTransactionMatchesKeyword(item, query.keyword, this.inventoryTransactionSourceSearchValues(item, outSourceTaskMap))
+      )) {
         const key = this.materialSummaryKey(transaction);
         const row = outQuantityMap.get(key) ?? {
           quantity: 0,
@@ -345,6 +515,7 @@ export class InventoryService {
         row.warehouses.set(selectedWarehouse.warehouseId, {
           warehouseId: selectedWarehouse.warehouseId,
           warehouseName: selectedWarehouse.warehouseName,
+          reservedQuantity: 0,
           availableQuantity: 0,
           batchCount: 0
         });
@@ -359,6 +530,8 @@ export class InventoryService {
       unit: row.unit,
       batchCount: row.batchCount,
       warehouseCount: row.warehouseIds.size,
+      physicalQuantity: row.physicalQuantity,
+      reservedQuantity: row.reservedQuantity,
       availableQuantity: row.availableQuantity,
       usedQuantity: row.usedQuantity,
       totalQuantity: row.totalQuantity,
@@ -410,13 +583,16 @@ export class InventoryService {
             replenishmentSourceType: true,
             replenishmentSourceRequestNo: true,
             sourceCustomerName: true,
-            warehouse: { select: { warehouseName: true } }
+            warehouse: { select: { warehouseName: true } },
+            sourceOrder: { select: { orderNo: true, customerName: true } },
+            productionTask: { select: { orderNo: true, customerName: true } }
           },
           orderBy: [{ partCode: 'asc' }, { batchNo: 'asc' }]
         })
       ]);
       const materialByCode = new Map(allMaterials.map((material) => [material.partCode.toLocaleLowerCase(), material]));
-      for (const batch of candidateBatches.filter((item) => this.inventoryBatchMatchesKeyword(item, keyword))) {
+      const sourceTaskMap = await this.findSourceTaskMap(candidateBatches.map((batch) => batch.sourceProductionTaskNo));
+      for (const batch of candidateBatches.filter((item) => this.inventoryBatchMatchesKeyword(item, keyword, this.inventoryBatchSourceSearchValues(item, sourceTaskMap)))) {
         const key = batch.partCode.toLocaleLowerCase();
         materialRows.set(
           key,
@@ -458,11 +634,15 @@ export class InventoryService {
         warehouseId: query.warehouseId || undefined
       },
       select: {
+        id: true,
         partCode: true,
         quantity: true,
         sourceOrderId: true
       }
     });
+    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(
+      batches.filter((batch) => !batch.sourceOrderId).map((batch) => batch.id)
+    );
 
     const quantityMap = new Map<
       string,
@@ -482,7 +662,8 @@ export class InventoryService {
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
-      const quantity = decimalToNumber(batch.quantity);
+      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const quantity = Math.max(decimalToNumber(batch.quantity) - reservedQuantity, 0);
       row.availableQuantity += quantity;
       if (batch.sourceOrderId) {
         row.orderInventoryQuantity += quantity;
@@ -531,6 +712,11 @@ export class InventoryService {
       where.sourceOrderId = { not: null };
     }
 
+    const excludeOrderNo = query.excludeOrderNo?.trim();
+    const reservationWhere: Prisma.InventoryReservationWhereInput = {
+      status: InventoryReservationStatus.ACTIVE,
+      ...(excludeOrderNo ? { orderNo: { not: excludeOrderNo } } : {})
+    };
     const batches = await this.prisma.inventoryBatch.findMany({
       where,
       include: {
@@ -538,9 +724,18 @@ export class InventoryService {
         location: true,
         sourceOrder: true,
         sourceOrderLine: true,
-        productionTask: { include: { order: true, orderLine: true } }
+        productionTask: { include: { order: true, orderLine: true } },
+        reservations: {
+          where: reservationWhere,
+          include: {
+            order: { select: { orderNo: true, customerName: true, orderDate: true } },
+            orderLine: { select: { lineNo: true, partCode: true, partName: true } }
+          },
+          orderBy: [{ createdAt: 'asc' }]
+        }
       },
-      orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
+      // 下单选择备货库存时默认从小批次数量开始，减少大批次被过早拆散。
+      orderBy: [{ quantity: 'asc' }, { createdAt: 'asc' }, { batchNo: 'asc' }]
     });
 
     const sourceTaskMap = await this.findSourceTaskMap(batches.map((batch) => batch.sourceProductionTaskNo));
@@ -595,7 +790,18 @@ export class InventoryService {
       async (tx) => {
         const batch = await tx.inventoryBatch.findUnique({
           where: { id: batchId },
-          include: { warehouse: true, location: true }
+          include: {
+            warehouse: true,
+            location: true,
+            reservations: {
+              where: { status: InventoryReservationStatus.ACTIVE },
+              include: {
+                order: { select: { orderNo: true, customerName: true } },
+                orderLine: { select: { partCode: true, partName: true } }
+              },
+              orderBy: [{ createdAt: 'asc' }]
+            }
+          }
         });
         if (!batch) {
           throw new NotFoundException('库存批次不存在');
@@ -604,6 +810,24 @@ export class InventoryService {
         const beforeQuantity = decimalToNumber(batch.quantity);
         if (batch.status !== 'AVAILABLE' && beforeQuantity > 0) {
           throw new BadRequestException('只有可用库存可以盘点调整');
+        }
+        const reservedQuantity = batch.sourceOrderId
+          ? 0
+          : batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0);
+        if (afterQuantity + 0.0001 < reservedQuantity) {
+          const reservationText = batch.reservations
+            .slice(0, 3)
+            .map((reservation) => {
+              const orderNo = reservation.orderNo || reservation.order?.orderNo || '草稿订单';
+              const partName = reservation.partName || reservation.orderLine?.partName || reservation.partCode || reservation.orderLine?.partCode || '-';
+              return `${orderNo}/${partName} ${decimalToNumber(reservation.quantity)}${reservation.unit || batch.unit}`;
+            })
+            .join('，');
+          throw new BadRequestException(
+            `盘点后数量不能小于已预占数量：已预占 ${reservedQuantity}${batch.unit}，盘点后 ${afterQuantity}${batch.unit}${
+              reservationText ? `（${reservationText}）` : ''
+            }。请先处理订单库存选择或释放预占后再盘点。`
+          );
         }
         const deltaQuantity = afterQuantity - beforeQuantity;
         const adjustmentNo = this.buildAdjustmentNo();
@@ -677,6 +901,46 @@ export class InventoryService {
     return adjustments.map((adjustment) => this.toAdjustment(adjustment));
   }
 
+  async findBatchReservations(batchId: string) {
+    const batch = await this.prisma.inventoryBatch.findUnique({
+      where: { id: batchId },
+      select: { id: true }
+    });
+    if (!batch) {
+      throw new NotFoundException('库存批次不存在');
+    }
+
+    const reservations = await this.prisma.inventoryReservation.findMany({
+      where: { batchId },
+      include: {
+        order: { select: { orderNo: true, customerName: true, orderDate: true } },
+        orderLine: { select: { lineNo: true, partCode: true, partName: true } }
+      },
+      orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }]
+    });
+
+    return reservations.map((reservation) => ({
+      id: reservation.id,
+      batchId: reservation.batchId,
+      orderId: reservation.orderId,
+      orderLineId: reservation.orderLineId,
+      orderNo: reservation.orderNo || reservation.order?.orderNo,
+      customerName: reservation.order?.customerName,
+      orderDate: reservation.order?.orderDate,
+      lineNo: reservation.orderLine?.lineNo,
+      partCode: reservation.partCode || reservation.orderLine?.partCode,
+      partName: reservation.partName || reservation.orderLine?.partName,
+      quantity: decimalToNumber(reservation.quantity),
+      unit: reservation.unit,
+      status: reservation.status,
+      statusReason: reservation.statusReason,
+      releasedAt: reservation.releasedAt,
+      consumedAt: reservation.consumedAt,
+      createdAt: reservation.createdAt,
+      updatedAt: reservation.updatedAt
+    }));
+  }
+
   private async findSourceTaskMap(taskNos: Array<string | null | undefined>) {
     const uniqueTaskNos = [...new Set(taskNos.filter(Boolean))] as string[];
     if (uniqueTaskNos.length === 0) {
@@ -719,11 +983,43 @@ export class InventoryService {
     return sourceRequestNo ? `${prefix}：${sourceRequestNo}` : prefix;
   }
 
+  private async activeReservationQuantityByBatchId(batchIds: string[], excludeOrderNo?: string) {
+    if (batchIds.length === 0) {
+      return new Map<string, number>();
+    }
+    const rows = await this.prisma.inventoryReservation.groupBy({
+      by: ['batchId'],
+      where: {
+        batchId: { in: batchIds },
+        status: InventoryReservationStatus.ACTIVE,
+        ...(excludeOrderNo?.trim() ? { orderNo: { not: excludeOrderNo.trim() } } : {})
+      },
+      _sum: { quantity: true }
+    });
+    return new Map(rows.map((row) => [row.batchId, decimalToNumber(row._sum.quantity || 0)]));
+  }
+
   private toInventorySourceDetail(batch: any, sourceTaskMap: Map<string, any>) {
     const sourceTask = this.resolveInventorySourceTask(batch, sourceTaskMap);
     const sourceLine = this.resolveInventorySourceLine(batch, sourceTask);
     const sourceOrder = this.resolveInventorySourceOrder(batch, sourceTask);
-    const quantity = batch.status === 'AVAILABLE' ? decimalToNumber(batch.quantity) : 0;
+    const reservations = (batch.reservations || []).map((reservation: any) => ({
+      id: reservation.id,
+      orderNo: reservation.orderNo || reservation.order?.orderNo,
+      customerName: reservation.order?.customerName,
+      orderDate: reservation.order?.orderDate,
+      orderLineId: reservation.orderLineId,
+      lineNo: reservation.orderLine?.lineNo,
+      partCode: reservation.partCode || reservation.orderLine?.partCode,
+      partName: reservation.partName || reservation.orderLine?.partName,
+      quantity: decimalToNumber(reservation.quantity),
+      unit: reservation.unit,
+      statusReason: reservation.statusReason,
+      createdAt: reservation.createdAt
+    }));
+    const reservedQuantity = reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
+    const physicalQuantity = batch.status === 'AVAILABLE' ? decimalToNumber(batch.quantity) : 0;
+    const quantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
 
     return {
       id: batch.id,
@@ -731,6 +1027,9 @@ export class InventoryService {
       partCode: batch.partCode,
       partName: batch.partName,
       quantity,
+      physicalQuantity,
+      reservedQuantity,
+      reservations,
       unit: batch.unit,
       warehouseId: batch.warehouseId,
       warehouseName: batch.warehouse?.warehouseName,
@@ -761,25 +1060,52 @@ export class InventoryService {
   }
 
   async findAll(query: InventoryQueryDto) {
-    const where = this.buildInventoryWhere(query);
+    const where = await this.buildInventoryWhere(query);
 
-    const batches = (await this.prisma.inventoryBatch.findMany({
+    const rawBatches = await this.prisma.inventoryBatch.findMany({
       where,
       include: {
         warehouse: true,
         location: true,
         sourceOrder: true,
         sourceOrderLine: true,
-        productionTask: { include: { order: true, orderLine: true } }
+        productionTask: { include: { order: true, orderLine: true } },
+        reservations: {
+          where: { status: InventoryReservationStatus.ACTIVE },
+          include: {
+            order: { select: { orderNo: true, customerName: true, orderDate: true } },
+            orderLine: { select: { lineNo: true, partCode: true, partName: true } }
+          },
+          orderBy: [{ createdAt: 'asc' }]
+        }
       },
       orderBy: [{ createdAt: 'desc' }, { partCode: 'asc' }]
-    })).filter((batch) => this.inventoryBatchMatchesKeyword(batch, query.keyword));
+    });
 
-    const sourceTaskMap = await this.findSourceTaskMap(batches.map((batch) => batch.sourceProductionTaskNo));
+    const sourceTaskMap = await this.findSourceTaskMap(rawBatches.map((batch) => batch.sourceProductionTaskNo));
+    const batches = rawBatches.filter((batch) =>
+      this.inventoryBatchMatchesKeyword(batch, query.keyword, this.inventoryBatchSourceSearchValues(batch, sourceTaskMap))
+    );
 
     return batches.map((batch) => {
       const storedQuantity = decimalToNumber(batch.quantity);
-      const currentQuantity = batch.status === 'AVAILABLE' ? storedQuantity : 0;
+      const physicalQuantity = batch.status === 'AVAILABLE' ? storedQuantity : 0;
+      const reservations = (batch.reservations || []).map((reservation: any) => ({
+        id: reservation.id,
+        orderNo: reservation.orderNo || reservation.order?.orderNo,
+        customerName: reservation.order?.customerName,
+        orderDate: reservation.order?.orderDate,
+        orderLineId: reservation.orderLineId,
+        lineNo: reservation.orderLine?.lineNo,
+        partCode: reservation.partCode || reservation.orderLine?.partCode,
+        partName: reservation.partName || reservation.orderLine?.partName,
+        quantity: decimalToNumber(reservation.quantity),
+        unit: reservation.unit,
+        statusReason: reservation.statusReason,
+        createdAt: reservation.createdAt
+      }));
+      const reservedQuantity = batch.sourceOrderId ? 0 : reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
+      const availableQuantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
       const sourceTask = this.resolveInventorySourceTask(batch, sourceTaskMap);
       const sourceLine = this.resolveInventorySourceLine(batch, sourceTask);
       const sourceOrder = this.resolveInventorySourceOrder(batch, sourceTask);
@@ -790,8 +1116,12 @@ export class InventoryService {
         batchNo: batch.batchNo,
         partCode: batch.partCode,
         partName: batch.partName,
-        // 批次列表的 quantity 表示当前剩余；USED 历史批次即使旧数据保留原数量，也按 0 返回。
-        quantity: currentQuantity,
+        // 批次列表的 quantity 保持账面当前剩余，盘点调整必须以它为准；availableQuantity 才是扣除预占后的可下单数量。
+        quantity: physicalQuantity,
+        physicalQuantity,
+        reservedQuantity,
+        availableQuantity,
+        reservations,
         canAdjust: batch.status === 'AVAILABLE' || storedQuantity === 0,
         unit: batch.unit,
         warehouseId: batch.warehouseId,

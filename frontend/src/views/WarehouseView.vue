@@ -441,15 +441,41 @@
           <template #default="{ row }">{{ row.transactionType === 'IN' ? '入库' : '出库' }}</template>
         </el-table-column>
         <el-table-column prop="partName" label="零件" min-width="160" />
+        <el-table-column label="批次 / 任务" min-width="210">
+          <template #default="{ row }">
+            <div class="cell-main">{{ row.batchNo || '-' }}</div>
+            <small v-if="row.productionTaskNo" class="muted">{{ row.productionTaskNo }}</small>
+          </template>
+        </el-table-column>
         <el-table-column label="数量" width="120">
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
+        </el-table-column>
+        <el-table-column label="批次余量" min-width="170">
+          <template #default="{ row }">
+            <div v-if="row.batchNo" class="inventory-balance-cell">
+              <span>可用 {{ formatQuantity(row.availableQuantity ?? 0, row.unit) }}</span>
+              <small class="muted">
+                账面 {{ formatQuantity(row.physicalQuantity ?? 0, row.unit) }}
+                <template v-if="(row.reservedQuantity || 0) > 0">
+                  / 预占 {{ formatQuantity(row.reservedQuantity || 0, row.unit) }}
+                </template>
+              </small>
+            </div>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="仓库 / 库位" min-width="170">
           <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
         </el-table-column>
         <el-table-column label="来源订单" min-width="180">
           <template #default="{ row }">
-            <OrderNoLink :order-no="row.orderNo" />
+            <OrderNoLink :order-no="transactionSourceOrderNo(row)" />
+            <small v-if="row.orderNo && row.sourceOrderNo && row.orderNo !== row.sourceOrderNo" class="muted">
+              当前订单 <OrderNoLink :order-no="row.orderNo" />
+            </small>
+            <small v-if="row.productionSourceOrderNo && row.productionSourceOrderNo !== transactionSourceOrderNo(row)" class="muted">
+              生产来源 <OrderNoLink :order-no="row.productionSourceOrderNo" />
+            </small>
           </template>
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="160" />
@@ -478,12 +504,42 @@
             <span>{{ formatQuantity(transaction.quantity, transaction.unit) }}</span>
           </div>
           <div class="mobile-field">
+            <label>批次 / 任务</label>
+            <span>
+              {{ transaction.batchNo || '-' }}
+              <small v-if="transaction.productionTaskNo" class="muted">{{ transaction.productionTaskNo }}</small>
+            </span>
+          </div>
+          <div v-if="transaction.batchNo" class="mobile-field">
+            <label>批次余量</label>
+            <span>
+              可用 {{ formatQuantity(transaction.availableQuantity ?? 0, transaction.unit) }}
+              <small class="muted">
+                账面 {{ formatQuantity(transaction.physicalQuantity ?? 0, transaction.unit) }}
+                <template v-if="(transaction.reservedQuantity || 0) > 0">
+                  / 预占 {{ formatQuantity(transaction.reservedQuantity || 0, transaction.unit) }}
+                </template>
+              </small>
+            </span>
+          </div>
+          <div class="mobile-field">
             <label>仓库 / 库位</label>
             <span>{{ transaction.warehouseName }} / {{ transaction.locationName || '-' }}</span>
           </div>
           <div class="mobile-field">
             <label>来源订单</label>
-            <span><OrderNoLink :order-no="transaction.orderNo" /></span>
+            <span>
+              <OrderNoLink :order-no="transactionSourceOrderNo(transaction)" />
+              <small v-if="transaction.orderNo && transaction.sourceOrderNo && transaction.orderNo !== transaction.sourceOrderNo" class="muted">
+                当前订单 <OrderNoLink :order-no="transaction.orderNo" />
+              </small>
+              <small
+                v-if="transaction.productionSourceOrderNo && transaction.productionSourceOrderNo !== transactionSourceOrderNo(transaction)"
+                class="muted"
+              >
+                生产来源 <OrderNoLink :order-no="transaction.productionSourceOrderNo" />
+              </small>
+            </span>
           </div>
           <div class="mobile-field">
             <label>备注</label>
@@ -494,7 +550,14 @@
       <div v-if="!transactions.length && !loading" class="mobile-empty">暂无库存流水</div>
     </div>
 
-    <el-dialog v-model="confirmVisible" title="确认入库" width="min(440px, calc(100vw - 32px))">
+    <el-dialog
+      v-model="confirmVisible"
+      title="确认入库"
+      width="min(440px, calc(100vw - 32px))"
+      :close-on-click-modal="false"
+      :before-close="handleSavingDialogBeforeClose"
+      @closed="resetReceiptDialog"
+    >
       <el-form label-width="92px">
         <el-form-item label="零件">
           <strong>{{ activeReceipt?.partName }}</strong>
@@ -547,7 +610,7 @@
             <el-option v-for="item in warehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="库位">
+        <el-form-item label="库位" required>
           <el-select v-model="receiptForm.locationId" placeholder="选择库位" style="width: 260px">
             <el-option v-for="item in currentLocations" :key="item.id" :label="item.locationName" :value="item.id" />
           </el-select>
@@ -564,7 +627,7 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="confirmVisible = false">取消</el-button>
+        <el-button :disabled="saving" @click="confirmVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="confirmReceipt">确认入库</el-button>
       </template>
     </el-dialog>
@@ -577,7 +640,14 @@
       :focus-batch-no="shipmentSourceFocusBatchNo"
     />
 
-    <el-dialog v-model="shipmentVisible" title="确认发货" width="min(460px, calc(100vw - 32px))">
+    <el-dialog
+      v-model="shipmentVisible"
+      title="确认发货"
+      width="min(460px, calc(100vw - 32px))"
+      :close-on-click-modal="false"
+      :before-close="handleSavingDialogBeforeClose"
+      @closed="resetShipmentDialog"
+    >
       <el-form label-width="92px">
         <el-form-item label="库存批次">
           <strong>{{ activeShipment?.batchNo }}</strong>
@@ -640,7 +710,7 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="shipmentVisible = false">取消</el-button>
+        <el-button :disabled="saving" @click="shipmentVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="confirmShipment">确认发货</el-button>
       </template>
     </el-dialog>
@@ -649,6 +719,9 @@
       v-model="batchShipmentVisible"
       :title="batchShipmentIsOrderMode ? '整单确认发货' : '批量确认发货'"
       width="min(760px, calc(100vw - 32px))"
+      :close-on-click-modal="false"
+      :before-close="handleSavingDialogBeforeClose"
+      @closed="resetBatchShipmentDialog"
     >
       <el-alert
         :title="batchShipmentAlertTitle"
@@ -711,14 +784,19 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="batchShipmentVisible = false">取消</el-button>
+        <el-button :disabled="saving" @click="batchShipmentVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="confirmBatchShipment">
           {{ batchShipmentIsOrderMode ? '确认整单发货' : '确认批量发货' }}
         </el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="warehouseVisible" title="新增仓库" width="min(420px, calc(100vw - 32px))">
+    <el-dialog
+      v-model="warehouseVisible"
+      title="新增仓库"
+      width="min(420px, calc(100vw - 32px))"
+      :before-close="handleSavingDialogBeforeClose"
+    >
       <el-form label-width="92px">
         <el-form-item label="仓库编码">
           <el-input v-model="warehouseForm.warehouseCode" placeholder="不填则自动生成" />
@@ -728,12 +806,17 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="warehouseVisible = false">取消</el-button>
+        <el-button :disabled="saving" @click="warehouseVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveWarehouse">保存</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="locationVisible" title="新增库位" width="min(420px, calc(100vw - 32px))">
+    <el-dialog
+      v-model="locationVisible"
+      title="新增库位"
+      width="min(420px, calc(100vw - 32px))"
+      :before-close="handleSavingDialogBeforeClose"
+    >
       <el-form label-width="92px">
         <el-form-item label="仓库">
           <el-select v-model="locationForm.warehouseId" placeholder="选择仓库" style="width: 260px">
@@ -748,7 +831,7 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="locationVisible = false">取消</el-button>
+        <el-button :disabled="saving" @click="locationVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveLocation">保存</el-button>
       </template>
     </el-dialog>
@@ -770,7 +853,7 @@
           >
             确认已知晓
           </el-button>
-          <StatusTag v-else value="COMPLETED" compact />
+          <StatusTag v-else value="ACKNOWLEDGED" compact />
         </article>
       </div>
       <template #footer>
@@ -795,6 +878,8 @@
       :title="stockNoticeDialogTitle"
       width="min(640px, calc(100vw - 32px))"
       append-to-body
+      :close-on-click-modal="false"
+      :before-close="handleStockNoticeBeforeClose"
     >
       <div v-if="activeWarehouseNotice" class="notice-stock-panel">
         <el-alert
@@ -822,9 +907,9 @@
           </el-form-item>
           <el-form-item v-if="showCustomerChangeHandlingFields" label="处理方式" required>
             <el-radio-group v-model="stockNoticeForm.handlingMode" @change="handleStockNoticeModeChange">
-              <el-radio-button label="STOCK">转备货库存</el-radio-button>
-              <el-radio-button label="SCRAP">报废</el-radio-button>
-              <el-radio-button label="NONE">无实物处理</el-radio-button>
+              <el-radio-button value="STOCK">转备货库存</el-radio-button>
+              <el-radio-button value="SCRAP">报废</el-radio-button>
+              <el-radio-button value="NONE">无实物处理</el-radio-button>
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="showCustomerChangeHandlingFields && stockNoticeForm.handlingMode !== 'NONE'" label="处理数量" required>
@@ -836,8 +921,8 @@
               <el-option v-for="item in warehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
             </el-select>
           </el-form-item>
-          <el-form-item v-if="stockNoticeNeedsWarehouse" label="库位">
-            <el-select v-model="stockNoticeForm.locationId" placeholder="选择库位" style="width: 260px" clearable>
+          <el-form-item v-if="stockNoticeNeedsWarehouse" label="库位" required>
+            <el-select v-model="stockNoticeForm.locationId" placeholder="选择库位" style="width: 260px">
               <el-option v-for="item in currentStockNoticeLocations" :key="item.id" :label="item.locationName" :value="item.id" />
             </el-select>
           </el-form-item>
@@ -859,7 +944,7 @@
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="stockNoticeVisible = false">取消</el-button>
+        <el-button :disabled="stockNoticeSaving" @click="stockNoticeVisible = false">取消</el-button>
         <el-button type="primary" :loading="stockNoticeSaving" @click="saveWithdrawStockNotice">
           {{ stockNoticeConfirmText }}
         </el-button>
@@ -869,9 +954,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Bell } from '@element-plus/icons-vue';
+import { useRoute } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
@@ -892,6 +978,7 @@ import type {
 } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
 
+const route = useRoute();
 const orderOptions = ref<OrderSummary[]>([]);
 const warehouses = ref<Warehouse[]>([]);
 const receipts = ref<WarehouseReceipt[]>([]);
@@ -1137,6 +1224,18 @@ async function loadTransactions() {
   }
 }
 
+function routeOrderNo() {
+  const value = route.query.orderNo;
+  return Array.isArray(value) ? value[0] || '' : value || '';
+}
+
+function applyRouteOrderFilter() {
+  const orderNo = routeOrderNo().trim();
+  if (orderNo) {
+    filters.orderNo = orderNo;
+  }
+}
+
 async function loadWarehouseNotices() {
   noticeLoading.value = true;
   try {
@@ -1232,6 +1331,20 @@ function resetStockNoticeLocation() {
   stockNoticeForm.locationId = currentStockNoticeLocations.value[0]?.id || '';
 }
 
+function handleSavingDialogBeforeClose(done: () => void) {
+  if (saving.value) {
+    return;
+  }
+  done();
+}
+
+function handleStockNoticeBeforeClose(done: () => void) {
+  if (stockNoticeSaving.value) {
+    return;
+  }
+  done();
+}
+
 function handleStockNoticeModeChange() {
   if (stockNoticeForm.handlingMode === 'NONE') {
     stockNoticeForm.handlingQuantity = 0;
@@ -1261,6 +1374,10 @@ async function saveWithdrawStockNotice() {
   }
   if (stockNoticeNeedsWarehouse.value && !stockNoticeForm.warehouseId) {
     ElMessage.warning('请选择转入仓库');
+    return;
+  }
+  if (stockNoticeNeedsWarehouse.value && !stockNoticeForm.locationId) {
+    ElMessage.warning('请选择转入库位');
     return;
   }
   if (showStockMergeConfirm.value && !stockNoticeForm.mergeConfirmed) {
@@ -1383,6 +1500,26 @@ function resetLocation() {
   receiptForm.locationId = currentLocations.value[0]?.id || '';
 }
 
+function resetReceiptDialog() {
+  activeReceipt.value = undefined;
+  receiptForm.warehouseId = '';
+  receiptForm.locationId = '';
+  receiptForm.remark = '';
+}
+
+function resetShipmentDialog() {
+  activeShipment.value = undefined;
+  shipmentForm.remark = '';
+}
+
+function resetBatchShipmentDialog() {
+  if (!batchShipmentVisible.value) {
+    batchShipmentIsOrderMode.value = false;
+    batchShipmentRows.value = [];
+    batchShipmentForm.remark = '';
+  }
+}
+
 function taskRelationText(
   row: Pick<
     WarehouseReceipt | WarehouseShipment,
@@ -1415,6 +1552,10 @@ function partSpecText(row: Pick<WarehouseReceipt | WarehouseShipment, 'partSpeci
   const specification = row.partSpecification || '-';
   const thickness = row.partThickness ? `${row.partThickness} mm` : '-';
   return `${specification} / ${thickness}`;
+}
+
+function transactionSourceOrderNo(row: WarehouseTransaction) {
+  return row.sourceOrderNo || row.orderNo || '';
 }
 
 function formatDateTime(value?: string) {
@@ -1483,6 +1624,14 @@ async function saveLocation() {
 
 async function confirmReceipt() {
   if (!activeReceipt.value) {
+    return;
+  }
+  if (!receiptForm.warehouseId) {
+    ElMessage.warning('请选择仓库');
+    return;
+  }
+  if (!receiptForm.locationId) {
+    ElMessage.warning('请选择库位');
     return;
   }
   saving.value = true;
@@ -1564,7 +1713,16 @@ function formatShipmentTotal(rows: WarehouseShipment[]) {
     .join(' / ');
 }
 
+watch(
+  () => route.query.orderNo,
+  async () => {
+    filters.orderNo = routeOrderNo().trim() || undefined;
+    await queryWarehouseWork();
+  }
+);
+
 onMounted(async () => {
+  applyRouteOrderFilter();
   await queryWarehouseWork();
 });
 </script>
@@ -1676,6 +1834,12 @@ onMounted(async () => {
   color: #64748b;
   font-size: 12px;
   line-height: 18px;
+}
+
+.inventory-balance-cell {
+  display: grid;
+  gap: 2px;
+  line-height: 20px;
 }
 
 .batch-shipment-table {

@@ -157,6 +157,17 @@ export class StartProductionDto {
   supervisorCode!: string;
 }
 
+export class BatchStartProductionDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  taskIds!: string[];
+
+  @IsString()
+  @IsNotEmpty()
+  supervisorCode!: string;
+}
+
 export class CompleteProductionDto {
   @IsString()
   @IsNotEmpty()

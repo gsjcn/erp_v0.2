@@ -3,6 +3,14 @@ export type CustomerRegionType = 'CHINA' | 'OVERSEAS';
 export type OrderStatus = 'DRAFT' | 'SUBMITTED' | 'IN_PRODUCTION' | 'COMPLETED' | 'CANCELLED';
 export type OrderLineFulfillmentMode = 'PRODUCTION' | 'STOCK' | 'REWORK';
 export type ProductionStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED';
+export type OrderProductionFilterStatus =
+  | 'ORDER_DRAFT'
+  | 'WAITING_PRODUCTION'
+  | 'ORDER_IN_PRODUCTION'
+  | 'ORDER_COMPLETED_UNSHIPPED'
+  | 'ORDER_SHIPPED_COMPLETED'
+  | 'ORDER_CANCELLED';
+export type ProductionOrderSummaryStatus = ProductionStatus | 'READY_TO_COMPLETE' | 'RECEIVED';
 export type ProductionShortageMode = 'REPLENISHMENT_REQUEST' | 'REPLENISHMENT' | 'MANAGER_APPROVED';
 export type ProductionReplenishmentRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 export type ProductionNoticeType = 'QUANTITY_INCREASE' | 'QUANTITY_DECREASE' | 'ORDER_CANCELLED' | 'MATERIAL_ADDED' | 'TASK_WITHDRAWN';
@@ -12,6 +20,14 @@ export type InventoryStatus = 'AVAILABLE' | 'USED';
 export type InventorySourceType = 'ORDER' | 'STOCK';
 export type InventorySourceKind = 'NORMAL_ORDER' | 'CANCELLED_ORDER' | 'CUSTOMER_CHANGE';
 export type StatisticsPeriod = 'year' | 'quarter' | 'month';
+export type OrderDisplayStatus =
+  | 'ORDER_DRAFT'
+  | 'ORDER_CANCELLED'
+  | 'ORDER_IN_PRODUCTION'
+  | 'ORDER_COMPLETED_UNSHIPPED'
+  | 'ORDER_SHIPPED_COMPLETED'
+  | 'WAITING_PRODUCTION'
+  | OrderStatus;
 export type WarehouseStage =
   | 'ORDER_DRAFT'
   | 'ORDER_CANCELLED'
@@ -112,6 +128,12 @@ export interface OrderLine {
   partSpecification?: string;
   quantity: number;
   productionPlanQuantity: number;
+  productionPlanSuggestedQuantity?: number;
+  productionPlanOverrideByCode?: string;
+  productionPlanOverrideByName?: string;
+  productionPlanOverrideByRole?: string;
+  productionPlanOverrideAt?: string;
+  productionPlanOverrideReason?: string;
   fulfillmentMode: OrderLineFulfillmentMode;
   unit: string;
   deliveryDate?: string;
@@ -179,7 +201,9 @@ export interface ProductionTask {
   id: string;
   productionTaskNo: string;
   orderId: string;
+  orderLineId: string;
   orderNo: string;
+  orderStatus?: OrderStatus;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string;
   replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
@@ -210,6 +234,59 @@ export interface ProductionTask {
   startedAt?: string;
   completedAt?: string;
   remark?: string;
+}
+
+export interface ProductionOrderSummaryTask {
+  id: string;
+  orderLineId?: string;
+  orderNo: string;
+  orderStatus?: OrderStatus;
+  productionTaskNo: string;
+  partCode: string;
+  partName: string;
+  plannedQuantity: number;
+  unit: string;
+  processSteps: string[];
+  processStepDetails?: ProcessStepDetail[];
+}
+
+export interface ProductionOrderSummaryQuantity {
+  unit: string;
+  customerOrderQuantity: number;
+  plannedQuantity: number;
+  completedQuantity: number;
+}
+
+export interface ProductionOrderSummaryProgressItem {
+  label: string;
+  count: number;
+  text: string;
+}
+
+export interface ProductionOrderSummary {
+  orderId: string;
+  orderNo: string;
+  orderStatus?: OrderStatus;
+  customerId?: string;
+  customerName: string;
+  orderDate?: string;
+  deliveryDate?: string;
+  taskCount: number;
+  partCount: number;
+  pendingCount: number;
+  inProgressCount: number;
+  readyToCompleteCount: number;
+  completedCount: number;
+  receivedCount: number;
+  totalPlannedQuantity: number;
+  totalCompletedQuantity: number;
+  unit: string;
+  status: ProductionOrderSummaryStatus;
+  progressPercent: number;
+  quantityByUnit: ProductionOrderSummaryQuantity[];
+  progressItems?: ProductionOrderSummaryProgressItem[];
+  pendingTaskIds: string[];
+  pendingTasks: ProductionOrderSummaryTask[];
 }
 
 export interface ProductionProcessCompletion {
@@ -374,6 +451,7 @@ export interface OrderStatisticsOrderRow {
   orderDate: string;
   deliveryDate?: string;
   status: OrderStatus;
+  statisticsStatus?: OrderDisplayStatus;
   partCount: number;
   totalQuantity: number;
   totalProductionPlanQuantity: number;
@@ -455,6 +533,8 @@ export interface WarehouseShipment {
   partCode: string;
   partName: string;
   quantity: number;
+  physicalQuantity?: number;
+  reservedQuantity?: number;
   unit: string;
   warehouseId?: string;
   warehouseName: string;
@@ -480,6 +560,10 @@ export interface InventoryBatch {
   partCode: string;
   partName: string;
   quantity: number;
+  physicalQuantity?: number;
+  reservedQuantity?: number;
+  availableQuantity?: number;
+  reservations?: InventorySourceReservation[];
   canAdjust?: boolean;
   unit: string;
   warehouseId: string;
@@ -514,6 +598,7 @@ export interface InventoryBatch {
 export interface InventorySummaryWarehouseRow {
   warehouseId: string;
   warehouseName: string;
+  reservedQuantity: number;
   availableQuantity: number;
   batchCount: number;
 }
@@ -524,6 +609,8 @@ export interface InventorySummaryRow {
   unit: string;
   batchCount: number;
   warehouseCount: number;
+  physicalQuantity: number;
+  reservedQuantity: number;
   availableQuantity: number;
   usedQuantity: number;
   totalQuantity: number;
@@ -555,6 +642,9 @@ export interface InventorySourceBatchDetail {
   partCode: string;
   partName: string;
   quantity: number;
+  physicalQuantity?: number;
+  reservedQuantity?: number;
+  reservations?: InventorySourceReservation[];
   unit: string;
   warehouseId: string;
   warehouseName?: string;
@@ -581,6 +671,44 @@ export interface InventorySourceBatchDetail {
   partSpecification?: string;
   status: InventoryStatus;
   createdAt: string;
+}
+
+export interface InventorySourceReservation {
+  id: string;
+  orderNo?: string;
+  customerName?: string;
+  orderDate?: string;
+  orderLineId?: string;
+  lineNo?: number;
+  partCode?: string;
+  partName?: string;
+  quantity: number;
+  unit?: string;
+  statusReason?: string;
+  createdAt: string;
+}
+
+export type InventoryReservationStatus = 'ACTIVE' | 'RELEASED' | 'CONSUMED';
+
+export interface InventoryReservationAudit {
+  id: string;
+  batchId: string;
+  orderId: string;
+  orderLineId?: string;
+  orderNo?: string;
+  customerName?: string;
+  orderDate?: string;
+  lineNo?: number;
+  partCode?: string;
+  partName?: string;
+  quantity: number;
+  unit: string;
+  status: InventoryReservationStatus;
+  statusReason?: string;
+  releasedAt?: string;
+  consumedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface InventorySourceDetailResponse {
@@ -636,6 +764,14 @@ export interface WarehouseTransaction {
   partCode: string;
   partName: string;
   orderNo?: string;
+  sourceOrderNo?: string;
+  productionSourceOrderNo?: string;
+  batchId?: string;
+  batchNo?: string;
+  batchStatus?: InventoryStatus;
+  physicalQuantity?: number | null;
+  reservedQuantity?: number | null;
+  availableQuantity?: number | null;
   productionTaskNo?: string;
   quantity: number;
   unit: string;

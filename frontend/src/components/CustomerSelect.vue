@@ -19,12 +19,7 @@
   >
     <el-option v-for="customer in visibleOptions" :key="customer.id" :label="customerLabel(customer)" :value="customer.id">
       <div class="customer-option">
-        <div class="customer-option-main">
-          <strong>{{ customer.customerName }}</strong>
-          <span>{{ customer.customerCode }}</span>
-        </div>
-        <small>{{ customerContactText(customer) }}</small>
-        <small>{{ customerRegionText(customer) }}</small>
+        <strong>{{ customer.customerName }}</strong>
       </div>
     </el-option>
   </el-select>
@@ -122,24 +117,7 @@ function handleVisibleChange(visible: boolean) {
 }
 
 function customerLabel(customer: Customer) {
-  return `${customer.customerName} / ${customer.customerCode}`;
-}
-
-function customerContactText(customer: Customer) {
-  const contactName = customer.contactName?.trim();
-  const contactPhone = customer.contactPhone?.trim();
-  if (!contactName && !contactPhone) {
-    return customer.status === 'DISABLED' ? '无主要联系人 / 已停用' : '无主要联系人';
-  }
-  return [contactName, contactPhone].filter(Boolean).join(' / ');
-}
-
-function customerRegionText(customer: Customer) {
-  const parts =
-    customer.regionType === 'OVERSEAS'
-      ? [customer.country, customer.state, customer.province, customer.district, customer.city]
-      : [customer.country || '中国', customer.province, customer.city, customer.district];
-  return parts.filter(Boolean).join(' / ') || '未填写地区';
+  return customer.customerName;
 }
 
 watch(
@@ -165,20 +143,13 @@ onMounted(() => {
 
 <style scoped>
 .customer-option {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 5px 0;
-  overflow: hidden;
-  color: #0f172a;
-  line-height: 1.35;
-}
-
-.customer-option-main {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  color: #0f172a;
+  line-height: 34px;
 }
 
 .customer-option strong {
@@ -189,24 +160,15 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.customer-option span,
-.customer-option small {
-  overflow: hidden;
-  color: #64748b;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 :global(.customer-select-popper .el-select-dropdown__wrap) {
   max-height: 320px;
 }
 
 :global(.customer-select-popper .el-select-dropdown__item) {
-  height: auto;
-  min-height: 64px;
-  padding: 6px 14px;
-  line-height: normal;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 14px;
+  line-height: 34px;
 }
 
 :global(.customer-select-popper .el-select-dropdown__item.is-hovering),
@@ -214,16 +176,4 @@ onMounted(() => {
   background: #f1f5f9;
 }
 
-@media (max-width: 900px) {
-  .customer-option-main {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .customer-option span,
-  .customer-option small {
-    white-space: normal;
-  }
-}
 </style>

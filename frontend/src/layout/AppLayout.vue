@@ -88,7 +88,17 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
   }
 
   if (route.path === '/processes' && orderNo.value) {
-    return [{ label: '生产流程' }];
+    return [
+      { label: '生产流程', path: '/processes' },
+      { label: '工序设定' }
+    ];
+  }
+
+  if (route.path === '/production' && orderNo.value) {
+    return [
+      { label: '生产', path: '/production' },
+      { label: '订单生产详情' }
+    ];
   }
 
   const current = navItems.find((item) => item.path === route.path);
@@ -102,6 +112,12 @@ const parentPath = computed(() => {
 
   if (route.path.startsWith('/orders/') && orderNo.value) {
     return '/orders';
+  }
+  if (route.path === '/processes' && orderNo.value) {
+    return '/processes';
+  }
+  if (route.path === '/production' && orderNo.value) {
+    return '/production';
   }
   return '';
 });

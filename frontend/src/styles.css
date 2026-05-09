@@ -278,6 +278,28 @@ a {
   border-radius: 8px;
 }
 
+.stat-card-button {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.stat-card-button:hover,
+.stat-card-button.active {
+  border-color: var(--erp-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.12);
+}
+
+.stat-card-button.active {
+  background: #eff6ff;
+}
+
 .stat-label {
   color: var(--erp-muted);
   font-size: 13px;
