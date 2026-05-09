@@ -90,7 +90,9 @@ export class StatisticsService {
             this.prisma.inventoryTransaction.findMany({
               where: {
                 transactionType: InventoryTransactionType.OUT,
-                orderNo: { in: orderNos }
+                orderNo: { in: orderNos },
+                // 订单发货数量只统计仓库确认发货生成的 OUT 流水；取消、盘点和备货领用不能混入发货口径。
+                sourceRecordType: 'InventoryBatch'
               }
             })
           ])
@@ -199,11 +201,9 @@ export class StatisticsService {
 
     const orderRows = orders.map((order) => {
       const orderPeriod = orderPeriodMap.get(order.orderNo) || this.getPeriod(order.orderDate, period);
-      const totalQuantity = order.lines.reduce((sum, line) => sum + decimalToNumber(line.quantity), 0);
-      const totalProductionPlanQuantity = order.lines.reduce(
-        (sum, line) => sum + decimalToNumber(line.productionPlanQuantity ?? line.quantity),
-        0
-      );
+      const quantityByUnit = this.toOrderQuantityByUnit(order.lines);
+      const totalQuantity = quantityByUnit.reduce((sum, row) => sum + row.totalQuantity, 0);
+      const totalProductionPlanQuantity = quantityByUnit.reduce((sum, row) => sum + row.totalProductionPlanQuantity, 0);
       return {
         periodKey: orderPeriod.periodKey,
         periodLabel: orderPeriod.periodLabel,
@@ -215,6 +215,7 @@ export class StatisticsService {
         partCount: order.lines.length,
         totalQuantity,
         totalProductionPlanQuantity,
+        quantityByUnit,
         unit: order.lines[0]?.unit || '件'
       };
     });
@@ -225,6 +226,19 @@ export class StatisticsService {
       summaryRows,
       orderRows
     };
+  }
+
+  private toOrderQuantityByUnit(lines: any[]) {
+    const unitMap = new Map<string, { unit: string; totalQuantity: number; totalProductionPlanQuantity: number }>();
+    for (const line of lines) {
+      const unit = line.unit || '件';
+      const row = unitMap.get(unit) || { unit, totalQuantity: 0, totalProductionPlanQuantity: 0 };
+      row.totalQuantity += decimalToNumber(line.quantity);
+      row.totalProductionPlanQuantity += decimalToNumber(line.productionPlanQuantity ?? line.quantity);
+      unitMap.set(unit, row);
+    }
+    // 订单展示按单位分组汇总，避免只读统计页把不同计量单位混算成一个总数。
+    return Array.from(unitMap.values()).sort((a, b) => a.unit.localeCompare(b.unit, 'zh-Hans-CN'));
   }
 
   private getPeriod(orderDate: Date, period: StatisticsPeriod) {

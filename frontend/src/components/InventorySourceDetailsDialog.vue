@@ -34,11 +34,26 @@
               <strong>{{ item.partCode }}</strong>
               <span>{{ item.partName }}</span>
               <small>备货库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
+              <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
             </div>
           </template>
         </el-autocomplete>
         <el-button @click="searchInventoryKeyword">查询库存</el-button>
         <el-button v-if="expected?.partCode" @click="searchExpectedPart">返回订单零件</el-button>
+      </div>
+      <div v-if="lastInventorySuggestions.length > 1" class="source-search-results">
+        <strong>匹配到多个物料，请选择具体零件</strong>
+        <button
+          v-for="item in lastInventorySuggestions"
+          :key="`${item.partCode}-${item.matchedBatchNo || 'all'}`"
+          type="button"
+          class="source-search-result"
+          @click="handleInventorySuggestionSelect(item)"
+        >
+          <span>{{ item.partCode }} / {{ item.partName }}</span>
+          <small>备货库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
+          <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
+        </button>
       </div>
     </div>
 
@@ -473,6 +488,7 @@ type ManualConfirmForm = {
 
 const expected = computed(() => props.expected || null);
 const sourceSearchKeyword = ref('');
+const activeSearchFocusBatchNo = ref('');
 const inventorySuggestionRequestSeq = ref(0);
 const lastInventorySuggestions = ref<InventoryMaterialSuggestion[]>([]);
 const reviewConfirmChecked = ref(false);
@@ -482,7 +498,7 @@ const orderPreviewLoading = ref(false);
 const orderPreview = ref<OrderDetail | null>(null);
 const sourceRows = computed(() => {
   const rows = props.detail?.sources || [];
-  if (!props.focusBatchId && !props.focusBatchNo && (!expected.value || !hasExpectedInfo.value)) {
+  if (!props.focusBatchId && !props.focusBatchNo && !activeSearchFocusBatchNo.value && (!expected.value || !hasExpectedInfo.value)) {
     return rows;
   }
   // 操作人员优先看到当前正在核对的批次；下单核对时，再把图纸匹配库存排在前面。
@@ -526,6 +542,27 @@ const selectedIssueSourceForms = computed(() =>
     form: ensureManualConfirmForm(source)
   }))
 );
+const directStockBlockedIssue = computed(() => {
+  if (!props.reviewMode || expected.value?.fulfillmentMode !== 'STOCK') {
+    return '';
+  }
+  const sourceMap = new Map((props.detail?.sources || []).map((row) => [row.id, row]));
+  const blockedSource = selectedSourceRows.value.find((source) => {
+    const row = sourceMap.get(source.batchId);
+    if (row) {
+      return directStockSourceMissingDrawingInfo(row).length > 0;
+    }
+    return source.compatibilityStatus === 'INCOMPLETE' && savedSourceMissingDrawingInfo(source.compatibilityReason);
+  });
+  if (!blockedSource) {
+    return '';
+  }
+  const row = sourceMap.get(blockedSource.batchId);
+  const reason = row
+    ? directStockSourceMissingDrawingInfo(row).join('、')
+    : blockedSource.compatibilityReason || '库存来源图纸资料不完整';
+  return `已选库存批次 ${blockedSource.batchNo || blockedSource.batchId} 缺少来源${reason}，不能直接使用库存；请选择库存再加工或重新生产。`;
+});
 const matchedQuantity = computed(() =>
   (props.detail?.sources || []).reduce(
     (sum, row) => sum + (compatibilityResult(row).label === '图纸匹配' ? row.quantity : 0),
@@ -561,6 +598,9 @@ const stockReviewQuantityOk = computed(() => {
     return false;
   }
   if (props.reviewMode) {
+    if (expected.value?.fulfillmentMode === 'STOCK' && !orderDrawingInfoComplete.value) {
+      return false;
+    }
     return selectedQuantityTotal.value + 0.0001 >= requiredQuantity.value && !selectedQuantityOverRequired.value;
   }
   if (expected.value?.fulfillmentMode === 'STOCK') {
@@ -584,7 +624,7 @@ const stockReviewQuantityText = computed(() => {
       return `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，超过本次需要 ${formatQuantity(requiredQuantity.value, expected.value?.unit || props.detail.unit)}`;
     }
     if (expected.value?.fulfillmentMode === 'STOCK' && !orderDrawingInfoComplete.value) {
-      return '本次订单图纸资料不完整，必须填写人工确认说明';
+      return `本次订单图纸资料不完整，必须补齐 ${expectedMissingInfoReasons.value.join('、')}；否则请选择库存再加工或重新生产`;
     }
     return `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，满足本次需要`;
   }
@@ -607,7 +647,9 @@ const manualConfirmationOk = computed(() => {
     Boolean(item.form.confirmedBy.trim() && manualConfirmDateValid(item.form.confirmedAt) && item.form.remark.trim())
   );
 });
-const canConfirmReview = computed(() => Boolean(!props.loading && stockReviewQuantityOk.value && reviewConfirmChecked.value && manualConfirmationOk.value));
+const canConfirmReview = computed(() =>
+  Boolean(!props.loading && stockReviewQuantityOk.value && !directStockBlockedIssue.value && reviewConfirmChecked.value && manualConfirmationOk.value)
+);
 const sourceKindSummaryText = computed(() => {
   const rows = props.detail?.sources || [];
   if (!rows.length) {
@@ -632,6 +674,9 @@ const confirmHint = computed(() => {
   if (!stockReviewQuantityOk.value) {
     return stockReviewQuantityText.value;
   }
+  if (directStockBlockedIssue.value) {
+    return directStockBlockedIssue.value;
+  }
   if (!manualConfirmationOk.value) {
     return '已选不适配库存，请填写确认人员、确认时间和使用说明。';
   }
@@ -648,7 +693,7 @@ const hasExpectedInfo = computed(() => {
 async function queryInventorySuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
   const requestId = ++inventorySuggestionRequestSeq.value;
   try {
-    const result = await erpApi.inventoryMaterialSuggestions(keyword.trim());
+    const result = await erpApi.inventoryMaterialSuggestions(keyword.trim(), undefined, 'STOCK');
     if (requestId === inventorySuggestionRequestSeq.value) {
       lastInventorySuggestions.value = result;
       callback(result);
@@ -663,14 +708,27 @@ async function queryInventorySuggestions(keyword: string, callback: (items: Inve
 
 function handleInventorySuggestionSelect(item: InventoryMaterialSuggestion) {
   resetReviewConfirmation();
+  lastInventorySuggestions.value = [item];
+  activeSearchFocusBatchNo.value = item.matchedBatchNo || '';
   sourceSearchKeyword.value = item.partName ? `${item.partCode} ${item.partName}` : item.partCode;
   emit('sourceSearch', item.partCode);
+}
+
+function materialSuggestionMatchText(item: InventoryMaterialSuggestion) {
+  const parts = [
+    item.matchedBatchNo ? `命中批次 ${item.matchedBatchNo}` : '',
+    item.matchedSourceOrderNo ? `订单 ${item.matchedSourceOrderNo}` : '',
+    item.matchedProductionTaskNo ? `任务 ${item.matchedProductionTaskNo}` : ''
+  ].filter(Boolean);
+  return parts.join(' / ');
 }
 
 async function searchInventoryKeyword() {
   const keyword = sourceSearchKeyword.value.trim();
   resetReviewConfirmation();
   if (!keyword) {
+    activeSearchFocusBatchNo.value = '';
+    lastInventorySuggestions.value = [];
     if (expected.value?.partCode) {
       emit('sourceSearch', expected.value.partCode);
     }
@@ -681,21 +739,31 @@ async function searchInventoryKeyword() {
     (item) => item.partCode.toLocaleLowerCase() === keyword.toLocaleLowerCase() || item.partName === keyword
   );
   if (exact) {
+    lastInventorySuggestions.value = [exact];
+    activeSearchFocusBatchNo.value = exact.matchedBatchNo || '';
     emit('sourceSearch', exact.partCode);
     return;
   }
 
   try {
-    const suggestions = await erpApi.inventoryMaterialSuggestions(keyword);
+    const suggestions = await erpApi.inventoryMaterialSuggestions(keyword, undefined, 'STOCK');
     lastInventorySuggestions.value = suggestions;
     const first = suggestions[0];
     if (!first) {
+      activeSearchFocusBatchNo.value = '';
       ElMessage.warning('没有找到匹配物料');
       return;
     }
+    if (suggestions.length > 1) {
+      activeSearchFocusBatchNo.value = '';
+      ElMessage.warning(`找到 ${suggestions.length} 个匹配物料，请从下拉列表中选择具体零件`);
+      return;
+    }
+    activeSearchFocusBatchNo.value = first.matchedBatchNo || '';
     sourceSearchKeyword.value = first.partName ? `${first.partCode} ${first.partName}` : first.partCode;
     emit('sourceSearch', first.partCode);
   } catch (error) {
+    activeSearchFocusBatchNo.value = '';
     ElMessage.error(error instanceof Error ? error.message : '库存查询失败');
   }
 }
@@ -703,6 +771,8 @@ async function searchInventoryKeyword() {
 function searchExpectedPart() {
   if (expected.value?.partCode) {
     resetReviewConfirmation();
+    activeSearchFocusBatchNo.value = '';
+    lastInventorySuggestions.value = [];
     sourceSearchKeyword.value = expected.value.partName ? `${expected.value.partCode} ${expected.value.partName}` : expected.value.partCode;
     emit('sourceSearch', expected.value.partCode);
   }
@@ -758,6 +828,7 @@ function updateSourceSelection(row: InventorySourceBatchDetail, quantity: number
       partCode: row.partCode,
       partName: row.partName,
       quantity: nextQuantity,
+      availableQuantity: row.quantity,
       unit: row.unit,
       replenishmentSourceType: row.replenishmentSourceType,
       replenishmentSourceRequestNo: row.replenishmentSourceRequestNo,
@@ -796,6 +867,7 @@ function normalizeSelectedSources(sources: StockSourceSelectionPayload[]) {
       partCode: source.partCode?.trim() || current?.partCode,
       partName: source.partName?.trim() || current?.partName,
       quantity: (current?.quantity || 0) + quantity,
+      availableQuantity: Math.max(Number(source.availableQuantity || 0), Number(current?.availableQuantity || 0)) || undefined,
       unit: source.unit?.trim() || current?.unit,
       replenishmentSourceType: source.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
       replenishmentSourceRequestNo: source.replenishmentSourceRequestNo?.trim() || current?.replenishmentSourceRequestNo,
@@ -830,7 +902,8 @@ function sourceKindText(kind?: string) {
 function isFocusedSource(row: InventorySourceBatchDetail) {
   return Boolean(
     (props.focusBatchId && row.id === props.focusBatchId) ||
-      (props.focusBatchNo && row.batchNo === props.focusBatchNo)
+      (props.focusBatchNo && row.batchNo === props.focusBatchNo) ||
+      (activeSearchFocusBatchNo.value && row.batchNo === activeSearchFocusBatchNo.value)
   );
 }
 
@@ -879,6 +952,19 @@ function drawingTitle(row: InventorySourceBatchDetail) {
   const drawingNo = row.drawingNo || '未记录图号';
   const version = row.drawingVersion ? ` / ${row.drawingVersion}` : '';
   return `${drawingNo}${version}`;
+}
+
+function directStockSourceMissingDrawingInfo(row: InventorySourceBatchDetail) {
+  // 直接使用库存必须能追到来源图号、版本和图纸文件，人工说明不能替代缺失的来源图纸。
+  return [
+    !normalizeValue(row.drawingNo) ? '图号' : '',
+    !normalizeValue(row.drawingVersion) ? '图纸版本' : '',
+    !row.drawingFileUrl ? '图纸文件' : ''
+  ].filter(Boolean);
+}
+
+function savedSourceMissingDrawingInfo(reason?: string) {
+  return Boolean(reason && /库存缺图号|库存缺版本|库存缺图纸文件|库存图纸信息不完整|库存来源图纸资料不完整|来源图纸/.test(reason));
 }
 
 function normalizeValue(value?: string | number | null) {
@@ -1060,6 +1146,10 @@ function confirmReviewed() {
     ElMessage.warning(stockReviewQuantityText.value);
     return;
   }
+  if (directStockBlockedIssue.value) {
+    ElMessage.warning(directStockBlockedIssue.value);
+    return;
+  }
   if (!manualConfirmationOk.value) {
     ElMessage.warning('已选不适配库存，请填写确认人员、确认时间和使用说明');
     return;
@@ -1106,10 +1196,18 @@ watch(
   () => props.modelValue,
   (visible) => {
     if (!visible) {
+      activeSearchFocusBatchNo.value = '';
       return;
     }
     reviewConfirmChecked.value = Boolean(props.reviewed);
     syncManualConfirmForms();
+  }
+);
+
+watch(
+  () => expected.value?.partCode,
+  () => {
+    activeSearchFocusBatchNo.value = '';
   }
 );
 
@@ -1154,6 +1252,46 @@ watch(
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto auto;
   gap: 8px;
+}
+
+.source-search-results {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  padding-top: 4px;
+}
+
+.source-search-results > strong {
+  color: #1e3a8a;
+  font-size: 13px;
+}
+
+.source-search-result {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(160px, auto);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  text-align: left;
+  cursor: pointer;
+}
+
+.source-search-result:hover,
+.source-search-result:focus {
+  border-color: #409eff;
+  outline: none;
+}
+
+.source-search-result span {
+  color: #0f172a;
+  font-weight: 600;
 }
 
 .source-detail-body {
@@ -1520,6 +1658,7 @@ watch(
   }
 
   .source-search-controls,
+  .source-search-result,
   .mobile-source-selection {
     grid-template-columns: 1fr;
   }

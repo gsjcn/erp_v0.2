@@ -8,11 +8,22 @@
     <div class="filter-bar">
       <div class="filter-field">
         <label>订单日期</label>
-        <DateRangeFilter v-model="dateRange" />
+        <DateRangeFilter v-model="dateRange" @change="handleOrderScopeChange" />
       </div>
       <div class="filter-field">
         <label>客户</label>
-        <CustomerSelect v-model="filters.customerId" placeholder="全部客户" width="260px" />
+        <CustomerSelect v-model="filters.customerId" placeholder="全部客户" width="260px" @change="handleOrderScopeChange" />
+      </div>
+      <div class="filter-field">
+        <label>订单</label>
+        <OrderSelect
+          v-model="filters.orderNo"
+          :orders="orderOptions"
+          placeholder="全部订单"
+          width="320px"
+          :disabled="orderOptions.length === 0"
+          @change="loadOrders"
+        />
       </div>
       <div class="filter-field">
         <label>订单状态</label>
@@ -24,6 +35,16 @@
           placeholder="勾选订单状态"
           style="width: 210px"
         >
+          <template #header>
+            <el-checkbox
+              class="select-all-checkbox"
+              :model-value="allOrderStatusesChecked"
+              :indeterminate="orderStatusesIndeterminate"
+              @change="toggleAllOrderStatuses"
+            >
+              全部勾选
+            </el-checkbox>
+          </template>
           <el-option v-for="option in orderStatusOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
       </div>
@@ -37,6 +58,16 @@
           placeholder="勾选生产状态"
           style="width: 190px"
         >
+          <template #header>
+            <el-checkbox
+              class="select-all-checkbox"
+              :model-value="allProductionStatusesChecked"
+              :indeterminate="productionStatusesIndeterminate"
+              @change="toggleAllProductionStatuses"
+            >
+              全部勾选
+            </el-checkbox>
+          </template>
           <el-option
             v-for="option in productionStatusOptions"
             :key="option.value"
@@ -65,10 +96,10 @@
         </el-table-column>
         <el-table-column prop="partCount" label="零件数" width="100" />
         <el-table-column label="客户订单数量" width="140">
-          <template #default="{ row }">{{ formatQuantity(row.totalQuantity, row.unit) }}</template>
+          <template #default="{ row }">{{ formatOrderQuantity(row, 'totalQuantity') }}</template>
         </el-table-column>
         <el-table-column label="生产计划数量" width="140">
-          <template #default="{ row }">{{ formatQuantity(row.totalProductionPlanQuantity, row.unit) }}</template>
+          <template #default="{ row }">{{ formatOrderQuantity(row, 'totalProductionPlanQuantity') }}</template>
         </el-table-column>
         <el-table-column label="订单状态" width="160">
           <template #default="{ row }">
@@ -82,8 +113,12 @@
         </el-table-column>
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="goProcess(row)">生产流程</el-button>
-            <el-button link type="danger" :disabled="!canCancelOrder(row)" @click.stop="openCancelOrder(row)">取消</el-button>
+            <el-button link type="primary" @click="goProcess(row)">{{ orderProcessActionText(row) }}</el-button>
+            <el-tooltip :content="cancelOrderDisabledReason(row)" :disabled="canCancelOrder(row)" placement="top">
+              <span class="action-tooltip-wrap">
+                <el-button link type="danger" :disabled="!canCancelOrder(row)" @click.stop="openCancelOrder(row)">取消</el-button>
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>
@@ -120,17 +155,21 @@
           </div>
           <div class="mobile-field">
             <label>客户订单数量</label>
-            <span>{{ formatQuantity(order.totalQuantity, order.unit) }}</span>
+            <span>{{ formatOrderQuantity(order, 'totalQuantity') }}</span>
           </div>
           <div class="mobile-field">
             <label>生产计划数量</label>
-            <span>{{ formatQuantity(order.totalProductionPlanQuantity, order.unit) }}</span>
+            <span>{{ formatOrderQuantity(order, 'totalProductionPlanQuantity') }}</span>
           </div>
         </div>
         <div class="mobile-card-actions">
           <el-button link type="primary" @click="goDetail(order)">订单明细</el-button>
-          <el-button link type="primary" @click="goProcess(order)">生产流程</el-button>
-          <el-button link type="danger" :disabled="!canCancelOrder(order)" @click="openCancelOrder(order)">取消</el-button>
+          <el-button link type="primary" @click="goProcess(order)">{{ orderProcessActionText(order) }}</el-button>
+          <el-tooltip :content="cancelOrderDisabledReason(order)" :disabled="canCancelOrder(order)" placement="top">
+            <span class="action-tooltip-wrap">
+              <el-button link type="danger" :disabled="!canCancelOrder(order)" @click="openCancelOrder(order)">取消</el-button>
+            </span>
+          </el-tooltip>
         </div>
       </article>
       <div v-if="!orders.length && !loading" class="mobile-empty">暂无订单</div>
@@ -185,7 +224,7 @@
               <div class="duplicate-help">
                 <strong>图纸与图号使用说明</strong>
                 <p>图号可能跨零件复用，但系统必须先提醒操作人员确认。</p>
-                <p>如果当前订单内出现重复图号，保存时会提示“此图号和某某零件的图号一样”，需要确认后才能继续。</p>
+                <p>如果不同零件编号出现相同图号，保存时会提示图号冲突，并列出两个零件的图号和版本号，需要确认后才能继续。</p>
                 <p>如果上传了相同图纸文件名，上传时会先确认，并同时展示当前选择图纸和重复图纸或图纸打开入口。</p>
                 <p>保存时仍会再次检查相同图纸文件名，作为最终兜底。</p>
                 <p>保存时会同时检查当前订单和历史订单中的图号、图纸文件名，不能只依赖人工记忆。</p>
@@ -312,6 +351,7 @@ import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
 import OrderLineEditor from '../components/OrderLineEditor.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
+import OrderSelect from '../components/OrderSelect.vue';
 import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import StatusTag from '../components/StatusTag.vue';
 import type {
@@ -332,11 +372,12 @@ import {
   confirmExistingDrawingNos
 } from '../utils/orderLineDuplicateChecks';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
-import { findUnreviewedStockSourceLine, sanitizeOrderLinePayload, validateReviewedStockSourceLines } from '../utils/stockSourceReview';
+import { sanitizeOrderLinePayload, validateDraftStockSourceLines } from '../utils/stockSourceReview';
 
 const router = useRouter();
 const customers = ref<Customer[]>([]);
 const orders = ref<OrderSummary[]>([]);
+const orderOptions = ref<OrderSummary[]>([]);
 const inventorySummary = ref<InventorySummaryRow[]>([]);
 const dateRange = ref<string[]>([]);
 const orderDateRange = ref<string[]>([]);
@@ -363,6 +404,7 @@ const productionStatusOptions: Array<{ label: string; value: ProductionStatus }>
 
 const filters = reactive<{
   customerId?: string;
+  orderNo?: string;
   orderStatuses: OrderStatus[];
   productionStatuses: ProductionStatus[];
 }>({
@@ -412,6 +454,14 @@ let orderNoCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let orderNoCheckSequence = 0;
 
 const activeCustomers = computed(() => customers.value.filter((item) => item.status === 'ENABLED'));
+const allOrderStatusesChecked = computed(() => filters.orderStatuses.length === orderStatusOptions.length);
+const orderStatusesIndeterminate = computed(
+  () => filters.orderStatuses.length > 0 && filters.orderStatuses.length < orderStatusOptions.length
+);
+const allProductionStatusesChecked = computed(() => filters.productionStatuses.length === productionStatusOptions.length);
+const productionStatusesIndeterminate = computed(
+  () => filters.productionStatuses.length > 0 && filters.productionStatuses.length < productionStatusOptions.length
+);
 const orderDurationDaysText = computed(() => {
   if (!orderForm.orderDate || !orderForm.deliveryDate) {
     return '-';
@@ -461,13 +511,15 @@ async function loadOrders() {
   }
   loading.value = true;
   try {
-    orders.value = await erpApi.orders({
+    const rows = await erpApi.orders({
       customerId: filters.customerId,
       statuses: selectedOrderStatusesForQuery(),
       productionStatuses: selectedProductionStatusesForQuery(),
       dateFrom: dateRange.value[0],
       dateTo: dateRange.value[1]
     });
+    // 订单下拉只在当前日期/客户范围内做本地缩小，不反向改变父页面的日期和客户筛选。
+    orders.value = filters.orderNo ? rows.filter((item) => item.orderNo === filters.orderNo) : rows;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '订单列表加载失败');
   } finally {
@@ -485,12 +537,44 @@ async function loadInventorySummary() {
   }
 }
 
-function reset() {
+async function loadOrderOptions() {
+  try {
+    orderOptions.value = await erpApi.orders({
+      customerId: filters.customerId,
+      dateFrom: dateRange.value[0],
+      dateTo: dateRange.value[1]
+    });
+
+    if (filters.orderNo && !orderOptions.value.some((item) => item.orderNo === filters.orderNo)) {
+      filters.orderNo = undefined;
+    }
+  } catch (error) {
+    orderOptions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败');
+  }
+}
+
+async function handleOrderScopeChange() {
+  await loadOrderOptions();
+  await loadOrders();
+}
+
+async function reset() {
   filters.customerId = undefined;
+  filters.orderNo = undefined;
   filters.orderStatuses = orderStatusOptions.map((option) => option.value);
   filters.productionStatuses = productionStatusOptions.map((option) => option.value);
   dateRange.value = [];
-  void loadOrders();
+  await loadOrderOptions();
+  await loadOrders();
+}
+
+function toggleAllOrderStatuses(value: string | number | boolean) {
+  filters.orderStatuses = value ? orderStatusOptions.map((option) => option.value) : [];
+}
+
+function toggleAllProductionStatuses(value: string | number | boolean) {
+  filters.productionStatuses = value ? productionStatusOptions.map((option) => option.value) : [];
 }
 
 function selectedOrderStatusesForQuery() {
@@ -515,6 +599,13 @@ function orderProductionStatusValue(order: OrderSummary) {
     return 'ORDER_CANCELLED';
   }
   return order.productionStatus;
+}
+
+function formatOrderQuantity(order: OrderSummary, field: 'totalQuantity' | 'totalProductionPlanQuantity') {
+  if (order.quantityByUnit?.length) {
+    return order.quantityByUnit.map((row) => formatQuantity(row[field], row.unit)).join(' / ');
+  }
+  return formatQuantity(order[field], order.unit);
 }
 
 async function openCreate() {
@@ -581,15 +672,13 @@ async function saveOrder() {
   if (!stockCheck.ok) {
     ElMessage.warning(`草稿可先保存；${stockCheck.message}，提交生产前必须补足`);
   }
-  const unreviewedStockLine = findUnreviewedStockSourceLine(orderForm.lines);
-  if (unreviewedStockLine) {
-    ElMessage.warning(`请先核对 ${unreviewedStockLine.partCode || unreviewedStockLine.partName} 的库存来源、图号和版本`);
+  const draftStockCheck = validateDraftStockSourceLines(orderForm.lines);
+  if (!draftStockCheck.ok) {
+    ElMessage.warning(draftStockCheck.message);
     return;
   }
-  const reviewedStockCheck = validateReviewedStockSourceLines(orderForm.lines);
-  if (!reviewedStockCheck.ok) {
-    ElMessage.warning(reviewedStockCheck.message);
-    return;
+  if (draftStockCheck.warning) {
+    ElMessage.warning(draftStockCheck.warning);
   }
   if (!(await confirmDuplicateDrawingNos(orderForm.lines))) {
     return;
@@ -773,13 +862,27 @@ function goProcess(row: OrderSummary) {
   void router.push({ path: '/processes', query: { orderNo: row.orderNo, returnTo: '/orders' } });
 }
 
+function orderProcessActionText(row: OrderSummary) {
+  return row.status === 'DRAFT' ? '提交生产' : '生产流程';
+}
+
 function canCancelOrder(row: OrderSummary) {
   return row.status !== 'CANCELLED' && row.status !== 'COMPLETED';
 }
 
+function cancelOrderDisabledReason(row: OrderSummary) {
+  if (row.status === 'COMPLETED') {
+    return '已完成订单第一阶段不允许直接取消';
+  }
+  if (row.status === 'CANCELLED') {
+    return '订单已取消';
+  }
+  return '';
+}
+
 async function openCancelOrder(row: OrderSummary) {
   if (!canCancelOrder(row)) {
-    ElMessage.warning(row.status === 'COMPLETED' ? '已完成订单第一阶段不允许直接取消' : '订单已取消');
+    ElMessage.warning(cancelOrderDisabledReason(row));
     return;
   }
   activeCancelOrder.value = row;
@@ -903,6 +1006,7 @@ async function saveCancelOrder() {
 
 onMounted(async () => {
   await loadCustomers();
+  await loadOrderOptions();
   await loadOrders();
 });
 </script>
@@ -1001,6 +1105,14 @@ onMounted(async () => {
 
 .orders-table-card {
   min-height: 0;
+}
+
+.action-tooltip-wrap {
+  display: inline-flex;
+}
+
+.select-all-checkbox {
+  width: 100%;
 }
 
 .dialog-footer-actions {

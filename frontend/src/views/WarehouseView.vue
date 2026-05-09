@@ -227,7 +227,7 @@
       <div v-if="shipmentOrderGroups.length" class="shipment-order-groups">
         <article v-for="group in shipmentOrderGroups" :key="group.orderNo" class="shipment-order-card">
           <div>
-            <strong>{{ group.orderNo }}</strong>
+            <strong><OrderNoLink :order-no="group.orderNo" /></strong>
             <span>{{ group.customerName || '-' }}</span>
             <small>{{ group.partCount }} 种零件 / {{ group.batchCount }} 批 / {{ group.totalText }}</small>
           </div>
@@ -263,6 +263,23 @@
         </el-table-column>
         <el-table-column prop="customerName" label="客户" min-width="150" />
         <el-table-column prop="partName" label="零件" min-width="150" />
+        <el-table-column label="图纸" min-width="180">
+          <template #default="{ row }">
+            <div class="cell-main">{{ drawingTitle(row) }}</div>
+            <DrawingPreviewLink
+              :file-name="row.drawingFileName"
+              :file-url="row.drawingFileUrl"
+              link-text="打开图纸"
+              :title="`${row.partName} 发货图纸`"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="规格 / 厚度" min-width="150">
+          <template #default="{ row }">
+            <div>{{ row.partSpecification || '-' }}</div>
+            <div class="cell-subtext">{{ row.partThickness ? `${row.partThickness} mm` : '-' }}</div>
+          </template>
+        </el-table-column>
         <el-table-column label="数量" width="100">
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
         </el-table-column>
@@ -287,7 +304,7 @@
         <article v-for="group in shipmentOrderGroups" :key="group.orderNo" class="mobile-card shipment-mobile-order-card">
           <div class="mobile-card-header">
             <div class="mobile-card-title">
-              <strong>{{ group.orderNo }}</strong>
+              <strong><OrderNoLink :order-no="group.orderNo" /></strong>
               <small>{{ group.customerName || '-' }}</small>
             </div>
           </div>
@@ -338,6 +355,14 @@
             <span>{{ formatDate(shipment.deliveryDate) }}</span>
           </div>
           <div class="mobile-field">
+            <label>图纸</label>
+            <span>{{ drawingTitle(shipment) }}</span>
+          </div>
+          <div class="mobile-field">
+            <label>规格 / 厚度</label>
+            <span>{{ partSpecText(shipment) }}</span>
+          </div>
+          <div class="mobile-field">
             <label>数量</label>
             <span>{{ formatQuantity(shipment.quantity, shipment.unit) }}</span>
           </div>
@@ -347,6 +372,12 @@
           </div>
         </div>
         <div class="mobile-card-actions">
+          <DrawingPreviewLink
+            :file-name="shipment.drawingFileName"
+            :file-url="shipment.drawingFileUrl"
+            link-text="打开图纸"
+            :title="`${shipment.partName} 发货图纸`"
+          />
           <el-button link type="primary" @click="openShipmentSourceDetails(shipment)">来源/图纸</el-button>
           <el-button link type="primary" @click="openShipmentConfirm(shipment)">确认发货</el-button>
           <el-button link type="primary" @click="openOrderShipmentConfirm(shipment)">整单发货</el-button>
@@ -561,6 +592,21 @@
         <el-form-item label="零件">
           {{ activeShipment?.partName || '-' }}
         </el-form-item>
+        <el-form-item label="图纸">
+          <div class="receipt-drawing-info">
+            <strong>{{ activeShipment ? drawingTitle(activeShipment) : '-' }}</strong>
+            <DrawingPreviewLink
+              v-if="activeShipment"
+              :file-name="activeShipment.drawingFileName"
+              :file-url="activeShipment.drawingFileUrl"
+              link-text="打开图纸"
+              :title="`${activeShipment.partName} 发货图纸`"
+            />
+          </div>
+        </el-form-item>
+        <el-form-item label="规格/厚度">
+          {{ activeShipment ? partSpecText(activeShipment) : '-' }}
+        </el-form-item>
         <el-form-item label="数量">
           {{ activeShipment ? formatQuantity(activeShipment.quantity, activeShipment.unit) : '-' }}
         </el-form-item>
@@ -627,6 +673,20 @@
         <el-table :data="batchShipmentRows" max-height="260px" class="batch-shipment-table">
           <el-table-column prop="batchNo" label="库存批次" min-width="190" />
           <el-table-column prop="partName" label="零件" min-width="160" />
+          <el-table-column label="图纸" min-width="180">
+            <template #default="{ row }">
+              <div class="cell-main">{{ drawingTitle(row) }}</div>
+              <DrawingPreviewLink
+                :file-name="row.drawingFileName"
+                :file-url="row.drawingFileUrl"
+                link-text="打开图纸"
+                :title="`${row.partName} 发货图纸`"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="规格 / 厚度" min-width="150">
+            <template #default="{ row }">{{ partSpecText(row) }}</template>
+          </el-table-column>
           <el-table-column label="数量" width="110">
             <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
           </el-table-column>
@@ -1068,7 +1128,10 @@ async function resetFilters() {
 
 async function loadTransactions() {
   try {
-    transactions.value = await erpApi.warehouseTransactions(transactionType.value === 'ALL' ? undefined : transactionType.value);
+    transactions.value = await erpApi.warehouseTransactions({
+      ...warehouseWorkParams(),
+      transactionType: transactionType.value === 'ALL' ? undefined : transactionType.value
+    });
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '库存流水加载失败');
   }
@@ -1346,6 +1409,12 @@ function drawingTitle(row: Pick<WarehouseReceipt | WarehouseShipment, 'drawingNo
   const drawingNo = row.drawingNo || '未填写图号';
   const version = row.drawingVersion ? ` / ${row.drawingVersion}` : '';
   return `${drawingNo}${version}`;
+}
+
+function partSpecText(row: Pick<WarehouseReceipt | WarehouseShipment, 'partSpecification' | 'partThickness'>) {
+  const specification = row.partSpecification || '-';
+  const thickness = row.partThickness ? `${row.partThickness} mm` : '-';
+  return `${specification} / ${thickness}`;
 }
 
 function formatDateTime(value?: string) {

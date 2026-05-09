@@ -64,7 +64,7 @@
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button link @click="toggleStatus(row)">{{ row.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
+            <el-button link @click="openStatusDialog(row)">{{ row.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -99,7 +99,7 @@
         </div>
         <div class="mobile-card-actions">
           <el-button link type="primary" @click="openEdit(customer)">编辑</el-button>
-          <el-button link @click="toggleStatus(customer)">{{ customer.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
+          <el-button link @click="openStatusDialog(customer)">{{ customer.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
         </div>
       </article>
       <div v-if="!customers.length && !loading" class="mobile-empty">暂无客户资料</div>
@@ -206,6 +206,49 @@
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="statusDialogVisible"
+      :title="statusDialogTitle"
+      width="min(520px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <div v-if="statusCustomer" class="status-confirm-panel">
+        <p class="status-confirm-row">
+          <span class="status-confirm-label">客户ID</span>
+          <strong>{{ statusCustomer.customerCode }}</strong>
+        </p>
+        <p class="status-confirm-row">
+          <span class="status-confirm-label">客户名称</span>
+          <strong>{{ statusCustomer.customerName }}</strong>
+        </p>
+        <p class="status-confirm-row">
+          <span class="status-confirm-label">当前状态</span>
+          <StatusTag :value="statusCustomer.status" />
+        </p>
+        <p class="status-confirm-row">
+          <span class="status-confirm-label">操作后状态</span>
+          <StatusTag :value="nextCustomerStatus" />
+        </p>
+        <p class="status-confirm-row">
+          <span class="status-confirm-label">主要联系人</span>
+          <strong>{{ statusPrimaryContactText }}</strong>
+        </p>
+        <p class="status-confirm-warning">{{ statusDialogWarning }}</p>
+      </div>
+      <template #footer>
+        <el-button :disabled="statusSaving" @click="statusDialogVisible = false">取消</el-button>
+        <el-button
+          :type="nextCustomerStatus === 'DISABLED' ? 'warning' : 'primary'"
+          :disabled="statusConfirmDisabled"
+          :loading="statusSaving"
+          @click="confirmStatusChange"
+        >
+          确认{{ statusActionText }}
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -241,6 +284,9 @@ const saving = ref(false);
 const dialogVisible = ref(false);
 const editingId = ref<string>();
 const primaryContactIndex = ref<number>();
+const statusDialogVisible = ref(false);
+const statusSaving = ref(false);
+const statusCustomer = ref<Customer>();
 const nextCustomerCode = ref('');
 const checkingName = ref(false);
 const checkingCode = ref(false);
@@ -256,6 +302,32 @@ let customerSuggestionSequence = 0;
 const form = reactive<CustomerForm>(blankForm());
 
 const cityOptions = computed(() => chinaRegions.find((item) => item.province === form.province)?.cities || []);
+const statusActionText = computed(() => (statusCustomer.value?.status === 'ENABLED' ? '停用' : '启用'));
+const nextCustomerStatus = computed<CommonStatus>(() => (statusCustomer.value?.status === 'ENABLED' ? 'DISABLED' : 'ENABLED'));
+const statusDialogTitle = computed(() => `${statusActionText.value}客户`);
+const statusPrimaryContact = computed(() =>
+  statusCustomer.value?.contacts?.find((contact) => contact.isPrimary && contact.contactName?.trim())
+);
+const statusPrimaryContactText = computed(() => {
+  if (!statusPrimaryContact.value) {
+    return '未设置';
+  }
+  return [
+    statusPrimaryContact.value.contactName,
+    statusPrimaryContact.value.contactPhone,
+    statusPrimaryContact.value.title
+  ]
+    .filter(Boolean)
+    .join(' / ');
+});
+const statusConfirmDisabled = computed(() => nextCustomerStatus.value === 'ENABLED' && !statusPrimaryContact.value);
+const statusDialogWarning = computed(() =>
+  nextCustomerStatus.value === 'DISABLED'
+    ? '停用后该客户不能创建新订单，已存在订单和历史记录仍会保留。'
+    : statusConfirmDisabled.value
+      ? '该客户没有主要联系人，不能启用。请先编辑客户并设置一个主要联系人。'
+      : '启用后该客户可继续创建新订单；系统仍会要求客户至少保留一个主要联系人。'
+);
 
 watch([keyword, statusFilter], () => {
   if (customerSearchTimer) {
@@ -561,6 +633,16 @@ function validateForm() {
 }
 
 function validateContacts() {
+  const incompleteContact = form.contacts.find(
+    (contact) =>
+      !contact.contactName?.trim() &&
+      Boolean(contact.contactPhone?.trim() || contact.title?.trim() || contact.remark?.trim())
+  );
+  if (incompleteContact) {
+    ElMessage.warning('填写联系人电话或职务时，必须填写联系人姓名');
+    return false;
+  }
+
   const namedContacts = form.contacts
     .map((contact, index) => ({ contact, index, contactName: contact.contactName?.trim() }))
     .filter((item) => item.contactName);
@@ -632,12 +714,31 @@ async function save() {
   }
 }
 
-async function toggleStatus(row: Customer) {
+function openStatusDialog(row: Customer) {
+  statusCustomer.value = row;
+  statusDialogVisible.value = true;
+}
+
+async function confirmStatusChange() {
+  if (!statusCustomer.value) {
+    return;
+  }
+  if (statusConfirmDisabled.value) {
+    ElMessage.warning('请先编辑客户并设置一个主要联系人');
+    return;
+  }
+
+  statusSaving.value = true;
   try {
-    await erpApi.updateCustomerStatus(row.id, row.status === 'ENABLED' ? 'DISABLED' : 'ENABLED');
+    await erpApi.updateCustomerStatus(statusCustomer.value.id, nextCustomerStatus.value);
+    ElMessage.success(`客户已${statusActionText.value}`);
+    statusDialogVisible.value = false;
+    statusCustomer.value = undefined;
     await loadCustomers();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '客户状态修改失败');
+  } finally {
+    statusSaving.value = false;
   }
 }
 
@@ -763,6 +864,42 @@ onBeforeUnmount(clearCheckTimers);
   font-size: 12px;
 }
 
+.status-confirm-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.status-confirm-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin: 0;
+}
+
+.status-confirm-label {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.status-confirm-panel strong {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.status-confirm-warning {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  color: #92400e;
+  background: #fffbeb;
+  font-size: 13px;
+  line-height: 20px;
+}
+
 @media (max-width: 900px) {
   .customer-form-grid {
     grid-template-columns: 1fr;
@@ -792,6 +929,11 @@ onBeforeUnmount(clearCheckTimers);
     min-height: 40px;
     line-height: 20px;
     white-space: normal;
+  }
+
+  .status-confirm-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }
 </style>

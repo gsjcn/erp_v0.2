@@ -31,23 +31,23 @@
       </div>
       <div class="stat-card">
         <div class="stat-label">客户订单数量</div>
-        <div class="stat-value">{{ formatQuantity(totals.customerOrderQuantity, defaultUnit) }}</div>
+        <div class="stat-value">{{ formatTotalQuantity('customerOrderQuantity') }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">生产计划数量</div>
-        <div class="stat-value">{{ formatQuantity(totals.productionPlanQuantity, defaultUnit) }}</div>
+        <div class="stat-value">{{ formatTotalQuantity('productionPlanQuantity') }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">实际完成数量</div>
-        <div class="stat-value">{{ formatQuantity(totals.completedProductionQuantity, defaultUnit) }}</div>
+        <div class="stat-value">{{ formatTotalQuantity('completedProductionQuantity') }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">订单发货数量</div>
-        <div class="stat-value">{{ formatQuantity(totals.shippedOrderQuantity, defaultUnit) }}</div>
+        <div class="stat-value">{{ formatTotalQuantity('shippedOrderQuantity') }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">转库存数量</div>
-        <div class="stat-value">{{ formatQuantity(totals.stockQuantity, defaultUnit) }}</div>
+        <div class="stat-value">{{ formatTotalQuantity('stockQuantity') }}</div>
       </div>
     </div>
 
@@ -137,10 +137,10 @@
         </el-table-column>
         <el-table-column prop="partCount" label="零件数" width="90" />
         <el-table-column label="客户订单数量" width="140">
-          <template #default="{ row }">{{ formatQuantity(row.totalQuantity, row.unit) }}</template>
+          <template #default="{ row }">{{ formatOrderQuantity(row, 'totalQuantity') }}</template>
         </el-table-column>
         <el-table-column label="生产计划数量" width="140">
-          <template #default="{ row }">{{ formatQuantity(row.totalProductionPlanQuantity, row.unit) }}</template>
+          <template #default="{ row }">{{ formatOrderQuantity(row, 'totalProductionPlanQuantity') }}</template>
         </el-table-column>
         <el-table-column label="订单状态" width="150">
           <template #default="{ row }">
@@ -178,11 +178,11 @@
           </div>
           <div class="mobile-field">
             <label>客户订单数量</label>
-            <span>{{ formatQuantity(row.totalQuantity, row.unit) }}</span>
+            <span>{{ formatOrderQuantity(row, 'totalQuantity') }}</span>
           </div>
           <div class="mobile-field">
             <label>生产计划数量</label>
-            <span>{{ formatQuantity(row.totalProductionPlanQuantity, row.unit) }}</span>
+            <span>{{ formatOrderQuantity(row, 'totalProductionPlanQuantity') }}</span>
           </div>
         </div>
       </article>
@@ -198,7 +198,7 @@ import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
 import StatusTag from '../components/StatusTag.vue';
-import type { OrderStatisticsResponse, StatisticsPeriod } from '../types/erp';
+import type { OrderStatisticsOrderRow, OrderStatisticsResponse, OrderStatisticsSummaryRow, StatisticsPeriod } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
 
 const activePeriod = ref<StatisticsPeriod>('year');
@@ -209,7 +209,6 @@ const statistics = ref<OrderStatisticsResponse>();
 
 const summaryRows = computed(() => statistics.value?.summaryRows || []);
 const orderRows = computed(() => statistics.value?.orderRows || []);
-const defaultUnit = computed(() => summaryRows.value[0]?.unit || '件');
 const periodTitle = computed(() => {
   if (activePeriod.value === 'quarter') {
     return '季度';
@@ -221,13 +220,39 @@ const periodTitle = computed(() => {
 });
 
 const totals = computed(() => ({
-  orderCount: orderRows.value.length,
-  customerOrderQuantity: summaryRows.value.reduce((sum, row) => sum + row.customerOrderQuantity, 0),
-  productionPlanQuantity: summaryRows.value.reduce((sum, row) => sum + row.productionPlanQuantity, 0),
-  completedProductionQuantity: summaryRows.value.reduce((sum, row) => sum + row.completedProductionQuantity, 0),
-  shippedOrderQuantity: summaryRows.value.reduce((sum, row) => sum + row.shippedOrderQuantity, 0),
-  stockQuantity: summaryRows.value.reduce((sum, row) => sum + row.stockQuantity, 0)
+  orderCount: orderRows.value.length
 }));
+
+type QuantitySummaryField = Extract<
+  keyof OrderStatisticsSummaryRow,
+  | 'customerOrderQuantity'
+  | 'productionPlanQuantity'
+  | 'completedProductionQuantity'
+  | 'shippedOrderQuantity'
+  | 'stockQuantity'
+>;
+
+function formatTotalQuantity(field: QuantitySummaryField) {
+  // 统计卡片不能把不同单位强行合并；按单位分别汇总，避免把“件”和“套”显示成同一种数量。
+  const totalByUnit = new Map<string, number>();
+  for (const row of summaryRows.value) {
+    const unit = row.unit || '件';
+    totalByUnit.set(unit, (totalByUnit.get(unit) || 0) + Number(row[field] || 0));
+  }
+  if (totalByUnit.size === 0) {
+    return formatQuantity(0, '件');
+  }
+  return Array.from(totalByUnit.entries())
+    .map(([unit, quantity]) => formatQuantity(quantity, unit))
+    .join(' / ');
+}
+
+function formatOrderQuantity(row: OrderStatisticsOrderRow, field: 'totalQuantity' | 'totalProductionPlanQuantity') {
+  if (row.quantityByUnit?.length) {
+    return row.quantityByUnit.map((item) => formatQuantity(item[field], item.unit)).join(' / ');
+  }
+  return formatQuantity(row[field], row.unit);
+}
 
 async function loadStatistics() {
   loading.value = true;

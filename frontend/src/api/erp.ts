@@ -62,6 +62,7 @@ export interface StockSourceSelectionPayload {
   partCode?: string;
   partName?: string;
   quantity: number;
+  availableQuantity?: number;
   unit?: string;
   replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
   replenishmentSourceRequestNo?: string;
@@ -182,6 +183,10 @@ export interface WarehouseWorkFilters {
   dateTo?: string;
 }
 
+export interface WarehouseTransactionFilters extends WarehouseWorkFilters {
+  transactionType?: 'IN' | 'OUT';
+}
+
 export interface CompleteProcessStepPayload {
   processName: string;
   isCompleted: boolean;
@@ -194,6 +199,15 @@ export interface CompleteProcessStepPayload {
   shortageReason?: string;
   quantityOverrideReason?: string;
   remark?: string;
+}
+
+export interface SubmitOrderPayload {
+  submittedByCode: string;
+}
+
+export interface UpdateLineProcessPayload {
+  configuredByCode: string;
+  steps: ProcessStepDetail[];
 }
 
 export interface CompleteProcessStepsPayload {
@@ -214,6 +228,7 @@ export interface CompleteProcessStepsPayload {
 }
 
 export interface CompleteProductionPayload {
+  supervisorCode: string;
   completedQuantity: number;
   operatorCode?: string;
   operatorCodes?: string[];
@@ -222,6 +237,10 @@ export interface CompleteProductionPayload {
   managerName?: string;
   shortageReason?: string;
   remark?: string;
+}
+
+export interface StartProductionPayload {
+  supervisorCode: string;
 }
 
 export interface ApproveProductionReplenishmentRequestPayload {
@@ -393,13 +412,13 @@ export const erpApi = {
   updateOrder(orderNo: string, payload: Omit<CreateOrderPayload, 'customerId' | 'orderDate'>) {
     return request<OrderDetail>(`/orders/${orderNo}`, { method: 'PATCH', body: JSON.stringify(payload) });
   },
-  submitOrder(orderNo: string) {
-    return request<OrderDetail>(`/orders/${orderNo}/submit`, { method: 'POST' });
+  submitOrder(orderNo: string, payload: SubmitOrderPayload) {
+    return request<OrderDetail>(`/orders/${orderNo}/submit`, { method: 'POST', body: JSON.stringify(payload) });
   },
-  updateLineProcess(orderNo: string, lineId: string, steps: ProcessStepDetail[]) {
+  updateLineProcess(orderNo: string, lineId: string, payload: UpdateLineProcessPayload) {
     return request<OrderDetail>(`/orders/${orderNo}/lines/${lineId}/process`, {
       method: 'PATCH',
-      body: JSON.stringify({ steps })
+      body: JSON.stringify(payload)
     });
   },
   processDefinitions(keyword?: string, status?: CommonStatus) {
@@ -520,8 +539,11 @@ export const erpApi = {
       })}`
     );
   },
-  startProduction(id: string) {
-    return request<ProductionTask>(`/production/tasks/${id}/start`, { method: 'POST' });
+  startProduction(id: string, payload: StartProductionPayload) {
+    return request<ProductionTask>(`/production/tasks/${id}/start`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
   },
   completeProduction(id: string, payload: CompleteProductionPayload) {
     return request<ProductionTask>(`/production/tasks/${id}/complete`, {
@@ -619,8 +641,16 @@ export const erpApi = {
       body: JSON.stringify(body)
     });
   },
-  warehouseTransactions(transactionType?: 'IN' | 'OUT') {
-    return request<WarehouseTransaction[]>(`/warehouse/transactions${toQuery({ transactionType })}`);
+  warehouseTransactions(filters: WarehouseTransactionFilters = {}) {
+    return request<WarehouseTransaction[]>(
+      `/warehouse/transactions${toQuery({
+        transactionType: filters.transactionType,
+        customerId: filters.customerId,
+        orderNo: filters.orderNo,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo
+      })}`
+    );
   },
   inventory(filters: InventoryFilters) {
     return request<InventoryBatch[]>(
@@ -644,11 +674,12 @@ export const erpApi = {
       })}`
     );
   },
-  inventoryMaterialSuggestions(keyword: string, warehouseId?: string) {
+  inventoryMaterialSuggestions(keyword: string, warehouseId?: string, sourceType?: 'ALL' | 'ORDER' | 'STOCK') {
     return request<InventoryMaterialSuggestion[]>(
       `/inventory/materials/suggestions${toQuery({
         keyword,
-        warehouseId
+        warehouseId,
+        sourceType
       })}`
     );
   },

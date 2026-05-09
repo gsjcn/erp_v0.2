@@ -82,6 +82,16 @@ export function restoreSavedStockSourceReview(line: CreateOrderLinePayload) {
     line.stockSourceReviewSignature = '';
     return;
   }
+  if (line.fulfillmentMode === 'STOCK' && stockSourceMissingOrderInfo(line).length > 0) {
+    line.stockSourceReviewed = false;
+    line.stockSourceReviewSignature = '';
+    return;
+  }
+  if (findDirectStockSourceBlockedIssue(line)) {
+    line.stockSourceReviewed = false;
+    line.stockSourceReviewSignature = '';
+    return;
+  }
   line.stockSourceAvailableQuantity = selectedQuantity;
   line.stockSourceMatchedQuantity = selectedQuantity;
   markStockSourceReviewed(line);
@@ -98,7 +108,92 @@ export function findUnreviewedStockSourceLine(lines: CreateOrderLinePayload[]) {
   return lines.find((line) => stockSourceReviewRequired(line) && !isStockSourceReviewed(line));
 }
 
+export function validateDraftStockSourceLines(lines: CreateOrderLinePayload[]) {
+  const overusedBatchIssue = findOverusedSelectedStockBatchIssue(lines);
+  if (overusedBatchIssue) {
+    return {
+      ok: false,
+      message: overusedBatchIssue,
+      warning: ''
+    };
+  }
+
+  for (const line of lines) {
+    if (!stockSourceReviewRequired(line)) {
+      continue;
+    }
+
+    const overSelectedIssue = findOverSelectedStockSourceQuantity(line);
+    if (overSelectedIssue) {
+      return {
+        ok: false,
+        message: overSelectedIssue,
+        warning: ''
+      };
+    }
+
+    const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
+    const selectedQuantityIssue = findSelectedStockSourceQuantityIssue(line);
+    if (selectedQuantityIssue) {
+      return {
+        ok: false,
+        message: selectedQuantityIssue,
+        warning: ''
+      };
+    }
+
+    const missingStockInfo = line.fulfillmentMode === 'STOCK' ? stockSourceMissingOrderInfo(line) : [];
+    if (missingStockInfo.length > 0) {
+      return {
+        ok: false,
+        message: `${partText} 直接使用库存前必须补齐：${missingStockInfo.join('、')}；否则请选择库存再加工或重新生产。`,
+        warning: ''
+      };
+    }
+
+    const directStockIssue = findDirectStockSourceBlockedIssue(line);
+    if (directStockIssue) {
+      return {
+        ok: false,
+        message: directStockIssue,
+        warning: ''
+      };
+    }
+
+    if (!isStockSourceReviewed(line)) {
+      return {
+        ok: false,
+        message: `${partText} 必须先完成库存来源核对，再保存订单。`,
+        warning: ''
+      };
+    }
+
+    const manualIssue = findMissingStockSourceManualConfirmation(line);
+    if (manualIssue) {
+      return {
+        ok: false,
+        message: manualIssue,
+        warning: ''
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    message: '',
+    warning: ''
+  };
+}
+
 export function validateReviewedStockSourceLines(lines: CreateOrderLinePayload[]) {
+  const overusedBatchIssue = findOverusedSelectedStockBatchIssue(lines);
+  if (overusedBatchIssue) {
+    return {
+      ok: false,
+      message: overusedBatchIssue
+    };
+  }
+
   const stockGroups = new Map<
     string,
     {
@@ -123,11 +218,29 @@ export function validateReviewedStockSourceLines(lines: CreateOrderLinePayload[]
       continue;
     }
 
+    const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
+    if (line.fulfillmentMode === 'STOCK') {
+      const missingStockInfo = stockSourceMissingOrderInfo(line);
+      if (missingStockInfo.length > 0) {
+        return {
+          ok: false,
+          message: `${partText} 直接使用库存前必须补齐：${missingStockInfo.join('、')}；否则请选择库存再加工或重新生产。`
+        };
+      }
+    }
+
     const manualIssue = findMissingStockSourceManualConfirmation(line);
     if (manualIssue) {
       return {
         ok: false,
         message: manualIssue
+      };
+    }
+    const directStockIssue = findDirectStockSourceBlockedIssue(line);
+    if (directStockIssue) {
+      return {
+        ok: false,
+        message: directStockIssue
       };
     }
     const overSelectedIssue = findOverSelectedStockSourceQuantity(line);
@@ -138,8 +251,15 @@ export function validateReviewedStockSourceLines(lines: CreateOrderLinePayload[]
       };
     }
 
-    const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
     const requiredQuantity = stockSourceRequiredQuantity(line);
+    const selectedQuantityIssue = findSelectedStockSourceQuantityIssue(line);
+    if (selectedQuantityIssue) {
+      return {
+        ok: false,
+        message: selectedQuantityIssue
+      };
+    }
+
     if (line.fulfillmentMode === 'STOCK') {
       const key = stockSourceComparableKey(line);
       const selectedQuantity = selectedStockSourceQuantity(line);
@@ -149,12 +269,10 @@ export function validateReviewedStockSourceLines(lines: CreateOrderLinePayload[]
           partText,
           unit: line.unit || '件',
           requiredQuantity: 0,
-          matchedQuantity: selectedQuantity ? 0 : Number(line.stockSourceMatchedQuantity || 0)
+          matchedQuantity: 0
         };
       row.requiredQuantity += requiredQuantity;
-      row.matchedQuantity = selectedQuantity
-        ? row.matchedQuantity + selectedQuantity
-        : Math.max(row.matchedQuantity, Number(line.stockSourceMatchedQuantity || 0));
+      row.matchedQuantity += selectedQuantity;
       stockGroups.set(key, row);
       continue;
     }
@@ -167,12 +285,10 @@ export function validateReviewedStockSourceLines(lines: CreateOrderLinePayload[]
         partText,
         unit: line.unit || '件',
         requiredQuantity: 0,
-        availableQuantity: selectedQuantity ? 0 : Number(line.stockSourceAvailableQuantity || 0)
+        availableQuantity: 0
       };
     row.requiredQuantity += requiredQuantity;
-    row.availableQuantity = selectedQuantity
-      ? row.availableQuantity + selectedQuantity
-      : Math.max(row.availableQuantity, Number(line.stockSourceAvailableQuantity || 0));
+    row.availableQuantity += selectedQuantity;
     reworkGroups.set(reworkKey, row);
   }
 
@@ -239,6 +355,83 @@ export function findOverSelectedStockSourceQuantity(line: CreateOrderLinePayload
   return '';
 }
 
+export function findSelectedStockSourceQuantityIssue(line: CreateOrderLinePayload) {
+  if (!stockSourceReviewRequired(line)) {
+    return '';
+  }
+  const requiredQuantity = stockSourceRequiredQuantity(line);
+  const selectedQuantity = selectedStockSourceQuantity(line);
+  const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
+  const unit = line.unit || '件';
+  if (requiredQuantity > 0 && selectedQuantity <= 0) {
+    return `${partText} 必须先选择库存批次并完成来源核对，不能由系统自动扣减库存。`;
+  }
+  if (requiredQuantity > 0 && selectedQuantity + 0.0001 < requiredQuantity) {
+    return `${partText} 已选库存 ${formatQuantity(selectedQuantity, unit)}，少于本次需要 ${formatQuantity(
+      requiredQuantity,
+      unit
+    )}；请重新打开库存来源并补足批次数量。`;
+  }
+  return '';
+}
+
+export function findOverusedSelectedStockBatchIssue(lines: CreateOrderLinePayload[]) {
+  const batchRows = new Map<
+    string,
+    {
+      batchId: string;
+      batchNo?: string;
+      unit: string;
+      selectedQuantity: number;
+      availableQuantity?: number;
+      partTexts: Set<string>;
+    }
+  >();
+
+  for (const line of lines) {
+    if (!stockSourceReviewRequired(line)) {
+      continue;
+    }
+    const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
+    for (const source of normalizeSelectedStockSources(line)) {
+      const row =
+        batchRows.get(source.batchId) ??
+        {
+          batchId: source.batchId,
+          batchNo: source.batchNo,
+          unit: source.unit || line.unit || '件',
+          selectedQuantity: 0,
+          availableQuantity: undefined,
+          partTexts: new Set<string>()
+        };
+      row.batchNo = row.batchNo || source.batchNo;
+      row.unit = source.unit || row.unit;
+      row.selectedQuantity += source.quantity;
+      const sourceAvailableQuantity = Number(source.availableQuantity || 0);
+      if (sourceAvailableQuantity > 0) {
+        row.availableQuantity = Math.max(row.availableQuantity || 0, sourceAvailableQuantity);
+      }
+      row.partTexts.add(partText);
+      batchRows.set(source.batchId, row);
+    }
+  }
+
+  const issue = [...batchRows.values()].find(
+    (row) => row.availableQuantity !== undefined && row.selectedQuantity > row.availableQuantity + 0.0001
+  );
+  if (!issue) {
+    return '';
+  }
+
+  const relatedParts = [...issue.partTexts].join('、');
+  return `库存批次 ${issue.batchNo || issue.batchId} 被多行重复选用${
+    relatedParts ? `（${relatedParts}）` : ''
+  }，当前可用 ${formatQuantity(issue.availableQuantity || 0, issue.unit)}，合计选用 ${formatQuantity(
+    issue.selectedQuantity,
+    issue.unit
+  )}；请调整库存来源。`;
+}
+
 export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
   const rows = new Map<
     string,
@@ -248,6 +441,7 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
       partCode?: string;
       partName?: string;
       quantity: number;
+      availableQuantity?: number;
       unit?: string;
       replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
       replenishmentSourceRequestNo?: string;
@@ -272,6 +466,7 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
       partCode: source.partCode?.trim() || current?.partCode,
       partName: source.partName?.trim() || current?.partName,
       quantity: (current?.quantity || 0) + quantity,
+      availableQuantity: Math.max(Number(source.availableQuantity || 0), Number(current?.availableQuantity || 0)) || undefined,
       unit: source.unit?.trim() || current?.unit,
       replenishmentSourceType: source.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
       replenishmentSourceRequestNo: source.replenishmentSourceRequestNo?.trim() || current?.replenishmentSourceRequestNo,
@@ -307,6 +502,20 @@ export function findMissingStockSourceManualConfirmation(line: CreateOrderLinePa
     (!requiredTextMatches(line.partCode, issueSource.partCode) ? '物料编码不同，属于替代库存' : '') ||
     (missingOrderInfo.length > 0 ? `本次订单缺少${missingOrderInfo.join('、')}` : '库存来源需要人工确认');
   return `${partText} 已选库存批次 ${issueSource.batchNo || issueSource.batchId} 需要填写人工确认记录：${issueReason}`;
+}
+
+export function findDirectStockSourceBlockedIssue(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode !== 'STOCK') {
+    return '';
+  }
+  const issueSource = normalizeSelectedStockSources(line).find((source) =>
+    source.compatibilityStatus === 'INCOMPLETE' && stockSourceReasonMeansSourceDrawingMissing(source.compatibilityReason)
+  );
+  if (!issueSource) {
+    return '';
+  }
+  const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
+  return `${partText} 已选库存批次 ${issueSource.batchNo || issueSource.batchId} 缺少来源图纸资料，不能直接使用库存；请选择库存再加工或重新生产。`;
 }
 
 export function selectedStockSourceNeedsManualConfirmation(
@@ -361,6 +570,10 @@ export function stockSourceComparableKey(line: StockSourceComparableLine) {
 function sourceHasDirectStockDrawingInfo(source: InventorySourceBatchDetail) {
   // 直接使用库存必须能看到库存来源图纸文件；否则只能提示改为库存再加工或重新生产。
   return Boolean(source.drawingNo?.trim() && source.drawingVersion?.trim() && source.drawingFileUrl?.trim());
+}
+
+function stockSourceReasonMeansSourceDrawingMissing(reason?: string) {
+  return Boolean(reason && /库存缺图号|库存缺版本|库存缺图纸文件|库存图纸信息不完整|库存来源图纸资料不完整|来源图纸/.test(reason));
 }
 
 function requiredTextMatches(required?: string | null, actual?: string | null) {

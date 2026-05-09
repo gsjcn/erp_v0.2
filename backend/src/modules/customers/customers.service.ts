@@ -105,7 +105,7 @@ export class CustomersService {
   }
 
   async update(id: string, dto: UpdateCustomerDto) {
-    const existing = await this.ensureExists(id);
+    const existing = await this.ensureExistsWithContacts(id);
 
     const customerName =
       dto.customerName !== undefined ? this.normalizeRequired(dto.customerName, '客户名称不能为空') : undefined;
@@ -126,12 +126,17 @@ export class CustomersService {
       city: dto.city ?? existing.city ?? undefined,
       detailAddress: dto.detailAddress ?? existing.detailAddress ?? undefined
     });
-    const contacts = this.normalizeContacts(dto.contacts, dto.contactName, dto.contactPhone);
+    const shouldUpdateContacts = dto.contacts !== undefined || dto.contactName !== undefined || dto.contactPhone !== undefined;
+    const contacts = shouldUpdateContacts
+      ? this.normalizeContacts(dto.contacts, dto.contactName, dto.contactPhone)
+      : this.normalizeExistingContacts(existing.contacts);
     const primaryContact = contacts.find((contact) => contact.isPrimary);
 
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await tx.customerContact.deleteMany({ where: { customerId: id } });
+        if (shouldUpdateContacts) {
+          await tx.customerContact.deleteMany({ where: { customerId: id } });
+        }
         return tx.customer.update({
           where: { id },
           data: {
@@ -143,7 +148,7 @@ export class CustomersService {
             address: this.buildAddress(regionData),
             remark: dto.remark?.trim(),
             status: contacts.length ? existing.status : CommonStatus.DISABLED,
-            contacts: contacts.length ? { create: contacts } : undefined
+            ...(shouldUpdateContacts && contacts.length ? { contacts: { create: contacts } } : {})
           },
           include: this.customerInclude()
         });
@@ -178,6 +183,17 @@ export class CustomersService {
 
   private async ensureExists(id: string) {
     const customer = await this.prisma.customer.findUnique({ where: { id } });
+    if (!customer) {
+      throw new NotFoundException('客户不存在');
+    }
+    return customer;
+  }
+
+  private async ensureExistsWithContacts(id: string) {
+    const customer = await this.prisma.customer.findUnique({
+      where: { id },
+      include: this.customerInclude()
+    });
     if (!customer) {
       throw new NotFoundException('客户不存在');
     }
@@ -224,12 +240,27 @@ export class CustomersService {
 
   private normalizeContacts(contacts?: CustomerContactDto[], fallbackName?: string, fallbackPhone?: string) {
     // 有联系人时必须明确选择一个主联系人；没有联系人时客户会自动停用但保留客户ID和名称。
+    const fallbackContactName = fallbackName?.trim();
+    const fallbackContactPhone = fallbackPhone?.trim();
+    if (!contacts?.length && !fallbackContactName && fallbackContactPhone) {
+      throw new BadRequestException('联系人姓名不能为空');
+    }
+
     const source =
       contacts && contacts.length > 0
         ? contacts
-        : fallbackName || fallbackPhone
-          ? [{ contactName: fallbackName || '默认联系人', contactPhone: fallbackPhone, isPrimary: true }]
+        : fallbackContactName
+          ? [{ contactName: fallbackContactName, contactPhone: fallbackContactPhone, isPrimary: true }]
           : [];
+
+    const hasIncompleteContact = source.some(
+      (contact) =>
+        !contact.contactName?.trim() &&
+        Boolean(contact.contactPhone?.trim() || contact.title?.trim() || contact.remark?.trim())
+    );
+    if (hasIncompleteContact) {
+      throw new BadRequestException('联系人姓名不能为空');
+    }
 
     const normalized = source
       .map((contact, index) => ({
@@ -252,6 +283,25 @@ export class CustomersService {
     }
 
     return normalized;
+  }
+
+  private normalizeExistingContacts(
+    contacts: Array<{
+      contactName: string;
+      contactPhone?: string | null;
+      title?: string | null;
+      remark?: string | null;
+      isPrimary?: boolean | null;
+    }>
+  ) {
+    // PATCH 未传联系人时保留原联系人，避免局部更新误删联系人并自动停用客户。
+    return contacts.map((contact) => ({
+      contactName: contact.contactName.trim(),
+      contactPhone: contact.contactPhone?.trim() || null,
+      title: contact.title?.trim() || null,
+      remark: contact.remark?.trim() || null,
+      isPrimary: Boolean(contact.isPrimary)
+    }));
   }
 
   private buildAddress(region: ReturnType<CustomersService['normalizeRegion']>) {

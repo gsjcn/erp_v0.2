@@ -13,7 +13,7 @@
         </RouterLink>
       </nav>
 
-      <div class="scope-note">当前不包含质量 / 追溯 / IATF</div>
+      <div class="scope-note">第一阶段运行中</div>
     </aside>
 
     <section class="app-main">

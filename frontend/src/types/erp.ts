@@ -45,6 +45,12 @@ export interface ProcessDefinition {
   updatedAt: string;
 }
 
+export interface OrderQuantityByUnit {
+  unit: string;
+  totalQuantity: number;
+  totalProductionPlanQuantity: number;
+}
+
 export interface Customer {
   id: string;
   customerCode: string;
@@ -86,6 +92,7 @@ export interface OrderSummary {
   partCount: number;
   totalQuantity: number;
   totalProductionPlanQuantity: number;
+  quantityByUnit?: OrderQuantityByUnit[];
   unit: string;
   productionStatus: ProductionStatus;
   warehouseStage: WarehouseStage;
@@ -137,6 +144,7 @@ export interface StockSourceSelection {
   partCode?: string;
   partName?: string;
   quantity: number;
+  availableQuantity?: number;
   unit?: string;
   replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
   replenishmentSourceRequestNo?: string;
@@ -369,6 +377,7 @@ export interface OrderStatisticsOrderRow {
   partCount: number;
   totalQuantity: number;
   totalProductionPlanQuantity: number;
+  quantityByUnit?: OrderQuantityByUnit[];
   unit: string;
 }
 
@@ -532,6 +541,9 @@ export interface InventoryMaterialSuggestion {
   partName: string;
   unit: string;
   partSpecification?: string;
+  matchedBatchNo?: string;
+  matchedSourceOrderNo?: string;
+  matchedProductionTaskNo?: string;
   availableQuantity: number;
   orderInventoryQuantity: number;
   stockInventoryQuantity: number;

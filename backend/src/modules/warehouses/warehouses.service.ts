@@ -301,7 +301,7 @@ export class WarehousesService {
       : await this.generateWarehouseCode();
     await this.ensureWarehouseCodeAvailable(warehouseCode);
 
-    // 第一阶段只维护仓库基础资料，不扩展复杂仓储策略或权限审批。
+    // 第一阶段只维护仓库基础资料，保持仓库编码和库位编码可迁移、可查重。
     try {
       return await this.prisma.warehouse.create({
         data: {
@@ -646,8 +646,25 @@ export class WarehousesService {
   }
 
   async findTransactions(query: WarehouseTransactionQueryDto) {
+    const where: Prisma.InventoryTransactionWhereInput = {};
+    if (query.transactionType) {
+      where.transactionType = query.transactionType;
+    }
+
+    const scopedOrderRefs = await this.findWarehouseTransactionOrderRefs(query);
+    if (scopedOrderRefs) {
+      const or: Prisma.InventoryTransactionWhereInput[] = [];
+      if (scopedOrderRefs.orderNos.length > 0) {
+        or.push({ orderNo: { in: scopedOrderRefs.orderNos } });
+      }
+      if (scopedOrderRefs.productionTaskNos.length > 0) {
+        or.push({ productionTaskNo: { in: scopedOrderRefs.productionTaskNos } });
+      }
+      where.OR = or.length > 0 ? or : [{ id: '__NO_WAREHOUSE_TRANSACTION_MATCH__' }];
+    }
+
     const transactions = await this.prisma.inventoryTransaction.findMany({
-      where: query.transactionType ? { transactionType: query.transactionType } : undefined,
+      where,
       include: { warehouse: true, location: true },
       orderBy: { transactionTime: 'desc' }
     });
@@ -667,6 +684,38 @@ export class WarehousesService {
       transactionTime: item.transactionTime,
       remark: item.remark
     }));
+  }
+
+  private async findWarehouseTransactionOrderRefs(query: WarehouseTransactionQueryDto) {
+    const hasOrderScope = Boolean(query.customerId || query.orderNo?.trim() || query.dateFrom || query.dateTo);
+    if (!hasOrderScope) {
+      return null;
+    }
+
+    const orderWhere = this.buildOrderWhere(query);
+    const orderNo = query.orderNo?.trim();
+    if (orderNo) {
+      orderWhere.orderNo = { contains: orderNo, mode: 'insensitive' };
+    }
+
+    const orders = await this.prisma.customerOrder.findMany({
+      where: orderWhere,
+      select: { orderNo: true }
+    });
+    const orderNos = orders.map((order) => order.orderNo);
+    const tasks =
+      orderNos.length > 0
+        ? await this.prisma.productionTask.findMany({
+            where: { orderNo: { in: orderNos } },
+            select: { productionTaskNo: true }
+          })
+        : [];
+
+    // 仓库流水跟随页面顶部订单范围：订单库存流水看 orderNo，备货/多做库存流水看 productionTaskNo。
+    return {
+      orderNos,
+      productionTaskNos: tasks.map((task) => task.productionTaskNo)
+    };
   }
 
   private async resolveTargetLocation(dto: ConfirmReceiptDto) {
@@ -930,7 +979,7 @@ export class WarehousesService {
     }
 
     if (order.status !== 'DRAFT') {
-      // 部分发货时订单仍在流转中；页面仓库阶段会按批次显示“待发货/部分发货”。
+      // 部分发货时订单仍在流转中；页面库存/发货状态会按批次显示“待发货/部分发货”。
       await tx.customerOrder.update({
         where: { id: orderId },
         data: { status: 'IN_PRODUCTION' }

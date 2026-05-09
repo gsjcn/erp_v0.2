@@ -15,6 +15,7 @@ import {
   ProductionScrapQueryDto,
   ProductionTaskQueryDto,
   RejectProductionReplenishmentRequestDto,
+  StartProductionDto,
   WithdrawProductionTaskDto
 } from './dto';
 
@@ -31,6 +32,24 @@ type ProductionOperatorRow = {
 };
 
 const fallbackProductionOperators: ProductionOperatorRow[] = [
+  {
+    code: 'PLAN-001',
+    accountId: 'PLAN-001',
+    name: '刘计划',
+    role: '生产计划员',
+    pinyin: 'liujihua',
+    pinyinInitials: 'ljh',
+    keywords: ['liu', 'jihua', 'ljh', '计划', '下计划']
+  },
+  {
+    code: 'WS-001',
+    accountId: 'WS-001',
+    name: '陈主任',
+    role: '车间主任',
+    pinyin: 'chenzhuren',
+    pinyinInitials: 'czr',
+    keywords: ['chen', 'zhuren', 'czr', '车间主任', '主任', '车间', '主管']
+  },
   {
     code: 'OP-001',
     accountId: 'OP-001',
@@ -252,7 +271,13 @@ export class ProductionService {
         orderBy: [{ accountId: 'asc' }]
       });
       if (rows.length > 0) {
-        return rows.map((operator) => this.toProductionOperatorRow(operator));
+        const dbRows = rows.map((operator) => this.toProductionOperatorRow(operator));
+        const existingCodes = new Set(dbRows.map((operator) => operator.accountId.toLocaleLowerCase()));
+        // 开发库可能已有旧测试人员但缺少计划员；合并基础岗位，避免提交生产入口没有下计划操作员可选。
+        return [
+          ...dbRows,
+          ...fallbackProductionOperators.filter((operator) => !existingCodes.has(operator.accountId.toLocaleLowerCase()))
+        ];
       }
     } catch {
       // 数据库还未执行新迁移时，先保留兜底名单，避免当前测试页面无法选择操作人员。
@@ -332,6 +357,31 @@ export class ProductionService {
       name: operators.map((operator) => operator.name).join('、'),
       role: operators.map((operator) => operator.role).join('、')
     };
+  }
+
+  private isWorkshopSupervisor(operator: ProductionOperatorRow) {
+    const role = operator.role || '';
+    return !role.includes('计划') && (role.includes('车间主任') || role.includes('车间主管') || role.includes('主任'));
+  }
+
+  private async resolveWorkshopSupervisor(supervisorCode?: string): Promise<ProductionOperatorRow> {
+    const code = supervisorCode?.trim();
+    if (!code) {
+      throw new BadRequestException('请选择车间主任');
+    }
+
+    const operators = await this.loadProductionOperators();
+    const normalizedCode = code.toLocaleLowerCase();
+    const operator = operators.find(
+      (item) => item.code.toLocaleLowerCase() === normalizedCode || item.accountId.toLocaleLowerCase() === normalizedCode
+    );
+    if (!operator) {
+      throw new BadRequestException(`车间主任不存在或未启用：${code}`);
+    }
+    if (!this.isWorkshopSupervisor(operator)) {
+      throw new BadRequestException('开始生产和确认生产只能由车间主任操作');
+    }
+    return operator;
   }
 
   private async resolveOperatorSnapshotForProcess(
@@ -499,7 +549,8 @@ export class ProductionService {
     return Array.from(rows.values()).sort((a, b) => a.partCode.localeCompare(b.partCode, 'zh-Hans-CN'));
   }
 
-  async start(id: string) {
+  async start(id: string, dto: StartProductionDto) {
+    const supervisor = await this.resolveWorkshopSupervisor(dto.supervisorCode);
     const task = await this.findTaskOrThrow(id);
     if (task.order.status === OrderStatus.CANCELLED) {
       throw new BadRequestException('已取消订单不能开始新的生产任务');
@@ -517,7 +568,8 @@ export class ProductionService {
         where: { id },
         data: {
           status: ProductionStatus.IN_PROGRESS,
-          startedAt: task.startedAt || new Date()
+          startedAt: task.startedAt || new Date(),
+          remark: this.appendTaskRemark(task.remark, this.formatSupervisorActionRemark('开始生产', supervisor))
         }
       });
       await this.markOrderInProduction(tx, task.orderId);
@@ -665,6 +717,7 @@ export class ProductionService {
   }
 
   async complete(id: string, dto: CompleteProductionDto) {
+    const supervisor = await this.resolveWorkshopSupervisor(dto.supervisorCode);
     const task = await this.findTaskOrThrow(id);
     if (task.inventoryBatch) {
       throw new BadRequestException('生产任务已入库，不能修改生产完成记录');
@@ -760,7 +813,7 @@ export class ProductionService {
           completedQuantity,
           startedAt: task.startedAt || new Date(),
           completedAt: isFinalCorrection ? task.completedAt || new Date() : new Date(),
-          remark: dto.remark
+          remark: this.appendTaskRemark(dto.remark?.trim() || task.remark, this.formatSupervisorActionRemark('确认生产', supervisor))
         }
       });
 
@@ -1681,7 +1734,7 @@ export class ProductionService {
     requestedBy: ResolvedOperatorSnapshot,
     existingRequestNo?: string | null
   ) {
-    // sourceType 固定为 PRODUCTION_SCRAP，用于后续区分“质量/生产报废补单”和“销售/计划追加补单”。
+    // sourceType 固定为 PRODUCTION_SCRAP，用于后续区分“生产报废补单”和“销售/计划追加补单”。
     const requestQuantity = decimalToNumber(completion.shortageQuantity);
     const scrapQuantity = decimalToNumber(completion.scrapQuantity);
     const reason = [
@@ -1774,6 +1827,15 @@ export class ProductionService {
     });
     const nextSequence = lastNotice ? Number(lastNotice.noticeNo.slice(prefix.length)) + 1 : 1;
     return `${prefix}${String(nextSequence).padStart(4, '0')}`;
+  }
+
+  private appendTaskRemark(existingRemark: string | null | undefined, appendLine: string) {
+    const existing = existingRemark?.trim();
+    return [existing, appendLine].filter(Boolean).join('；');
+  }
+
+  private formatSupervisorActionRemark(action: string, supervisor: ProductionOperatorRow) {
+    return `${action}：${supervisor.name}（${supervisor.accountId || supervisor.code} / ${supervisor.role}）`;
   }
 
   private formatWithdrawRemark(

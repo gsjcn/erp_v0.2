@@ -236,10 +236,20 @@ export class UpdateOrderDto {
 }
 
 export class UpdateLineProcessDto {
+  @IsString()
+  @IsNotEmpty()
+  configuredByCode!: string;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ProcessStepDto)
   steps!: ProcessStepDto[];
+}
+
+export class SubmitOrderDto {
+  @IsString()
+  @IsNotEmpty()
+  submittedByCode!: string;
 }
 
 export class CreateLineReplenishmentDto {

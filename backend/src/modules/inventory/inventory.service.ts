@@ -372,17 +372,85 @@ export class InventoryService {
   }
 
   async materialSuggestions(query: MaterialSuggestionQueryDto) {
-    const materials = await this.findMaterialsByKeyword(query.keyword);
-    if (materials.length === 0) {
+    const keyword = query.keyword?.trim();
+    const sourceType = query.sourceType || 'ALL';
+    const materials = await this.findMaterialsByKeyword(keyword);
+    const materialRows = new Map<string, { partCode: string; partName: string; unit: string; partSpecification?: string | null }>();
+    const matchHints = new Map<
+      string,
+      {
+        matchedBatchNo?: string;
+        matchedSourceOrderNo?: string;
+        matchedProductionTaskNo?: string;
+      }
+    >();
+
+    materials.forEach((material) => {
+      materialRows.set(material.partCode.toLocaleLowerCase(), material);
+    });
+
+    if (keyword) {
+      const [allMaterials, candidateBatches] = await Promise.all([
+        this.findMaterialsByKeyword(''),
+        this.prisma.inventoryBatch.findMany({
+          where: {
+            status: 'AVAILABLE',
+            quantity: { gt: 0 },
+            warehouseId: query.warehouseId || undefined,
+            ...(sourceType === 'STOCK' ? { sourceOrderId: null } : {}),
+            ...(sourceType === 'ORDER' ? { sourceOrderId: { not: null } } : {})
+          },
+          select: {
+            batchNo: true,
+            partCode: true,
+            partName: true,
+            unit: true,
+            sourceOrderNo: true,
+            sourceProductionTaskNo: true,
+            replenishmentSourceType: true,
+            replenishmentSourceRequestNo: true,
+            sourceCustomerName: true,
+            warehouse: { select: { warehouseName: true } }
+          },
+          orderBy: [{ partCode: 'asc' }, { batchNo: 'asc' }]
+        })
+      ]);
+      const materialByCode = new Map(allMaterials.map((material) => [material.partCode.toLocaleLowerCase(), material]));
+      for (const batch of candidateBatches.filter((item) => this.inventoryBatchMatchesKeyword(item, keyword))) {
+        const key = batch.partCode.toLocaleLowerCase();
+        materialRows.set(
+          key,
+          materialRows.get(key) ||
+            materialByCode.get(key) || {
+              partCode: batch.partCode,
+              partName: batch.partName,
+              unit: batch.unit,
+              partSpecification: null
+            }
+        );
+        if (!matchHints.has(key)) {
+          matchHints.set(key, {
+            matchedBatchNo: batch.batchNo,
+            matchedSourceOrderNo: batch.sourceOrderNo || undefined,
+            matchedProductionTaskNo: batch.sourceProductionTaskNo || undefined
+          });
+        }
+      }
+    }
+
+    const suggestionMaterials = [...materialRows.values()].sort((a, b) => a.partCode.localeCompare(b.partCode, 'zh-Hans-CN'));
+    if (suggestionMaterials.length === 0) {
       return [];
     }
 
-    const partCodes = materials.map((material) => material.partCode);
+    const partCodes = suggestionMaterials.map((material) => material.partCode);
     const materialCodeSet = new Set(partCodes.map((partCode) => partCode.toLocaleLowerCase()));
     const batches = await this.prisma.inventoryBatch.findMany({
       where: {
         status: 'AVAILABLE',
         quantity: { gt: 0 },
+        ...(sourceType === 'STOCK' ? { sourceOrderId: null } : {}),
+        ...(sourceType === 'ORDER' ? { sourceOrderId: { not: null } } : {}),
         // 物料下拉允许空关键字查看完整物料清单；批次数量在内存中按物料主数据再次过滤，避免数据库结果被条数限制误导。
         ...(partCodes.length <= 500
           ? { OR: partCodes.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } })) }
@@ -424,18 +492,20 @@ export class InventoryService {
       quantityMap.set(key, row);
     }
 
-    return materials.map((material) => {
+    return suggestionMaterials.map((material) => {
       const quantity = quantityMap.get(material.partCode.toLocaleLowerCase()) ?? {
         availableQuantity: 0,
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
+      const matchHint = matchHints.get(material.partCode.toLocaleLowerCase()) || {};
       return {
         value: `${material.partCode} ${material.partName}`,
         partCode: material.partCode,
         partName: material.partName,
         unit: material.unit,
         partSpecification: material.partSpecification,
+        ...matchHint,
         ...quantity
       };
     });
@@ -748,7 +818,7 @@ export class InventoryService {
         drawingFileUrl: sourceLine?.drawingFileUrl,
         partThickness: sourceLine ? decimalToNumber(sourceLine.partThickness) : null,
         partSpecification: sourceLine?.partSpecification,
-        // 库存来源订单日期用于入库后继续追踪交期，不做质量追溯扩展。
+        // 库存来源订单日期用于入库后继续核对交期和订单来源。
         orderDate: sourceOrder?.orderDate,
         deliveryDate: sourceLine?.deliveryDate || sourceOrder?.deliveryDate,
         status: batch.status,

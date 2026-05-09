@@ -16,7 +16,7 @@
       </div>
       <div class="stat-card">
         <div class="stat-label">可用数量</div>
-        <div class="stat-value">{{ availableQuantity }} 件</div>
+        <div class="stat-value">{{ availableQuantityText }}</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">有库存仓库</div>
@@ -46,6 +46,7 @@
                 {{ selectedWarehouseName || '全部仓库' }}库存
                 {{ formatQuantity(item.availableQuantity, item.unit) }}
               </small>
+              <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
             </div>
           </template>
         </el-autocomplete>
@@ -496,11 +497,7 @@ const filters = reactive<{
   status?: InventoryStatus;
 }>({});
 
-const availableQuantity = computed(() =>
-  inventory.value
-    .filter((item) => item.status === 'AVAILABLE' && item.quantity > 0)
-    .reduce((sum, item) => sum + item.quantity, 0)
-);
+const availableQuantityText = computed(() => formatInventoryTotalByUnit('availableQuantity'));
 const stockedWarehouseCount = computed(
   () => new Set(inventory.value.filter((item) => item.status === 'AVAILABLE' && item.quantity > 0).map((item) => item.warehouseId)).size
 );
@@ -513,6 +510,21 @@ const inventoryQueryNoticeRows = computed(() => {
   // 关键字命中物料但库存为 0 时，要明确告诉仓库人员当前查询范围没有可用库存。
   return inventorySummary.value.filter((row) => row.availableQuantity <= 0);
 });
+
+function formatInventoryTotalByUnit(field: 'availableQuantity') {
+  // 库存汇总可能同时包含件、套、kg 等单位，顶部卡片必须按单位分别展示。
+  const totalByUnit = new Map<string, number>();
+  for (const row of inventorySummary.value) {
+    const unit = row.unit || '件';
+    totalByUnit.set(unit, (totalByUnit.get(unit) || 0) + Number(row[field] || 0));
+  }
+  if (totalByUnit.size === 0) {
+    return formatQuantity(0, '件');
+  }
+  return Array.from(totalByUnit.entries())
+    .map(([unit, quantity]) => formatQuantity(quantity, unit))
+    .join(' / ');
+}
 
 async function loadWarehouses() {
   try {
@@ -563,6 +575,15 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
 function selectMaterialSuggestion(item: InventoryMaterialSuggestion) {
   filters.keyword = item.partCode;
   void loadInventory();
+}
+
+function materialSuggestionMatchText(item: InventoryMaterialSuggestion) {
+  const parts = [
+    item.matchedBatchNo ? `命中批次 ${item.matchedBatchNo}` : '',
+    item.matchedSourceOrderNo ? `订单 ${item.matchedSourceOrderNo}` : '',
+    item.matchedProductionTaskNo ? `任务 ${item.matchedProductionTaskNo}` : ''
+  ].filter(Boolean);
+  return parts.join(' / ');
 }
 
 function inventorySourceLabel(row: InventoryBatch) {

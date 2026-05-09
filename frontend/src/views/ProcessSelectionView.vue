@@ -6,7 +6,7 @@
         <el-button :disabled="!order" @click="goOrderDetail">查看订单明细</el-button>
         <el-button :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
         <el-button type="primary" :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存零件流程</el-button>
-        <el-button type="success" :disabled="!canSubmitOrder" :loading="submitting" @click="submitOrderFromProcess">
+        <el-button type="success" :disabled="!canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog">
           提交生产
         </el-button>
       </div>
@@ -54,7 +54,7 @@
         <el-table :data="orders" max-height="calc(100vh - 330px)">
           <el-table-column label="订单号" min-width="190">
             <template #default="{ row }">
-              <el-button link type="primary" @click="goOrderSummaryDetail(row.orderNo)">{{ row.orderNo }}</el-button>
+              <OrderNoLink :order-no="row.orderNo" />
             </template>
           </el-table-column>
           <el-table-column prop="customerName" label="客户" min-width="210" />
@@ -66,10 +66,10 @@
           </el-table-column>
           <el-table-column prop="partCount" label="零件数" width="100" />
           <el-table-column label="客户订单数量" width="140">
-            <template #default="{ row }">{{ formatQuantity(row.totalQuantity, row.unit) }}</template>
+            <template #default="{ row }">{{ formatOrderQuantity(row, 'totalQuantity') }}</template>
           </el-table-column>
           <el-table-column label="生产计划数量" width="140">
-            <template #default="{ row }">{{ formatQuantity(row.totalProductionPlanQuantity, row.unit) }}</template>
+            <template #default="{ row }">{{ formatOrderQuantity(row, 'totalProductionPlanQuantity') }}</template>
           </el-table-column>
           <el-table-column label="订单状态" width="170">
             <template #default="{ row }">
@@ -95,7 +95,7 @@
           <div class="mobile-card-header">
             <div class="mobile-card-title">
               <strong>
-                <el-button link type="primary" @click="goOrderSummaryDetail(item.orderNo)">{{ item.orderNo }}</el-button>
+                <OrderNoLink :order-no="item.orderNo" />
               </strong>
               <small>{{ item.customerName }}</small>
             </div>
@@ -123,11 +123,11 @@
             </div>
             <div class="mobile-field">
               <label>客户订单数量</label>
-              <span>{{ formatQuantity(item.totalQuantity, item.unit) }}</span>
+              <span>{{ formatOrderQuantity(item, 'totalQuantity') }}</span>
             </div>
             <div class="mobile-field">
               <label>生产计划数量</label>
-              <span>{{ formatQuantity(item.totalProductionPlanQuantity, item.unit) }}</span>
+              <span>{{ formatOrderQuantity(item, 'totalProductionPlanQuantity') }}</span>
             </div>
           </div>
           <div class="mobile-card-actions">
@@ -184,6 +184,36 @@
           <span v-if="isDirty" class="dirty-text">未保存</span>
         </div>
 
+        <el-form label-width="108px" class="process-editor-form">
+          <el-form-item label="流程填写人员" required>
+            <el-select
+              v-model="processEditorCode"
+              filterable
+              remote
+              reserve-keyword
+              clearable
+              :disabled="!canEditProcessBase"
+              :remote-method="loadProcessEditorOperators"
+              :loading="processEditorLoading"
+              placeholder="选择下单/计划或技术工艺人员，车间人员只能查看"
+              @visible-change="(visible: boolean) => visible && loadProcessEditorOperators('')"
+            >
+              <el-option
+                v-for="operator in processEditorOperators"
+                :key="operator.code"
+                :label="submitPlanOperatorLabel(operator)"
+                :value="operator.code"
+              >
+                <div class="operator-option">
+                  <strong>{{ operator.name }}</strong>
+                  <span>{{ operator.accountId || operator.code }} / {{ operator.role }}</span>
+                </div>
+              </el-option>
+            </el-select>
+            <div class="form-help-text">生产流程由下单管理人员填写；后续可交由技术或工艺人员维护，车间人员只查看流程并按流程生产。</div>
+          </el-form-item>
+        </el-form>
+
         <ProcessTemplateManager
           class="process-template-inline"
           compact
@@ -197,15 +227,24 @@
           @process-definition-updated="loadProcessDefinitions"
         />
 
+        <div class="available-process-toolbar">
+          <el-input
+            v-model="quickProcessFilterKeyword"
+            clearable
+            placeholder="搜索工序 / 拼音 / 首字母"
+            :disabled="!canEditProcess"
+          />
+        </div>
         <div class="available-processes">
-          <el-button v-for="process in processOptions" :key="process" round :disabled="!canEditProcess" @click="addStep(process)">
+          <el-button v-for="process in filteredQuickProcessOptions" :key="process" round :disabled="!canEditProcess" @click="addStep(process)">
             {{ process }}
           </el-button>
+          <span v-if="quickProcessFilterKeyword && filteredQuickProcessOptions.length === 0" class="process-empty-text">没有匹配工序</span>
         </div>
         <div class="inline-process-create">
           <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸、抛光" maxlength="30" :disabled="!canEditProcess" />
           <el-button :loading="creatingProcess" :disabled="!canEditProcess" @click="createProcessDefinition">新建工序</el-button>
-          <el-button @click="processDefinitionManagerVisible = true">管理工序</el-button>
+          <el-button :disabled="!canEditProcess" @click="processDefinitionManagerVisible = true">管理工序</el-button>
         </div>
 
         <div class="standard-process-help">
@@ -216,8 +255,16 @@
         <div class="selected-steps">
           <div v-for="(step, index) in draftSteps" :key="`${index}-${step.processName}`" class="selected-step">
             <span class="step-index">{{ index + 1 }}</span>
-            <el-select v-model="step.processName" placeholder="标准工序" :disabled="!canEditProcess" @change="handleDraftStepChange">
-              <el-option v-for="process in processOptions" :key="process" :label="process" :value="process" />
+            <el-select
+              v-model="step.processName"
+              filterable
+              placeholder="标准工序 / 拼音 / 首字母"
+              :disabled="!canEditProcess"
+              :filter-method="handleDraftProcessFilter"
+              @change="handleDraftStepChange"
+              @visible-change="handleDraftProcessVisibleChange"
+            >
+              <el-option v-for="process in filteredProcessOptions" :key="process" :label="process" :value="process" />
             </el-select>
             <el-input v-model="step.processRemark" placeholder="参数备注，例如 4次 / M6孔" :disabled="!canEditProcess" />
             <div class="step-actions">
@@ -244,24 +291,118 @@
         @updated="handleProcessDefinitionsUpdated"
       />
     </el-dialog>
+
+    <el-dialog
+      v-model="submitOrderDialogVisible"
+      title="提交生产"
+      width="min(760px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <div class="submit-production-summary">
+        <el-alert
+          title="提交后会按履约方式生成生产任务、扣减库存或转入订单待发货库存；提交后订单零件不能再按草稿编辑。"
+          type="warning"
+          :closable="false"
+        />
+        <el-form label-width="108px" class="submit-plan-form">
+          <el-form-item label="下计划操作员" required>
+            <el-select
+              v-model="submitPlanOperatorCode"
+              filterable
+              remote
+              reserve-keyword
+              clearable
+              :remote-method="loadSubmitPlanOperators"
+              :loading="submitPlanOperatorLoading"
+              placeholder="选择生产计划员，车间主任不能提交"
+              @visible-change="(visible: boolean) => visible && loadSubmitPlanOperators('')"
+            >
+              <el-option
+                v-for="operator in submitPlanOperators"
+                :key="operator.code"
+                :label="submitPlanOperatorLabel(operator)"
+                :value="operator.code"
+              >
+                <div class="operator-option">
+                  <strong>{{ operator.name }}</strong>
+                  <span>{{ operator.accountId || operator.code }} / {{ operator.role }}</span>
+                </div>
+              </el-option>
+            </el-select>
+            <div class="form-help-text">提交生产属于下计划动作；车间主任只在生产页开始生产、确认生产。</div>
+          </el-form-item>
+        </el-form>
+        <p class="submit-production-row">
+          <span>订单号</span>
+          <strong>{{ order?.orderNo }}</strong>
+        </p>
+        <p class="submit-production-row">
+          <span>客户</span>
+          <strong>{{ order?.customerName }}</strong>
+        </p>
+        <p class="submit-production-row">
+          <span>零件数</span>
+          <strong>{{ order?.lines.length || 0 }} 个</strong>
+        </p>
+        <p v-if="order" class="submit-production-row">
+          <span>客户订单</span>
+          <strong>{{ formatOrderQuantity(order, 'totalQuantity') }}</strong>
+        </p>
+        <p v-if="order" class="submit-production-row">
+          <span>生产计划</span>
+          <strong>{{ formatOrderQuantity(order, 'totalProductionPlanQuantity') }}</strong>
+        </p>
+        <div v-if="order" class="submit-production-lines">
+          <article v-for="line in order.lines" :key="line.id" class="submit-production-line">
+            <div>
+              <strong>{{ line.partCode }} / {{ line.partName }}</strong>
+              <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}，订单 {{ formatQuantity(line.quantity, line.unit) }}，生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
+            </div>
+            <small v-if="line.fulfillmentMode !== 'STOCK'">流程：{{ line.processSteps.length ? line.processSteps.join('、') : '未配置' }}</small>
+            <small v-if="stockSourceSummary(line)">库存来源：{{ stockSourceSummary(line) }}</small>
+          </article>
+        </div>
+      </div>
+      <template #footer>
+        <el-button :disabled="submitting" @click="submitOrderDialogVisible = false">取消</el-button>
+        <el-button type="success" :disabled="!submitPlanOperatorCode" :loading="submitting" @click="confirmSubmitOrderFromProcess">提交生产</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="discardChangesDialogVisible"
+      title="切换流程"
+      width="min(500px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+      @closed="handleDiscardChangesClosed"
+    >
+      <p class="discard-changes-text">当前流程未保存，切换后会丢失修改。</p>
+      <template #footer>
+        <el-button @click="cancelDiscardChanges">取消</el-button>
+        <el-button type="warning" @click="confirmDiscardChangesDialog">继续切换</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
+import OrderNoLink from '../components/OrderNoLink.vue';
 import OrderSelect from '../components/OrderSelect.vue';
 import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import ProcessTemplateManager from '../components/ProcessTemplateManager.vue';
 import StatusTag from '../components/StatusTag.vue';
-import { standardProcessOptions } from '../config/processes';
-import type { OrderDetail, OrderLine, OrderSummary, ProcessStepDetail } from '../types/erp';
+import type { OrderDetail, OrderLine, OrderSummary, ProcessStepDetail, ProductionOperator } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
+import { filterPinyinSearchOptions } from '../utils/pinyinSearch';
 import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
 
 const route = useRoute();
@@ -283,10 +424,21 @@ const saving = ref(false);
 const submitting = ref(false);
 const restoringSelection = ref(false);
 
-const processOptions = ref<string[]>([...standardProcessOptions]);
+const processOptions = ref<string[]>([]);
 const newProcessName = ref('');
 const creatingProcess = ref(false);
+const quickProcessFilterKeyword = ref('');
+const draftProcessFilterKeyword = ref('');
 const processDefinitionManagerVisible = ref(false);
+const submitOrderDialogVisible = ref(false);
+const processEditorCode = ref('');
+const processEditorOperators = ref<ProductionOperator[]>([]);
+const processEditorLoading = ref(false);
+const submitPlanOperatorCode = ref('');
+const submitPlanOperators = ref<ProductionOperator[]>([]);
+const submitPlanOperatorLoading = ref(false);
+const discardChangesDialogVisible = ref(false);
+let discardChangesResolver: ((confirmed: boolean) => void) | undefined;
 
 const selectedLine = computed<OrderLine | undefined>(() => order.value?.lines.find((line) => line.id === selectedLineId.value));
 const selectedLineTemplateName = computed(() => (selectedLine.value?.partName ? `${selectedLine.value.partName}流程` : '当前流程'));
@@ -299,11 +451,14 @@ const processPercent = computed(() =>
   totalLineCount.value ? Math.round((configuredLineCount.value / totalLineCount.value) * 100) : 0
 );
 const missingLineNames = computed(() => processRequiredLines.value.filter((line) => line.processSteps.length === 0).map((line) => line.partName));
-const canEditProcess = computed(() => order.value?.status === 'DRAFT' && selectedLine.value?.fulfillmentMode !== 'STOCK');
+const canEditProcessBase = computed(() => order.value?.status === 'DRAFT' && selectedLine.value?.fulfillmentMode !== 'STOCK');
+const canEditProcess = computed(() => canEditProcessBase.value);
 const canSubmitOrder = computed(
   () => order.value?.status === 'DRAFT' && (order.value?.lines.length || 0) > 0 && missingLineNames.value.length === 0 && !isDirty.value
 );
 const returnToPath = computed(() => normalizeReturnTo(route.query.returnTo));
+const filteredQuickProcessOptions = computed(() => filterPinyinSearchOptions(processOptions.value, quickProcessFilterKeyword.value));
+const filteredProcessOptions = computed(() => filterPinyinSearchOptions(processOptions.value, draftProcessFilterKeyword.value));
 
 function orderProductionStatusValue(item: OrderSummary) {
   if (item.status === 'DRAFT') {
@@ -315,12 +470,20 @@ function orderProductionStatusValue(item: OrderSummary) {
   return item.productionStatus;
 }
 
+function formatOrderQuantity(order: OrderSummary, field: 'totalQuantity' | 'totalProductionPlanQuantity') {
+  if (order.quantityByUnit?.length) {
+    return order.quantityByUnit.map((row) => formatQuantity(row[field], row.unit)).join(' / ');
+  }
+  return formatQuantity(order[field], order.unit);
+}
+
 async function loadProcessDefinitions() {
   try {
     const rows = await erpApi.processDefinitions(undefined, 'ENABLED');
     processOptions.value = rows.map((row) => row.processName);
-  } catch {
-    processOptions.value = [...standardProcessOptions];
+  } catch (error) {
+    processOptions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败');
   }
 }
 
@@ -363,17 +526,20 @@ async function loadOrder() {
     order.value = undefined;
     selectedLineId.value = '';
     draftSteps.value = [];
+    processEditorCode.value = '';
     return;
   }
 
   loading.value = true;
   try {
     order.value = await erpApi.order(selectedOrderNo.value);
-    applySelectedLine(order.value.lines[0]?.id || '');
+    processEditorCode.value = '';
+    applySelectedLine(defaultProcessLineId(order.value));
   } catch (error) {
     order.value = undefined;
     selectedLineId.value = '';
     draftSteps.value = [];
+    processEditorCode.value = '';
     ElMessage.error(error instanceof Error ? error.message : '订单明细加载失败');
   } finally {
     loading.value = false;
@@ -417,6 +583,7 @@ function resetOrderSelection() {
   order.value = undefined;
   selectedLineId.value = '';
   draftSteps.value = [];
+  processEditorCode.value = '';
 }
 
 function fulfillmentModeLabel(mode?: string) {
@@ -427,6 +594,38 @@ function fulfillmentModeLabel(mode?: string) {
     return '库存再加工';
   }
   return '重新生产';
+}
+
+function stockSourceSummary(line: OrderLine) {
+  const sources = line.selectedStockSources || [];
+  if (sources.length === 0) {
+    return '';
+  }
+  return sources
+    .map((source) => {
+      const manualText = source.compatibilityStatus && source.compatibilityStatus !== 'MATCHED' ? ' / 人工确认' : '';
+      return `${source.batchNo || source.batchId} ${formatQuantity(source.quantity, source.unit || line.unit)}${manualText}`;
+    })
+    .join('；');
+}
+
+function warnProcessEditUnavailable() {
+  if (!canEditProcessBase.value) {
+    ElMessage.warning('只有草稿订单的生产零件可以修改生产流程');
+    return false;
+  }
+  return true;
+}
+
+function warnProcessSaveUnavailable() {
+  if (!warnProcessEditUnavailable()) {
+    return false;
+  }
+  if (!processEditorCode.value) {
+    ElMessage.warning('保存生产流程前，请选择下单/计划或技术工艺人员；车间人员只能查看生产流程');
+    return false;
+  }
+  return true;
 }
 
 async function selectLine(lineId: string) {
@@ -446,16 +645,37 @@ async function confirmDiscardChanges() {
     return true;
   }
 
-  try {
-    await ElMessageBox.confirm('当前流程未保存，切换后会丢失修改。', '切换流程', {
-      confirmButtonText: '继续切换',
-      cancelButtonText: '取消',
-      type: 'warning'
-    });
-    return true;
-  } catch {
-    return false;
+  if (discardChangesResolver) {
+    discardChangesResolver(false);
+    discardChangesResolver = undefined;
   }
+  discardChangesDialogVisible.value = true;
+  return new Promise<boolean>((resolve) => {
+    discardChangesResolver = resolve;
+  });
+}
+
+function confirmDiscardChangesDialog() {
+  const resolve = discardChangesResolver;
+  discardChangesResolver = undefined;
+  discardChangesDialogVisible.value = false;
+  resolve?.(true);
+}
+
+function cancelDiscardChanges() {
+  const resolve = discardChangesResolver;
+  discardChangesResolver = undefined;
+  discardChangesDialogVisible.value = false;
+  resolve?.(false);
+}
+
+function handleDiscardChangesClosed() {
+  if (!discardChangesResolver) {
+    return;
+  }
+  const resolve = discardChangesResolver;
+  discardChangesResolver = undefined;
+  resolve(false);
 }
 
 function applySelectedLine(lineId: string) {
@@ -463,16 +683,26 @@ function applySelectedLine(lineId: string) {
   draftSteps.value = selectedLineProcessDetails(order.value?.lines.find((line) => line.id === lineId));
 }
 
+function defaultProcessLineId(orderDetail: OrderDetail) {
+  // 使用库存的零件不需要配置工序；进入页面时优先定位到仍需维护流程的零件，减少操作员手动跳转。
+  return (
+    orderDetail.lines.find((line) => line.fulfillmentMode !== 'STOCK' && line.processSteps.length === 0)?.id ||
+    orderDetail.lines.find((line) => line.fulfillmentMode !== 'STOCK')?.id ||
+    orderDetail.lines[0]?.id ||
+    ''
+  );
+}
+
 function addStep(processName: string) {
-  if (!canEditProcess.value) {
-    ElMessage.warning('只有草稿订单可以修改生产流程');
+  if (!warnProcessEditUnavailable()) {
     return;
   }
   const step = processName.trim();
   if (!step) {
     return;
   }
-  if (normalizeSteps(draftSteps.value).some((item) => item.processName === step)) {
+  const stepKey = normalizeProcessNameKey(step);
+  if (normalizeSteps(draftSteps.value).some((item) => normalizeProcessNameKey(item.processName) === stepKey)) {
     ElMessage.warning(`当前零件已包含工艺：${step}`);
     return;
   }
@@ -480,12 +710,16 @@ function addStep(processName: string) {
 }
 
 async function createProcessDefinition() {
+  if (!warnProcessEditUnavailable()) {
+    return;
+  }
   const processName = newProcessName.value.trim();
   if (!processName) {
     ElMessage.warning('请填写标准工序名称');
     return;
   }
-  if (processOptions.value.some((item) => item.toLocaleLowerCase() === processName.toLocaleLowerCase())) {
+  const processKey = normalizeProcessNameKey(processName);
+  if (processOptions.value.some((item) => normalizeProcessNameKey(item) === processKey)) {
     ElMessage.warning(`标准工序“${processName}”已存在，请勿重复创建`);
     return;
   }
@@ -523,8 +757,7 @@ function moveStep(index: number, offset: number) {
 }
 
 function applyTemplate(steps: ProcessStepDetail[]) {
-  if (!canEditProcess.value) {
-    ElMessage.warning('只有草稿订单可以修改生产流程');
+  if (!warnProcessEditUnavailable()) {
     return;
   }
   draftSteps.value = normalizeSteps(steps);
@@ -535,10 +768,11 @@ function applyTemplate(steps: ProcessStepDetail[]) {
 }
 
 function normalizeSteps(steps: ProcessStepDetail[]) {
+  // 不按当前本地标准工序列表过滤，避免列表尚未刷新时把模板步骤误删；保存时后端会校验标准工序状态。
   const result: ProcessStepDetail[] = [];
   steps.forEach((step) => {
     const processName = step.processName.trim();
-    if (processName && processOptions.value.includes(processName)) {
+    if (processName) {
       const processRemark = step.processRemark?.trim();
       result.push({
         processName,
@@ -555,9 +789,20 @@ function normalizeDraftSteps() {
 
 function handleDraftStepChange() {
   normalizeDraftSteps();
+  draftProcessFilterKeyword.value = '';
   const duplicates = duplicateStepNames(draftSteps.value);
   if (duplicates.length > 0) {
     ElMessage.warning(`当前零件流程存在重复工序：${duplicates.join('、')}，请确认后再保存`);
+  }
+}
+
+function handleDraftProcessFilter(keyword: string) {
+  draftProcessFilterKeyword.value = keyword;
+}
+
+function handleDraftProcessVisibleChange(visible: boolean) {
+  if (!visible) {
+    draftProcessFilterKeyword.value = '';
   }
 }
 
@@ -566,15 +811,20 @@ function duplicateStepNames(steps: ProcessStepDetail[]) {
   const duplicates = new Set<string>();
   for (const step of steps) {
     const processName = step.processName.trim();
-    if (!processName) {
+    const processKey = normalizeProcessNameKey(processName);
+    if (!processKey) {
       continue;
     }
-    if (seen.has(processName)) {
+    if (seen.has(processKey)) {
       duplicates.add(processName);
     }
-    seen.add(processName);
+    seen.add(processKey);
   }
   return [...duplicates];
+}
+
+function normalizeProcessNameKey(processName: string) {
+  return processName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
 }
 
 function selectedLineProcessDetails(line?: OrderLine): ProcessStepDetail[] {
@@ -588,15 +838,8 @@ function selectedLineProcessDetails(line?: OrderLine): ProcessStepDetail[] {
 }
 
 function goOrderDetail() {
-  if (returnToPath.value) {
-    void router.push(returnToPath.value);
-    return;
-  }
   if (order.value) {
-    void router.push({
-      path: `/orders/${encodeURIComponent(order.value.orderNo)}`,
-      query: { returnTo: normalizeReturnTo(route.fullPath) || '/processes' }
-    });
+    goOrderSummaryDetail(order.value.orderNo);
   }
 }
 
@@ -629,8 +872,7 @@ async function saveProcess() {
   if (!order.value || !selectedLine.value) {
     return false;
   }
-  if (!canEditProcess.value) {
-    ElMessage.warning('只有草稿订单可以修改生产流程');
+  if (!warnProcessSaveUnavailable()) {
     return false;
   }
 
@@ -649,7 +891,10 @@ async function saveProcess() {
   saving.value = true;
   try {
     // 保存时同步 OrderLine 流程，并同步尚未完成的 ProductionTask 快照。
-    order.value = await erpApi.updateLineProcess(order.value.orderNo, lineId, normalizedSteps);
+    order.value = await erpApi.updateLineProcess(order.value.orderNo, lineId, {
+      configuredByCode: processEditorCode.value,
+      steps: normalizedSteps
+    });
     applySelectedLine(lineId);
     ElMessage.success('生产流程已保存');
     return true;
@@ -669,41 +914,51 @@ async function saveAndNext() {
   }
 
   const currentIndex = order.value.lines.findIndex((line) => line.id === lineId);
-  const nextLine = order.value.lines[currentIndex + 1];
+  const nextLine = order.value.lines.slice(currentIndex + 1).find((line) => line.fulfillmentMode !== 'STOCK');
   if (nextLine) {
     applySelectedLine(nextLine.id);
   } else {
-    ElMessage.success('当前订单零件流程已全部处理');
+    ElMessage.success('当前订单需要配置流程的零件已全部处理');
   }
 }
 
-async function submitOrderFromProcess() {
+function validateSubmitOrderReady() {
   if (!order.value) {
-    return;
+    return false;
   }
   if (isDirty.value) {
     ElMessage.warning('请先保存当前零件流程');
-    return;
+    return false;
   }
   if (order.value.status !== 'DRAFT') {
     ElMessage.warning('只有草稿订单可以提交生产');
-    return;
+    return false;
   }
   if (missingLineNames.value.length > 0) {
     ElMessage.warning(`还有零件未配置流程：${missingLineNames.value.join('、')}`);
+    return false;
+  }
+  return true;
+}
+
+async function openSubmitOrderDialog() {
+  if (!validateSubmitOrderReady()) {
     return;
   }
+  submitPlanOperatorCode.value = '';
+  await loadSubmitPlanOperators('');
+  submitOrderDialogVisible.value = true;
+}
 
-  try {
-    await ElMessageBox.confirm('提交后会生成生产任务，订单零件不能再编辑。', '提交生产', {
-      confirmButtonText: '提交生产',
-      cancelButtonText: '取消',
-      type: 'warning'
-    });
-  } catch {
+async function confirmSubmitOrderFromProcess() {
+  if (!validateSubmitOrderReady() || !order.value) {
+    submitOrderDialogVisible.value = false;
     return;
   }
-
+  if (!submitPlanOperatorCode.value) {
+    ElMessage.warning('请选择下计划操作员');
+    return;
+  }
   submitting.value = true;
   try {
     const inventorySummary = await erpApi.inventorySummary({ status: 'AVAILABLE' });
@@ -718,8 +973,9 @@ async function submitOrderFromProcess() {
       return;
     }
     // 生产流程页确认全部零件流程后，直接提交订单并生成 ProductionTask。
-    order.value = await erpApi.submitOrder(order.value.orderNo);
+    order.value = await erpApi.submitOrder(order.value.orderNo, { submittedByCode: submitPlanOperatorCode.value });
     ElMessage.success('订单已提交生产');
+    submitOrderDialogVisible.value = false;
     await loadOrders();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '订单提交生产失败');
@@ -728,8 +984,48 @@ async function submitOrderFromProcess() {
   }
 }
 
+function isSubmitPlanOperator(operator: ProductionOperator) {
+  return /计划/.test(operator.role || '') && !/车间主任|主任/.test(operator.role || '');
+}
+
+function isProcessEditorOperator(operator: ProductionOperator) {
+  const role = operator.role || '';
+  return /计划|下单|订单|技术|工艺/.test(role) && !/车间|主任|操作员/.test(role);
+}
+
+function submitPlanOperatorLabel(operator: ProductionOperator) {
+  return `${operator.name} / ${operator.accountId || operator.code} / ${operator.role}`;
+}
+
+async function loadSubmitPlanOperators(keyword = '') {
+  submitPlanOperatorLoading.value = true;
+  try {
+    const operators = await erpApi.productionOperators(keyword.trim());
+    submitPlanOperators.value = operators.filter(isSubmitPlanOperator);
+  } catch (error) {
+    submitPlanOperators.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '下计划操作员加载失败');
+  } finally {
+    submitPlanOperatorLoading.value = false;
+  }
+}
+
+async function loadProcessEditorOperators(keyword = '') {
+  processEditorLoading.value = true;
+  try {
+    const operators = await erpApi.productionOperators(keyword.trim());
+    processEditorOperators.value = operators.filter(isProcessEditorOperator);
+  } catch (error) {
+    processEditorOperators.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '流程填写人员加载失败');
+  } finally {
+    processEditorLoading.value = false;
+  }
+}
+
 async function loadInitialState() {
   await loadProcessDefinitions();
+  await loadProcessEditorOperators('');
   const initialOrderNo = String(route.query.orderNo || '');
   if (!initialOrderNo) {
     await loadOrders();
@@ -872,15 +1168,39 @@ onMounted(loadInitialState);
   font-size: 13px;
 }
 
+.available-process-toolbar {
+  max-width: 360px;
+  padding: 8px 20px 4px;
+}
+
 .available-processes {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
+  min-height: 42px;
   padding: 8px 20px 18px;
+}
+
+.process-empty-text {
+  align-self: center;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .process-template-inline {
   margin: 4px 20px 18px;
+}
+
+.process-editor-form {
+  margin: 4px 20px 18px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.process-editor-form :deep(.el-select) {
+  width: min(380px, 100%);
 }
 
 .inline-process-create {
@@ -900,6 +1220,102 @@ onMounted(loadInitialState);
   margin: 0 20px 18px;
   color: #64748b;
   font-size: 13px;
+}
+
+.submit-production-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.submit-plan-form {
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.submit-plan-form :deep(.el-select) {
+  width: min(360px, 100%);
+}
+
+.form-help-text {
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.operator-option {
+  display: grid;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.operator-option strong {
+  color: #0f172a;
+}
+
+.operator-option span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.submit-production-row {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin: 0;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.submit-production-summary span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.submit-production-summary strong {
+  min-width: 0;
+  color: #0f172a;
+  overflow-wrap: anywhere;
+}
+
+.submit-production-lines {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.submit-production-line {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.submit-production-line div {
+  display: grid;
+  gap: 4px;
+}
+
+.submit-production-line span,
+.submit-production-line small {
+  min-width: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.discard-changes-text {
+  margin: 0;
+  color: #475569;
+  line-height: 1.7;
 }
 
 .builder-panel h4 {

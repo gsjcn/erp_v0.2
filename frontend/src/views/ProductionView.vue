@@ -149,7 +149,7 @@
             >
               主管确认补单
             </el-button>
-            <el-button v-if="shouldShowStartAction(row)" link type="primary" @click="start(row)">开始生产</el-button>
+            <el-button v-if="shouldShowStartAction(row)" link type="primary" @click="openStartDialog(row)">开始生产</el-button>
             <el-button
               v-else-if="shouldShowConfirmCompletedAction(row)"
               link
@@ -250,7 +250,7 @@
           >
             主管确认补单
           </el-button>
-          <el-button v-if="shouldShowStartAction(task)" link type="primary" @click="start(task)">开始生产</el-button>
+          <el-button v-if="shouldShowStartAction(task)" link type="primary" @click="openStartDialog(task)">开始生产</el-button>
           <el-button
             v-else-if="shouldShowConfirmCompletedAction(task)"
             link
@@ -274,6 +274,86 @@
       </article>
       <div v-if="!filteredTasks.length && !loading" class="mobile-empty">暂无生产任务</div>
     </div>
+
+    <el-dialog
+      v-model="startConfirmVisible"
+      title="开始生产确认"
+      width="min(640px, calc(100vw - 32px))"
+      class="responsive-dialog"
+    >
+      <div v-if="activeStartTask" class="start-confirm-panel">
+        <el-alert
+          title="确认后任务会进入生产中，后续必须按工序顺序填写完成表。"
+          type="warning"
+          :closable="false"
+        />
+        <el-form label-width="96px" class="supervisor-form">
+          <el-form-item label="车间主任" required>
+            <el-select
+              v-model="startSupervisorCode"
+              filterable
+              remote
+              clearable
+              reserve-keyword
+              placeholder="选择车间主任，支持姓名 / 拼音 / 首字母 / 账号ID"
+              :remote-method="searchStartSupervisors"
+              :loading="isOperatorLoading(startSupervisorScope)"
+              style="width: min(360px, 100%)"
+              @visible-change="handleStartSupervisorSelectVisible"
+            >
+              <el-option
+                v-for="operator in startSupervisorOptionRows"
+                :key="operator.code"
+                :label="operatorOptionLabel(operator)"
+                :value="operator.code"
+              >
+                <div class="operator-option">
+                  <strong>{{ operator.name }}</strong>
+                  <span>{{ operator.accountId || operator.code }} / {{ operator.role }}</span>
+                </div>
+              </el-option>
+            </el-select>
+            <div class="form-help-text">开始生产必须由车间主任确认；提交生产仍由下计划操作员处理。</div>
+          </el-form-item>
+        </el-form>
+        <div class="process-info-grid">
+          <div>
+            <label>订单号</label>
+            <strong><OrderNoLink :order-no="activeStartTask.orderNo" /></strong>
+          </div>
+          <div>
+            <label>任务号</label>
+            <strong>{{ activeStartTask.productionTaskNo }}</strong>
+          </div>
+          <div>
+            <label>客户</label>
+            <strong>{{ activeStartTask.customerName }}</strong>
+          </div>
+          <div>
+            <label>零件</label>
+            <strong>{{ activeStartTask.partName }}</strong>
+          </div>
+          <div>
+            <label>客户订单</label>
+            <strong>{{ formatCustomerOrderQuantity(activeStartTask) }}</strong>
+          </div>
+          <div>
+            <label>生产计划</label>
+            <strong>{{ formatQuantity(activeStartTask.plannedQuantity, activeStartTask.unit) }}</strong>
+          </div>
+        </div>
+        <div class="start-process-list">
+          <span>生产流程</span>
+          <strong>{{ startProcessText }}</strong>
+        </div>
+      </div>
+      <template #footer>
+        <el-button :disabled="startSaving" @click="startConfirmVisible = false">取消</el-button>
+        <el-button type="primary" :loading="startSaving" :disabled="!startSupervisorCode" @click="confirmStartProduction">
+          确认开始生产
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="noticeVisible" title="生产通知" width="min(760px, calc(100vw - 32px))">
       <div v-loading="noticeLoading" class="notice-list">
@@ -343,7 +423,7 @@
               <StatusTag :value="replenishmentRequestStatusTag(request.status)" compact />
             </div>
             <div class="replenishment-request-grid">
-              <p><span>订单号</span>{{ request.orderNo }}</p>
+              <p><span>订单号</span><OrderNoLink :order-no="request.orderNo" /></p>
               <p><span>任务号</span>{{ request.productionTaskNo || '-' }}</p>
               <p><span>零件</span>{{ request.partName }} / {{ request.partCode }}</p>
               <p><span>报废数量</span>{{ formatQuantity(request.scrapQuantity, request.unit) }}</p>
@@ -400,7 +480,7 @@
           </div>
           <div>
             <label>订单号</label>
-            <strong>{{ activeReplenishmentRejectRequest.orderNo }}</strong>
+            <strong><OrderNoLink :order-no="activeReplenishmentRejectRequest.orderNo" /></strong>
           </div>
           <div>
             <label>任务号</label>
@@ -445,22 +525,26 @@
       <div class="dialog-filter-row">
         <div class="filter-field compact">
           <label>报废日期</label>
-          <DateRangeFilter v-model="scrapDateRange" />
+          <DateRangeFilter v-model="scrapDateRange" @change="handleScrapScopeChange" />
         </div>
         <div class="filter-field compact">
           <label>客户</label>
-          <CustomerSelect v-model="scrapFilters.customerId" placeholder="全部客户" width="220px" @change="handleScrapCustomerChange" />
+          <CustomerSelect v-model="scrapFilters.customerId" placeholder="全部客户" width="220px" @change="handleScrapScopeChange" />
         </div>
         <div class="filter-field compact">
           <label>订单</label>
-          <OrderSelect v-model="scrapFilters.orderNo" :orders="scrapOrderOptions" placeholder="全部订单" width="260px" />
+          <OrderSelect v-model="scrapFilters.orderNo" :orders="scrapOrderOptions" placeholder="全部订单" width="260px" @change="loadScrapRecords" />
         </div>
         <el-button type="primary" :loading="scrapLoading" @click="loadScrapRecords">查询</el-button>
         <el-button @click="resetScrapFilters">重置</el-button>
       </div>
       <el-table v-loading="scrapLoading" :data="scrapRecords" max-height="520px">
         <el-table-column prop="scrapNo" label="报废记录号" min-width="180" />
-        <el-table-column prop="orderNo" label="订单号" min-width="150" />
+        <el-table-column label="订单号" min-width="150">
+          <template #default="{ row }">
+            <OrderNoLink :order-no="row.orderNo" />
+          </template>
+        </el-table-column>
         <el-table-column prop="productionTaskNo" label="任务号" min-width="210" />
         <el-table-column prop="partCode" label="物料编码" min-width="130" />
         <el-table-column prop="partName" label="物料名称" min-width="150" />
@@ -490,7 +574,7 @@
           </div>
           <div>
             <label>订单号</label>
-            <strong>{{ activeTask.orderNo }}</strong>
+            <strong><OrderNoLink :order-no="activeTask.orderNo" /></strong>
           </div>
           <div>
             <label>产品名称</label>
@@ -737,6 +821,26 @@
     </el-dialog>
 
     <el-dialog
+      v-model="quantityOverrideDialogVisible"
+      title="数量确认"
+      width="min(560px, calc(100vw - 32px))"
+      append-to-body
+      @closed="handleQuantityOverrideDialogClosed"
+    >
+      <div class="quantity-override-confirm">
+        <el-alert :title="processQuantityWarningText" type="warning" :closable="false" show-icon />
+        <p>
+          <span>填写原因</span>
+          <strong>{{ processForm.quantityOverrideReason }}</strong>
+        </p>
+      </div>
+      <template #footer>
+        <el-button :disabled="processSaving" @click="cancelQuantityOverrideDialog">返回修改</el-button>
+        <el-button type="primary" :loading="processSaving" @click="confirmQuantityOverrideDialog">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="finalConfirmVisible"
       :title="finalConfirmTitle"
       width="min(720px, calc(100vw - 32px))"
@@ -749,7 +853,7 @@
           </div>
           <div>
             <label>订单号</label>
-            <strong>{{ activeFinalTask.orderNo }}</strong>
+            <strong><OrderNoLink :order-no="activeFinalTask.orderNo" /></strong>
           </div>
           <div>
             <label>生产任务</label>
@@ -764,12 +868,42 @@
             <strong>{{ formatQuantity(activeFinalTask.plannedQuantity, activeFinalTask.unit) }}</strong>
           </div>
           <div>
+            <label>客户订单</label>
+            <strong>{{ formatCustomerOrderQuantity(activeFinalTask) }}</strong>
+          </div>
+          <div>
             <label>最后工序</label>
             <strong>{{ finalProcessLabel }}</strong>
           </div>
         </div>
 
         <el-form label-width="128px" class="mt-16">
+          <el-form-item label="车间主任" required>
+            <el-select
+              v-model="finalSupervisorCode"
+              filterable
+              remote
+              clearable
+              reserve-keyword
+              placeholder="选择车间主任，支持姓名 / 拼音 / 首字母 / 账号ID"
+              :remote-method="searchFinalSupervisors"
+              :loading="isOperatorLoading(finalSupervisorScope)"
+              style="width: 320px; max-width: 100%"
+              @visible-change="handleFinalSupervisorSelectVisible"
+            >
+              <el-option
+                v-for="operator in finalSupervisorOptionRows"
+                :key="operator.code"
+                :label="operatorOptionLabel(operator)"
+                :value="operator.code"
+              >
+                <div class="operator-option">
+                  <strong>{{ operator.name }}</strong>
+                  <span>{{ operator.accountId || operator.code }} / {{ operator.role }}</span>
+                </div>
+              </el-option>
+            </el-select>
+          </el-form-item>
           <el-form-item label="最终完成数量" required>
             <el-input-number
               v-model="finalForm.completedQuantity"
@@ -787,6 +921,19 @@
             :closable="false"
             class="mt-16"
           />
+          <div class="warehouse-split-panel">
+            <div>
+              <span>预计订单待发货</span>
+              <strong>{{ formatQuantity(finalOrderReceiptQuantityEstimate, activeFinalTask.unit) }}</strong>
+            </div>
+            <div>
+              <span>预计转备货库存</span>
+              <strong :class="{ 'stock-extra': finalStockQuantityEstimate > 0 }">
+                {{ formatQuantity(finalStockQuantityEstimate, activeFinalTask.unit) }}
+              </strong>
+            </div>
+            <small>仓库确认入库时会按客户订单剩余数量重新计算，最终以仓库入库结果为准。</small>
+          </div>
           <div v-if="finalShouldShowShortagePanel" class="shortage-panel">
             <el-alert
               :title="`缺少 ${formatQuantity(finalShortageQuantity, activeFinalTask.unit)}，必须填写报废数量，并选择生产报废补单申请或管理确认缺货完成。`"
@@ -866,7 +1013,7 @@
       </div>
       <template #footer>
         <el-button @click="finalConfirmVisible = false">取消</el-button>
-        <el-button type="primary" :loading="finalSaving" @click="saveFinalProductionCompletion">
+        <el-button type="primary" :loading="finalSaving" :disabled="!finalSupervisorCode" @click="saveFinalProductionCompletion">
           {{ activeFinalTask?.status === 'COMPLETED' ? '保存修改' : '确认完成' }}
         </el-button>
       </template>
@@ -885,7 +1032,7 @@
           </div>
           <div>
             <label>订单号</label>
-            <strong>{{ activeReplenishmentApprovalTask.orderNo }}</strong>
+            <strong><OrderNoLink :order-no="activeReplenishmentApprovalTask.orderNo" /></strong>
           </div>
           <div>
             <label>生产任务</label>
@@ -944,7 +1091,7 @@
         <div class="process-info-grid">
           <div>
             <label>订单号</label>
-            <strong>{{ activeWithdrawTask.orderNo }}</strong>
+            <strong><OrderNoLink :order-no="activeWithdrawTask.orderNo" /></strong>
           </div>
           <div>
             <label>任务号</label>
@@ -1115,7 +1262,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import { Bell, Document, Download, Printer, Refresh } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
@@ -1151,6 +1298,8 @@ const noticeVisible = ref(false);
 const noticeLoading = ref(false);
 const acknowledgeVisible = ref(false);
 const acknowledgeSaving = ref(false);
+const startConfirmVisible = ref(false);
+const startSaving = ref(false);
 const productionNotices = ref<ProductionNotice[]>([]);
 const activeProductionNotice = ref<ProductionNotice>();
 const replenishmentRequestVisible = ref(false);
@@ -1168,6 +1317,7 @@ const scrapOrderOptions = ref<OrderSummary[]>([]);
 const scrapDateRange = ref<string[]>([]);
 const processVisible = ref(false);
 const processSaving = ref(false);
+const quantityOverrideDialogVisible = ref(false);
 const finalConfirmVisible = ref(false);
 const finalSaving = ref(false);
 const replenishmentApprovalVisible = ref(false);
@@ -1175,6 +1325,7 @@ const replenishmentApprovalSaving = ref(false);
 const withdrawVisible = ref(false);
 const withdrawSaving = ref(false);
 const printPreviewVisible = ref(false);
+const activeStartTask = ref<ProductionTask>();
 const activeTask = ref<ProductionTask>();
 const activeFinalTask = ref<ProductionTask>();
 const activeReplenishmentApprovalTask = ref<ProductionTask>();
@@ -1183,13 +1334,18 @@ const activeWithdrawTask = ref<ProductionTask>();
 const activeProcessName = ref('');
 const batchProcessNames = ref<string[]>([]);
 const processOperatorCodes = reactive<Record<string, string[]>>({});
+const startSupervisorScope = 'start-supervisor';
+const finalSupervisorScope = 'final-supervisor';
 const finalOperatorScope = 'final';
+const startSupervisorCode = ref('');
+const finalSupervisorCode = ref('');
 const operatorLoadingByScope = reactive<Record<string, boolean>>({});
 const operatorOptionsByScope = reactive<Record<string, ProductionOperator[]>>({});
 const operatorKeywordByScope = reactive<Record<string, string>>({});
 const activeStatus = ref<ProductionDisplayStatus | 'ALL'>('ALL');
 const printDateTime = ref('');
 let operatorSearchRequestSequence = 0;
+let quantityOverrideResolver: ((confirmed: boolean) => void) | undefined;
 const operatorSearchRequestByScope = reactive<Record<string, number>>({});
 
 const filters = reactive<{
@@ -1242,14 +1398,7 @@ const withdrawForm = reactive({
   remark: ''
 });
 
-const fallbackOperatorOptions: ProductionOperator[] = [
-  { code: 'OP-001', accountId: 'OP-001', name: '张明', role: '冲压操作员', pinyin: 'zhangming', pinyinInitials: 'zm', keywords: ['zhang', 'ming', 'zm', '冲压'] },
-  { code: 'OP-002', accountId: 'OP-002', name: '李强', role: '激光切割操作员', pinyin: 'liqiang', pinyinInitials: 'lq', keywords: ['li', 'qiang', 'lq', '激光', '切割'] },
-  { code: 'OP-003', accountId: 'OP-003', name: '王磊', role: '焊接操作员', pinyin: 'wanglei', pinyinInitials: 'wl', keywords: ['wang', 'lei', 'wl', '焊接'] },
-  { code: 'OP-004', accountId: 'OP-004', name: '赵敏', role: '包装操作员', pinyin: 'zhaomin', pinyinInitials: 'zm', keywords: ['zhao', 'min', 'zm', '包装'] },
-  { code: 'OP-005', accountId: 'OP-005', name: '顾胜钧', role: '折弯操作员', pinyin: 'gushengjun', pinyinInitials: 'gsj', keywords: ['gu', 'sheng', 'jun', 'gs', 'gsj', '折弯'], idCardMasked: '3204********1234' }
-];
-const operatorOptions = ref<ProductionOperator[]>([...fallbackOperatorOptions]);
+const operatorOptions = ref<ProductionOperator[]>([]);
 const operatorCache = reactive<Record<string, ProductionOperator>>({});
 
 const counts = computed(() => ({
@@ -1330,8 +1479,24 @@ const finalProcessLabel = computed(() => {
   const finalProcessName = activeFinalTask.value.processSteps[activeFinalTask.value.processSteps.length - 1];
   return finalProcessName ? processStepDisplay(activeFinalTask.value, finalProcessName) : '-';
 });
+const startProcessText = computed(() => {
+  const task = activeStartTask.value;
+  if (!task) {
+    return '-';
+  }
+  if (task.processSteps.length === 0) {
+    return '未配置生产流程';
+  }
+  return task.processSteps.map((step) => processStepDisplay(task, step)).join('、');
+});
 
 const finalOperatorOptionRows = computed(() => operatorOptionRowsWithSelectedCodes(finalForm.operatorCodes, finalOperatorScope));
+const startSupervisorOptionRows = computed(() =>
+  supervisorOptionRowsWithSelectedCode(startSupervisorCode.value, startSupervisorScope)
+);
+const finalSupervisorOptionRows = computed(() =>
+  supervisorOptionRowsWithSelectedCode(finalSupervisorCode.value, finalSupervisorScope)
+);
 
 const batchProcessOptions = computed(() => {
   if (!activeTask.value || !activeProcessName.value || !processForm.isCompleted) {
@@ -1447,6 +1612,20 @@ const finalOverageQuantity = computed(() => {
   return Math.max(roundQuantity(Number(finalForm.completedQuantity || 0) - activeFinalTask.value.plannedQuantity), 0);
 });
 
+const finalOrderReceiptQuantityEstimate = computed(() => {
+  if (!activeFinalTask.value) {
+    return 0;
+  }
+  return Math.min(Number(finalForm.completedQuantity || 0), activeFinalTask.value.customerOrderQuantity || activeFinalTask.value.plannedQuantity);
+});
+
+const finalStockQuantityEstimate = computed(() => {
+  if (!activeFinalTask.value) {
+    return 0;
+  }
+  return Math.max(roundQuantity(Number(finalForm.completedQuantity || 0) - finalOrderReceiptQuantityEstimate.value), 0);
+});
+
 const finalShouldShowShortagePanel = computed(() => finalShortageQuantity.value > 0);
 
 function taskQueryParams() {
@@ -1469,9 +1648,10 @@ async function loadCustomers() {
 async function loadOperators() {
   try {
     const operators = await erpApi.productionOperators();
-    setOperatorOptions(operators.length > 0 ? operators : [...fallbackOperatorOptions]);
-  } catch {
-    setOperatorOptions([...fallbackOperatorOptions]);
+    setOperatorOptions(operators);
+  } catch (error) {
+    setOperatorOptions([]);
+    ElMessage.error(error instanceof Error ? error.message : '操作人员列表加载失败');
   }
 }
 
@@ -1568,32 +1748,46 @@ async function loadScrapRecords() {
 
 async function loadScrapOrderOptions() {
   try {
-    scrapOrderOptions.value = await erpApi.orders({
-      customerId: scrapFilters.customerId
-    });
+    const [records, orders] = await Promise.all([
+      erpApi.productionScrapRecords({
+        customerId: scrapFilters.customerId,
+        dateFrom: scrapDateRange.value[0],
+        dateTo: scrapDateRange.value[1]
+      }),
+      erpApi.orders({
+        customerId: scrapFilters.customerId
+      })
+    ]);
+    const scrapOrderNos = new Set(records.map((record) => record.orderNo).filter(Boolean));
+    // 报废统计的日期是报废日期，不是订单日期；订单下拉按当前报废日期/客户范围内实际有报废记录的订单缩小。
+    scrapOrderOptions.value = orders.filter((order) => scrapOrderNos.has(order.orderNo));
     if (scrapFilters.orderNo && !scrapOrderOptions.value.some((item) => item.orderNo === scrapFilters.orderNo)) {
       scrapFilters.orderNo = undefined;
     }
   } catch (error) {
+    scrapOrderOptions.value = [];
     ElMessage.error(error instanceof Error ? error.message : '报废统计订单选项加载失败');
   }
 }
 
 async function openScrapRecords() {
   scrapVisible.value = true;
-  await Promise.all([loadScrapOrderOptions(), loadScrapRecords()]);
+  await loadScrapOrderOptions();
+  await loadScrapRecords();
 }
 
 async function resetScrapFilters() {
   scrapFilters.customerId = undefined;
   scrapFilters.orderNo = undefined;
   scrapDateRange.value = [];
-  await Promise.all([loadScrapOrderOptions(), loadScrapRecords()]);
+  await loadScrapOrderOptions();
+  await loadScrapRecords();
 }
 
-async function handleScrapCustomerChange() {
+async function handleScrapScopeChange() {
   scrapFilters.orderNo = undefined;
   await loadScrapOrderOptions();
+  await loadScrapRecords();
 }
 
 async function queryTasks() {
@@ -1657,13 +1851,36 @@ async function saveNoticeAcknowledge(acknowledgedBy: string) {
   }
 }
 
-async function start(row: ProductionTask) {
+function openStartDialog(row: ProductionTask) {
+  activeStartTask.value = row;
+  startSupervisorCode.value = '';
+  startConfirmVisible.value = true;
+  void searchStartSupervisors('');
+}
+
+async function confirmStartProduction() {
+  if (!activeStartTask.value) {
+    return;
+  }
+  if (!startSupervisorCode.value) {
+    ElMessage.warning('请选择车间主任');
+    return;
+  }
+  // 开始生产会改变任务状态，先由前端确认，再交给后端校验订单和任务当前状态。
+  startSaving.value = true;
   try {
-    await erpApi.startProduction(row.id);
+    await erpApi.startProduction(activeStartTask.value.id, {
+      supervisorCode: startSupervisorCode.value
+    });
     ElMessage.success('已开始生产');
+    startConfirmVisible.value = false;
+    activeStartTask.value = undefined;
+    startSupervisorCode.value = '';
     await loadTasks();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '开始生产失败');
+  } finally {
+    startSaving.value = false;
   }
 }
 
@@ -2021,6 +2238,15 @@ function operatorOptionRowsWithSelectedCodes(selectedCodes: string[], scope: str
   return Array.from(merged.values());
 }
 
+function isWorkshopSupervisor(operator: ProductionOperator) {
+  const role = operator.role || '';
+  return !role.includes('计划') && (role.includes('车间主任') || role.includes('车间主管') || role.includes('主任'));
+}
+
+function supervisorOptionRowsWithSelectedCode(selectedCode: string, scope: string) {
+  return operatorOptionRowsWithSelectedCodes(selectedCode ? [selectedCode] : [], scope).filter(isWorkshopSupervisor);
+}
+
 function operatorOptionRowsForProcess(processName: string) {
   return operatorOptionRowsWithSelectedCodes(operatorCodesForProcess(processName), operatorScopeForProcess(processName));
 }
@@ -2044,7 +2270,7 @@ async function searchOperatorsForScope(scope: string, keyword: string) {
     }
   } catch {
     if (requestId === operatorSearchRequestByScope[scope]) {
-      setOperatorOptionsForScope(scope, keyword.trim() ? [] : [...fallbackOperatorOptions]);
+      setOperatorOptionsForScope(scope, []);
     }
   } finally {
     if (requestId === operatorSearchRequestByScope[scope]) {
@@ -2059,6 +2285,14 @@ function searchOperatorsForProcess(processName: string, keyword: string) {
 
 function searchFinalOperators(keyword: string) {
   return searchOperatorsForScope(finalOperatorScope, keyword);
+}
+
+function searchStartSupervisors(keyword: string) {
+  return searchOperatorsForScope(startSupervisorScope, keyword);
+}
+
+function searchFinalSupervisors(keyword: string) {
+  return searchOperatorsForScope(finalSupervisorScope, keyword);
 }
 
 function handleOperatorSelectVisible(scope: string, visible: boolean) {
@@ -2078,6 +2312,14 @@ function handleProcessOperatorSelectVisible(processName: string, visible: boolea
 
 function handleFinalOperatorSelectVisible(visible: boolean) {
   handleOperatorSelectVisible(finalOperatorScope, visible);
+}
+
+function handleStartSupervisorSelectVisible(visible: boolean) {
+  handleOperatorSelectVisible(startSupervisorScope, visible);
+}
+
+function handleFinalSupervisorSelectVisible(visible: boolean) {
+  handleOperatorSelectVisible(finalSupervisorScope, visible);
 }
 
 function operatorOptionLabel(operator: ProductionOperator) {
@@ -2119,16 +2361,37 @@ async function confirmProcessQuantityOverride() {
     ElMessage.warning('完成数量超过上一道工序数量，请填写原因');
     return false;
   }
-  try {
-    await ElMessageBox.confirm(processQuantityWarningText.value, '数量确认', {
-      type: 'warning',
-      confirmButtonText: '确定',
-      cancelButtonText: '返回修改'
-    });
-    return true;
-  } catch {
-    return false;
+  if (quantityOverrideResolver) {
+    quantityOverrideResolver(false);
+    quantityOverrideResolver = undefined;
   }
+  quantityOverrideDialogVisible.value = true;
+  return new Promise<boolean>((resolve) => {
+    quantityOverrideResolver = resolve;
+  });
+}
+
+function confirmQuantityOverrideDialog() {
+  const resolve = quantityOverrideResolver;
+  quantityOverrideResolver = undefined;
+  quantityOverrideDialogVisible.value = false;
+  resolve?.(true);
+}
+
+function cancelQuantityOverrideDialog() {
+  const resolve = quantityOverrideResolver;
+  quantityOverrideResolver = undefined;
+  quantityOverrideDialogVisible.value = false;
+  resolve?.(false);
+}
+
+function handleQuantityOverrideDialogClosed() {
+  if (!quantityOverrideResolver) {
+    return;
+  }
+  const resolve = quantityOverrideResolver;
+  quantityOverrideResolver = undefined;
+  resolve(false);
 }
 
 function buildShortagePayloadFromForm() {
@@ -2167,11 +2430,17 @@ async function confirmCompletedTask(row: ProductionTask) {
   finalForm.managerName = finalCompletion?.managerName || '';
   finalForm.shortageReason = finalCompletion?.shortageReason || '';
   finalForm.remark = finalCompletion?.remark || row.remark || '';
+  finalSupervisorCode.value = '';
   finalConfirmVisible.value = true;
+  void searchFinalSupervisors('');
 }
 
 function validateFinalCompletion() {
   if (!activeFinalTask.value) {
+    return false;
+  }
+  if (!finalSupervisorCode.value) {
+    ElMessage.warning('请选择车间主任');
     return false;
   }
   if (!finalForm.completedQuantity || finalForm.completedQuantity <= 0) {
@@ -2224,6 +2493,7 @@ async function saveFinalProductionCompletion() {
   finalSaving.value = true;
   try {
     await erpApi.completeProduction(activeFinalTask.value.id, {
+      supervisorCode: finalSupervisorCode.value,
       completedQuantity: finalForm.completedQuantity,
       operatorCodes: cleanOperatorCodes(finalForm.operatorCodes),
       ...buildFinalShortagePayload(),
@@ -2231,6 +2501,7 @@ async function saveFinalProductionCompletion() {
     });
     ElMessage.success(activeFinalTask.value.status === 'COMPLETED' ? '生产完成确认已修改' : '生产已确认完成，请到仓库确认入库');
     finalConfirmVisible.value = false;
+    finalSupervisorCode.value = '';
     await loadTasks();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '确认生产完成失败');
@@ -2863,6 +3134,44 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.start-confirm-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.supervisor-form {
+  padding: 10px 0 0;
+}
+
+.form-help-text {
+  width: 100%;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.start-process-list {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.start-process-list span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.start-process-list strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
 .dialog-filter-row {
   display: flex;
   flex-wrap: wrap;
@@ -2960,6 +3269,42 @@ onMounted(async () => {
   border-radius: 8px;
 }
 
+.warehouse-split-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 16px 128px;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.warehouse-split-panel div {
+  display: grid;
+  gap: 4px;
+}
+
+.warehouse-split-panel span,
+.warehouse-split-panel small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.warehouse-split-panel strong {
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.warehouse-split-panel small {
+  grid-column: 1 / -1;
+}
+
+.stock-extra {
+  color: #b45309;
+}
+
 .process-quantity-panel {
   display: grid;
   gap: 10px;
@@ -2968,6 +3313,32 @@ onMounted(async () => {
   background: #fff7ed;
   border: 1px solid #fed7aa;
   border-radius: 8px;
+}
+
+.quantity-override-confirm {
+  display: grid;
+  gap: 12px;
+}
+
+.quantity-override-confirm p {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.quantity-override-confirm span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.quantity-override-confirm strong {
+  color: #0f172a;
+  line-height: 1.6;
+  white-space: pre-wrap;
 }
 
 .process-step-button {
@@ -3499,7 +3870,12 @@ onMounted(async () => {
 
   .batch-process-group .el-checkbox {
     flex: 1 1 128px;
-    min-height: 36px;
+    min-height: 44px;
+  }
+
+  .process-step-button {
+    min-height: 44px;
+    padding: 0 14px;
   }
 
   .drawing-file-toolbar {
@@ -3521,8 +3897,13 @@ onMounted(async () => {
   }
 
   .shortage-panel,
+  .warehouse-split-panel,
   .process-quantity-panel {
     margin-left: 0;
+  }
+
+  .warehouse-split-panel {
+    grid-template-columns: 1fr;
   }
 
   .drawing-sheet {

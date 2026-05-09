@@ -32,6 +32,10 @@ export class MaterialSuggestionQueryDto {
   @IsOptional()
   @IsString()
   warehouseId?: string;
+
+  @IsOptional()
+  @IsIn(['ALL', 'ORDER', 'STOCK'])
+  sourceType?: 'ALL' | 'ORDER' | 'STOCK';
 }
 
 export class InventorySourceDetailQueryDto {

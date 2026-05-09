@@ -9,7 +9,7 @@
         <el-input
           v-model="keyword"
           clearable
-          placeholder="搜索流程名称 / 工序 / 备注 / 拼音"
+          placeholder="搜索流程名称 / 工序 / 备注 / 拼音 / 首字母"
           class="process-template-search"
           @keyup.enter="loadTemplates"
           @clear="loadTemplates"
@@ -52,7 +52,7 @@
             <el-button link type="primary" @click.stop="openPreviewDialog(template)">查看</el-button>
             <el-button link type="primary" @click.stop="openEditDialog(template)">编辑</el-button>
             <el-button link type="primary" @click.stop="openCopyDialog(template)">复制</el-button>
-            <el-button link type="danger" @click.stop="deleteTemplate(template)">删除</el-button>
+            <el-button link type="danger" @click.stop="openDeleteDialog(template)">删除</el-button>
           </div>
         </article>
       </el-tooltip>
@@ -89,8 +89,15 @@
           <div class="template-step-editor">
             <div v-for="(step, index) in templateForm.steps" :key="`template-step-${index}`" class="template-step-row">
               <span class="template-step-index">{{ index + 1 }}</span>
-              <el-select v-model="step.processName" placeholder="标准工序" @change="handleTemplateStepChange">
-                <el-option v-for="process in dynamicProcessOptions" :key="process" :label="process" :value="process" />
+              <el-select
+                v-model="step.processName"
+                filterable
+                placeholder="标准工序 / 拼音 / 首字母"
+                :filter-method="handleTemplateProcessFilter"
+                @change="handleTemplateStepChange"
+                @visible-change="handleTemplateProcessVisibleChange"
+              >
+                <el-option v-for="process in filteredDynamicProcessOptions" :key="process" :label="process" :value="process" />
               </el-select>
               <el-input
                 v-model="step.processRemark"
@@ -105,8 +112,15 @@
               </div>
             </div>
             <div class="template-step-add">
-              <el-select v-model="newStepName" placeholder="选择标准工序" style="width: 200px">
-                <el-option v-for="process in availableNewStepOptions" :key="process" :label="process" :value="process" />
+              <el-select
+                v-model="newStepName"
+                filterable
+                placeholder="选择标准工序 / 拼音 / 首字母"
+                style="width: 200px"
+                :filter-method="handleNewStepProcessFilter"
+                @visible-change="handleNewStepProcessVisibleChange"
+              >
+                <el-option v-for="process in filteredNewStepOptions" :key="process" :label="process" :value="process" />
               </el-select>
               <el-button @click="addTemplateStep">添加工序</el-button>
             </div>
@@ -146,15 +160,34 @@
         <el-button v-if="previewTemplate" type="primary" plain @click="copyPreviewTemplate">复制编辑</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="deleteDialogVisible"
+      title="删除流程记忆"
+      width="min(520px, calc(100vw - 32px))"
+      append-to-body
+    >
+      <div class="delete-template-summary">
+        <p>
+          <span>流程名称</span>
+          <strong>{{ activeDeleteTemplate?.templateName }}</strong>
+        </p>
+        <p class="delete-template-warning">删除后不会影响已经保存到订单零件的流程。</p>
+      </div>
+      <template #footer>
+        <el-button :disabled="deleting" @click="deleteDialogVisible = false">取消</el-button>
+        <el-button type="danger" :loading="deleting" @click="deleteTemplate">删除</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import { erpApi } from '../api/erp';
-import { standardProcessOptions } from '../config/processes';
 import type { ProcessStepDetail, ProcessTemplate } from '../types/erp';
+import { filterPinyinSearchOptions } from '../utils/pinyinSearch';
 
 const props = withDefaults(
   defineProps<{
@@ -183,7 +216,7 @@ const emit = defineEmits<{
   processDefinitionUpdated: [];
 }>();
 
-const dynamicProcessOptions = ref<string[]>([...standardProcessOptions]);
+const dynamicProcessOptions = ref<string[]>([]);
 const templateNameMaxLength = 60;
 const templateRemarkMaxLength = 300;
 const processRemarkMaxLength = 120;
@@ -191,14 +224,19 @@ const templates = ref<ProcessTemplate[]>([]);
 const keyword = ref('');
 const loading = ref(false);
 const saving = ref(false);
+const deleting = ref(false);
 const dialogVisible = ref(false);
 const previewVisible = ref(false);
+const deleteDialogVisible = ref(false);
 const previewTemplate = ref<ProcessTemplate>();
+const activeDeleteTemplate = ref<ProcessTemplate>();
 const editingTemplateId = ref('');
 const newStepName = ref('');
 const newProcessName = ref('');
 const searchTimer = ref<number>();
 const creatingProcess = ref(false);
+const templateProcessFilterKeyword = ref('');
+const newStepProcessFilterKeyword = ref('');
 const templateForm = reactive({
   templateName: '',
   remark: '',
@@ -207,18 +245,26 @@ const templateForm = reactive({
 
 const dialogTitle = computed(() => (editingTemplateId.value ? '编辑流程记忆' : '新建流程记忆'));
 const availableNewStepOptions = computed(() =>
-  dynamicProcessOptions.value.filter((processName) => !templateForm.steps.some((step) => step.processName === processName))
+  dynamicProcessOptions.value.filter(
+    (processName) => !templateForm.steps.some((step) => normalizeProcessNameKey(step.processName) === normalizeProcessNameKey(processName))
+  )
 );
+const filteredDynamicProcessOptions = computed(() => filterPinyinSearchOptions(dynamicProcessOptions.value, templateProcessFilterKeyword.value));
+const filteredNewStepOptions = computed(() => filterPinyinSearchOptions(availableNewStepOptions.value, newStepProcessFilterKeyword.value));
 const canCreateFromSource = computed(() =>
-  props.sourceSteps.some((step) => step.processName?.trim() && dynamicProcessOptions.value.includes(step.processName.trim()))
+  props.sourceSteps.some((step) => {
+    const processKey = normalizeProcessNameKey(step.processName || '');
+    return Boolean(processKey && dynamicProcessOptions.value.some((item) => normalizeProcessNameKey(item) === processKey));
+  })
 );
 
 async function loadProcessDefinitions() {
   try {
     const rows = await erpApi.processDefinitions(undefined, 'ENABLED');
     dynamicProcessOptions.value = rows.map((row) => row.processName);
-  } catch {
-    dynamicProcessOptions.value = [...standardProcessOptions];
+  } catch (error) {
+    dynamicProcessOptions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败');
   }
 }
 
@@ -239,7 +285,8 @@ async function createProcessDefinition() {
     ElMessage.warning('请填写标准工序名称');
     return;
   }
-  if (dynamicProcessOptions.value.some((item) => item.toLocaleLowerCase() === processName.toLocaleLowerCase())) {
+  const processKey = normalizeProcessNameKey(processName);
+  if (dynamicProcessOptions.value.some((item) => normalizeProcessNameKey(item) === processKey)) {
     ElMessage.warning(`标准工序“${processName}”已存在，请勿重复创建`);
     return;
   }
@@ -281,6 +328,7 @@ function openCreateDialog() {
   templateForm.remark = '';
   templateForm.steps = [];
   newStepName.value = '';
+  resetProcessSelectFilters();
   dialogVisible.value = true;
 }
 
@@ -291,6 +339,7 @@ function openCreateFromSourceDialog() {
   templateForm.remark = '';
   templateForm.steps = cloneProcessSteps(props.sourceSteps).filter((step) => step.processName);
   newStepName.value = '';
+  resetProcessSelectFilters();
   dialogVisible.value = true;
 }
 
@@ -300,6 +349,7 @@ function openEditDialog(template: ProcessTemplate) {
   templateForm.remark = template.remark || '';
   templateForm.steps = cloneProcessSteps(template.steps);
   newStepName.value = '';
+  resetProcessSelectFilters();
   dialogVisible.value = true;
 }
 
@@ -309,6 +359,7 @@ function openCopyDialog(template: ProcessTemplate) {
   templateForm.remark = template.remark || '';
   templateForm.steps = cloneProcessSteps(template.steps);
   newStepName.value = '';
+  resetProcessSelectFilters();
   dialogVisible.value = true;
 }
 
@@ -341,20 +392,48 @@ function addTemplateStep() {
     ElMessage.warning('请选择标准工序');
     return;
   }
-  if (templateForm.steps.some((step) => step.processName === processName)) {
+  const processKey = normalizeProcessNameKey(processName);
+  if (templateForm.steps.some((step) => normalizeProcessNameKey(step.processName) === processKey)) {
     ElMessage.warning(`当前流程已包含工序：${processName}`);
     return;
   }
   templateForm.steps.push({ processName, processRemark: '' });
   newStepName.value = '';
+  newStepProcessFilterKeyword.value = '';
 }
 
 function handleTemplateStepChange() {
   normalizeTemplateSteps();
+  templateProcessFilterKeyword.value = '';
   const duplicates = duplicateTemplateStepNames();
   if (duplicates.length > 0) {
     ElMessage.warning(`当前流程存在重复工序：${duplicates.join('、')}，请确认后再保存`);
   }
+}
+
+function handleTemplateProcessFilter(keyword: string) {
+  templateProcessFilterKeyword.value = keyword;
+}
+
+function handleNewStepProcessFilter(keyword: string) {
+  newStepProcessFilterKeyword.value = keyword;
+}
+
+function handleTemplateProcessVisibleChange(visible: boolean) {
+  if (!visible) {
+    templateProcessFilterKeyword.value = '';
+  }
+}
+
+function handleNewStepProcessVisibleChange(visible: boolean) {
+  if (!visible) {
+    newStepProcessFilterKeyword.value = '';
+  }
+}
+
+function resetProcessSelectFilters() {
+  templateProcessFilterKeyword.value = '';
+  newStepProcessFilterKeyword.value = '';
 }
 
 function removeTemplateStep(index: number) {
@@ -370,10 +449,11 @@ function moveTemplateStep(index: number, offset: number) {
 }
 
 function normalizeTemplateSteps() {
+  // 本地只做空白清理，不按当前下拉选项删除步骤；后端会校验标准工序是否仍启用。
   const result: ProcessStepDetail[] = [];
   for (const step of templateForm.steps) {
     const processName = step.processName.trim();
-    if (!processName || !dynamicProcessOptions.value.includes(processName)) {
+    if (!processName) {
       continue;
     }
     const processRemark = step.processRemark?.trim();
@@ -387,15 +467,20 @@ function duplicateTemplateStepNames() {
   const duplicates = new Set<string>();
   for (const step of templateForm.steps) {
     const processName = step.processName.trim();
-    if (!processName) {
+    const processKey = normalizeProcessNameKey(processName);
+    if (!processKey) {
       continue;
     }
-    if (seen.has(processName)) {
+    if (seen.has(processKey)) {
       duplicates.add(processName);
     }
-    seen.add(processName);
+    seen.add(processKey);
   }
   return [...duplicates];
+}
+
+function normalizeProcessNameKey(processName: string) {
+  return processName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
 }
 
 async function saveTemplate() {
@@ -407,6 +492,14 @@ async function saveTemplate() {
   }
   if (templateName.length > templateNameMaxLength) {
     ElMessage.warning(`流程名称不能超过 ${templateNameMaxLength} 个字符`);
+    return;
+  }
+  const templateNameKey = normalizeTemplateNameKey(templateName);
+  const duplicatedTemplate = templates.value.find(
+    (template) => template.id !== editingTemplateId.value && normalizeTemplateNameKey(template.templateName) === templateNameKey
+  );
+  if (duplicatedTemplate) {
+    ElMessage.warning(`流程记忆“${duplicatedTemplate.templateName}”已存在，请勿重复创建`);
     return;
   }
   if (templateForm.remark.trim().length > templateRemarkMaxLength) {
@@ -452,24 +545,25 @@ async function saveTemplate() {
 }
 
 function cloneProcessSteps(steps: ProcessStepDetail[]) {
+  // 应用模板时保留模板里的完整步骤；标准工序是否仍可用由保存接口统一校验，避免接口加载慢时把步骤误删。
   return steps
     .map((step) => ({
       processName: step.processName.trim(),
       ...(step.processRemark?.trim() ? { processRemark: step.processRemark.trim() } : {})
     }))
-    .filter((step) => step.processName && dynamicProcessOptions.value.includes(step.processName));
+    .filter((step) => step.processName);
 }
 
 function nextAvailableName(name: string) {
   const baseName = truncateTemplateName(name.trim() || '流程记忆');
-  const usedNames = new Set(templates.value.map((template) => template.templateName.trim().toLowerCase()));
-  if (!usedNames.has(baseName.toLowerCase())) {
+  const usedNames = new Set(templates.value.map((template) => normalizeTemplateNameKey(template.templateName)));
+  if (!usedNames.has(normalizeTemplateNameKey(baseName))) {
     return baseName;
   }
 
   let index = 2;
   let candidate = buildNumberedTemplateName(baseName, index);
-  while (usedNames.has(candidate.toLowerCase())) {
+  while (usedNames.has(normalizeTemplateNameKey(candidate))) {
     index += 1;
     candidate = buildNumberedTemplateName(baseName, index);
   }
@@ -486,24 +580,32 @@ function buildNumberedTemplateName(baseName: string, index: number) {
   return `${head}${suffix}`;
 }
 
-async function deleteTemplate(template: ProcessTemplate) {
-  try {
-    await ElMessageBox.confirm(`确定删除流程记忆“${template.templateName}”？删除后不会影响已经保存到订单零件的流程。`, '删除流程记忆', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      type: 'warning'
-    });
-  } catch {
+function normalizeTemplateNameKey(templateName: string) {
+  return templateName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
+}
+
+function openDeleteDialog(template: ProcessTemplate) {
+  activeDeleteTemplate.value = template;
+  deleteDialogVisible.value = true;
+}
+
+async function deleteTemplate() {
+  if (!activeDeleteTemplate.value) {
     return;
   }
 
+  deleting.value = true;
   try {
-    await erpApi.deleteProcessTemplate(template.id);
+    await erpApi.deleteProcessTemplate(activeDeleteTemplate.value.id);
     ElMessage.success('流程记忆已删除');
+    deleteDialogVisible.value = false;
+    activeDeleteTemplate.value = undefined;
     await loadTemplates();
     emit('updated');
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '流程记忆删除失败');
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -731,6 +833,38 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 .process-template-tooltip p {
   margin: 8px 0 0;
   color: #64748b;
+}
+
+.delete-template-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.delete-template-summary p {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0;
+}
+
+.delete-template-summary span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.delete-template-summary strong {
+  color: #0f172a;
+}
+
+.delete-template-warning {
+  display: block !important;
+  padding: 10px 12px;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  line-height: 1.6;
 }
 
 @media (max-width: 900px) {

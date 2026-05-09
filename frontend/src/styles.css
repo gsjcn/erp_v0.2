@@ -711,13 +711,33 @@ a {
   .filter-field .el-range-editor .el-range-input {
     min-width: 0;
     width: 42%;
-    font-size: 13px;
+    font-size: 16px;
   }
 
   .filter-field .el-range-editor .el-range-separator {
     flex: 0 0 22px;
     min-width: 22px;
     padding: 0;
+  }
+
+  .el-input__wrapper,
+  .el-select__wrapper,
+  .el-date-editor.el-input__wrapper,
+  .el-range-editor.el-input__wrapper,
+  .el-textarea__inner {
+    min-height: 44px;
+  }
+
+  .el-input__inner,
+  .el-select__placeholder,
+  .el-select__selected-item,
+  .el-range-input,
+  .el-textarea__inner {
+    font-size: 16px !important;
+  }
+
+  .el-button {
+    min-height: 44px;
   }
 
   .stat-grid {

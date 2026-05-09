@@ -69,6 +69,22 @@ export class WarehouseTransactionQueryDto {
   @IsOptional()
   @IsEnum(InventoryTransactionType)
   transactionType?: InventoryTransactionType;
+
+  @IsOptional()
+  @IsString()
+  customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  orderNo?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
 }
 
 export class WarehouseNoticeQueryDto {

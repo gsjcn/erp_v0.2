@@ -24,7 +24,7 @@ const labelMap: Record<string, string> = {
   RECEIVED: '已入库',
   AVAILABLE: '可用',
   USED: '已使用',
-  ORDER_DRAFT: '草稿',
+  ORDER_DRAFT: '待提交生产',
   ORDER_CANCELLED: '已取消',
   WAITING_PRODUCTION: '待生产',
   IN_PRODUCTION_STAGE: '生产中',

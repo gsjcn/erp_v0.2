@@ -8,6 +8,7 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
@@ -150,7 +151,17 @@ export class WithdrawProductionTaskDto {
   remark?: string;
 }
 
+export class StartProductionDto {
+  @IsString()
+  @IsNotEmpty()
+  supervisorCode!: string;
+}
+
 export class CompleteProductionDto {
+  @IsString()
+  @IsNotEmpty()
+  supervisorCode!: string;
+
   @IsOptional()
   @IsNumber()
   @Min(0.001)

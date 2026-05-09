@@ -26,7 +26,7 @@
       </el-option>
     </el-select>
     <div v-if="selectedOrder" class="order-select-summary">
-      {{ selectedOrder.customerName }} / 订单 {{ formatDate(selectedOrder.orderDate) }} / 交期 {{ formatDate(selectedOrder.deliveryDate) }} /
+      {{ selectedOrder.customerName }}（{{ selectedOrder.customerCode }}） / 订单 {{ formatDate(selectedOrder.orderDate) }} / 交期 {{ formatDate(selectedOrder.deliveryDate) }} /
       {{ selectedOrder.partCount }} 个零件
     </div>
   </div>
@@ -37,6 +37,7 @@ import { computed, ref, watch } from 'vue';
 import StatusTag from './StatusTag.vue';
 import type { OrderSummary } from '../types/erp';
 import { formatDate } from '../utils/format';
+import { pinyinSearchMatches } from '../utils/pinyinSearch';
 
 const props = withDefaults(
   defineProps<{
@@ -88,28 +89,29 @@ function handleChange(value?: string) {
   emit('change', nextValue);
 }
 
+function orderMatchesKeyword(order: OrderSummary, normalizedKeyword: string) {
+  // 订单下拉只在当前日期/客户范围内做轻量本地过滤，不改变父页面筛选范围。
+  return pinyinSearchMatches(
+    [
+      order.orderNo,
+      order.customerCode,
+      order.customerName,
+      order.customerSearchText,
+      formatDate(order.orderDate),
+      formatDate(order.deliveryDate),
+      order.status,
+      order.productionStatus,
+      order.warehouseStage
+    ],
+    normalizedKeyword
+  );
+}
+
 function normalizeKeyword(value?: string | null) {
   return String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, '');
-}
-
-function orderMatchesKeyword(order: OrderSummary, normalizedKeyword: string) {
-  // 订单下拉只在当前日期/客户范围内做轻量本地过滤，不改变父页面筛选范围。
-  const searchText = [
-    order.orderNo,
-    order.customerName,
-    order.customerSearchText,
-    formatDate(order.orderDate),
-    formatDate(order.deliveryDate),
-    order.status,
-    order.productionStatus,
-    order.warehouseStage
-  ]
-    .filter(Boolean)
-    .join(' ');
-  return normalizeKeyword(searchText).includes(normalizedKeyword);
+    .replace(/[\s\-_./\\]+/g, '');
 }
 
 watch(

@@ -12,6 +12,7 @@ import {
   ProductionScrapQueryDto,
   ProductionTaskQueryDto,
   RejectProductionReplenishmentRequestDto,
+  StartProductionDto,
   WithdrawProductionTaskDto
 } from './dto';
 import { ProductionService } from './production.service';
@@ -66,8 +67,8 @@ export class ProductionController {
   }
 
   @Post(':id/start')
-  start(@Param('id') id: string) {
-    return this.productionService.start(id);
+  start(@Param('id') id: string, @Body() dto: StartProductionDto) {
+    return this.productionService.start(id, dto);
   }
 
   @Post(':id/withdraw')

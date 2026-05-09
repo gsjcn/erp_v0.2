@@ -14,7 +14,7 @@ import {
   processSnapshotToDetails,
   type ProcessStepSnapshot
 } from '../../common/serializers';
-import { buildPinyinSearchText } from '../../common/pinyin-search';
+import { buildPinyinSearchText, normalizeSearchKeyword } from '../../common/pinyin-search';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProcessDefinitionsService } from '../process-definitions/process-definitions.service';
@@ -28,6 +28,7 @@ import {
   CreateOrderDto,
   NextOrderNoQueryDto,
   OrderQueryDto,
+  SubmitOrderDto,
   UpdateLineProcessDto,
   UpdateLineQuantityDto,
   UpdateOrderDto
@@ -41,6 +42,25 @@ type NormalizedCancelHandlingPlanItem = {
   handlingQuantity: number;
   remark?: string;
 };
+
+type SubmitPlanOperator = {
+  accountId: string;
+  name: string;
+  role: string;
+};
+
+const fallbackSubmitPlanOperators: SubmitPlanOperator[] = [
+  {
+    accountId: 'PLAN-001',
+    name: '刘计划',
+    role: '生产计划员'
+  },
+  {
+    accountId: 'WS-001',
+    name: '陈主任',
+    role: '车间主任'
+  }
+];
 
 @Injectable()
 export class OrdersService {
@@ -183,6 +203,7 @@ export class OrdersService {
 
   async create(dto: CreateOrderDto) {
     this.validateOrderLines(dto.lines);
+    await this.validateOrderStockSourceSelections(dto.lines);
 
     const customer = await this.prisma.customer.findUnique({ where: { id: dto.customerId } });
     if (!customer) {
@@ -284,6 +305,7 @@ export class OrdersService {
 
   async update(orderNo: string, dto: UpdateOrderDto) {
     this.validateOrderLines(dto.lines);
+    await this.validateOrderStockSourceSelections(dto.lines);
 
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const order = await this.prisma.customerOrder.findFirst({
@@ -383,6 +405,7 @@ export class OrdersService {
   }
 
   async updateLineProcess(orderNo: string, lineId: string, dto: UpdateLineProcessDto) {
+    const processEditor = await this.resolveProcessEditorOperator(dto.configuredByCode);
     const steps = await this.normalizeProcessSteps(dto.steps, true);
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const order = await this.prisma.customerOrder.findFirst({
@@ -419,6 +442,15 @@ export class OrdersService {
       await tx.orderLine.update({
         where: { id: lineId },
         data: { processSnapshot: this.processStepsToJson(steps) }
+      });
+      await tx.customerOrder.update({
+        where: { id: order.id },
+        data: {
+          remark: this.appendOrderRemark(
+            order.remark,
+            `生产流程填写：${processEditor.name}（${processEditor.accountId} / ${processEditor.role}），零件 ${line.partCode}`
+          )
+        }
       });
       await tx.productionTask.updateMany({
         where: { orderLineId: lineId, status: { not: 'COMPLETED' } },
@@ -910,8 +942,9 @@ export class OrdersService {
     return this.cancelOrder(orderNo, dto);
   }
 
-  async submit(orderNo: string) {
+  async submit(orderNo: string, dto: SubmitOrderDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    const submitOperator = await this.resolveSubmitPlanOperator(dto.submittedByCode, '下计划操作员');
 
     // 提交订单时按零件来源处理：重新生产生成 ProductionTask，使用库存则把备货库存转为订单库存。
     await runSerializableTransaction(
@@ -946,7 +979,13 @@ export class OrdersService {
         // 订单提交会占用备货库存或生成生产任务，所有判断必须在事务内基于最新订单状态执行。
         await tx.customerOrder.update({
           where: { id: order.id },
-          data: { status: OrderStatus.SUBMITTED }
+          data: {
+            status: OrderStatus.SUBMITTED,
+            remark: this.appendOrderRemark(
+              order.remark,
+              `提交生产：${submitOperator.name}（${submitOperator.accountId} / ${submitOperator.role}）`
+            )
+          }
         });
 
         for (const line of order.lines) {
@@ -989,6 +1028,82 @@ export class OrdersService {
     );
 
     return this.findOne(normalizedOrderNo);
+  }
+
+  private async resolveSubmitPlanOperator(submittedByCode: string, label = '下计划操作员') {
+    const accountId = submittedByCode?.trim();
+    if (!accountId) {
+      throw new BadRequestException(`请选择${label}`);
+    }
+
+    const operator = await this.prisma.productionOperator.findFirst({
+      where: { accountId: { equals: accountId, mode: 'insensitive' } },
+      select: { accountId: true, name: true, role: true, status: true }
+    });
+    const fallbackOperator = fallbackSubmitPlanOperators.find(
+      (item) => item.accountId.toLocaleLowerCase() === accountId.toLocaleLowerCase()
+    );
+    const submitOperator = operator || fallbackOperator;
+    if (!submitOperator) {
+      throw new BadRequestException(`${label}不存在，请刷新后重新选择`);
+    }
+    if ('status' in submitOperator && submitOperator.status !== CommonStatus.ENABLED) {
+      throw new BadRequestException(`${label}已停用，不能操作`);
+    }
+    if (!this.isSubmitPlanOperatorRole(submitOperator.role)) {
+      throw new BadRequestException(`${label}必须是下单/计划管理人员，车间人员只能查看生产流程`);
+    }
+    return {
+      accountId: submitOperator.accountId,
+      name: submitOperator.name,
+      role: submitOperator.role
+    };
+  }
+
+  private isSubmitPlanOperatorRole(role?: string | null) {
+    const value = role || '';
+    return /计划/.test(value) && !/车间主任|主任/.test(value);
+  }
+
+  private async resolveProcessEditorOperator(configuredByCode: string) {
+    const accountId = configuredByCode?.trim();
+    if (!accountId) {
+      throw new BadRequestException('请选择生产流程填写人员');
+    }
+
+    const operator = await this.prisma.productionOperator.findFirst({
+      where: { accountId: { equals: accountId, mode: 'insensitive' } },
+      select: { accountId: true, name: true, role: true, status: true }
+    });
+    const fallbackOperator = fallbackSubmitPlanOperators.find(
+      (item) => item.accountId.toLocaleLowerCase() === accountId.toLocaleLowerCase()
+    );
+    const processEditor = operator || fallbackOperator;
+    if (!processEditor) {
+      throw new BadRequestException('生产流程填写人员不存在，请刷新后重新选择');
+    }
+    if ('status' in processEditor && processEditor.status !== CommonStatus.ENABLED) {
+      throw new BadRequestException('生产流程填写人员已停用，不能操作');
+    }
+    if (!this.isProcessEditorRole(processEditor.role)) {
+      throw new BadRequestException('生产流程只能由下单/计划或技术工艺人员填写，车间人员只能查看生产流程');
+    }
+    return {
+      accountId: processEditor.accountId,
+      name: processEditor.name,
+      role: processEditor.role
+    };
+  }
+
+  private isProcessEditorRole(role?: string | null) {
+    const value = role || '';
+    return /计划|下单|订单|技术|工艺/.test(value) && !/车间|主任|操作员/.test(value);
+  }
+
+  private appendOrderRemark(existingRemark: string | null | undefined, line: string) {
+    const normalizedRemark = existingRemark?.trim();
+    const record = `${new Date().toISOString()} ${line}`;
+    return normalizedRemark ? `${normalizedRemark}\n${record}` : record;
   }
 
   private async findStartedOrderLineTask(tx: Prisma.TransactionClient, orderNo: string, lineId: string) {
@@ -1358,10 +1473,13 @@ export class OrdersService {
   ) {
     const selectedSources = this.jsonToStockSourceSelections(line.stockSourceSelections);
     if (purpose === 'STOCK') {
-      this.validateDirectStockOrderLineInfo(line, selectedSources);
+      this.validateDirectStockOrderLineInfo(line);
     }
     this.validateSelectedStockSourceManualConfirmations(selectedSources);
     const hasManualSelections = selectedSources.length > 0;
+    if (!hasManualSelections) {
+      throw new BadRequestException(`零件 ${line.partCode} 必须先选择库存批次并完成来源核对`);
+    }
     const stockBatches = await tx.inventoryBatch.findMany({
       where: hasManualSelections
         ? {
@@ -1421,6 +1539,15 @@ export class OrdersService {
         throw new BadRequestException(`已选库存批次 ${batch.batchNo} 的使用数量超过当前可用库存`);
       }
       const selectedSource = hasManualSelections ? selectedSourceMap.get(batch.id) : undefined;
+      if (hasManualSelections && purpose === 'STOCK') {
+        // 直接使用库存必须能追到来源图纸，不能靠人工说明绕过缺失图号、版本或文件。
+        const missingSourceDrawingInfo = this.directStockSourceMissingDrawingInfo(batch, sourceTaskMap);
+        if (missingSourceDrawingInfo.length > 0) {
+          throw new BadRequestException(
+            `已选库存批次 ${batch.batchNo} 缺少来源${missingSourceDrawingInfo.join('、')}，不能直接使用库存，请改为库存再加工或重新生产`
+          );
+        }
+      }
       if (
         hasManualSelections &&
         !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) &&
@@ -1541,7 +1668,7 @@ export class OrdersService {
     }
   }
 
-  private validateDirectStockOrderLineInfo(line: any, selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>) {
+  private validateDirectStockOrderLineInfo(line: any) {
     const missingFields = [
       !String(line.drawingNo || '').trim() ? '图号' : '',
       !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
@@ -1549,12 +1676,6 @@ export class OrdersService {
       decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
     ].filter(Boolean);
     if (missingFields.length === 0) {
-      return;
-    }
-
-    const manualOverrideOk =
-      selectedSources.length > 0 && selectedSources.every((source) => this.stockSourceManualConfirmationComplete(source));
-    if (manualOverrideOk) {
       return;
     }
 
@@ -1646,6 +1767,18 @@ export class OrdersService {
       this.requiredTextMatches(line.partSpecification, sourceLine.partSpecification) &&
       this.requiredNumberMatches(line.partThickness, sourceLine.partThickness)
     );
+  }
+
+  private directStockSourceMissingDrawingInfo(batch: any, sourceTaskMap: Map<string, any>) {
+    const sourceLine = this.resolveStockBatchSourceLine(batch, sourceTaskMap);
+    if (!sourceLine) {
+      return ['图纸资料'];
+    }
+    return [
+      !String(sourceLine.drawingNo || '').trim() ? '图号' : '',
+      !String(sourceLine.drawingVersion || '').trim() ? '图纸版本' : '',
+      !String(sourceLine.drawingFileUrl || '').trim() ? '图纸文件' : ''
+    ].filter(Boolean);
   }
 
   private sourceLineHasDirectStockDrawingInfo(sourceLine: any) {
@@ -1984,11 +2117,128 @@ export class OrdersService {
       if (productionPlanQuantity !== 0) {
         throw new BadRequestException(`${label}使用库存时生产计划数量必须为 0`);
       }
+      this.validateDirectStockOrderLineInfo(line);
     } else {
       if (productionPlanQuantity < orderQuantity) {
         throw new BadRequestException(`${label}生产计划数量不能小于客户订单数量`);
       }
     }
+    this.validateStockSourceSelectionQuantity(line, label, fulfillmentMode, orderQuantity, productionPlanQuantity);
+  }
+
+  private validateStockSourceSelectionQuantity(
+    line: CreateOrderLineDto,
+    label: string,
+    fulfillmentMode: OrderLineFulfillmentMode,
+    orderQuantity: number,
+    productionPlanQuantity: number
+  ) {
+    const selectedSources = this.normalizeStockSourceSelections(line.selectedStockSources);
+    if (fulfillmentMode !== OrderLineFulfillmentMode.STOCK && fulfillmentMode !== OrderLineFulfillmentMode.REWORK) {
+      if (selectedSources.length === 0) {
+        return;
+      }
+      throw new BadRequestException(`${label}不是使用库存或库存再加工，不能保留库存来源选择`);
+    }
+
+    const requiredQuantity = fulfillmentMode === OrderLineFulfillmentMode.STOCK ? orderQuantity : productionPlanQuantity;
+    const selectedQuantity = selectedSources.reduce((sum, source) => sum + source.quantity, 0);
+    if (selectedSources.length === 0 || selectedQuantity <= 0) {
+      throw new BadRequestException(`${label}必须先选择库存批次并完成来源核对`);
+    }
+    this.validateSelectedStockSourceManualConfirmations(selectedSources);
+    // 草稿保存时也要拒绝数量不足或超量来源，避免提交生产前已经保存了不可执行的库存批次选择。
+    if (selectedQuantity + 0.0001 < requiredQuantity) {
+      throw new BadRequestException(`${label}已选库存数量少于本次需要数量：需要 ${requiredQuantity}，已选 ${selectedQuantity}`);
+    }
+    if (selectedQuantity > requiredQuantity + 0.0001) {
+      throw new BadRequestException(`${label}已选库存数量超过本次需要数量：需要 ${requiredQuantity}，已选 ${selectedQuantity}`);
+    }
+  }
+
+  private async validateOrderStockSourceSelections(lines: CreateOrderDto['lines']) {
+    const selectedRows = lines.flatMap((line, lineIndex) =>
+      this.normalizeStockSourceSelections(line.selectedStockSources).map((source) => ({ line, lineIndex, source }))
+    );
+    if (selectedRows.length === 0) {
+      return;
+    }
+
+    const batchIds = [...new Set(selectedRows.map((row) => row.source.batchId))];
+    const batches = await this.prisma.inventoryBatch.findMany({
+      where: {
+        id: { in: batchIds },
+        sourceOrderId: null,
+        quantity: { gt: 0 },
+        status: 'AVAILABLE'
+      },
+      include: {
+        sourceOrderLine: true,
+        productionTask: { include: { orderLine: true } }
+      }
+    });
+    const batchMap = new Map(batches.map((batch) => [batch.id, batch]));
+    const selectedQuantityByBatchId = new Map<string, number>();
+    for (const { source } of selectedRows) {
+      selectedQuantityByBatchId.set(
+        source.batchId,
+        this.roundQuantity((selectedQuantityByBatchId.get(source.batchId) || 0) + source.quantity)
+      );
+    }
+    for (const [batchId, selectedQuantity] of selectedQuantityByBatchId) {
+      const batch = batchMap.get(batchId);
+      if (!batch) {
+        continue;
+      }
+      const availableQuantity = decimalToNumber(batch.quantity);
+      if (availableQuantity + 0.0001 < selectedQuantity) {
+        throw new BadRequestException(
+          `已选库存批次 ${batch.batchNo} 在当前订单中被多行重复占用：当前可用 ${availableQuantity}，合计选用 ${selectedQuantity}`
+        );
+      }
+    }
+    const sourceTaskMap = await this.findStockSourceTaskMapByBatches(batches);
+
+    for (const { line, lineIndex, source } of selectedRows) {
+      const label = `第 ${lineIndex + 1} 个零件`;
+      const batch = batchMap.get(source.batchId);
+      if (!batch) {
+        throw new BadRequestException(`${label}已选库存批次 ${source.batchNo || source.batchId} 不存在或当前不可用`);
+      }
+      if (batch.unit !== line.unit) {
+        throw new BadRequestException(`${label}已选库存批次 ${batch.batchNo} 的单位 ${batch.unit} 与订单单位 ${line.unit} 不一致`);
+      }
+      if (decimalToNumber(batch.quantity) + 0.0001 < source.quantity) {
+        throw new BadRequestException(`${label}已选库存批次 ${batch.batchNo} 的使用数量超过当前可用库存`);
+      }
+
+      const fulfillmentMode = this.normalizeFulfillmentMode(line.fulfillmentMode);
+      if (fulfillmentMode === OrderLineFulfillmentMode.STOCK) {
+        // 草稿保存阶段也必须按真实批次核对来源图纸，不能信任前端提交的 compatibilityStatus。
+        const missingSourceDrawingInfo = this.directStockSourceMissingDrawingInfo(batch, sourceTaskMap);
+        if (missingSourceDrawingInfo.length > 0) {
+          throw new BadRequestException(
+            `${label}已选库存批次 ${batch.batchNo} 缺少来源${missingSourceDrawingInfo.join('、')}，不能直接使用库存，请改为库存再加工或重新生产`
+          );
+        }
+      }
+
+      if (!this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) && !this.stockSourceManualConfirmationComplete(source)) {
+        throw new BadRequestException(`${label}已选库存批次 ${batch.batchNo} 与本次订单资料不完全匹配，必须填写人工确认记录`);
+      }
+    }
+  }
+
+  private async findStockSourceTaskMapByBatches(batches: any[]) {
+    const taskNos = [...new Set(batches.map((batch) => batch.sourceProductionTaskNo).filter(Boolean))] as string[];
+    if (taskNos.length === 0) {
+      return new Map<string, any>();
+    }
+    const tasks = await this.prisma.productionTask.findMany({
+      where: { productionTaskNo: { in: taskNos } },
+      include: { orderLine: true }
+    });
+    return new Map(tasks.map((task) => [task.productionTaskNo, task]));
   }
 
   private normalizeFulfillmentMode(mode?: OrderLineFulfillmentMode | string) {
@@ -2038,7 +2288,7 @@ export class OrdersService {
 
     const seen = new Set<string>();
     for (const step of normalized) {
-      const key = step.processName.toLocaleLowerCase();
+      const key = normalizeSearchKeyword(step.processName);
       if (seen.has(key)) {
         throw new BadRequestException(`生产流程存在重复工序：${step.processName}`);
       }
@@ -2189,11 +2439,9 @@ export class OrdersService {
   }
 
   private toSummary(order: any) {
-    const totalQuantity = order.lines.reduce((sum: number, line: any) => sum + decimalToNumber(line.quantity), 0);
-    const totalProductionPlanQuantity = order.lines.reduce(
-      (sum: number, line: any) => sum + decimalToNumber(line.productionPlanQuantity ?? line.quantity),
-      0
-    );
+    const quantityByUnit = this.toOrderQuantityByUnit(order.lines);
+    const totalQuantity = quantityByUnit.reduce((sum, row) => sum + row.totalQuantity, 0);
+    const totalProductionPlanQuantity = quantityByUnit.reduce((sum, row) => sum + row.totalProductionPlanQuantity, 0);
 
     return {
       id: order.id,
@@ -2209,6 +2457,7 @@ export class OrdersService {
       partCount: order.lines.length,
       totalQuantity,
       totalProductionPlanQuantity,
+      quantityByUnit,
       unit: order.lines[0]?.unit || '件',
       productionStatus: this.toOrderProductionStatus(order),
       warehouseStage: this.toOrderWarehouseStage(order),
@@ -2216,6 +2465,19 @@ export class OrdersService {
       createdAt: order.createdAt,
       updatedAt: order.updatedAt
     };
+  }
+
+  private toOrderQuantityByUnit(lines: any[]) {
+    const unitMap = new Map<string, { unit: string; totalQuantity: number; totalProductionPlanQuantity: number }>();
+    for (const line of lines) {
+      const unit = line.unit || '件';
+      const row = unitMap.get(unit) || { unit, totalQuantity: 0, totalProductionPlanQuantity: 0 };
+      row.totalQuantity += decimalToNumber(line.quantity);
+      row.totalProductionPlanQuantity += decimalToNumber(line.productionPlanQuantity ?? line.quantity);
+      unitMap.set(unit, row);
+    }
+    // 订单可能包含不同计量单位，列表汇总必须按单位分组，避免把“件”和“米”等直接相加。
+    return Array.from(unitMap.values()).sort((a, b) => a.unit.localeCompare(b.unit, 'zh-Hans-CN'));
   }
 
   private toDetail(
@@ -2278,6 +2540,7 @@ export class OrdersService {
       batchNo: batch.batchNo,
       partCode: batch.partCode,
       partName: batch.partName,
+      availableQuantity: decimalToNumber(batch.quantity),
       unit: batch.unit,
       replenishmentSourceType,
       replenishmentSourceRequestNo,
@@ -2299,6 +2562,7 @@ export class OrdersService {
         batchNo: source.batchNo || sourceInfo.batchNo,
         partCode: source.partCode || sourceInfo.partCode,
         partName: source.partName || sourceInfo.partName,
+        availableQuantity: sourceInfo.availableQuantity,
         unit: source.unit || sourceInfo.unit,
         replenishmentSourceType: source.replenishmentSourceType || sourceInfo.replenishmentSourceType,
         replenishmentSourceRequestNo: source.replenishmentSourceRequestNo || sourceInfo.replenishmentSourceRequestNo,

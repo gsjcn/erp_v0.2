@@ -17,6 +17,7 @@
               <strong>{{ item.partCode }}</strong>
               <span>{{ item.partName }}</span>
               <small>库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
+              <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
             </div>
           </template>
         </el-autocomplete>
@@ -42,7 +43,7 @@
           </el-tag>
           <small :class="{ warning: stockGapQuantity(row) > 0 }">{{ stockStatusHint(row) }}</small>
           <el-button class="stock-detail-button" link type="primary" @click="openStockDetails(row)">
-            查看库存来源
+            {{ stockSourceActionText(row) }}
           </el-button>
           <el-tooltip
             v-if="stockSourceReviewRequired(row)"
@@ -179,6 +180,7 @@
                 <strong>{{ item.partCode }}</strong>
                 <span>{{ item.partName }}</span>
                 <small>库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
+                <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
               </div>
             </template>
           </el-autocomplete>
@@ -203,7 +205,7 @@
             </el-tag>
             <small :class="{ warning: stockGapQuantity(line) > 0 }">{{ stockStatusHint(line) }}</small>
             <el-button class="stock-detail-button" link type="primary" @click="openStockDetails(line)">
-              查看库存来源
+              {{ stockSourceActionText(line) }}
             </el-button>
             <el-tooltip
               v-if="stockSourceReviewRequired(line)"
@@ -383,12 +385,21 @@ function handleFulfillmentModeChange(line: CreateOrderLinePayload) {
     return;
   }
   if (line.fulfillmentMode === 'REWORK') {
+    ensureProductionPlanQuantity(line);
     invalidateStockSourceReview(line);
     void openStockDetails(line);
     return;
   }
+  ensureProductionPlanQuantity(line);
   invalidateStockSourceReview(line, true);
   emitQuantityChange(line);
+}
+
+function ensureProductionPlanQuantity(line: CreateOrderLinePayload) {
+  // 从 STOCK 切回 REWORK / PRODUCTION 时，生产计划数量必须恢复到不低于客户订单数量。
+  if (!line.productionPlanQuantity || line.productionPlanQuantity < line.quantity) {
+    line.productionPlanQuantity = line.quantity || 1;
+  }
 }
 
 function invalidateStockSourceReview(line: CreateOrderLinePayload, clearSources = false, markSourcesForRecheck = false) {
@@ -431,20 +442,27 @@ function stockDemandKey(line: CreateOrderLinePayload) {
 }
 
 function stockAggregateRequiredQuantity(line: CreateOrderLinePayload) {
+  // 同一个订单内相同零件、相同单位的 STOCK / REWORK 需求必须合计校验，避免每行单独看库存时误判够用。
+  return stockDemandLines(line).reduce((sum, item) => sum + stockRequiredQuantity(item), 0);
+}
+
+function stockAggregateSelectedQuantity(line: CreateOrderLinePayload) {
+  return stockDemandLines(line).reduce((sum, item) => sum + selectedStockSourceQuantity(item), 0);
+}
+
+function stockDemandLines(line: CreateOrderLinePayload) {
   const key = stockDemandKey(line);
   if (!key.trim()) {
-    return stockRequiredQuantity(line);
+    return [line];
   }
-  // 同一个订单内相同零件、相同单位的 STOCK / REWORK 需求必须合计校验，避免每行单独看库存时误判够用。
   return props.lines
     .filter((item) => item.fulfillmentMode === 'STOCK' || item.fulfillmentMode === 'REWORK')
-    .filter((item) => stockDemandKey(item) === key)
-    .reduce((sum, item) => sum + stockRequiredQuantity(item), 0);
+    .filter((item) => stockDemandKey(item) === key);
 }
 
 function stockGapQuantity(line: CreateOrderLinePayload) {
   if ((line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && isStockSourceReviewed(line)) {
-    return Math.max(stockAggregateRequiredQuantity(line) - selectedStockSourceQuantity(line), 0);
+    return Math.max(stockAggregateRequiredQuantity(line) - stockAggregateSelectedQuantity(line), 0);
   }
   return Math.max(stockAggregateRequiredQuantity(line) - availableStockQuantity(line), 0);
 }
@@ -462,34 +480,41 @@ function stockStatusHint(line: CreateOrderLinePayload) {
   const requiredQuantity = stockAggregateRequiredQuantity(line);
   if (line.fulfillmentMode === 'STOCK') {
     if (isStockSourceReviewed(line)) {
-      const matchedQuantity = selectedStockSourceQuantity(line);
+      const matchedQuantity = stockAggregateSelectedQuantity(line);
       return matchedQuantity + 0.0001 >= requiredQuantity
         ? `已选库存 ${formatQuantity(matchedQuantity, line.unit || '件')}，需 ${formatQuantity(requiredQuantity, line.unit || '件')}`
         : `已选库存不足，已选 ${formatQuantity(matchedQuantity, line.unit || '件')}，需 ${formatQuantity(requiredQuantity, line.unit || '件')}`;
     }
     return gap > 0
-      ? `总备货需 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}，仍需核对图纸`
-      : `总备货够用，需核对图纸来源`;
+      ? `总备货需 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}，必须选择库存批次`
+      : `总备货够用，必须选择库存批次并核对来源`;
   }
   if (line.fulfillmentMode === 'REWORK') {
     if (isStockSourceReviewed(line)) {
-      return `已选库存 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}`;
+      return `已选库存 ${formatQuantity(stockAggregateSelectedQuantity(line), line.unit || '件')}`;
     }
     return gap > 0
       ? `合计领料 ${formatQuantity(requiredQuantity, line.unit || '件')}，缺 ${formatQuantity(gap, line.unit || '件')}`
-      : `可领库存再加工，仍需核对来源`;
+      : `可领库存再加工，必须选择库存批次并核对来源`;
   }
   return availableStockQuantity(line) > 0 ? '有备货库存' : '无备货库存';
 }
 
 function stockSourceReviewHint(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
-    return '使用库存必须核对来源订单、任务号、图号、版本、规格、厚度和图纸文件；不匹配不能直接使用库存。';
+    return '使用库存保存前必须选择具体库存批次，并核对来源订单、任务号、图号、版本、规格、厚度和图纸文件。';
   }
   if (line.fulfillmentMode === 'REWORK') {
-    return '库存再加工必须核对库存来源并保留记录；图纸或规格不一致时需要按再加工处理。';
+    return '库存再加工保存前必须选择具体库存批次，核对库存来源并保留记录。';
   }
   return '';
+}
+
+function stockSourceActionText(line: CreateOrderLinePayload) {
+  if (!stockSourceReviewRequired(line)) {
+    return '查看库存来源';
+  }
+  return isStockSourceReviewed(line) ? '调整库存来源' : '选择库存来源';
 }
 
 function formatStockQuantity(line: CreateOrderLinePayload) {
@@ -632,6 +657,15 @@ function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryM
   if (!line.partSpecification && item.partSpecification) {
     line.partSpecification = item.partSpecification;
   }
+}
+
+function materialSuggestionMatchText(item: InventoryMaterialSuggestion) {
+  const parts = [
+    item.matchedBatchNo ? `命中批次 ${item.matchedBatchNo}` : '',
+    item.matchedSourceOrderNo ? `订单 ${item.matchedSourceOrderNo}` : '',
+    item.matchedProductionTaskNo ? `任务 ${item.matchedProductionTaskNo}` : ''
+  ].filter(Boolean);
+  return parts.join(' / ');
 }
 
 function handlePartCodeInput(line: CreateOrderLinePayload) {

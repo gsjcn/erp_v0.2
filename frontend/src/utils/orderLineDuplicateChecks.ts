@@ -1,4 +1,5 @@
-import { ElMessageBox } from 'element-plus';
+import { createApp, defineComponent, h, ref } from 'vue';
+import { ElButton, ElDialog } from 'element-plus';
 import { erpApi } from '../api/erp';
 import type { CreateOrderLinePayload, DrawingDuplicateMatch } from '../api/erp';
 
@@ -16,6 +17,30 @@ function describeLine(line: CreateOrderLinePayload, index: number) {
   const partName = line.partName?.trim() || `第 ${index + 1} 个零件`;
   const partCode = line.partCode?.trim();
   return partCode ? `${partName}（${partCode}）` : partName;
+}
+
+function describeDrawingNoConflictLine(line: CreateOrderLinePayload, index: number) {
+  const partCode = line.partCode?.trim() || `第 ${index + 1} 个零件`;
+  const drawingNo = line.drawingNo?.trim() || '未填写';
+  const drawingVersion = line.drawingVersion?.trim() || '-';
+  return `零件 ${escapeHtml(partCode)} 图号：${escapeHtml(drawingNo)}, 版本号${escapeHtml(drawingVersion)}`;
+}
+
+function describeDrawingNoConflictMatch(match: DrawingDuplicateMatch) {
+  const partCode = match.partCode?.trim() || '历史零件';
+  const drawingNo = match.drawingNo?.trim() || '未填写';
+  const drawingVersion = match.drawingVersion?.trim() || '-';
+  return `零件 ${escapeHtml(partCode)} 图号：${escapeHtml(drawingNo)}, 版本号${escapeHtml(drawingVersion)}`;
+}
+
+function renderDrawingNoConflictHtml(lines: string[], extraText?: string) {
+  return `
+    <div style="display:grid;gap:8px;line-height:1.7;color:#334155;">
+      <p style="margin:0;">不同零件编号，图号冲突，请确认是否继续使用相同图号</p>
+      ${lines.map((line) => `<p style="margin:0;">${line}</p>`).join('')}
+      ${extraText ? `<p style="margin:0;color:#64748b;">${escapeHtml(extraText)}</p>` : ''}
+    </div>
+  `;
 }
 
 function findDuplicatePair(lines: CreateOrderLinePayload[], getter: (line: CreateOrderLinePayload) => string | undefined) {
@@ -108,6 +133,77 @@ function renderSelectedDrawingPreview(file: File, fileUrl: string) {
   `;
 }
 
+function confirmDrawingDuplicateDialog(options: {
+  title: string;
+  message?: string;
+  html?: string;
+  confirmText: string;
+  cancelText?: string;
+}) {
+  if (typeof document === 'undefined') {
+    return Promise.resolve(false);
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let settled = false;
+
+    const settle = (confirmed: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(confirmed);
+    };
+
+    const DialogHost = defineComponent({
+      setup() {
+        const visible = ref(true);
+        const closeWith = (confirmed: boolean) => {
+          settle(confirmed);
+          visible.value = false;
+        };
+        return () =>
+          h(
+            ElDialog,
+            {
+              modelValue: visible.value,
+              'onUpdate:modelValue': (value: boolean) => {
+                visible.value = value;
+                if (!value) {
+                  settle(false);
+                }
+              },
+              title: options.title,
+              width: 'min(760px, calc(100vw - 32px))',
+              appendToBody: true,
+              destroyOnClose: true,
+              closeOnClickModal: false,
+              onClosed: () => {
+                app.unmount();
+                container.remove();
+              }
+            },
+            {
+              default: () =>
+                options.html
+                  ? h('div', { class: 'drawing-duplicate-dialog-body', innerHTML: options.html })
+                  : h('p', { class: 'drawing-duplicate-dialog-message' }, options.message || ''),
+              footer: () => [
+                h(ElButton, { onClick: () => closeWith(false) }, () => options.cancelText || '返回修改'),
+                h(ElButton, { type: 'primary', onClick: () => closeWith(true) }, () => options.confirmText)
+              ]
+            }
+          );
+      }
+    });
+
+    const app = createApp(DialogHost);
+    app.mount(container);
+  });
+}
+
 function findSameOrderDrawingFile(
   lines: CreateOrderLinePayload[],
   currentLine: CreateOrderLinePayload,
@@ -124,17 +220,11 @@ function findSameOrderDrawingFile(
 }
 
 async function confirmDrawingFileHtml(html: string, title: string) {
-  try {
-    await ElMessageBox.confirm(html, title, {
-      confirmButtonText: '确认继续',
-      cancelButtonText: '返回修改',
-      type: 'warning',
-      dangerouslyUseHTMLString: true
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return confirmDrawingDuplicateDialog({
+    title,
+    html,
+    confirmText: '确认继续'
+  });
 }
 
 export async function confirmDuplicateDrawingNos(lines: CreateOrderLinePayload[]) {
@@ -143,22 +233,15 @@ export async function confirmDuplicateDrawingNos(lines: CreateOrderLinePayload[]
     return true;
   }
 
-  const firstLineText = describeLine(duplicate.first.line, duplicate.first.index);
-  const secondLineText = describeLine(duplicate.second.line, duplicate.second.index);
-  try {
-    await ElMessageBox.confirm(
-      `图号 ${duplicate.value} 和 ${firstLineText} 的图号一样。当前零件：${secondLineText}。请确认是否继续使用同一图号。`,
-      '图号重复确认',
-      {
-        confirmButtonText: '继续使用',
-        cancelButtonText: '返回修改',
-        type: 'warning'
-      }
-    );
-    return true;
-  } catch {
-    return false;
-  }
+  const html = renderDrawingNoConflictHtml([
+    describeDrawingNoConflictLine(duplicate.first.line, duplicate.first.index),
+    describeDrawingNoConflictLine(duplicate.second.line, duplicate.second.index)
+  ]);
+  return confirmDrawingDuplicateDialog({
+    title: '图号或版本号冲突',
+    html,
+    confirmText: '继续使用'
+  });
 }
 
 export async function confirmDuplicateDrawingFiles(lines: CreateOrderLinePayload[]) {
@@ -203,20 +286,15 @@ export async function confirmExistingDrawingNos(lines: CreateOrderLinePayload[],
       continue;
     }
 
-    try {
-      await ElMessageBox.confirm(
-        `图号 ${drawingNo} 和历史订单 ${match.orderNo} 的 ${match.partName}（${match.partCode}）图号一样。当前零件：${describeLine(
-          line,
-          index
-        )}。请确认是否继续使用同一图号。`,
-        '历史图号重复确认',
-        {
-          confirmButtonText: '继续使用',
-          cancelButtonText: '返回修改',
-          type: 'warning'
-        }
-      );
-    } catch {
+    const confirmed = await confirmDrawingDuplicateDialog({
+      title: '图号或版本号冲突',
+      html: renderDrawingNoConflictHtml(
+        [describeDrawingNoConflictMatch(match), describeDrawingNoConflictLine(line, index)],
+        `历史订单：${match.orderNo} / ${match.customerName || '-'}`
+      ),
+      confirmText: '继续使用'
+    });
+    if (!confirmed) {
       return false;
     }
   }

@@ -9,7 +9,7 @@
         <el-input
           v-model="keyword"
           clearable
-          placeholder="搜索工序名称 / 备注 / 拼音"
+          placeholder="搜索工序名称 / 备注 / 拼音 / 首字母"
           class="process-definition-search"
           @keyup.enter="loadDefinitions"
           @clear="loadDefinitions"
@@ -44,7 +44,7 @@
           </div>
           <div class="process-definition-actions">
             <el-button link type="primary" @click="openEditDialog(definition)">编辑</el-button>
-            <el-button link type="danger" @click="deleteDefinition(definition)">删除</el-button>
+            <el-button link type="danger" @click="openDeleteDialog(definition)">删除</el-button>
           </div>
         </article>
       </el-tooltip>
@@ -77,12 +77,31 @@
         <el-button type="primary" :loading="saving" @click="saveDefinition">保存工序</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="deleteDialogVisible"
+      title="删除工序"
+      width="min(500px, calc(100vw - 32px))"
+      append-to-body
+    >
+      <div class="delete-definition-summary">
+        <p>
+          <span>工序名称</span>
+          <strong>{{ activeDeleteDefinition?.processName }}</strong>
+        </p>
+        <p class="delete-definition-warning">已保存到订单和生产任务中的历史工序不会被删除。</p>
+      </div>
+      <template #footer>
+        <el-button :disabled="deleting" @click="deleteDialogVisible = false">取消</el-button>
+        <el-button type="danger" :loading="deleting" @click="deleteDefinition">删除</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage } from 'element-plus';
 import { erpApi } from '../api/erp';
 import type { ProcessDefinition } from '../types/erp';
 
@@ -105,9 +124,12 @@ const definitions = ref<ProcessDefinition[]>([]);
 const keyword = ref('');
 const loading = ref(false);
 const saving = ref(false);
+const deleting = ref(false);
 const dialogVisible = ref(false);
+const deleteDialogVisible = ref(false);
 const editingDefinitionId = ref('');
 const searchTimer = ref<number>();
+const activeDeleteDefinition = ref<ProcessDefinition>();
 const form = reactive({
   processName: '',
   remark: ''
@@ -180,31 +202,31 @@ function processDefinitionNameExists(processName: string) {
 }
 
 function normalizeProcessDefinitionName(processName: string) {
-  return processName.trim().replace(/\s+/g, '').toLocaleLowerCase();
+  return processName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
 }
 
-async function deleteDefinition(definition: ProcessDefinition) {
-  try {
-    await ElMessageBox.confirm(
-      `确定删除工序“${definition.processName}”？已保存到订单和生产任务中的历史工序不会被删除。`,
-      '删除工序',
-      {
-        confirmButtonText: '删除',
-        cancelButtonText: '取消',
-        type: 'warning'
-      }
-    );
-  } catch {
+function openDeleteDialog(definition: ProcessDefinition) {
+  activeDeleteDefinition.value = definition;
+  deleteDialogVisible.value = true;
+}
+
+async function deleteDefinition() {
+  if (!activeDeleteDefinition.value) {
     return;
   }
 
+  deleting.value = true;
   try {
-    await erpApi.deleteProcessDefinition(definition.id);
+    await erpApi.deleteProcessDefinition(activeDeleteDefinition.value.id);
     ElMessage.success('工序已删除');
+    deleteDialogVisible.value = false;
+    activeDeleteDefinition.value = undefined;
     await loadDefinitions();
     emit('updated');
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '工序删除失败');
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -310,6 +332,38 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   margin: 0;
   color: #64748b;
   line-height: 1.5;
+}
+
+.delete-definition-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.delete-definition-summary p {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0;
+}
+
+.delete-definition-summary span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.delete-definition-summary strong {
+  color: #0f172a;
+}
+
+.delete-definition-warning {
+  display: block !important;
+  padding: 10px 12px;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  line-height: 1.6;
 }
 
 @media (max-width: 900px) {

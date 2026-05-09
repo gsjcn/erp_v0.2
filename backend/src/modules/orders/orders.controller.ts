@@ -14,6 +14,7 @@ import {
   DrawingDuplicateQueryDto,
   NextOrderNoQueryDto,
   OrderQueryDto,
+  SubmitOrderDto,
   UpdateLineQuantityDto,
   UpdateLineProcessDto,
   UpdateOrderDto
@@ -153,8 +154,8 @@ export class OrdersController {
   }
 
   @Post(':orderNo/submit')
-  submit(@Param('orderNo') orderNo: string) {
-    return this.ordersService.submit(orderNo);
+  submit(@Param('orderNo') orderNo: string, @Body() dto: SubmitOrderDto) {
+    return this.ordersService.submit(orderNo, dto);
   }
 
   @Post(':orderNo/cancel')

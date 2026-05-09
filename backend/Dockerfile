@@ -9,7 +9,7 @@ RUN apt-get update \
 COPY package.json package-lock.json* ./
 COPY backend/package.json ./backend/package.json
 COPY database/prisma ./database/prisma
-RUN npm install
+RUN npm ci --workspace backend
 RUN npm --workspace backend run db:generate
 
 COPY backend ./backend
