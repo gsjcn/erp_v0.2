@@ -2430,6 +2430,15 @@ watch(
   .order-preview-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .reservation-order-link,
+  .reservation-item small,
+  .order-preview-summary strong {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 @media (max-width: 560px) {

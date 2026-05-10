@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import {
   InventoryReservationStatus,
   InventoryTransactionType,
+  OrderStatus,
   Prisma,
   ProductionNoticeStatus,
   ProductionNoticeTarget,
@@ -540,11 +541,12 @@ export class WarehousesService {
       sourceOrderId: { not: null },
       quantity: { gt: 0 }
     };
-    const orderWhere = this.buildOrderWhere(query);
-    if (Object.keys(orderWhere).length > 0) {
-      // 待发货库存仍按来源订单筛选，保证订单入库后可继续同一条件发货。
-      where.sourceOrder = orderWhere;
-    }
+    const orderWhere: Prisma.CustomerOrderWhereInput = {
+      ...this.buildOrderWhere(query),
+      status: { notIn: [OrderStatus.DRAFT, OrderStatus.CANCELLED, OrderStatus.COMPLETED] }
+    };
+    // 待发货库存只展示仍可流转的订单，已取消或已完成发货的历史订单不能再次发货。
+    where.sourceOrder = orderWhere;
     if (query.orderNo) {
       const orderNo = query.orderNo.trim();
       // 待发货可按当前绑定订单、原生产任务号或原生产订单检索，避免备货库存绑定新订单后丢失来源查询能力。
@@ -688,6 +690,9 @@ export class WarehousesService {
         }
         if (order.status === 'DRAFT') {
           throw new BadRequestException('待提交生产订单不能发货，请先提交生产并形成待发货库存');
+        }
+        if (order.status === 'COMPLETED') {
+          throw new BadRequestException('已完成发货订单不能再次发货');
         }
         await this.assertOrderHasNoPendingShortage(tx, order.id, '整单发货');
 
@@ -1151,6 +1156,7 @@ export class WarehousesService {
       replenishmentSourceRequestNo: batch.replenishmentSourceRequestNo || batch.productionTask?.replenishmentSourceRequestNo,
       replenishmentSourceLabel: this.replenishmentSourceLabel(batch.productionTask || batch),
       customerId: batch.sourceOrder?.customerId,
+      orderStatus: batch.sourceOrder?.status,
       orderNo: batch.sourceOrderNo,
       customerName: batch.sourceCustomerName,
       orderDate: batch.sourceOrder?.orderDate,
@@ -1331,6 +1337,9 @@ export class WarehousesService {
     }
     if (batch.sourceOrder?.status === 'CANCELLED') {
       throw new BadRequestException('已取消订单库存不能发货');
+    }
+    if (batch.sourceOrder?.status === 'COMPLETED') {
+      throw new BadRequestException('已完成发货订单库存不能再次发货');
     }
     if (batch.status !== 'AVAILABLE') {
       throw new BadRequestException('只有可用库存可以发货');

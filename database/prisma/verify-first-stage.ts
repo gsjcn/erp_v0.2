@@ -40,7 +40,7 @@ type ProcessStepSnapshot = {
   processRemark?: string;
 };
 
-type NoticeOrderRow = { id: string; orderNo: string; customerName: string };
+type NoticeOrderRow = { id: string; orderNo: string; customerName: string; status?: OrderStatus };
 type NoticeLineRow = { id: string; orderId: string; partCode: string; partName: string; unit: string };
 type NoticeTaskRow = {
   id: string;
@@ -52,6 +52,8 @@ type NoticeTaskRow = {
   partName: string;
   unit: string;
   plannedQuantity?: Prisma.Decimal;
+  status?: ProductionStatus;
+  inventoryBatch?: { id: string } | null;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string | null;
   replenishmentSourceType?: string | null;
@@ -1296,8 +1298,8 @@ async function checkProductionTaskConsistency() {
       selectedStockQuantity + quantityTolerance >= decimalToNumber(line.quantity) &&
       planQuantity <= quantityTolerance;
 
-    if (shouldHaveProductionTask && line.productionTasks.length === 0) {
-      addIssue('ERROR', 'PRODUCTION_TASK_MISSING', `${label} 已提交且生产计划数量为 ${planQuantity}，但没有 ProductionTask`);
+    if (shouldHaveProductionTask && normalTasks.length === 0) {
+      addIssue('ERROR', 'PRODUCTION_TASK_MISSING', `${label} 已提交且生产计划数量为 ${planQuantity}，但没有普通 ProductionTask`);
     }
 
     if (line.order.status !== OrderStatus.DRAFT && planQuantity <= quantityTolerance && normalTasks.length > 0) {
@@ -2077,13 +2079,13 @@ async function checkProductionNotices() {
     orderIds.length
       ? prisma.customerOrder.findMany({
           where: { id: { in: orderIds } },
-          select: { id: true, orderNo: true, customerName: true }
+          select: { id: true, orderNo: true, customerName: true, status: true }
         })
       : [],
     orderNos.length
       ? prisma.customerOrder.findMany({
           where: { orderNo: { in: orderNos } },
-          select: { id: true, orderNo: true, customerName: true }
+          select: { id: true, orderNo: true, customerName: true, status: true }
         })
       : [],
     lineIds.length
@@ -2250,13 +2252,13 @@ async function checkProductionReplenishmentRequests() {
     orderIds.length
       ? prisma.customerOrder.findMany({
           where: { id: { in: orderIds } },
-          select: { id: true, orderNo: true, customerName: true }
+          select: { id: true, orderNo: true, customerName: true, status: true }
         })
       : [],
     orderNos.length
       ? prisma.customerOrder.findMany({
           where: { orderNo: { in: orderNos } },
-          select: { id: true, orderNo: true, customerName: true }
+          select: { id: true, orderNo: true, customerName: true, status: true }
         })
       : [],
     lineIds.length
@@ -2278,6 +2280,8 @@ async function checkProductionReplenishmentRequests() {
             partName: true,
             unit: true,
             plannedQuantity: true,
+            status: true,
+            inventoryBatch: { select: { id: true } },
             isReplenishment: true,
             sourceProductionTaskNo: true,
             replenishmentSourceType: true,
@@ -2298,6 +2302,8 @@ async function checkProductionReplenishmentRequests() {
             partName: true,
             unit: true,
             plannedQuantity: true,
+            status: true,
+            inventoryBatch: { select: { id: true } },
             isReplenishment: true,
             sourceProductionTaskNo: true,
             replenishmentSourceType: true,
@@ -2419,6 +2425,15 @@ async function checkProductionReplenishmentRequests() {
     }
 
     if (request.status === 'PENDING') {
+      if (order?.status === OrderStatus.CANCELLED) {
+        addIssue('ERROR', 'PENDING_REPLENISHMENT_ORDER_CANCELLED', `${label} 仍是 PENDING，但订单 ${order.orderNo} 已取消`);
+      }
+      if (order?.status === OrderStatus.COMPLETED) {
+        addIssue('ERROR', 'PENDING_REPLENISHMENT_ORDER_COMPLETED', `${label} 仍是 PENDING，但订单 ${order.orderNo} 已完成发货`);
+      }
+      if (task?.inventoryBatch) {
+        addIssue('ERROR', 'PENDING_REPLENISHMENT_TASK_RECEIVED', `${label} 仍是 PENDING，但来源任务 ${task.productionTaskNo} 已入库`);
+      }
       if (request.replenishmentTaskNo || request.approvedAt || request.reviewedAt || request.supervisorName) {
         addIssue('ERROR', 'PENDING_REPLENISHMENT_REVIEW_FIELDS_STALE', `${label} 仍是 PENDING，但已经存在主管确认字段或补单任务号`);
       }
@@ -2976,6 +2991,30 @@ async function checkOrderStatisticsStatuses() {
         `订单 ${order.orderNo} 的 CustomerOrder.status=COMPLETED，但发货流水未覆盖客户订单数量`
       );
     }
+    const availableShipmentBatches = order.inventoryBatches.filter(
+      (batch) => batch.status === 'AVAILABLE' && decimalToNumber(batch.quantity) > quantityTolerance
+    );
+    if (order.status === OrderStatus.COMPLETED && availableShipmentBatches.length > 0) {
+      addIssue(
+        'ERROR',
+        'COMPLETED_ORDER_HAS_AVAILABLE_SHIPMENT_BATCH',
+        `订单 ${order.orderNo} 已完成发货，但仍有可发货库存批次：${availableShipmentBatches.map((batch) => batch.batchNo).join('，')}`
+      );
+    }
+    if (order.status === OrderStatus.CANCELLED && availableShipmentBatches.length > 0) {
+      addIssue(
+        'ERROR',
+        'CANCELLED_ORDER_HAS_AVAILABLE_SHIPMENT_BATCH',
+        `订单 ${order.orderNo} 已取消，但仍有可发货订单库存批次：${availableShipmentBatches.map((batch) => batch.batchNo).join('，')}`
+      );
+    }
+    if (order.status === OrderStatus.DRAFT && availableShipmentBatches.length > 0) {
+      addIssue(
+        'ERROR',
+        'DRAFT_ORDER_HAS_AVAILABLE_SHIPMENT_BATCH',
+        `订单 ${order.orderNo} 仍是待提交生产，但已经形成可发货订单库存批次：${availableShipmentBatches.map((batch) => batch.batchNo).join('，')}`
+      );
+    }
     if (statisticsStatus === 'ORDER_IN_PRODUCTION' && order.status === OrderStatus.SUBMITTED) {
       addIssue(
         'ERROR',
@@ -3038,17 +3077,93 @@ function resolveExpectedStatisticsStatus(
 async function checkInventoryAdjustments() {
   const adjustments = await prisma.inventoryAdjustment.findMany({
     select: {
+      id: true,
       adjustmentNo: true,
+      batchId: true,
+      beforeQuantity: true,
+      afterQuantity: true,
+      deltaQuantity: true,
+      unit: true,
       countedBy: true,
       signatureName: true,
       attachmentFileUrl: true,
       attachmentFileName: true
     }
   });
+  const adjustmentIds = adjustments.map((adjustment) => adjustment.id);
+  const adjustmentTransactions = adjustmentIds.length
+    ? await prisma.inventoryTransaction.findMany({
+        where: { sourceRecordType: 'InventoryAdjustment', sourceRecordId: { in: adjustmentIds } },
+        select: {
+          transactionNo: true,
+          transactionType: true,
+          sourceRecordId: true,
+          batchId: true,
+          quantity: true,
+          unit: true
+        }
+      })
+    : [];
+  const transactionsByAdjustmentId = new Map<string, typeof adjustmentTransactions>();
+  for (const transaction of adjustmentTransactions) {
+    if (!transaction.sourceRecordId) {
+      continue;
+    }
+    const rows = transactionsByAdjustmentId.get(transaction.sourceRecordId) || [];
+    rows.push(transaction);
+    transactionsByAdjustmentId.set(transaction.sourceRecordId, rows);
+  }
   const uploadRoot = resolveUploadRootPath();
   const inventoryAdjustmentPrefix = '/uploads/inventory-adjustments/';
 
   for (const adjustment of adjustments) {
+    const beforeQuantity = decimalToNumber(adjustment.beforeQuantity);
+    const afterQuantity = decimalToNumber(adjustment.afterQuantity);
+    const deltaQuantity = decimalToNumber(adjustment.deltaQuantity);
+    const expectedDeltaQuantity = roundQuantity(afterQuantity - beforeQuantity);
+    if (quantityDiffers(deltaQuantity, expectedDeltaQuantity)) {
+      addIssue(
+        'ERROR',
+        'INVENTORY_ADJUSTMENT_DELTA_MISMATCH',
+        `盘点调整 ${adjustment.adjustmentNo} 差异数量应为 ${expectedDeltaQuantity}${adjustment.unit}，实际记录为 ${deltaQuantity}${adjustment.unit}`
+      );
+    }
+
+    const linkedTransactions = transactionsByAdjustmentId.get(adjustment.id) || [];
+    if (Math.abs(deltaQuantity) > quantityTolerance) {
+      if (linkedTransactions.length !== 1) {
+        addIssue(
+          'ERROR',
+          'INVENTORY_ADJUSTMENT_TRANSACTION_MISSING',
+          `盘点调整 ${adjustment.adjustmentNo} 差异 ${deltaQuantity}${adjustment.unit}，但对应库存流水数量为 ${linkedTransactions.length}`
+        );
+      } else {
+        const transaction = linkedTransactions[0];
+        const expectedType = deltaQuantity > 0 ? 'IN' : 'OUT';
+        const transactionQuantity = decimalToNumber(transaction.quantity);
+        if (
+          transaction.transactionType !== expectedType ||
+          transaction.batchId !== adjustment.batchId ||
+          transaction.unit !== adjustment.unit ||
+          quantityDiffers(transactionQuantity, Math.abs(deltaQuantity))
+        ) {
+          addIssue(
+            'ERROR',
+            'INVENTORY_ADJUSTMENT_TRANSACTION_MISMATCH',
+            `盘点调整 ${adjustment.adjustmentNo} 对应流水 ${transaction.transactionNo} 与差异数量、方向、批次或单位不一致`
+          );
+        }
+      }
+    } else if (linkedTransactions.length > 0) {
+      addIssue(
+        'ERROR',
+        'INVENTORY_ADJUSTMENT_ZERO_DELTA_HAS_TRANSACTION',
+        `盘点调整 ${adjustment.adjustmentNo} 差异为 0，但仍生成了库存流水：${linkedTransactions
+          .map((transaction) => transaction.transactionNo)
+          .join('，')}`
+      );
+    }
+
     if (!adjustment.countedBy?.trim() || !adjustment.signatureName?.trim()) {
       addIssue('ERROR', 'INVENTORY_ADJUSTMENT_SIGN_MISSING', `盘点调整 ${adjustment.adjustmentNo} 缺少清点人或签字`);
     }

@@ -916,8 +916,7 @@ function syncPlanQuantity(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
     if (planWasFollowingSuggestion) {
       line.productionPlanQuantity = nextSuggestedQuantity;
-      line.productionPlanOverrideByCode = '';
-      line.productionPlanOverrideReason = '';
+      clearProductionPlanOverride(line);
     }
     return;
   }
@@ -928,9 +927,16 @@ function syncPlanQuantity(line: CreateOrderLinePayload) {
   }
   if (planWasFollowingSuggestion) {
     line.productionPlanQuantity = nextSuggestedQuantity;
-    line.productionPlanOverrideByCode = '';
-    line.productionPlanOverrideReason = '';
+    clearProductionPlanOverride(line);
   }
+}
+
+function clearProductionPlanOverride(line: CreateOrderLinePayload) {
+  line.productionPlanOverrideByCode = '';
+  line.productionPlanOverrideByName = '';
+  line.productionPlanOverrideByRole = '';
+  line.productionPlanOverrideAt = '';
+  line.productionPlanOverrideReason = '';
 }
 
 function normalizedLines() {

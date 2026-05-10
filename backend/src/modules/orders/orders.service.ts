@@ -392,9 +392,6 @@ export class OrdersService {
   }
 
   async update(orderNo: string, dto: UpdateOrderDto) {
-    this.validateOrderLines(dto.lines, { requireStockSources: false });
-    const preparedLinePlans = await this.prepareOrderLinePlans(dto.lines);
-
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const order = await this.prisma.customerOrder.findFirst({
       where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
@@ -407,6 +404,8 @@ export class OrdersService {
       throw new BadRequestException('只有待提交生产订单可以编辑');
     }
 
+    this.validateOrderLines(dto.lines, { requireStockSources: false });
+    const preparedLinePlans = await this.prepareOrderLinePlans(dto.lines);
     const nextOrderNo = dto.orderNo?.trim() ? this.normalizeOrderNo(dto.orderNo) : order.orderNo;
     if (nextOrderNo !== order.orderNo) {
       await this.ensureOrderNoAvailable(nextOrderNo, order.orderNo);
@@ -498,8 +497,6 @@ export class OrdersService {
   }
 
   async updateLineProcess(orderNo: string, lineId: string, dto: UpdateLineProcessDto) {
-    const processEditor = await this.resolveProcessEditorOperator(dto.configuredByCode);
-    const steps = await this.normalizeProcessSteps(dto.steps, true);
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
     const order = await this.prisma.customerOrder.findFirst({
       where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } }
@@ -521,6 +518,8 @@ export class OrdersService {
     ) {
       throw new BadRequestException('该零件已全量使用库存，不需要设置生产流程');
     }
+    const steps = await this.normalizeProcessSteps(dto.steps, true);
+    const processEditor = await this.resolveProcessEditorOperator(dto.configuredByCode);
 
     // 保存某个订单零件的独立生产流程，并同步未完成的生产任务快照。
     await this.prisma.$transaction(async (tx) => {
@@ -1132,7 +1131,6 @@ export class OrdersService {
 
   async submit(orderNo: string, dto: SubmitOrderDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
-    const submitOperator = await this.resolveSubmitPlanOperator(dto.submittedByCode, '下单/计划操作员');
 
     // 提交订单时按零件来源处理：重新生产生成 ProductionTask，使用库存则把备货库存转为订单库存。
     await runSerializableTransaction(
@@ -1157,6 +1155,7 @@ export class OrdersService {
         if (order.status !== OrderStatus.DRAFT) {
           throw new BadRequestException('只有待提交生产订单可以提交生产');
         }
+        const submitOperator = await this.resolveSubmitPlanOperatorFromClient(tx, dto.submittedByCode, '下单/计划操作员');
         order.lines.forEach((line, index) => {
           this.validateSingleOrderLine(this.persistedOrderLineToValidationDto(line), `第 ${index + 1} 个零件`, true);
         });

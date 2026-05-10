@@ -247,10 +247,32 @@ export class ProductionService {
       where,
       orderBy: [{ createdAt: 'desc' }]
     });
+    const orderIds = Array.from(new Set(requests.map((request) => request.orderId).filter(Boolean))) as string[];
+    const orderNos = Array.from(new Set(requests.map((request) => request.orderNo?.trim()).filter(Boolean))) as string[];
+    const relatedOrders =
+      orderIds.length > 0 || orderNos.length > 0
+        ? await this.prisma.customerOrder.findMany({
+            where: {
+              OR: [
+                ...(orderIds.length > 0 ? [{ id: { in: orderIds } }] : []),
+                ...(orderNos.length > 0 ? [{ orderNo: { in: orderNos } }] : [])
+              ]
+            },
+            select: { id: true, orderNo: true, status: true }
+          })
+        : [];
+    const orderStatusByOrderId = new Map(relatedOrders.map((order) => [order.id, order.status]));
+    const orderStatusByOrderNo = new Map(relatedOrders.map((order) => [order.orderNo.trim().toUpperCase(), order.status]));
     const statusRank: Record<string, number> = { PENDING: 0, APPROVED: 1, REJECTED: 2 };
     return requests
       .sort((left, right) => (statusRank[left.status] ?? 9) - (statusRank[right.status] ?? 9))
-      .map((request) => this.toProductionReplenishmentRequest(request));
+      .map((request) =>
+        this.toProductionReplenishmentRequest(
+          request,
+          (request.orderId ? orderStatusByOrderId.get(request.orderId) : undefined) ||
+            orderStatusByOrderNo.get(request.orderNo.trim().toUpperCase())
+        )
+      );
   }
 
   async scrapRecords(query: ProductionScrapQueryDto = {}) {
@@ -815,6 +837,9 @@ export class ProductionService {
         if (task.order.status === OrderStatus.CANCELLED) {
           throw new BadRequestException('已取消订单不能开始新的生产任务');
         }
+        if (task.order.status === OrderStatus.COMPLETED) {
+          throw new BadRequestException('已完成发货订单不能开始新的生产任务');
+        }
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能重新开始生产');
         }
@@ -871,6 +896,9 @@ export class ProductionService {
         for (const task of tasks) {
           if (task.order.status === OrderStatus.CANCELLED) {
             throw new BadRequestException(`已取消订单不能开始新的生产任务：${task.orderNo}`);
+          }
+          if (task.order.status === OrderStatus.COMPLETED) {
+            throw new BadRequestException(`已完成发货订单不能开始新的生产任务：${task.orderNo}`);
           }
           if (task.inventoryBatch) {
             throw new BadRequestException(`生产任务已入库，不能重新开始生产：${task.productionTaskNo}`);
@@ -936,6 +964,12 @@ export class ProductionService {
       this.prisma,
       async (tx) => {
         const task = await this.findTaskForMutationOrThrow(tx, id);
+        if (task.order.status === OrderStatus.CANCELLED) {
+          throw new BadRequestException('已取消订单不能撤回生产任务');
+        }
+        if (task.order.status === OrderStatus.COMPLETED) {
+          throw new BadRequestException('已完成发货订单不能撤回生产任务');
+        }
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能撤回');
         }
@@ -1061,6 +1095,9 @@ export class ProductionService {
         const task = await this.findTaskForMutationOrThrow(tx, id);
         if (task.order.status === OrderStatus.CANCELLED) {
           throw new BadRequestException('已取消订单不能确认生产完成');
+        }
+        if (task.order.status === OrderStatus.COMPLETED) {
+          throw new BadRequestException('已完成发货订单不能修改生产完成记录');
         }
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能修改生产完成记录');
@@ -1206,6 +1243,9 @@ export class ProductionService {
         if (task.order.status === OrderStatus.CANCELLED) {
           throw new BadRequestException('已取消订单不能修改工序完成记录');
         }
+        if (task.order.status === OrderStatus.COMPLETED) {
+          throw new BadRequestException('已完成发货订单不能修改工序完成记录');
+        }
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能修改工序完成记录');
         }
@@ -1345,6 +1385,9 @@ export class ProductionService {
         const task = await this.findTaskForMutationOrThrow(tx, id);
         if (task.order.status === OrderStatus.CANCELLED) {
           throw new BadRequestException('已取消订单不能修改工序完成记录');
+        }
+        if (task.order.status === OrderStatus.COMPLETED) {
+          throw new BadRequestException('已完成发货订单不能修改工序完成记录');
         }
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能修改工序完成记录');
@@ -1514,6 +1557,9 @@ export class ProductionService {
       if (task.order.status === OrderStatus.CANCELLED) {
         throw new BadRequestException('已取消订单不能确认生产报废补单');
       }
+      if (task.order.status === OrderStatus.COMPLETED) {
+        throw new BadRequestException('已完成发货订单不能确认生产报废补单');
+      }
       if (task.inventoryBatch) {
         throw new BadRequestException('生产任务已入库，不能确认生产报废补单');
       }
@@ -1638,6 +1684,9 @@ export class ProductionService {
       const task = completion.productionTask;
       if (task.order.status === OrderStatus.CANCELLED) {
         throw new BadRequestException('已取消订单不能驳回生产报废补单');
+      }
+      if (task.order.status === OrderStatus.COMPLETED) {
+        throw new BadRequestException('已完成发货订单不能驳回生产报废补单');
       }
       if (task.inventoryBatch) {
         throw new BadRequestException('生产任务已入库，不能驳回生产报废补单');
@@ -2733,12 +2782,13 @@ export class ProductionService {
     };
   }
 
-  private toProductionReplenishmentRequest(request: any) {
+  private toProductionReplenishmentRequest(request: any, orderStatus?: OrderStatus) {
     return {
       id: request.id,
       requestNo: request.requestNo,
       sourceType: request.sourceType,
       status: request.status,
+      orderStatus,
       orderId: request.orderId,
       orderNo: request.orderNo,
       orderLineId: request.orderLineId,

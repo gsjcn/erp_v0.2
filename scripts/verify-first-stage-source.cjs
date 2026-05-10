@@ -91,6 +91,7 @@ function verifyNavigation() {
 function verifyResponsiveMobileBaseline() {
   const stylesPath = 'frontend/src/styles.css';
   const layoutPath = 'frontend/src/layout/AppLayout.vue';
+  const dateRangePath = 'frontend/src/components/DateRangeFilter.vue';
   if (!fileExists(stylesPath)) {
     addFailure(`Missing global styles file: ${stylesPath}`);
     return;
@@ -99,9 +100,14 @@ function verifyResponsiveMobileBaseline() {
     addFailure(`Missing app layout file: ${layoutPath}`);
     return;
   }
+  if (!fileExists(dateRangePath)) {
+    addFailure(`Missing shared date range filter file: ${dateRangePath}`);
+    return;
+  }
 
   const stylesSource = readFile(stylesPath);
   const layoutSource = readFile(layoutPath);
+  const dateRangeSource = readFile(dateRangePath);
   const requiredStyleSnippets = [
     'min-height: 100dvh',
     'env(safe-area-inset-left)',
@@ -128,7 +134,16 @@ function verifyResponsiveMobileBaseline() {
     '.el-dialog',
     'width: calc(100vw - 24px) !important',
     '.el-dialog__footer .el-button',
+    '.el-popover.el-popper',
+    'width: min(430px, calc(100vw - 24px)) !important',
+    '.el-message .el-message__content',
+    '.el-message-box__message',
+    ".el-popper[role='tooltip']",
+    'white-space: normal',
     '.el-select-dropdown__item',
+    '.el-select-dropdown__item span',
+    'height: auto',
+    'line-height: 20px',
     '@media (hover: none) and (pointer: coarse)'
   ];
   for (const snippet of requiredStyleSnippets) {
@@ -145,6 +160,18 @@ function verifyResponsiveMobileBaseline() {
   }
   if (!/\.el-input__wrapper,[\s\S]*\.el-select__wrapper,[\s\S]*min-height:\s*44px;/.test(stylesSource)) {
     addFailure('styles.css must keep Element Plus mobile input/select wrappers at least 44px high.');
+  }
+
+  const dateRangeSnippets = [
+    'class="date-range-filter"',
+    'min-height: 44px',
+    '@media (max-width: 900px)',
+    'font-size: 16px'
+  ];
+  for (const snippet of dateRangeSnippets) {
+    if (!dateRangeSource.includes(snippet)) {
+      addFailure(`DateRangeFilter.vue must keep mobile-friendly date range snippet: ${snippet}`);
+    }
   }
 
   const requiredLayoutSnippets = [
@@ -189,6 +216,37 @@ function verifyNoNativeBrowserDialogs() {
   }
 }
 
+function verifyResponsiveElementPlusDialogs() {
+  const frontendDir = resolveProjectPath('frontend/src');
+  if (!fs.existsSync(frontendDir)) {
+    return;
+  }
+
+  const dialogPattern = /<el-dialog\b[\s\S]*?>/g;
+  for (const filePath of walkFiles(frontendDir)) {
+    if (path.extname(filePath) !== '.vue') {
+      continue;
+    }
+
+    const source = fs.readFileSync(filePath, 'utf8');
+    const lineStarts = [0];
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index] === '\n') {
+        lineStarts.push(index + 1);
+      }
+    }
+
+    for (const match of source.matchAll(dialogPattern)) {
+      const dialogTag = match[0];
+      if (dialogTag.includes('responsive-dialog')) {
+        continue;
+      }
+      const lineNumber = lineStarts.filter((lineStart) => lineStart <= match.index).length;
+      addFailure(`Element Plus dialog must include responsive-dialog class: ${toProjectPath(filePath)}:${lineNumber}`);
+    }
+  }
+}
+
 function verifyCustomerSelectOnlyShowsName() {
   const componentPath = 'frontend/src/components/CustomerSelect.vue';
   if (!fileExists(componentPath)) {
@@ -208,6 +266,13 @@ function verifyCustomerSelectOnlyShowsName() {
       addFailure(`CustomerSelect.vue option template should not expose customer detail field "${field}".`);
     }
   }
+
+  const mobileTouchSnippets = ['min-height: 44px', 'class="customer-option"', '.customer-option strong', 'text-overflow: clip'];
+  for (const snippet of mobileTouchSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`CustomerSelect.vue must keep mobile-friendly customer option snippet: ${snippet}`);
+    }
+  }
 }
 
 function verifyOrderSelectDisplayContract() {
@@ -224,6 +289,9 @@ function verifyOrderSelectDisplayContract() {
     '{{ selectedOrder.customerName }}',
     'order.customerName',
     'order.customerSearchText',
+    '@media (max-width: 900px)',
+    'overflow-wrap: anywhere',
+    'min-height: 64px',
     'return props.orders.filter((order) => orderMatchesKeyword(order, normalizedKeyword));'
   ];
   for (const snippet of requiredSnippets) {
@@ -579,7 +647,8 @@ function verifyProductionOperatorSearchWorkflow() {
     '逐字段匹配，避免把多个字段拼接后产生跨字段误命中；例如 zm 不应命中顾胜钧',
     'role.includes(\'车间主任\')',
     'role.includes(\'车间主管\')',
-    '开始生产和确认生产只能由车间主任操作'
+    '开始生产和确认生产只能由车间主任操作',
+    '已完成发货订单不能开始新的生产任务'
   ];
   for (const snippet of backendSnippets) {
     if (!serviceSource.includes(snippet)) {
@@ -685,7 +754,7 @@ function verifyPlannerProcessAndSubmitGuard() {
     '只有待提交生产订单可以修改生产流程',
     '生产流程填写：${processEditor.name}',
     'async submit(orderNo: string, dto: SubmitOrderDto)',
-    "const submitOperator = await this.resolveSubmitPlanOperator(dto.submittedByCode, '下单/计划操作员');",
+    "const submitOperator = await this.resolveSubmitPlanOperatorFromClient(tx, dto.submittedByCode, '下单/计划操作员');",
     '只有待提交生产订单可以提交生产',
     '提交生产：${submitOperator.name}',
     'private async resolveSubmitPlanOperatorFromClient',
@@ -701,6 +770,20 @@ function verifyPlannerProcessAndSubmitGuard() {
     if (!serviceSource.includes(snippet)) {
       addFailure(`OrdersService must keep planner-only process/submit guard snippet: ${snippet}`);
     }
+  }
+  if (
+    !/async\s+updateLineProcess\s*\([^)]*\)\s*{[\s\S]*order\.status !== OrderStatus\.DRAFT[\s\S]*normalizeProcessSteps\(dto\.steps,\s*true\)[\s\S]*resolveProcessEditorOperator\(dto\.configuredByCode\)/.test(
+      serviceSource
+    )
+  ) {
+    addFailure('OrdersService.updateLineProcess must reject non-draft orders before validating process steps or the process editor operator.');
+  }
+  if (
+    !/async\s+submit\s*\([^)]*\)\s*{[\s\S]*order\.status !== OrderStatus\.DRAFT[\s\S]*resolveSubmitPlanOperatorFromClient\(tx,\s*dto\.submittedByCode,\s*'下单\/计划操作员'\)/.test(
+      serviceSource
+    )
+  ) {
+    addFailure('OrdersService.submit must reject non-draft orders before validating the submit operator.');
   }
 
   const processViewSource = readFile(processViewPath);
@@ -922,6 +1005,7 @@ function verifyMobileCompactOrderCards() {
     'frontend/src/views/OrderDetailView.vue',
     'frontend/src/views/ProcessTemplatesView.vue',
     'frontend/src/components/InventorySourceDetailsDialog.vue',
+    'frontend/src/components/OrderLineEditor.vue',
     'frontend/src/components/ProcessDefinitionManager.vue',
     'frontend/src/components/ProcessTemplateManager.vue',
     'frontend/src/styles.css'
@@ -943,6 +1027,7 @@ function verifyMobileCompactOrderCards() {
   const orderDetailSource = readFile('frontend/src/views/OrderDetailView.vue');
   const processTemplatesViewSource = readFile('frontend/src/views/ProcessTemplatesView.vue');
   const inventorySourceDialogSource = readFile('frontend/src/components/InventorySourceDetailsDialog.vue');
+  const orderLineEditorSource = readFile('frontend/src/components/OrderLineEditor.vue');
   const processDefinitionSource = readFile('frontend/src/components/ProcessDefinitionManager.vue');
   const processTemplateSource = readFile('frontend/src/components/ProcessTemplateManager.vue');
   const styleSource = readFile('frontend/src/styles.css');
@@ -1038,8 +1123,11 @@ function verifyMobileCompactOrderCards() {
     'isMobileLayout',
     'line-compact-summary',
     'order-detail-line-body',
+    'order-detail-line-toolbar',
     'expandedMobileOrderDetailLineIds',
     'toggleOrderDetailLine',
+    'expandAllOrderDetailLines',
+    'collapseAllOrderDetailLines',
     'showOrderDetailLineDetails',
     'isOrderDetailLineExpanded'
   ];
@@ -1071,6 +1159,38 @@ function verifyMobileCompactOrderCards() {
   for (const snippet of inventorySourceDialogSnippets) {
     if (!inventorySourceDialogSource.includes(snippet)) {
       addFailure(`InventorySourceDetailsDialog.vue must keep compact mobile source batch card snippet: ${snippet}`);
+    }
+  }
+  const orderLineEditorSnippets = [
+    'mobile-card-compact-summary',
+    'mobile-card-header-actions',
+    'order-line-mobile-toolbar',
+    'expandedMobileLineIndexes',
+    'length === 1 ? [0] : []',
+    'expandAllMobileLineCards',
+    'collapseAllMobileLineCards',
+    "line.deliveryDate || defaultDeliveryDate || '-'",
+    'stockSourceReviewRequired(line)',
+    "isStockSourceReviewed(line) ? '已核对来源' : '未核对来源'",
+    'toggleMobileLineCard',
+    'isMobileLineExpanded',
+    'fulfillmentModeText'
+  ];
+  for (const snippet of orderLineEditorSnippets) {
+    if (!orderLineEditorSource.includes(snippet)) {
+      addFailure(`OrderLineEditor.vue must keep compact mobile order-line editor card snippet: ${snippet}`);
+    }
+  }
+  const mobileTextWrapSnippets = [
+    { source: inventorySourceDialogSource, file: 'InventorySourceDetailsDialog.vue', snippet: '.reservation-order-link,' },
+    { source: inventorySourceDialogSource, file: 'InventorySourceDetailsDialog.vue', snippet: '.order-preview-summary strong' },
+    { source: warehouseSource, file: 'WarehouseView.vue', snippet: '.shipment-order-card strong,' },
+    { source: productionSource, file: 'ProductionView.vue', snippet: '.empty-production-hint span' },
+    { source: productionSource, file: 'ProductionView.vue', snippet: 'min-width: 0;' }
+  ];
+  for (const item of mobileTextWrapSnippets) {
+    if (!item.source.includes(item.snippet)) {
+      addFailure(`${item.file} must keep mobile text wrapping/shrinking snippet: ${item.snippet}`);
     }
   }
   const processDefinitionSnippets = [
@@ -1129,6 +1249,7 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     'runSerializableTransaction',
     'findTaskForMutationOrThrow(tx, id)',
     '已取消订单不能修改工序完成记录',
+    '已完成发货订单不能修改工序完成记录',
     '生产任务已入库，不能修改工序完成记录',
     '生产任务必须先开始，才能确认工序完成',
     '已完成生产的工序不能改为未完成',
@@ -1151,9 +1272,13 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
   const viewSource = readFile(viewPath);
   const viewSnippets = [
     'function canOpenProcess(row: ProductionTask, processName: string)',
+    "if (row.orderStatus === 'COMPLETED')",
+    "return isProcessCompleted(row, processName);",
     "if (effectiveProductionStatus(row) === 'PENDING')",
     'return row.status === \'COMPLETED\' || isProcessCompleted(row, processName) || isCurrentProcess(row, processName);',
     'function processButtonTitle(row: ProductionTask, processName: string)',
+    '订单已完成发货，只能查看工序记录',
+    '该订单已完成发货，工序完成表只能查看，不能再修改。',
     'return \'请先开始生产\';',
     'return \'请先完成上一道工序\';',
     'function openProcessCompletion(row: ProductionTask, processName: string)',
@@ -1185,6 +1310,7 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
 
   const verifierSource = readFile(verifierPath);
   const verifierSnippets = [
+    'shouldHaveProductionTask && normalTasks.length === 0',
     'PENDING_TASK_HAS_COMPLETED_PROCESS',
     'PROCESS_COMPLETION_SKIPPED_PREVIOUS',
     'PROCESS_COMPLETION_STEP_OUT_OF_RANGE',
@@ -1260,11 +1386,15 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
   const serviceSnippets = [
     'async replenishmentRequests(query: ProductionReplenishmentRequestQueryDto = {})',
     'this.prisma.productionReplenishmentRequest.findMany',
+    'orderStatusByOrderId',
+    'orderStatusByOrderNo',
+    'private toProductionReplenishmentRequest(request: any, orderStatus?: OrderStatus)',
     'statusRank',
     'async withdraw(id: string, dto: WithdrawProductionTaskDto)',
     '管理人员姓名和撤回原因不能为空',
     '撤回处理方式不能为空',
     '无实物处理时，处理数量必须为 0',
+    '已完成发货订单不能撤回生产任务',
     '生产任务已入库，不能撤回',
     '已有补单任务开始生产，不能自动撤回',
     'tx.productionTask.deleteMany',
@@ -1278,6 +1408,7 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     '没有待确认的生产报废补单申请',
     '生产报废补单申请已经生成任务',
     '已取消订单不能确认生产报废补单',
+    '已完成发货订单不能确认生产报废补单',
     '生产任务已入库，不能确认生产报废补单',
     '生产报废补单必须由车间主管确认后才生成补单任务',
     "shortageMode: 'REPLENISHMENT'",
@@ -1289,6 +1420,7 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'customerNameByOrderNo',
     'async rejectReplenishmentRequest(id: string, dto: RejectProductionReplenishmentRequestDto)',
     '已取消订单不能驳回生产报废补单',
+    '已完成发货订单不能驳回生产报废补单',
     '生产任务已入库，不能驳回生产报废补单',
     '已确认的生产报废补单申请不能驳回',
     "shortageMode: 'MANAGER_APPROVED'",
@@ -1361,6 +1493,9 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'title="生产报废补单申请"',
     'loadProductionReplenishmentRequests',
     'erpApi.productionReplenishmentRequests',
+    'canReviewReplenishmentRequest',
+    'replenishmentRequestLockedReason',
+    '订单已完成发货，不能处理生产报废补单申请',
     'openReplenishmentApprovalFromRequest',
     'openReplenishmentReject',
     'v-model="replenishmentApprovalVisible"',
@@ -1397,6 +1532,9 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'await checkProductionScrapRecords()',
     'PRODUCTION_NOTICE_ACK_MISSING',
     'REPLENISHMENT_SOURCE_TYPE_INVALID',
+    'PENDING_REPLENISHMENT_ORDER_CANCELLED',
+    'PENDING_REPLENISHMENT_ORDER_COMPLETED',
+    'PENDING_REPLENISHMENT_TASK_RECEIVED',
     'PENDING_REPLENISHMENT_REVIEW_FIELDS_STALE',
     'APPROVED_REPLENISHMENT_TASK_MISSING',
     'APPROVED_REPLENISHMENT_TASK_SOURCE_TYPE',
@@ -1495,6 +1633,13 @@ function verifyOrderChangeAndCancellationWorkflow() {
   }
 
   const serviceSource = readFile(servicePath);
+  if (
+    !/async\s+update\(orderNo:\s*string,\s*dto:\s*UpdateOrderDto\)\s*{[\s\S]*order\.status !== OrderStatus\.DRAFT[\s\S]*this\.validateOrderLines\(dto\.lines,\s*\{\s*requireStockSources:\s*false\s*\}\)/.test(
+      serviceSource
+    )
+  ) {
+    addFailure('OrdersService.update must reject non-draft orders before validating replacement order lines.');
+  }
   const serviceSnippets = [
     'async createLineReplenishment(orderNo: string, lineId: string, dto: CreateLineReplenishmentDto)',
     'findStartedOrderLineTask(tx, normalizedOrderNo, lineId)',
@@ -1626,6 +1771,21 @@ function verifyOrderChangeAndCancellationWorkflow() {
   for (const snippet of listViewSnippets) {
     if (!listViewSource.includes(snippet)) {
       addFailure(`OrdersListView.vue must keep cancel order dialog workflow snippet: ${snippet}`);
+    }
+  }
+  const planOverrideClearSnippets = [
+    { source: listViewSource, file: 'OrdersListView.vue', snippet: 'function clearProductionPlanOverride(line: CreateOrderLinePayload)' },
+    { source: listViewSource, file: 'OrdersListView.vue', snippet: 'line.productionPlanOverrideByName = \'\';' },
+    { source: listViewSource, file: 'OrdersListView.vue', snippet: 'line.productionPlanOverrideByRole = \'\';' },
+    { source: listViewSource, file: 'OrdersListView.vue', snippet: 'line.productionPlanOverrideAt = \'\';' },
+    { source: detailViewSource, file: 'OrderDetailView.vue', snippet: 'function clearLineProductionPlanOverride(line: CreateOrderLinePayload)' },
+    { source: detailViewSource, file: 'OrderDetailView.vue', snippet: 'line.productionPlanOverrideByName = \'\';' },
+    { source: detailViewSource, file: 'OrderDetailView.vue', snippet: 'line.productionPlanOverrideByRole = \'\';' },
+    { source: detailViewSource, file: 'OrderDetailView.vue', snippet: 'line.productionPlanOverrideAt = \'\';' }
+  ];
+  for (const item of planOverrideClearSnippets) {
+    if (!item.source.includes(item.snippet)) {
+      addFailure(`${item.file} must clear full production plan override snapshot when plan follows suggestion: ${item.snippet}`);
     }
   }
 
@@ -2114,6 +2274,7 @@ function verifyPartialShipmentWorkflow() {
     "await this.assertOrderHasNoPendingShortage(tx, batch.sourceOrderId, '单批发货');",
     'async confirmOrderShipment(orderNo: string, dto: ConfirmShipmentDto)',
     '待提交生产订单不能发货，请先提交生产并形成待发货库存',
+    '已完成发货订单不能再次发货',
     'const orderShipmentRequest = this.normalizeShipmentItems(dto);',
     'async confirmBatchShipment(dto: ConfirmBatchShipmentDto)',
     "await this.assertOrderHasNoPendingShortage(tx, orderIds[0], '批量发货');",
@@ -2132,6 +2293,7 @@ function verifyPartialShipmentWorkflow() {
     'shipmentQuantity > availableQuantity + 0.0001',
     'sourceOrder: { select: { status: true } }',
     '已取消订单库存不能发货',
+    '已完成发货订单库存不能再次发货',
     'const remainingOrderQuantity =',
     'const overShipmentQuantity = this.roundQuantity(Math.max(shipmentQuantity - remainingOrderQuantity, 0));',
     '本次发货超过订单未发货数量，必须填写销售确认人',
@@ -2141,6 +2303,8 @@ function verifyPartialShipmentWorkflow() {
     'await this.refreshOrderShipmentStatus(tx, order.id);',
     'private async isOrderShipmentClosed',
     'getShippedOrderQuantityMap',
+    'status: { notIn: [OrderStatus.DRAFT, OrderStatus.CANCELLED, OrderStatus.COMPLETED] }',
+    'orderStatus: batch.sourceOrder?.status',
     'const remainingSuggestionQuantityByLine = new Map<string, number>();',
     'this.toShipment(batch, shippedQuantityByLine, remainingSuggestionQuantityByLine)',
     'const suggestedShipmentQuantity = Math.min(availableQuantity, Math.max(suggestionRemaining, 0));',
@@ -2165,6 +2329,18 @@ function verifyPartialShipmentWorkflow() {
     'function shipmentQuantityAdjustmentText(row: EditableWarehouseShipment)',
     'const activeShipmentShortageText = computed(() => shipmentShortageText(activeShipment.value));',
     'function shipmentShortageText(row?: WarehouseShipment)',
+    'function shipmentLockedText(row?: WarehouseShipment)',
+    'function canShipWarehouseShipment(row?: WarehouseShipment)',
+    ':selectable="shipmentRowSelectable"',
+    'function shipmentRowSelectable(row: WarehouseShipment)',
+    'selectedShipments.value = rows.filter(canShipWarehouseShipment);',
+    '.filter((item) => item.orderNo === orderNo && canShipWarehouseShipment(item))',
+    'const selectedShipmentLockedText = computed',
+    'const batchShipmentLockedText = computed',
+    '订单已完成发货，不能再次发货',
+    'const lockedText = shipmentLockedText(activeShipment.value);',
+    'const lockedRow = batchShipmentRows.value.find((row) => !canShipWarehouseShipment(row));',
+    ':disabled="Boolean(batchShipmentLockedText) || Boolean(batchShipmentShortageText)"',
     '该订单仍有待补单短缺，暂不能单批发货',
     'goActiveShipmentShortageDetail',
     ':disabled="Boolean(activeShipmentShortageText)"',
@@ -2229,6 +2405,9 @@ function verifyPartialShipmentWorkflow() {
   const verifierSnippets = [
     'FULLY_SHIPPED_ORDER_STATUS_STALE',
     'COMPLETED_ORDER_NOT_FULLY_SHIPPED',
+    'COMPLETED_ORDER_HAS_AVAILABLE_SHIPMENT_BATCH',
+    'CANCELLED_ORDER_HAS_AVAILABLE_SHIPMENT_BATCH',
+    'DRAFT_ORDER_HAS_AVAILABLE_SHIPMENT_BATCH',
     'ORDER_COMPLETED_UNSHIPPED',
     'ORDER_SHIPPED_COMPLETED',
     'sourceRecordType: \'InventoryBatch\'',
@@ -2258,7 +2437,16 @@ function verifySharedLinkComponents() {
   }
 
   const drawingPreviewSource = readFile(drawingPreviewLinkPath);
-  const drawingPreviewRequiredSnippets = ['<el-dialog', 'isImageDrawing', 'isPdfDrawing', '打开或下载图纸'];
+  const drawingPreviewRequiredSnippets = [
+    '<el-dialog',
+    'responsive-dialog',
+    'isImageDrawing',
+    'isPdfDrawing',
+    '@media (max-width: 900px)',
+    'min-height: 44px',
+    'overflow-wrap: anywhere',
+    '打开或下载图纸'
+  ];
   for (const snippet of drawingPreviewRequiredSnippets) {
     if (!drawingPreviewSource.includes(snippet)) {
       addFailure(`DrawingPreviewLink.vue must keep shared preview/open behavior: missing ${snippet}`);
@@ -2647,25 +2835,28 @@ function verifySharedOrderDisplayStatus() {
   }
 
   const source = readFile(orderStatusPath);
-  const requiredStatusSnippets = [
-    'export function orderDisplayStatus',
-    "order.status === 'DRAFT'",
-    "return 'ORDER_DRAFT'",
-    "order.status === 'CANCELLED'",
-    "return 'ORDER_CANCELLED'",
-    "order.warehouseStage === 'SHIPPED'",
-    "return 'ORDER_SHIPPED_COMPLETED'",
-    "order.status === 'COMPLETED'",
-    "return 'ORDER_COMPLETED_UNSHIPPED'",
-    "order.status === 'IN_PRODUCTION'",
-    "return 'ORDER_IN_PRODUCTION'",
-    "order.status === 'SUBMITTED'",
-    "return 'WAITING_PRODUCTION'"
+  if (!source.includes('export function orderDisplayStatus')) {
+    addFailure('orderStatus.ts must export shared orderDisplayStatus utility.');
+  }
+  const requiredStatusRules = [
+    { name: 'draft order', pattern: /order\.status === 'DRAFT'[\s\S]*?return 'ORDER_DRAFT'/ },
+    { name: 'cancelled order', pattern: /order\.status === 'CANCELLED'[\s\S]*?return 'ORDER_CANCELLED'/ },
+    { name: 'shipped warehouse stage', pattern: /order\.warehouseStage === 'SHIPPED'[\s\S]*?return 'ORDER_SHIPPED_COMPLETED'/ },
+    {
+      name: 'completed order means shipped',
+      pattern: /!order\.warehouseStage && order\.status === 'COMPLETED'[\s\S]*?return 'ORDER_SHIPPED_COMPLETED'/
+    },
+    {
+      name: 'completed production before shipment',
+      pattern: /order\.productionStatus === 'COMPLETED'[\s\S]*?return 'ORDER_COMPLETED_UNSHIPPED'/
+    },
+    { name: 'in production order', pattern: /order\.status === 'IN_PRODUCTION'[\s\S]*?return 'ORDER_IN_PRODUCTION'/ },
+    { name: 'submitted order', pattern: /order\.status === 'SUBMITTED'[\s\S]*?return 'WAITING_PRODUCTION'/ }
   ];
 
-  for (const snippet of requiredStatusSnippets) {
-    if (!source.includes(snippet)) {
-      addFailure(`orderStatus.ts must keep shared order display status rule: ${snippet}`);
+  for (const rule of requiredStatusRules) {
+    if (!rule.pattern.test(source)) {
+      addFailure(`orderStatus.ts must keep shared order display status rule: ${rule.name}.`);
     }
   }
 
@@ -2910,7 +3101,9 @@ function verifyStockProductionPlanOverridePreserved() {
   const stockCoverPlanSnippets = [
     'options: { forceWhenStockCovers?: boolean } = {}',
     'const stockCoversCustomerQuantity =',
-    'if (options.forceWhenStockCovers && stockCoversCustomerQuantity)',
+    'function hasProductionPlanOverride(line: CreateOrderLinePayload)',
+    'const hasExplicitProductionPlanOverride = hasProductionPlanOverride(line);',
+    'if (options.forceWhenStockCovers && stockCoversCustomerQuantity && !hasExplicitProductionPlanOverride)',
     'const stockCoverAutoSyncedLines = new WeakSet<CreateOrderLinePayload>();',
     'function syncInitialStockCoveredPlanQuantity(line: CreateOrderLinePayload)',
     'stockCoverAutoSyncedLines.has(line)',
@@ -3211,6 +3404,8 @@ function verifyInventoryAdjustmentWorkflow() {
     'accept="application/pdf,image/*,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff"',
     '必须上传盘点工单、现场照片或 PDF',
     'adjustmentHistory.value = await erpApi.inventoryBatchAdjustments(batchId)',
+    'function adjustmentDisabledReason(row?: InventoryBatch)',
+    '只有可用库存或数量为 0 的历史批次可以盘点调整。',
     'function isAllowedAdjustmentFile(file: File)',
     'genericAdjustmentMimeTypes.includes(file.type)',
     'async function submitAdjustment()',
@@ -3234,6 +3429,11 @@ function verifyInventoryAdjustmentWorkflow() {
     'await checkInventoryAdjustments()',
     'async function checkInventoryAdjustments()',
     'prisma.inventoryAdjustment.findMany',
+    "where: { sourceRecordType: 'InventoryAdjustment', sourceRecordId: { in: adjustmentIds } }",
+    'INVENTORY_ADJUSTMENT_DELTA_MISMATCH',
+    'INVENTORY_ADJUSTMENT_TRANSACTION_MISSING',
+    'INVENTORY_ADJUSTMENT_TRANSACTION_MISMATCH',
+    'INVENTORY_ADJUSTMENT_ZERO_DELTA_HAS_TRANSACTION',
     'INVENTORY_ADJUSTMENT_SIGN_MISSING',
     'INVENTORY_ADJUSTMENT_ATTACHMENT_MISSING',
     'INVENTORY_ADJUSTMENT_ATTACHMENT_FILE_MISSING',
@@ -3415,6 +3615,9 @@ function verifyDataVerifierStockSourceReviewStatus() {
   if (!source.includes('STOCK_SOURCE_REVIEW_STATUS_MISSING') || !source.includes('STOCK_SOURCE_REVIEW_STATUS_INVALID')) {
     addFailure('verify-first-stage.ts must report missing or invalid stock source compatibilityStatus.');
   }
+  if (!source.includes('STOCK_SOURCE_OVER_ORDER_QUANTITY') || !source.includes('REWORK_SOURCE_OVER_PLAN_QUANTITY')) {
+    addFailure('verify-first-stage.ts must reject selected stock sources that exceed customer order quantity or rework plan quantity.');
+  }
   if (!source.includes('STOCK_SOURCE_USAGE_ORDER_CONFIRMATION_MISSING') || !source.includes('stockSourceUsageOrderIssue')) {
     addFailure('verify-first-stage.ts must verify draft stock source usage order manual confirmation.');
   }
@@ -3529,6 +3732,7 @@ verifyRequiredFiles();
 verifyNavigation();
 verifyResponsiveMobileBaseline();
 verifyNoNativeBrowserDialogs();
+verifyResponsiveElementPlusDialogs();
 verifyCustomerSelectOnlyShowsName();
 verifyOrderSelectDisplayContract();
 verifyOrderFilterOrder();

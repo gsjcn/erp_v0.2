@@ -568,6 +568,11 @@ a {
   max-width: calc(100vw - 32px);
 }
 
+.el-message .el-message__content,
+.el-message-box__message {
+  overflow-wrap: anywhere;
+}
+
 .el-select-dropdown__wrap,
 .el-autocomplete-suggestion__wrap {
   max-height: min(320px, 58vh);
@@ -1026,6 +1031,16 @@ a {
     min-width: 0;
   }
 
+  .el-message .el-message__content {
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .el-message-box__message p {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
   .el-dialog__footer .el-button + .el-button {
     margin-left: 0;
   }
@@ -1070,6 +1085,17 @@ a {
     max-width: calc(100vw - 24px);
   }
 
+  .el-popover.el-popper {
+    width: min(430px, calc(100vw - 24px)) !important;
+    overflow-wrap: anywhere;
+  }
+
+  .el-popper[role='tooltip'] {
+    max-width: calc(100vw - 24px);
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
   .el-select-dropdown__wrap,
   .el-autocomplete-suggestion__wrap {
     max-height: min(300px, 52vh);
@@ -1077,7 +1103,18 @@ a {
 
   .el-select-dropdown__item,
   .el-autocomplete-suggestion li {
+    height: auto;
     min-height: 44px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+    line-height: 20px;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .el-select-dropdown__item span {
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 }
 

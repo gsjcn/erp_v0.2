@@ -58,6 +58,11 @@ function handleChange(value: unknown) {
   max-width: 100%;
 }
 
+.date-range-filter :deep(.el-input__wrapper),
+.date-range-filter :deep(.el-range-editor.el-input__wrapper) {
+  min-height: 44px;
+}
+
 .date-range-filter :deep(.el-range-input) {
   min-width: 0;
   font-size: 13px;
@@ -67,5 +72,16 @@ function handleChange(value: unknown) {
   flex: 0 0 18px;
   min-width: 18px;
   padding: 0;
+}
+
+@media (max-width: 900px) {
+  .date-range-filter :deep(.el-range-input) {
+    font-size: 16px;
+  }
+
+  .date-range-filter :deep(.el-range-separator) {
+    flex-basis: 22px;
+    min-width: 22px;
+  }
 }
 </style>

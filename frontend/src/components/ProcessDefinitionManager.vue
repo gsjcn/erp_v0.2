@@ -59,6 +59,7 @@
       v-model="dialogVisible"
       :title="editingDefinitionId ? '编辑工序' : '新建工序'"
       width="min(520px, calc(100vw - 32px))"
+      class="responsive-dialog"
     >
       <el-form label-width="86px">
         <el-form-item label="工序名称" required>
@@ -85,6 +86,7 @@
       v-model="deleteDialogVisible"
       title="删除工序"
       width="min(500px, calc(100vw - 32px))"
+      class="responsive-dialog"
       append-to-body
     >
       <div class="delete-definition-summary">

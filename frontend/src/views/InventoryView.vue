@@ -282,7 +282,7 @@
             <el-button link type="primary" @click="openReservationDialog(row)">
               预占记录
             </el-button>
-            <el-button link type="primary" :disabled="!canAdjustBatch(row)" @click="openAdjustDialog(row)">
+            <el-button link type="primary" :disabled="!canAdjustBatch(row)" :title="adjustmentDisabledReason(row)" @click="openAdjustDialog(row)">
               盘点调整
             </el-button>
           </template>
@@ -393,7 +393,7 @@
           <el-button size="small" type="primary" plain @click="openReservationDialog(batch)">
             预占记录
           </el-button>
-          <el-button size="small" type="primary" plain :disabled="!canAdjustBatch(batch)" @click="openAdjustDialog(batch)">
+          <el-button size="small" type="primary" plain :disabled="!canAdjustBatch(batch)" :title="adjustmentDisabledReason(batch)" @click="openAdjustDialog(batch)">
             盘点调整
           </el-button>
         </div>
@@ -810,6 +810,13 @@ function canAdjustBatch(row: InventoryBatch) {
   return Boolean(row.canAdjust);
 }
 
+function adjustmentDisabledReason(row?: InventoryBatch) {
+  if (!row || canAdjustBatch(row)) {
+    return '';
+  }
+  return '只有可用库存或数量为 0 的历史批次可以盘点调整。';
+}
+
 function batchAvailableQuantity(row: InventoryBatch) {
   return Number(row.availableQuantity ?? Math.max(Number(row.quantity || 0) - Number(row.reservedQuantity || 0), 0));
 }
@@ -874,6 +881,11 @@ function currentDateTimeValue() {
 }
 
 function openAdjustDialog(row: InventoryBatch) {
+  const disabledReason = adjustmentDisabledReason(row);
+  if (disabledReason) {
+    ElMessage.warning(disabledReason);
+    return;
+  }
   selectedBatch.value = row;
   adjustForm.afterQuantity = Math.max(row.quantity, Number(row.reservedQuantity || 0));
   adjustForm.countedBy = '';

@@ -9,7 +9,7 @@
       :title="title || '产品图纸预览'"
       width="min(960px, calc(100vw - 32px))"
       append-to-body
-      class="drawing-preview-dialog-shell"
+      class="responsive-dialog drawing-preview-dialog-shell"
     >
       <div class="drawing-preview-dialog">
         <div class="drawing-preview-toolbar">
@@ -53,6 +53,7 @@ const isPdfDrawing = computed(() => /\.pdf$/i.test(props.fileUrl || props.fileNa
 
 .drawing-preview-button {
   max-width: 150px;
+  min-width: 0;
   overflow: hidden;
   padding: 0;
   text-overflow: ellipsis;
@@ -111,9 +112,10 @@ const isPdfDrawing = computed(() => /\.pdf$/i.test(props.fileUrl || props.fileNa
   color: #0f172a;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 900px) {
   .drawing-preview-button {
     max-width: 100%;
+    min-height: 44px;
     white-space: normal;
   }
 

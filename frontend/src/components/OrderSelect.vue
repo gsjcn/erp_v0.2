@@ -163,6 +163,7 @@ watch(
   overflow: hidden;
   color: #0f172a;
   font-size: 14px;
+  overflow-wrap: anywhere;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -196,6 +197,7 @@ watch(
   .order-select-summary {
     display: -webkit-box;
     overflow: hidden;
+    overflow-wrap: anywhere;
     white-space: normal;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -207,8 +209,12 @@ watch(
     gap: 4px;
   }
 
+  .order-option strong,
   .order-option span,
   .order-option small {
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
     white-space: normal;
   }
 }

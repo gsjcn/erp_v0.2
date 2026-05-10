@@ -139,6 +139,17 @@
         </div>
       </section>
 
+      <div v-if="isMobileLayout" class="order-detail-line-toolbar mt-24">
+        <div>
+          <strong>订单零件 {{ order.lines.length }} 项</strong>
+          <span>点击详情查看图纸、流程和补单操作。</span>
+        </div>
+        <div class="order-detail-line-toolbar-actions">
+          <el-button size="small" @click="expandAllOrderDetailLines">全部展开</el-button>
+          <el-button size="small" @click="collapseAllOrderDetailLines">全部收起</el-button>
+        </div>
+      </div>
+
       <div class="line-cards mt-24">
         <article
           v-for="line in order.lines"
@@ -356,7 +367,7 @@
       </div>
     </template>
 
-    <el-dialog v-model="editVisible" title="编辑订单零件" width="min(1500px, calc(100vw - 32px))">
+    <el-dialog v-model="editVisible" title="编辑订单零件" width="min(1500px, calc(100vw - 32px))" class="responsive-dialog">
       <el-form label-width="86px">
         <div class="order-edit-grid">
           <el-form-item label="订单号">
@@ -417,7 +428,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="additionalMaterialVisible" title="新增补单物料" width="min(1280px, calc(100vw - 32px))">
+    <el-dialog v-model="additionalMaterialVisible" title="新增补单物料" width="min(1280px, calc(100vw - 32px))" class="responsive-dialog">
       <el-alert
         title="只能用于订单已经开始生产后，客户在原订单基础上新增物料。未开始生产的订单必须编辑订单，不允许走补单。"
         type="warning"
@@ -616,7 +627,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="shortageResolutionVisible" title="需要补单处理" width="min(680px, calc(100vw - 32px))">
+    <el-dialog v-model="shortageResolutionVisible" title="需要补单处理" width="min(680px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-if="activeLine" class="shortage-resolution-panel">
         <el-alert
           :title="`不同于普通状态提示，这里必须把 ${activeLine.partCode} / ${activeLine.partName} 的短缺处理闭环，避免生产报废后忘记补单。`"
@@ -673,7 +684,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="replenishmentVisible" title="创建订单补单" width="min(560px, calc(100vw - 32px))">
+    <el-dialog v-model="replenishmentVisible" title="创建订单补单" width="min(560px, calc(100vw - 32px))" class="responsive-dialog">
       <el-alert
         :title="replenishmentDialogNotice"
         type="info"
@@ -707,7 +718,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="cancelReplenishmentVisible" title="取消补单" width="min(620px, calc(100vw - 32px))">
+    <el-dialog v-model="cancelReplenishmentVisible" title="取消补单" width="min(620px, calc(100vw - 32px))" class="responsive-dialog">
       <el-alert
         title="只允许取消未开始生产的补单。补单已经开工后不能直接删除，必须到生产页面走管理撤回。"
         type="warning"
@@ -740,7 +751,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="quantityChangeVisible" title="客户数量变更" width="min(640px, calc(100vw - 32px))">
+    <el-dialog v-model="quantityChangeVisible" title="客户数量变更" width="min(640px, calc(100vw - 32px))" class="responsive-dialog">
       <el-alert
         title="已开始生产的订单不能按待提交生产状态编辑。数量减少或取消会通知生产管理确认已生产物料转库存或销毁；数量增加会生成补单任务。"
         type="warning"
@@ -792,7 +803,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="cancelOrderVisible" title="取消订单" width="min(980px, calc(100vw - 32px))">
+    <el-dialog v-model="cancelOrderVisible" title="取消订单" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <el-alert
         :title="cancelOrderNoticeText"
         type="warning"
@@ -1863,8 +1874,7 @@ function syncPlanQuantity(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
     if (planWasFollowingSuggestion) {
       line.productionPlanQuantity = nextSuggestedQuantity;
-      line.productionPlanOverrideByCode = '';
-      line.productionPlanOverrideReason = '';
+      clearLineProductionPlanOverride(line);
     }
     return;
   }
@@ -1875,9 +1885,16 @@ function syncPlanQuantity(line: CreateOrderLinePayload) {
   }
   if (planWasFollowingSuggestion) {
     line.productionPlanQuantity = nextSuggestedQuantity;
-    line.productionPlanOverrideByCode = '';
-    line.productionPlanOverrideReason = '';
+    clearLineProductionPlanOverride(line);
   }
+}
+
+function clearLineProductionPlanOverride(line: CreateOrderLinePayload) {
+  line.productionPlanOverrideByCode = '';
+  line.productionPlanOverrideByName = '';
+  line.productionPlanOverrideByRole = '';
+  line.productionPlanOverrideAt = '';
+  line.productionPlanOverrideReason = '';
 }
 
 function normalizedLines() {
@@ -2118,6 +2135,14 @@ function toggleOrderDetailLine(lineId: string) {
   expandedMobileOrderDetailLineIds.value = isOrderDetailLineExpanded(lineId)
     ? expandedMobileOrderDetailLineIds.value.filter((item) => item !== lineId)
     : [...expandedMobileOrderDetailLineIds.value, lineId];
+}
+
+function expandAllOrderDetailLines() {
+  expandedMobileOrderDetailLineIds.value = order.value?.lines.map((line) => line.id) || [];
+}
+
+function collapseAllOrderDetailLines() {
+  expandedMobileOrderDetailLineIds.value = [];
 }
 
 function scrollToFirstShortageLine() {
@@ -2927,6 +2952,10 @@ onBeforeUnmount(() => {
   margin-top: 14px;
 }
 
+.order-detail-line-toolbar {
+  display: none;
+}
+
 .action-tooltip-wrap {
   display: inline-flex;
 }
@@ -3095,6 +3124,40 @@ onBeforeUnmount(() => {
     padding: 14px;
   }
 
+  .order-detail-line-toolbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+  }
+
+  .order-detail-line-toolbar > div:first-child {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .order-detail-line-toolbar strong,
+  .order-detail-line-toolbar span {
+    overflow-wrap: anywhere;
+  }
+
+  .order-detail-line-toolbar span {
+    color: #64748b;
+    font-size: 12px;
+    line-height: 18px;
+  }
+
+  .order-detail-line-toolbar-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
   .line-title {
     align-items: flex-start;
     margin-bottom: 8px;
@@ -3133,6 +3196,10 @@ onBeforeUnmount(() => {
 
   .pending-shortage-item {
     grid-template-columns: 1fr;
+  }
+
+  .order-detail-line-toolbar-actions .el-button {
+    min-height: 36px;
   }
 
   .line-actions .el-button,

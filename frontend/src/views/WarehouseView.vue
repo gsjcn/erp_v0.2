@@ -235,7 +235,13 @@
           <span v-if="selectedShipments.length" class="muted">
             已选 {{ selectedShipments.length }} 批{{ selectedShipmentOrderNo ? ` / ${selectedShipmentOrderNo}` : '' }}
           </span>
-          <el-button size="small" type="primary" :disabled="selectedShipments.length === 0" @click="openBatchShipmentConfirmFromSelection">
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="selectedShipments.length === 0 || Boolean(selectedShipmentLockedText)"
+            :title="selectedShipmentLockedText"
+            @click="openBatchShipmentConfirmFromSelection"
+          >
             批量确认发货
           </el-button>
         </div>
@@ -249,7 +255,14 @@
             <small>已发 {{ group.shippedText }} / 未发 {{ group.remainingText }} / 本次建议 {{ group.suggestedText }}</small>
             <small v-if="group.shortageText" class="shipment-shortage-warning">{{ group.shortageText }}</small>
           </div>
-          <el-button size="small" type="primary" plain @click="openOrderShipmentConfirm(group.rows[0])">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :disabled="!canShipWarehouseShipment(group.rows[0])"
+            :title="shipmentLockedText(group.rows[0])"
+            @click="openOrderShipmentConfirm(group.rows[0])"
+          >
             订单发货
           </el-button>
         </article>
@@ -261,7 +274,7 @@
         max-height="clamp(220px, 26vh, 320px)"
         @selection-change="handleShipmentSelectionChange"
       >
-        <el-table-column type="selection" width="46" />
+        <el-table-column type="selection" width="46" :selectable="shipmentRowSelectable" />
         <el-table-column label="库存批次" min-width="210">
           <template #default="{ row }">
             <div class="cell-main">{{ row.batchNo }}</div>
@@ -317,13 +330,13 @@
         <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="selectShipmentOrder(row)">选中订单</el-button>
-            <el-button link type="primary" @click="openOrderShipmentConfirm(row)">订单发货</el-button>
+            <el-button link type="primary" :disabled="!canShipWarehouseShipment(row)" :title="shipmentLockedText(row)" @click="openOrderShipmentConfirm(row)">订单发货</el-button>
             <el-button link type="primary" @click="openShipmentSourceDetails(row)">来源/图纸</el-button>
             <el-button
               link
               type="primary"
-              :disabled="Boolean(shipmentShortageText(row))"
-              :title="shipmentShortageText(row)"
+              :disabled="!canShipWarehouseShipment(row) || Boolean(shipmentShortageText(row))"
+              :title="shipmentLockedText(row) || shipmentShortageText(row)"
               @click="openShipmentConfirm(row)"
             >
               确认发货
@@ -381,7 +394,7 @@
             </div>
           </div>
           <div class="mobile-card-actions">
-            <el-button size="small" type="primary" plain @click="openOrderShipmentConfirm(group.rows[0])">
+            <el-button size="small" type="primary" plain :disabled="!canShipWarehouseShipment(group.rows[0])" :title="shipmentLockedText(group.rows[0])" @click="openOrderShipmentConfirm(group.rows[0])">
               订单发货
             </el-button>
           </div>
@@ -472,13 +485,13 @@
           <el-button
             link
             type="primary"
-            :disabled="Boolean(shipmentShortageText(shipment))"
-            :title="shipmentShortageText(shipment)"
+            :disabled="!canShipWarehouseShipment(shipment) || Boolean(shipmentShortageText(shipment))"
+            :title="shipmentLockedText(shipment) || shipmentShortageText(shipment)"
             @click="openShipmentConfirm(shipment)"
           >
             确认发货
           </el-button>
-          <el-button link type="primary" @click="openOrderShipmentConfirm(shipment)">订单发货</el-button>
+          <el-button link type="primary" :disabled="!canShipWarehouseShipment(shipment)" :title="shipmentLockedText(shipment)" @click="openOrderShipmentConfirm(shipment)">订单发货</el-button>
         </div>
       </article>
       <div v-if="!shipments.length && !loading" class="mobile-empty">暂无待发货库存</div>
@@ -682,6 +695,7 @@
       v-model="confirmVisible"
       title="确认入库"
       width="min(440px, calc(100vw - 32px))"
+      class="responsive-dialog"
       :close-on-click-modal="false"
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetReceiptDialog"
@@ -772,6 +786,7 @@
       v-model="shipmentVisible"
       title="确认发货"
       width="min(460px, calc(100vw - 32px))"
+      class="responsive-dialog"
       :close-on-click-modal="false"
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetShipmentDialog"
@@ -897,6 +912,7 @@
       v-model="batchShipmentVisible"
       :title="batchShipmentIsOrderMode ? '订单发货确认' : '批量确认发货'"
       width="min(760px, calc(100vw - 32px))"
+      class="responsive-dialog"
       :close-on-click-modal="false"
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetBatchShipmentDialog"
@@ -1052,7 +1068,13 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="batchShipmentVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="Boolean(batchShipmentShortageText)" @click="confirmBatchShipment">
+        <el-button
+          type="primary"
+          :loading="saving"
+          :disabled="Boolean(batchShipmentLockedText) || Boolean(batchShipmentShortageText)"
+          :title="batchShipmentLockedText || batchShipmentShortageText"
+          @click="confirmBatchShipment"
+        >
           {{ batchShipmentIsOrderMode ? '确认本次发货' : '确认批量发货' }}
         </el-button>
       </template>
@@ -1062,6 +1084,7 @@
       v-model="warehouseVisible"
       title="新增仓库"
       width="min(420px, calc(100vw - 32px))"
+      class="responsive-dialog"
       :before-close="handleSavingDialogBeforeClose"
     >
       <el-form label-width="92px">
@@ -1082,6 +1105,7 @@
       v-model="locationVisible"
       title="新增库位"
       width="min(420px, calc(100vw - 32px))"
+      class="responsive-dialog"
       :before-close="handleSavingDialogBeforeClose"
     >
       <el-form label-width="92px">
@@ -1103,7 +1127,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="noticeVisible" title="仓库通知" width="min(760px, calc(100vw - 32px))">
+    <el-dialog v-model="noticeVisible" title="仓库通知" width="min(760px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-loading="noticeLoading" class="notice-list">
         <div v-if="warehouseNotices.length === 0" class="muted">暂无仓库通知</div>
         <article v-for="notice in warehouseNotices" :key="notice.id" class="notice-item">
@@ -1147,6 +1171,7 @@
       v-model="stockNoticeVisible"
       :title="stockNoticeDialogTitle"
       width="min(640px, calc(100vw - 32px))"
+      class="responsive-dialog"
       append-to-body
       :close-on-click-modal="false"
       :before-close="handleStockNoticeBeforeClose"
@@ -1420,6 +1445,14 @@ const batchShipmentOrder = computed(() => orderOptions.value.find((order) => ord
 const batchShipmentShortageText = computed(() =>
   batchShipmentOrder.value && orderNeedsShortageAttention(batchShipmentOrder.value) ? orderShortageActionText(batchShipmentOrder.value) : ''
 );
+const selectedShipmentLockedText = computed(() => {
+  const lockedRow = selectedShipments.value.find((row) => !canShipWarehouseShipment(row));
+  return lockedRow ? shipmentLockedText(lockedRow) : '';
+});
+const batchShipmentLockedText = computed(() => {
+  const lockedRow = batchShipmentRows.value.find((row) => !canShipWarehouseShipment(row));
+  return lockedRow ? shipmentLockedText(lockedRow) : '';
+});
 const activeShipmentShortageText = computed(() => shipmentShortageText(activeShipment.value));
 const batchShipmentAlertTitle = computed(() =>
   batchShipmentIsOrderMode.value
@@ -1880,6 +1913,11 @@ function removeStockOverShipment(row: EditableWarehouseShipment) {
 }
 
 function openShipmentConfirm(row: WarehouseShipment) {
+  const lockedText = shipmentLockedText(row);
+  if (lockedText) {
+    ElMessage.warning(lockedText);
+    return;
+  }
   activeShipment.value = row;
   shipmentForm.shipmentQuantity = defaultShipmentQuantity(row);
   shipmentForm.warehouseConfirmedBy = '';
@@ -1914,7 +1952,7 @@ async function openShipmentSourceDetails(row: WarehouseShipment) {
 }
 
 function handleShipmentSelectionChange(rows: WarehouseShipment[]) {
-  selectedShipments.value = rows;
+  selectedShipments.value = rows.filter(canShipWarehouseShipment);
 }
 
 async function selectShipmentOrder(row: WarehouseShipment) {
@@ -1923,10 +1961,15 @@ async function selectShipmentOrder(row: WarehouseShipment) {
     ElMessage.warning('该库存没有来源订单，不能按订单批量发货');
     return;
   }
+  const lockedText = shipmentLockedText(row);
+  if (lockedText) {
+    ElMessage.warning(lockedText);
+    return;
+  }
   shipmentTableRef.value?.clearSelection();
   await nextTick();
   shipments.value
-    .filter((item) => item.orderNo === orderNo)
+    .filter((item) => item.orderNo === orderNo && canShipWarehouseShipment(item))
     .forEach((item) => shipmentTableRef.value?.toggleRowSelection(item, true));
 }
 
@@ -1935,9 +1978,14 @@ function openOrderShipmentConfirm(row: WarehouseShipment) {
     ElMessage.warning('该库存没有来源订单，不能按订单批量发货');
     return;
   }
+  const lockedText = shipmentLockedText(row);
+  if (lockedText) {
+    ElMessage.warning(lockedText);
+    return;
+  }
   batchShipmentRows.value = prepareBatchShipmentRows(
     shipments.value
-    .filter((item) => item.orderNo === row.orderNo)
+    .filter((item) => item.orderNo === row.orderNo && canShipWarehouseShipment(item))
     .sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`))
   );
   batchShipmentForm.remark = '';
@@ -1955,6 +2003,11 @@ function openBatchShipmentConfirmFromSelection() {
 function openBatchShipmentConfirm(rows: WarehouseShipment[]) {
   if (rows.length === 0) {
     ElMessage.warning('请先选择待发货库存');
+    return;
+  }
+  const lockedRow = rows.find((row) => !canShipWarehouseShipment(row));
+  if (lockedRow) {
+    ElMessage.warning(shipmentLockedText(lockedRow));
     return;
   }
   const orderNos = Array.from(new Set(rows.map((item) => item.orderNo).filter(Boolean)));
@@ -2165,6 +2218,11 @@ async function confirmShipment() {
   if (!activeShipment.value) {
     return;
   }
+  const lockedText = shipmentLockedText(activeShipment.value);
+  if (lockedText) {
+    ElMessage.warning(lockedText);
+    return;
+  }
   if (activeShipmentShortageText.value) {
     ElMessage.warning('该订单仍有待补单短缺，请先处理补单、客户减量或无需补单说明');
     return;
@@ -2210,6 +2268,11 @@ async function confirmShipment() {
 
 async function confirmBatchShipment() {
   if (batchShipmentRows.value.length === 0) {
+    return;
+  }
+  const lockedRow = batchShipmentRows.value.find((row) => !canShipWarehouseShipment(row));
+  if (lockedRow) {
+    ElMessage.warning(shipmentLockedText(lockedRow));
     return;
   }
   if (batchShipmentShortageText.value) {
@@ -2391,6 +2454,30 @@ function shipmentShortageText(row?: WarehouseShipment) {
     return '';
   }
   return orderShortageActionText(order);
+}
+
+function shipmentLockedText(row?: WarehouseShipment) {
+  if (!row) {
+    return '';
+  }
+  if (row.orderStatus === 'COMPLETED') {
+    return '订单已完成发货，不能再次发货';
+  }
+  if (row.orderStatus === 'CANCELLED') {
+    return '订单已取消，不能发货';
+  }
+  if (row.orderStatus === 'DRAFT') {
+    return '待提交生产订单不能发货';
+  }
+  return '';
+}
+
+function canShipWarehouseShipment(row?: WarehouseShipment) {
+  return Boolean(row) && !shipmentLockedText(row);
+}
+
+function shipmentRowSelectable(row: WarehouseShipment) {
+  return canShipWarehouseShipment(row);
 }
 
 watch(
@@ -2634,6 +2721,15 @@ onMounted(async () => {
   .shipment-order-card {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .shipment-order-card strong,
+  .shipment-order-card span,
+  .shipment-order-card small {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .shipment-order-card .el-button {

@@ -67,7 +67,7 @@
       v-model="dialogVisible"
       :title="dialogTitle"
       width="min(760px, calc(100vw - 32px))"
-      class="process-template-dialog"
+      class="responsive-dialog process-template-dialog"
     >
       <el-form label-width="92px">
         <el-form-item label="流程名称" required>
@@ -144,7 +144,7 @@
       v-model="previewVisible"
       title="流程记忆详情"
       width="min(560px, calc(100vw - 32px))"
-      class="process-template-preview-dialog"
+      class="responsive-dialog process-template-preview-dialog"
     >
       <div v-if="previewTemplate" class="process-template-preview">
         <h3>{{ previewTemplate.templateName }}</h3>
@@ -168,6 +168,7 @@
       v-model="deleteDialogVisible"
       title="删除流程记忆"
       width="min(520px, calc(100vw - 32px))"
+      class="responsive-dialog"
       append-to-body
     >
       <div class="delete-template-summary">

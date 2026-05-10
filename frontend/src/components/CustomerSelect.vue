@@ -145,11 +145,12 @@ onMounted(() => {
 .customer-option {
   display: flex;
   align-items: center;
+  min-height: 44px;
   min-width: 0;
   padding: 0;
   overflow: hidden;
   color: #0f172a;
-  line-height: 34px;
+  line-height: 20px;
 }
 
 .customer-option strong {
@@ -165,15 +166,28 @@ onMounted(() => {
 }
 
 :global(.customer-select-popper .el-select-dropdown__item) {
-  height: 34px;
-  min-height: 34px;
-  padding: 0 14px;
-  line-height: 34px;
+  height: auto;
+  min-height: 44px;
+  padding: 4px 14px;
+  line-height: 20px;
 }
 
 :global(.customer-select-popper .el-select-dropdown__item.is-hovering),
 :global(.customer-select-popper .el-select-dropdown__item:hover) {
   background: #f1f5f9;
+}
+
+@media (max-width: 900px) {
+  .customer-option {
+    overflow: visible;
+  }
+
+  .customer-option strong {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 </style>

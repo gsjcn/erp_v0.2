@@ -737,7 +737,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="noticeVisible" title="生产通知" width="min(760px, calc(100vw - 32px))">
+    <el-dialog v-model="noticeVisible" title="生产通知" width="min(760px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-loading="noticeLoading" class="notice-list">
         <div v-if="productionNotices.length === 0" class="muted">暂无生产通知</div>
         <article v-for="notice in productionNotices" :key="notice.id" class="notice-item">
@@ -777,7 +777,7 @@
       @confirm="saveNoticeAcknowledge"
     />
 
-    <el-dialog v-model="replenishmentRequestVisible" title="生产报废补单申请" width="min(980px, calc(100vw - 32px))">
+    <el-dialog v-model="replenishmentRequestVisible" title="生产报废补单申请" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div class="replenishment-request-toolbar">
         <el-radio-group v-model="replenishmentRequestStatusFilter" size="small">
           <el-radio-button value="ALL">全部 {{ productionReplenishmentRequests.length }}</el-radio-button>
@@ -833,6 +833,8 @@
               v-if="request.status === 'PENDING'"
               type="primary"
               size="small"
+              :disabled="!canReviewReplenishmentRequest(request)"
+              :title="replenishmentRequestLockedReason(request)"
               @click="openReplenishmentApprovalFromRequest(request)"
             >
               主管确认
@@ -842,6 +844,8 @@
               type="danger"
               size="small"
               plain
+              :disabled="!canReviewReplenishmentRequest(request)"
+              :title="replenishmentRequestLockedReason(request)"
               @click="openReplenishmentReject(request)"
             >
               驳回申请
@@ -855,7 +859,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="replenishmentRejectVisible" title="驳回生产报废补单申请" width="min(620px, calc(100vw - 32px))">
+    <el-dialog v-model="replenishmentRejectVisible" title="驳回生产报废补单申请" width="min(620px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-if="activeReplenishmentRejectRequest" class="final-confirm-panel">
         <el-alert
           title="驳回后不会生成补单任务，该短缺会按管理确认缺货完成保存；请确认现场确实不需要补齐客户订单数量。"
@@ -910,7 +914,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="scrapVisible" title="生产报废统计" width="min(980px, calc(100vw - 32px))">
+    <el-dialog v-model="scrapVisible" title="生产报废统计" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div class="dialog-filter-row">
         <div class="filter-field compact">
           <label>报废日期</label>
@@ -954,6 +958,7 @@
       v-model="processVisible"
       :title="processDialogTitle"
       width="min(860px, calc(100vw - 32px))"
+      class="responsive-dialog"
     >
       <div v-if="activeTask" class="process-form">
         <div class="process-info-grid">
@@ -1045,7 +1050,7 @@
         <el-form label-width="128px" class="mt-16">
           <el-alert
             v-if="activeProcessReadonly"
-            title="该生产任务已经入库，工序完成表只能查看，不能再修改。"
+            :title="activeProcessReadonlyText"
             type="info"
             :closable="false"
             class="mt-16"
@@ -1213,6 +1218,7 @@
       v-model="quantityOverrideDialogVisible"
       title="数量确认"
       width="min(560px, calc(100vw - 32px))"
+      class="responsive-dialog"
       append-to-body
       @closed="handleQuantityOverrideDialogClosed"
     >
@@ -1233,6 +1239,7 @@
       v-model="finalConfirmVisible"
       :title="finalConfirmTitle"
       width="min(720px, calc(100vw - 32px))"
+      class="responsive-dialog"
       :close-on-click-modal="!finalSaving"
       :close-on-press-escape="!finalSaving"
       :show-close="!finalSaving"
@@ -1416,6 +1423,7 @@
       v-model="replenishmentApprovalVisible"
       title="主管确认生产报废补单"
       width="min(680px, calc(100vw - 32px))"
+      class="responsive-dialog"
     >
       <div v-if="activeReplenishmentApprovalTask && activeReplenishmentApprovalCompletion" class="final-confirm-panel">
         <div class="process-info-grid">
@@ -1479,6 +1487,7 @@
       v-model="withdrawVisible"
       title="管理撤回"
       width="min(720px, calc(100vw - 32px))"
+      class="responsive-dialog"
     >
       <div v-if="activeWithdrawTask" class="withdraw-panel">
         <div class="process-info-grid">
@@ -1573,6 +1582,7 @@
       v-model="printPreviewVisible"
       :title="`${printDocumentTitle}打印预览`"
       width="min(1220px, calc(100vw - 24px))"
+      class="responsive-dialog"
       top="3vh"
     >
       <div class="print-preview-toolbar">
@@ -2149,7 +2159,12 @@ const activeProcessCompletion = computed(() => {
 });
 
 const activeProcessLogs = computed(() => activeProcessCompletion.value?.logs || []);
-const activeProcessReadonly = computed(() => Boolean(activeTask.value?.inventoryBatchNo));
+const activeProcessReadonly = computed(() => Boolean(activeTask.value?.inventoryBatchNo || activeTask.value?.orderStatus === 'COMPLETED'));
+const activeProcessReadonlyText = computed(() =>
+  activeTask.value?.orderStatus === 'COMPLETED'
+    ? '该订单已完成发货，工序完成表只能查看，不能再修改。'
+    : '该生产任务已经入库，工序完成表只能查看，不能再修改。'
+);
 
 const processRecordTimeText = computed(() => {
   if (activeProcessCompletion.value?.completedAt) {
@@ -2947,25 +2962,25 @@ function isFinalProcess(row: ProductionTask, processName: string) {
 
 function shouldShowConfirmCompletedAction(row: ProductionTask) {
   // 工序走完后必须先进入“待确认完成”，由操作人员再填写最终完成数量。
-  return row.orderStatus !== 'CANCELLED' && effectiveProductionStatus(row) === 'READY_TO_COMPLETE';
+  return row.orderStatus !== 'CANCELLED' && row.orderStatus !== 'COMPLETED' && effectiveProductionStatus(row) === 'READY_TO_COMPLETE';
 }
 
 function shouldShowStartAction(row: ProductionTask) {
   // 操作入口必须按有效状态判断；已入库历史任务即使原始 status 异常，也不能再次开始生产。
-  return row.orderStatus !== 'CANCELLED' && effectiveProductionStatus(row) === 'PENDING';
+  return row.orderStatus !== 'CANCELLED' && row.orderStatus !== 'COMPLETED' && effectiveProductionStatus(row) === 'PENDING';
 }
 
 function shouldShowNextProcessAction(row: ProductionTask) {
-  return row.orderStatus !== 'CANCELLED' && effectiveProductionStatus(row) === 'IN_PROGRESS' && Boolean(nextIncompleteProcess(row));
+  return row.orderStatus !== 'CANCELLED' && row.orderStatus !== 'COMPLETED' && effectiveProductionStatus(row) === 'IN_PROGRESS' && Boolean(nextIncompleteProcess(row));
 }
 
 function canModifyFinalCompletion(row: ProductionTask) {
   // 已经入库的生产任务不能再改最终完成数量，否则会和库存批次数量不一致。
-  return row.orderStatus !== 'CANCELLED' && row.status === 'COMPLETED' && !row.inventoryBatchNo;
+  return row.orderStatus !== 'CANCELLED' && row.orderStatus !== 'COMPLETED' && row.status === 'COMPLETED' && !row.inventoryBatchNo;
 }
 
 function canWithdrawProduction(row: ProductionTask) {
-  return !row.inventoryBatchNo && row.status !== 'PENDING';
+  return row.orderStatus !== 'CANCELLED' && row.orderStatus !== 'COMPLETED' && !row.inventoryBatchNo && row.status !== 'PENDING';
 }
 
 function defaultWithdrawHandlingQuantity(row: ProductionTask) {
@@ -2985,6 +3000,9 @@ function canOpenProcess(row: ProductionTask, processName: string) {
   if (row.orderStatus === 'CANCELLED') {
     return false;
   }
+  if (row.orderStatus === 'COMPLETED') {
+    return isProcessCompleted(row, processName);
+  }
   if (row.inventoryBatchNo) {
     return isProcessCompleted(row, processName);
   }
@@ -2997,6 +3015,9 @@ function canOpenProcess(row: ProductionTask, processName: string) {
 function processButtonTitle(row: ProductionTask, processName: string) {
   if (row.orderStatus === 'CANCELLED') {
     return '订单已取消，只能做管理撤回或查看通知';
+  }
+  if (row.orderStatus === 'COMPLETED') {
+    return isProcessCompleted(row, processName) ? '订单已完成发货，只能查看工序记录' : '订单已完成发货，不能新增工序记录';
   }
   if (row.inventoryBatchNo) {
     return isProcessCompleted(row, processName) ? '已入库，只能查看工序记录' : '已入库，不能新增工序记录';
@@ -3876,6 +3897,9 @@ function finalProcessCompletion(row: ProductionTask) {
 }
 
 function pendingProductionReplenishmentRequest(row: ProductionTask) {
+  if (row.orderStatus === 'CANCELLED' || row.orderStatus === 'COMPLETED' || row.inventoryBatchNo) {
+    return undefined;
+  }
   return row.processCompletions?.find(
     (completion) =>
       completion.id &&
@@ -3884,6 +3908,20 @@ function pendingProductionReplenishmentRequest(row: ProductionTask) {
       (!completion.replenishmentRequestStatus || completion.replenishmentRequestStatus === 'PENDING') &&
       !completion.replenishmentTaskNo
   );
+}
+
+function replenishmentRequestLockedReason(request: ProductionReplenishmentRequest) {
+  if (request.orderStatus === 'COMPLETED') {
+    return '订单已完成发货，不能处理生产报废补单申请';
+  }
+  if (request.orderStatus === 'CANCELLED') {
+    return '订单已取消，不能处理生产报废补单申请';
+  }
+  return '';
+}
+
+function canReviewReplenishmentRequest(request: ProductionReplenishmentRequest) {
+  return request.status === 'PENDING' && !replenishmentRequestLockedReason(request);
 }
 
 function replenishmentRequestStatusTag(status: ProductionReplenishmentRequest['status']) {
@@ -3926,6 +3964,11 @@ function openReplenishmentApproval(row: ProductionTask) {
 }
 
 async function openReplenishmentApprovalFromRequest(request: ProductionReplenishmentRequest) {
+  const lockedReason = replenishmentRequestLockedReason(request);
+  if (lockedReason) {
+    ElMessage.warning(lockedReason);
+    return;
+  }
   if (!request.processCompletionId) {
     ElMessage.warning('该补单申请缺少工序完成记录，不能确认');
     return;
@@ -3987,6 +4030,11 @@ async function saveReplenishmentApproval() {
 }
 
 function openReplenishmentReject(request: ProductionReplenishmentRequest) {
+  const lockedReason = replenishmentRequestLockedReason(request);
+  if (lockedReason) {
+    ElMessage.warning(lockedReason);
+    return;
+  }
   if (!request.processCompletionId) {
     ElMessage.warning('该补单申请缺少工序完成记录，不能驳回');
     return;
@@ -5416,6 +5464,10 @@ onMounted(async () => {
     text-overflow: clip;
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+
+  .empty-production-hint span {
+    min-width: 0;
   }
 
   .unit-text {

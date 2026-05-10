@@ -119,7 +119,7 @@
       <div v-if="!customers.length && !loading" class="mobile-empty">暂无客户资料</div>
     </div>
 
-    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑客户' : '新增客户'" width="min(860px, calc(100vw - 32px))">
+    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑客户' : '新增客户'" width="min(860px, calc(100vw - 32px))" class="responsive-dialog">
       <el-form label-width="112px">
         <div class="customer-form-grid">
           <el-form-item label="客户ID">

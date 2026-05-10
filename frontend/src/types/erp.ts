@@ -450,6 +450,7 @@ export interface ProductionReplenishmentRequest {
   requestNo: string;
   sourceType: 'PRODUCTION_SCRAP' | string;
   status: ProductionReplenishmentRequestStatus;
+  orderStatus?: OrderStatus;
   orderId?: string;
   orderNo: string;
   orderLineId?: string;
@@ -582,6 +583,7 @@ export interface WarehouseShipment {
   replenishmentSourceRequestNo?: string;
   replenishmentSourceLabel?: string;
   customerId?: string;
+  orderStatus?: OrderStatus;
   orderNo?: string;
   customerName?: string;
   orderDate?: string;

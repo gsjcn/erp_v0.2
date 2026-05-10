@@ -168,18 +168,48 @@
   </el-table>
 
   <div class="mobile-section order-line-mobile">
-    <article v-for="(line, index) in lines" :key="`${index}-${line.partCode}`" class="mobile-card order-line-card">
+    <div class="order-line-mobile-toolbar">
+      <span>订单零件 {{ lines.length }} 项</span>
+      <div>
+        <el-button size="small" @click="expandAllMobileLineCards">全部展开</el-button>
+        <el-button size="small" @click="collapseAllMobileLineCards">全部收起</el-button>
+      </div>
+    </div>
+    <article
+      v-for="(line, index) in lines"
+      :key="`${index}-${line.partCode}`"
+      class="mobile-card order-line-card"
+      :class="{ expanded: isMobileLineExpanded(index) }"
+    >
       <div class="mobile-card-header">
         <div class="mobile-card-title">
           <strong>零件 {{ index + 1 }}</strong>
-          <small>默认交期：{{ defaultDeliveryDate || '-' }}</small>
+          <small>{{ line.partName || line.partCode || '未填写零件资料' }}</small>
         </div>
-        <el-button class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove(index)">
-          {{ removeButtonText }}
-        </el-button>
+        <div class="mobile-card-header-actions">
+          <el-button link type="primary" @click.stop="toggleMobileLineCard(index)">
+            {{ isMobileLineExpanded(index) ? '收起' : '详情' }}
+          </el-button>
+          <el-button class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove(index)">
+            {{ removeButtonText }}
+          </el-button>
+        </div>
       </div>
 
-      <div class="order-line-mobile-fields">
+      <div class="mobile-card-compact-summary order-line-compact-summary">
+        <span>{{ line.partCode || '未填编码' }}</span>
+        <span>{{ fulfillmentModeText(line) }}</span>
+        <span>订单 {{ formatQuantity(line.quantity || 0, line.unit || '件') }}</span>
+        <span>计划 {{ formatQuantity(line.productionPlanQuantity ?? suggestedProductionPlanQuantity(line), line.unit || '件') }}</span>
+        <span>交期 {{ line.deliveryDate || defaultDeliveryDate || '-' }}</span>
+        <span v-if="selectedStockSourceQuantity(line) > 0">库存 {{ formatQuantity(selectedStockSourceQuantity(line), line.unit || '件') }}</span>
+        <span v-if="stockSourceReviewRequired(line)" :class="isStockSourceReviewed(line) ? 'success' : 'warning'">
+          {{ isStockSourceReviewed(line) ? '已核对来源' : '未核对来源' }}
+        </span>
+        <span v-if="stockProductionPlanDiffers(line)" class="warning">计划偏差待说明</span>
+      </div>
+
+      <div v-show="isMobileLineExpanded(index)" class="order-line-mobile-fields">
         <label>
           <span>零件编码</span>
           <el-autocomplete
@@ -393,6 +423,8 @@ const sourceExpected = ref<InventorySourceExpected | null>(null);
 const currentSourceLine = ref<CreateOrderLinePayload | null>(null);
 const stockCoverAutoSyncedLines = new WeakSet<CreateOrderLinePayload>();
 const materialSuggestionRequestSeq = ref(0);
+const expandedMobileLineIndexes = ref<number[]>([]);
+const mobileLineExpansionInitialized = ref(false);
 const otherLineSelectedStockSources = computed(() =>
   currentSourceLine.value
     ? props.lines
@@ -407,6 +439,50 @@ const emit = defineEmits<{
 }>();
 
 const specificationOptions = ['120mm x 204mm x 10mm', '200mm x 300mm x 2mm', '500mm x 800mm x 3mm'];
+
+watch(
+  () => props.lines.length,
+  (length, previousLength = 0) => {
+    if (!mobileLineExpansionInitialized.value) {
+      expandedMobileLineIndexes.value = length === 1 ? [0] : [];
+      mobileLineExpansionInitialized.value = true;
+      return;
+    }
+    const existingIndexes = expandedMobileLineIndexes.value.filter((index) => index < length);
+    const startIndex = Math.max(previousLength, 0);
+    const addedIndexes = Array.from({ length: Math.max(length - startIndex, 0) }, (_, offset) => startIndex + offset);
+    expandedMobileLineIndexes.value = Array.from(new Set([...existingIndexes, ...addedIndexes]));
+  },
+  { immediate: true }
+);
+
+function isMobileLineExpanded(index: number) {
+  return expandedMobileLineIndexes.value.includes(index);
+}
+
+function toggleMobileLineCard(index: number) {
+  expandedMobileLineIndexes.value = isMobileLineExpanded(index)
+    ? expandedMobileLineIndexes.value.filter((item) => item !== index)
+    : [...expandedMobileLineIndexes.value, index];
+}
+
+function expandAllMobileLineCards() {
+  expandedMobileLineIndexes.value = props.lines.map((_, index) => index);
+}
+
+function collapseAllMobileLineCards() {
+  expandedMobileLineIndexes.value = [];
+}
+
+function fulfillmentModeText(line: CreateOrderLinePayload) {
+  if (line.fulfillmentMode === 'STOCK') {
+    return '使用库存';
+  }
+  if (line.fulfillmentMode === 'REWORK') {
+    return '库存再加工';
+  }
+  return '重新生产';
+}
 
 function emitRemove(index: number) {
   emit('remove', index);
@@ -465,8 +541,9 @@ function syncStockProductionPlanQuantity(
     const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
     const stockCoversCustomerQuantity =
       nextSuggestedQuantity <= 0 && selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity || 0);
-    // 库存已完全覆盖客户数量时默认不生产，减少操作人员手动改 0。
-    if (options.forceWhenStockCovers && stockCoversCustomerQuantity) {
+    const hasExplicitProductionPlanOverride = hasProductionPlanOverride(line);
+    // 库存完全覆盖时默认不生产；如果操作人员已填写多做/少做说明，不覆盖人工计划。
+    if (options.forceWhenStockCovers && stockCoversCustomerQuantity && !hasExplicitProductionPlanOverride) {
       line.productionPlanQuantity = nextSuggestedQuantity;
       clearProductionPlanOverride(line);
       return;
@@ -511,6 +588,10 @@ function clearProductionPlanOverride(line: CreateOrderLinePayload) {
   line.productionPlanOverrideByRole = '';
   line.productionPlanOverrideAt = '';
   line.productionPlanOverrideReason = '';
+}
+
+function hasProductionPlanOverride(line: CreateOrderLinePayload) {
+  return Boolean(line.productionPlanOverrideByCode?.trim() || line.productionPlanOverrideReason?.trim());
 }
 
 function stockProductionPlanDiffers(line: CreateOrderLinePayload) {
@@ -905,6 +986,34 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   padding: 12px;
 }
 
+.order-line-mobile-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.order-line-mobile-toolbar > div {
+  display: flex;
+  gap: 6px;
+}
+
+.order-line-compact-summary {
+  margin-bottom: 10px;
+}
+
+.order-line-compact-summary .warning {
+  color: #d97706;
+  font-weight: 600;
+}
+
+.order-line-compact-summary .success {
+  color: #16a34a;
+  font-weight: 600;
+}
+
 .order-line-mobile-fields {
   display: grid;
   gap: 10px;
@@ -1043,6 +1152,14 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   .drawing-upload-cell :deep(.drawing-preview-button) {
     max-width: 100%;
     white-space: normal;
+  }
+
+  .order-line-mobile-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .order-line-mobile-toolbar :deep(.el-button) {
+    min-height: 36px;
   }
 }
 </style>
