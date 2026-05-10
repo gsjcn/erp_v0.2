@@ -8,6 +8,7 @@ export type OrderProductionFilterStatus =
   | 'WAITING_PRODUCTION'
   | 'ORDER_IN_PRODUCTION'
   | 'ORDER_COMPLETED_UNSHIPPED'
+  | 'PARTIAL_SHIPPED'
   | 'ORDER_SHIPPED_COMPLETED'
   | 'ORDER_CANCELLED';
 export type ProductionOrderSummaryStatus = ProductionStatus | 'READY_TO_COMPLETE' | 'RECEIVED';
@@ -27,6 +28,7 @@ export type OrderDisplayStatus =
   | 'ORDER_COMPLETED_UNSHIPPED'
   | 'ORDER_SHIPPED_COMPLETED'
   | 'WAITING_PRODUCTION'
+  | 'PARTIAL_SHIPPED'
   | OrderStatus;
 export type WarehouseStage =
   | 'ORDER_DRAFT'
@@ -112,6 +114,16 @@ export interface OrderSummary {
   unit: string;
   productionStatus: ProductionStatus;
   warehouseStage: WarehouseStage;
+  unresolvedShortageLineCount?: number;
+  unresolvedShortageQuantity?: number;
+  unresolvedShortageUnit?: string;
+  unresolvedShortageQuantityByUnit?: Array<{ unit: string; quantity: number }>;
+  needsReplenishmentAction?: boolean;
+  pendingProductionReplenishmentLineCount?: number;
+  pendingProductionReplenishmentQuantity?: number;
+  pendingProductionReplenishmentUnit?: string;
+  pendingProductionReplenishmentQuantityByUnit?: Array<{ unit: string; quantity: number }>;
+  needsProductionReplenishmentReview?: boolean;
   remark?: string;
 }
 
@@ -152,6 +164,19 @@ export interface OrderLine {
   productionReplenishmentTaskNos?: string[];
   productionReplenishmentRequestNos?: string[];
   productionShortageReasons?: Array<{ managerName?: string; shortageReason?: string }>;
+  unresolvedShortageQuantity?: number;
+  unresolvedShortageCount?: number;
+  unresolvedShortageRecords?: Array<{
+    completionId?: string;
+    productionTaskNo?: string;
+    partCode?: string;
+    partName?: string;
+    shortageQuantity: number;
+    scrapQuantity: number;
+    managerName?: string;
+    shortageReason?: string;
+    unit?: string;
+  }>;
   productionProgressText?: string;
   warehouseStage: WarehouseStage;
   inventoryBatchNo?: string;
@@ -224,6 +249,11 @@ export interface ProductionTask {
   customerOrderQuantity: number;
   plannedQuantity: number;
   completedQuantity: number;
+  unresolvedShortageQuantity?: number;
+  unresolvedShortageUnit?: string;
+  unresolvedShortageReason?: string;
+  pendingProductionReplenishmentQuantity?: number;
+  pendingProductionReplenishmentUnit?: string;
   unit: string;
   status: ProductionStatus;
   inventoryBatchNo?: string;
@@ -287,6 +317,25 @@ export interface ProductionOrderSummary {
   progressItems?: ProductionOrderSummaryProgressItem[];
   pendingTaskIds: string[];
   pendingTasks: ProductionOrderSummaryTask[];
+  unresolvedShortageLineCount?: number;
+  unresolvedShortageQuantity?: number;
+  unresolvedShortageUnit?: string;
+  unresolvedShortageQuantityByUnit?: Array<{ unit: string; quantity: number }>;
+  needsReplenishmentAction?: boolean;
+  pendingProductionReplenishmentLineCount?: number;
+  pendingProductionReplenishmentQuantity?: number;
+  pendingProductionReplenishmentUnit?: string;
+  pendingProductionReplenishmentQuantityByUnit?: Array<{ unit: string; quantity: number }>;
+  needsProductionReplenishmentReview?: boolean;
+  shortageActionTasks?: Array<{
+    id: string;
+    orderLineId?: string;
+    productionTaskNo: string;
+    partCode: string;
+    partName: string;
+    shortageQuantity: number;
+    unit: string;
+  }>;
 }
 
 export interface ProductionProcessCompletion {
@@ -309,6 +358,10 @@ export interface ProductionProcessCompletion {
   replenishmentApprovalRemark?: string;
   managerName?: string;
   shortageReason?: string;
+  shortageResolutionMode?: string;
+  shortageResolutionBy?: string;
+  shortageResolutionReason?: string;
+  shortageResolvedAt?: string;
   unit: string;
   operatorCode?: string;
   operatorName?: string;
@@ -346,7 +399,9 @@ export interface ProductionNotice {
   noticeType: ProductionNoticeType;
   target: ProductionNoticeTarget;
   status: ProductionNoticeStatus;
+  orderId?: string;
   orderNo: string;
+  customerName?: string;
   orderLineId?: string;
   productionTaskId?: string;
   productionTaskNo?: string;
@@ -519,6 +574,7 @@ export interface WarehouseReceipt {
 export interface WarehouseShipment {
   id: string;
   batchNo: string;
+  orderLineId?: string;
   productionTaskNo?: string;
   isReplenishment?: boolean;
   sourceProductionTaskNo?: string;
@@ -533,6 +589,10 @@ export interface WarehouseShipment {
   partCode: string;
   partName: string;
   quantity: number;
+  customerOrderQuantity?: number;
+  shippedQuantity?: number;
+  remainingQuantity?: number;
+  suggestedShipmentQuantity?: number;
   physicalQuantity?: number;
   reservedQuantity?: number;
   unit: string;

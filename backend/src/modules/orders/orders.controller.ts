@@ -14,6 +14,7 @@ import {
   DrawingDuplicateQueryDto,
   NextOrderNoQueryDto,
   OrderQueryDto,
+  ResolveLineShortageDto,
   SubmitOrderDto,
   UpdateLineQuantityDto,
   UpdateLineProcessDto,
@@ -151,6 +152,15 @@ export class OrdersController {
     @Body() dto: UpdateLineQuantityDto
   ) {
     return this.ordersService.updateLineQuantityAfterProductionStarted(orderNo, lineId, dto);
+  }
+
+  @Post(':orderNo/lines/:lineId/shortage-resolution')
+  resolveLineShortage(
+    @Param('orderNo') orderNo: string,
+    @Param('lineId') lineId: string,
+    @Body() dto: ResolveLineShortageDto
+  ) {
+    return this.ordersService.resolveLineShortage(orderNo, lineId, dto);
   }
 
   @Post(':orderNo/submit')

@@ -16,14 +16,16 @@ export function orderDisplayStatus(order: OrderStatusSource): OrderDisplayStatus
   if (order.warehouseStage === 'SHIPPED') {
     return 'ORDER_SHIPPED_COMPLETED';
   }
+  if (order.warehouseStage === 'PARTIAL_SHIPPED') {
+    return 'PARTIAL_SHIPPED';
+  }
   if (!order.warehouseStage && order.status === 'COMPLETED') {
     return 'ORDER_SHIPPED_COMPLETED';
   }
   if (
     order.productionStatus === 'COMPLETED' ||
     order.warehouseStage === 'WAITING_RECEIPT' ||
-    order.warehouseStage === 'WAITING_SHIPMENT' ||
-    order.warehouseStage === 'PARTIAL_SHIPPED'
+    order.warehouseStage === 'WAITING_SHIPMENT'
   ) {
     return 'ORDER_COMPLETED_UNSHIPPED';
   }

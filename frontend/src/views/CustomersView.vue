@@ -71,14 +71,28 @@
     </div>
 
     <div v-loading="loading" class="mobile-card-list">
-      <article v-for="customer in customers" :key="customer.id" class="mobile-card">
+      <article
+        v-for="customer in customers"
+        :key="customer.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileCustomerExpanded(customer.id) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ customer.customerName }}</strong>
             <small>{{ customer.customerCode }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <el-button link type="primary" @click="toggleMobileCustomerCard(customer.id)">
+              {{ isMobileCustomerExpanded(customer.id) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span><StatusTag :value="customer.status" compact /></span>
+          <span>{{ primaryContactText(customer) }}</span>
+        </div>
+        <div v-show="isMobileCustomerExpanded(customer.id)" class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
             <span><StatusTag :value="customer.status" /></span>
@@ -294,6 +308,7 @@ const nameAvailable = ref(false);
 const codeAvailable = ref(false);
 const nameCheckText = ref('');
 const codeCheckText = ref('');
+const expandedMobileCustomerIds = ref<string[]>([]);
 let nameCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let codeCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let customerSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
@@ -747,6 +762,24 @@ function formatRegion(row: Customer) {
     return [row.country, row.state, row.province, row.district, row.city].filter(Boolean).join(' / ') || '-';
   }
   return [row.country || '中国', row.province, row.city, row.district].filter(Boolean).join(' / ');
+}
+
+function primaryContactText(row: Customer) {
+  const contact = row.contacts?.find((item) => item.isPrimary && item.contactName?.trim()) || row.contacts?.[0];
+  if (!contact?.contactName) {
+    return '无联系人';
+  }
+  return [contact.contactName, contact.contactPhone].filter(Boolean).join(' / ');
+}
+
+function isMobileCustomerExpanded(id: string) {
+  return expandedMobileCustomerIds.value.includes(id);
+}
+
+function toggleMobileCustomerCard(id: string) {
+  expandedMobileCustomerIds.value = isMobileCustomerExpanded(id)
+    ? expandedMobileCustomerIds.value.filter((item) => item !== id)
+    : [...expandedMobileCustomerIds.value, id];
 }
 
 onMounted(loadCustomers);

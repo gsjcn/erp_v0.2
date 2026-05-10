@@ -424,6 +424,32 @@ a {
   white-space: nowrap;
 }
 
+.mobile-card-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mobile-card-compact-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+  color: var(--erp-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.mobile-card-compact-summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mobile-full {
   grid-column: 1 / -1;
 }
@@ -848,6 +874,28 @@ a {
 
   .mobile-card > .mobile-card-header .el-tag {
     justify-self: end;
+  }
+
+  .mobile-order-card {
+    padding: 10px 12px;
+  }
+
+  .mobile-order-card .mobile-card-header {
+    margin-bottom: 6px;
+  }
+
+  .mobile-order-card:not(.expanded) .mobile-card-actions {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+
+  .mobile-card-header-actions {
+    max-width: 148px;
+  }
+
+  .mobile-card-header-actions .el-button {
+    min-height: 28px;
+    padding: 0;
   }
 
   .mobile-empty {

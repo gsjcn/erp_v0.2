@@ -80,14 +80,29 @@
 
     <div class="mobile-section">
       <h3 class="mobile-section-title">{{ periodTitle }}汇总</h3>
-      <article v-for="row in summaryRows" :key="`${row.periodKey}-${row.partCode}`" class="mobile-card">
+      <article
+        v-for="row in summaryRows"
+        :key="summaryMobileCardKey(row)"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileStatisticsCardExpanded(summaryMobileCardKey(row)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ row.partName }}</strong>
             <small>{{ row.periodLabel }} / {{ row.partCode }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <el-button link type="primary" @click="toggleMobileStatisticsCard(summaryMobileCardKey(row))">
+              {{ isMobileStatisticsCardExpanded(summaryMobileCardKey(row)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>订单 {{ row.orderCount }}</span>
+          <span>生产 {{ formatQuantity(row.productionPlanQuantity, row.unit) }}</span>
+          <span>发货 {{ formatQuantity(row.shippedOrderQuantity, row.unit) }}</span>
+        </div>
+        <div v-show="isMobileStatisticsCardExpanded(summaryMobileCardKey(row))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>订单数</label>
             <span>{{ row.orderCount }}</span>
@@ -152,14 +167,29 @@
 
     <div class="mobile-section">
       <h3 class="mobile-section-title">订单展示</h3>
-      <article v-for="row in orderRows" :key="`${row.periodKey}-${row.orderNo}`" class="mobile-card">
+      <article
+        v-for="row in orderRows"
+        :key="orderMobileCardKey(row)"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileStatisticsCardExpanded(orderMobileCardKey(row)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong><OrderNoLink :order-no="row.orderNo" /></strong>
             <small>{{ row.periodLabel }} / {{ row.customerName }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <el-button link type="primary" @click="toggleMobileStatisticsCard(orderMobileCardKey(row))">
+              {{ isMobileStatisticsCardExpanded(orderMobileCardKey(row)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span><StatusTag :value="statisticsOrderStatus(row)" compact /></span>
+          <span>{{ row.partCount }} 个零件</span>
+          <span>{{ formatOrderQuantity(row, 'totalQuantity') }}</span>
+        </div>
+        <div v-show="isMobileStatisticsCardExpanded(orderMobileCardKey(row))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>订单状态</label>
             <span><StatusTag :value="statisticsOrderStatus(row)" compact /></span>
@@ -207,6 +237,7 @@ const year = ref(new Date().getFullYear());
 const customerId = ref('');
 const loading = ref(false);
 const statistics = ref<OrderStatisticsResponse>();
+const expandedMobileStatisticsCardKeys = ref<string[]>([]);
 
 const summaryRows = computed(() => statistics.value?.summaryRows || []);
 const orderRows = computed(() => statistics.value?.orderRows || []);
@@ -257,6 +288,24 @@ function formatOrderQuantity(row: OrderStatisticsOrderRow, field: 'totalQuantity
 
 function statisticsOrderStatus(row: OrderStatisticsOrderRow) {
   return row.statisticsStatus || orderDisplayStatus(row);
+}
+
+function summaryMobileCardKey(row: OrderStatisticsSummaryRow) {
+  return `summary:${row.periodKey}:${row.partCode}:${row.unit || 'unit'}`;
+}
+
+function orderMobileCardKey(row: OrderStatisticsOrderRow) {
+  return `order:${row.periodKey}:${row.orderNo}`;
+}
+
+function isMobileStatisticsCardExpanded(key: string) {
+  return expandedMobileStatisticsCardKeys.value.includes(key);
+}
+
+function toggleMobileStatisticsCard(key: string) {
+  expandedMobileStatisticsCardKeys.value = isMobileStatisticsCardExpanded(key)
+    ? expandedMobileStatisticsCardKeys.value.filter((item) => item !== key)
+    : [...expandedMobileStatisticsCardKeys.value, key];
 }
 
 async function loadStatistics() {

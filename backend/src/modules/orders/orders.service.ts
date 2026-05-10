@@ -30,6 +30,7 @@ import {
   CreateOrderDto,
   NextOrderNoQueryDto,
   OrderQueryDto,
+  ResolveLineShortageDto,
   SubmitOrderDto,
   UpdateLineProcessDto,
   UpdateLineQuantityDto,
@@ -66,6 +67,13 @@ type InventoryReservationCarryover = {
   createdAt: Date;
 };
 
+type StockReservationPriorityOrder = {
+  id: string;
+  orderNo: string;
+  status: OrderStatus;
+  createdAt: Date;
+};
+
 const fallbackSubmitPlanOperators: SubmitPlanOperator[] = [
   {
     accountId: 'PLAN-001',
@@ -94,6 +102,7 @@ const orderProductionFilterStatuses = [
   'WAITING_PRODUCTION',
   'ORDER_IN_PRODUCTION',
   'ORDER_COMPLETED_UNSHIPPED',
+  'PARTIAL_SHIPPED',
   'ORDER_SHIPPED_COMPLETED',
   'ORDER_CANCELLED',
   ProductionStatus.PENDING,
@@ -151,13 +160,26 @@ export class OrdersService {
       include: {
         lines: {
           include: {
+            inventoryTransactions: {
+              where: { transactionType: InventoryTransactionType.OUT, sourceRecordType: 'InventoryBatch' },
+              select: { id: true, transactionType: true, sourceRecordType: true, orderNo: true, quantity: true, unit: true }
+            },
             inventoryBatches: {
               include: { transactions: true }
             }
           }
         },
         productionTasks: {
-          include: { inventoryBatch: true }
+          include: {
+            inventoryBatch: true,
+            processCompletions: {
+              include: {
+                replenishmentRequests: {
+                  orderBy: { createdAt: 'desc' }
+                }
+              }
+            }
+          }
         },
         inventoryBatches: {
           include: { transactions: true }
@@ -183,9 +205,25 @@ export class OrdersService {
         inventoryBatches: {
           include: { transactions: true }
         },
+        productionTasks: {
+          include: {
+            inventoryBatch: true,
+            processCompletions: {
+              include: {
+                replenishmentRequests: {
+                  orderBy: { createdAt: 'desc' }
+                }
+              }
+            }
+          }
+        },
         lines: {
           include: {
             processSteps: { orderBy: { stepNo: 'asc' } },
+            inventoryTransactions: {
+              where: { transactionType: InventoryTransactionType.OUT, sourceRecordType: 'InventoryBatch' },
+              select: { id: true, transactionType: true, sourceRecordType: true, orderNo: true, quantity: true, unit: true }
+            },
             inventoryBatches: {
               include: { warehouse: true, location: true, transactions: true },
               orderBy: { createdAt: 'asc' }
@@ -221,7 +259,7 @@ export class OrdersService {
     const selectedStockBatchIds = order.lines.flatMap((line) =>
       this.jsonToStockSourceSelections(line.stockSourceSelections).map((source) => source.batchId)
     );
-    const stockSourceInfoByBatchId = await this.getStockSourceInfoByBatchId(selectedStockBatchIds);
+    const stockSourceInfoByBatchId = await this.getStockSourceInfoByBatchId(selectedStockBatchIds, order.id);
     return this.toDetail(order, stockQuantityByTaskNo, stockSourceInfoByBatchId);
   }
 
@@ -249,9 +287,8 @@ export class OrdersService {
   }
 
   async create(dto: CreateOrderDto) {
-    this.validateOrderLines(dto.lines);
+    this.validateOrderLines(dto.lines, { requireStockSources: false });
     const preparedLinePlans = await this.prepareOrderLinePlans(dto.lines);
-    await this.validateOrderStockSourceSelections(dto.lines);
 
     const customer = await this.prisma.customer.findUnique({ where: { id: dto.customerId } });
     if (!customer) {
@@ -268,6 +305,8 @@ export class OrdersService {
 
     try {
       const created = await runSerializableTransaction(this.prisma, async (tx) => {
+        // 草稿保存也会形成库存预占，库存来源必须在同一个 Serializable 事务内按最新库存复核。
+        await this.validateOrderStockSourceSelections(dto.lines, undefined, tx);
         await this.reserveOrderNo(tx, orderNo, undefined, 'ORDER_CREATED');
         await this.upsertMaterials(tx, dto.lines);
         const createdOrder = await tx.customerOrder.create({
@@ -343,7 +382,7 @@ export class OrdersService {
         return createdOrder;
       }, '库存正在被其他订单占用，请刷新库存后重新保存订单');
 
-      return this.toDetail(created);
+      return this.findOne(created.orderNo);
     } catch (error) {
       if (this.isDuplicateOrderNoError(error)) {
         throw new BadRequestException(`订单号 ${orderNo} 已存在，请修改后再保存`);
@@ -353,7 +392,7 @@ export class OrdersService {
   }
 
   async update(orderNo: string, dto: UpdateOrderDto) {
-    this.validateOrderLines(dto.lines);
+    this.validateOrderLines(dto.lines, { requireStockSources: false });
     const preparedLinePlans = await this.prepareOrderLinePlans(dto.lines);
 
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
@@ -367,7 +406,6 @@ export class OrdersService {
     if (order.status !== OrderStatus.DRAFT) {
       throw new BadRequestException('只有待提交生产订单可以编辑');
     }
-    await this.validateOrderStockSourceSelections(dto.lines, order.id);
 
     const nextOrderNo = dto.orderNo?.trim() ? this.normalizeOrderNo(dto.orderNo) : order.orderNo;
     if (nextOrderNo !== order.orderNo) {
@@ -378,6 +416,8 @@ export class OrdersService {
     // DRAFT 订单还没有进入生产，允许修改订单号和整体替换订单零件，保持订单总表和明细表边界清晰。
     try {
       const updated = await runSerializableTransaction(this.prisma, async (tx) => {
+        // 编辑草稿时先在事务内复核库存来源，再替换订单零件和同步 ACTIVE 预占。
+        await this.validateOrderStockSourceSelections(dto.lines, order, tx);
         if (nextOrderNo !== order.orderNo) {
           await this.reserveOrderNo(tx, nextOrderNo, order.id, 'DRAFT_ORDER_RENUMBERED');
         } else {
@@ -448,7 +488,7 @@ export class OrdersService {
         return updatedOrder;
       }, '库存正在被其他订单占用，请刷新库存后重新保存订单');
 
-      return this.toDetail(updated);
+      return this.findOne(updated.orderNo);
     } catch (error) {
       if (this.isDuplicateOrderNoError(error)) {
         throw new BadRequestException(`订单号 ${nextOrderNo} 已存在，请修改后再保存`);
@@ -544,8 +584,58 @@ export class OrdersService {
           reason: `补单：${reason}。${progressText}`,
           managerName: dto.managerName?.trim()
         });
+        await this.markLineShortagesResolved(
+          tx,
+          line.id,
+          quantity,
+          'ORDER_REPLENISHMENT',
+          dto.managerName?.trim() || '订单补单',
+          `已创建订单补单 ${taskNo}：${reason}`
+        );
       },
       '当前订单生产任务正在被其他操作修改，请刷新后重新创建补单'
+    );
+
+    return this.findOne(normalizedOrderNo);
+  }
+
+  async resolveLineShortage(orderNo: string, lineId: string, dto: ResolveLineShortageDto) {
+    const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const { order, line } = await this.findStartedOrderLineTask(tx, normalizedOrderNo, lineId);
+        this.assertOrderAcceptsProductionChange(order);
+        const managerName = dto.managerName.trim();
+        const reason = dto.reason.trim();
+        if (!managerName) {
+          throw new BadRequestException('处理人员不能为空');
+        }
+        if (!reason) {
+          throw new BadRequestException('无需补单说明不能为空');
+        }
+        const resolvedCount = await this.markLineShortagesResolved(
+          tx,
+          line.id,
+          undefined,
+          dto.resolutionMode,
+          managerName,
+          reason
+        );
+        if (resolvedCount === 0) {
+          throw new BadRequestException('当前零件没有待处理的管理确认短缺');
+        }
+        await tx.customerOrder.update({
+          where: { id: order.id },
+          data: {
+            remark: this.appendOrderRemark(
+              order.remark,
+              `短缺无需补单确认：${managerName}，零件 ${line.partCode} / ${line.partName}，说明：${reason}`
+            )
+          }
+        });
+      },
+      '当前订单短缺处理正在被其他操作修改，请刷新后重试'
     );
 
     return this.findOne(normalizedOrderNo);
@@ -855,6 +945,16 @@ export class OrdersService {
           managerName: dto.managerName?.trim()
         });
       }
+      if (deltaQuantity < 0) {
+        await this.markLineShortagesResolved(
+          tx,
+          line.id,
+          Math.abs(deltaQuantity),
+          'CUSTOMER_QUANTITY_CHANGED',
+          dto.managerName?.trim() || '客户数量变更',
+          `客户数量由 ${oldQuantity} ${line.unit} 调整为 ${nextQuantity} ${line.unit}：${reason}`
+        );
+      }
       },
       '当前订单生产任务正在被其他操作修改，请刷新后重新变更数量'
     );
@@ -922,8 +1022,19 @@ export class OrdersService {
           productionCancelState
         );
         const cancelHandledAt = new Date();
-        const shippedBatches = order.inventoryBatches.filter((batch) => batch.sourceOrderId && batch.status === 'USED');
-        if (shippedBatches.length > 0) {
+        const orderLineIds = order.lines.map((line) => line.id);
+        const shippedTransaction = await tx.inventoryTransaction.findFirst({
+          where: {
+            transactionType: InventoryTransactionType.OUT,
+            sourceRecordType: 'InventoryBatch',
+            OR: [
+              { batch: { sourceOrderId: order.id } },
+              { orderNo: order.orderNo, orderLineId: { in: orderLineIds } }
+            ]
+          },
+          select: { id: true }
+        });
+        if (shippedTransaction) {
           throw new BadRequestException('订单已有发货库存，不能直接取消');
         }
 
@@ -1046,6 +1157,9 @@ export class OrdersService {
         if (order.status !== OrderStatus.DRAFT) {
           throw new BadRequestException('只有待提交生产订单可以提交生产');
         }
+        order.lines.forEach((line, index) => {
+          this.validateSingleOrderLine(this.persistedOrderLineToValidationDto(line), `第 ${index + 1} 个零件`, true);
+        });
         await this.syncOrderInventoryReservations(tx, order.id);
         const missingStockSourceLine = order.lines.find(
           (line) =>
@@ -1076,6 +1190,7 @@ export class OrdersService {
             `零件 ${missingPlanOverrideLine.partCode} 生产计划数量与建议数量不一致，必须记录操作人员和调整说明`
           );
         }
+        await this.assertSubmittedProductionPlanOverrides(tx, order.lines, effectivePlanQuantityByLineId);
         const insufficientReworkSourceLine = order.lines.find(
           (line) =>
             this.normalizeFulfillmentMode(line.fulfillmentMode) === OrderLineFulfillmentMode.REWORK &&
@@ -1161,12 +1276,20 @@ export class OrdersService {
   }
 
   private async resolveSubmitPlanOperator(submittedByCode: string, label = '下单/计划操作员') {
+    return this.resolveSubmitPlanOperatorFromClient(this.prisma, submittedByCode, label);
+  }
+
+  private async resolveSubmitPlanOperatorFromClient(
+    client: { productionOperator: { findFirst: (args: any) => Promise<any> } },
+    submittedByCode: string,
+    label = '下单/计划操作员'
+  ) {
     const accountId = submittedByCode?.trim();
     if (!accountId) {
       throw new BadRequestException(`请选择${label}`);
     }
 
-    const operator = await this.prisma.productionOperator.findFirst({
+    const operator = await client.productionOperator.findFirst({
       where: { accountId: { equals: accountId, mode: 'insensitive' } },
       select: { accountId: true, name: true, role: true, status: true }
     });
@@ -1188,6 +1311,47 @@ export class OrdersService {
       name: submitOperator.name,
       role: submitOperator.role
     };
+  }
+
+  private async assertSubmittedProductionPlanOverrides(
+    tx: Prisma.TransactionClient,
+    lines: Array<{
+      id: string;
+      partCode: string;
+      quantity: Prisma.Decimal | number | string | null;
+      fulfillmentMode?: OrderLineFulfillmentMode | string | null;
+      productionPlanQuantity: Prisma.Decimal | number | string | null;
+      productionPlanOverrideByCode?: string | null;
+      productionPlanOverrideByName?: string | null;
+      productionPlanOverrideByRole?: string | null;
+      productionPlanOverrideAt?: Date | string | null;
+      productionPlanOverrideReason?: string | null;
+      stockSourceSelections?: Prisma.JsonValue | null;
+    }>,
+    effectivePlanQuantityByLineId: Map<string, number>
+  ) {
+    for (const line of lines) {
+      const effectivePlanQuantity = effectivePlanQuantityByLineId.get(line.id) || 0;
+      const suggestedQuantity = this.resolveSuggestedProductionPlanQuantity(line);
+      if (Math.abs(effectivePlanQuantity - suggestedQuantity) <= 0.0001) {
+        continue;
+      }
+
+      const operator = await this.resolveSubmitPlanOperatorFromClient(
+        tx,
+        line.productionPlanOverrideByCode || '',
+        `零件 ${line.partCode} 生产计划调整操作员`
+      );
+      const overrideAt = line.productionPlanOverrideAt ? new Date(line.productionPlanOverrideAt) : null;
+      if (!overrideAt || Number.isNaN(overrideAt.getTime()) || !line.productionPlanOverrideReason?.trim()) {
+        throw new BadRequestException(`零件 ${line.partCode} 生产计划数量与建议数量不一致，必须记录调整时间和说明`);
+      }
+      if (line.productionPlanOverrideByName !== operator.name || line.productionPlanOverrideByRole !== operator.role) {
+        throw new BadRequestException(
+          `零件 ${line.partCode} 生产计划调整操作员快照已过期，请重新选择 ${operator.accountId} 并保存订单后再提交生产`
+        );
+      }
+    }
   }
 
   private isSubmitPlanOperatorRole(role?: string | null) {
@@ -1295,6 +1459,37 @@ export class OrdersService {
 
   private appendRemark(current: string | null | undefined, next: string) {
     return [current?.trim(), next].filter(Boolean).join('\n');
+  }
+
+  private async markLineShortagesResolved(
+    tx: Prisma.TransactionClient,
+    orderLineId: string,
+    coveringQuantity: number | undefined,
+    resolutionMode: string,
+    resolvedBy: string,
+    reason: string
+  ) {
+    const tasks = await tx.productionTask.findMany({
+      where: { orderLineId },
+      include: { processCompletions: true }
+    });
+    const records = this.toUnresolvedShortageRecords(tasks);
+    const totalShortage = records.reduce((sum: number, record: any) => sum + Number(record.shortageQuantity || 0), 0);
+    if (records.length === 0 || (coveringQuantity !== undefined && coveringQuantity + 0.0001 < totalShortage)) {
+      return 0;
+    }
+
+    const now = new Date();
+    await tx.productionProcessCompletion.updateMany({
+      where: { id: { in: records.map((record: any) => record.completionId).filter(Boolean) } },
+      data: {
+        shortageResolutionMode: resolutionMode,
+        shortageResolutionBy: resolvedBy,
+        shortageResolutionReason: reason,
+        shortageResolvedAt: now
+      }
+    });
+    return records.length;
   }
 
   private async createReplenishmentTaskForLine(
@@ -1647,7 +1842,7 @@ export class OrdersService {
     const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(
       tx,
       stockBatches.map((batch) => batch.id),
-      order.id
+      order
     );
     if (hasManualSelections) {
       const selectedTotal = selectedSources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
@@ -1658,6 +1853,7 @@ export class OrdersService {
       }
     }
 
+    // 操作员已经在库存来源弹窗确定了使用队列；提交生产扣库必须严格按 selectedStockSources 顺序执行。
     const sortedStockBatches = hasManualSelections
       ? selectedSources
           .map((source) => stockBatches.find((batch) => batch.id === source.batchId))
@@ -1741,8 +1937,9 @@ export class OrdersService {
       }
 
       const batchQuantity = decimalToNumber(batch.quantity);
-      const selectedLimit = hasManualSelections ? Number(batch.selectedQuantity || 0) : batchQuantity;
-      const usedQuantity = this.roundQuantity(Math.min(batchQuantity, selectedLimit, remainingQuantity));
+      const batchAvailableQuantity = this.roundQuantity(Number(batch.availableQuantity ?? batchQuantity));
+      const selectedLimit = hasManualSelections ? Number(batch.selectedQuantity || 0) : batchAvailableQuantity;
+      const usedQuantity = this.roundQuantity(Math.min(batchAvailableQuantity, selectedLimit, remainingQuantity));
       if (usedQuantity <= 0) {
         continue;
       }
@@ -1760,6 +1957,7 @@ export class OrdersService {
           transactionNo: `IT-${purpose}-OUT-${order.orderNo}-${suffix}`,
           transactionType: 'OUT',
           batchId: batch.id,
+          orderLineId: line.id,
           partCode: batch.partCode,
           partName: batch.partName,
           orderNo: null,
@@ -1774,18 +1972,7 @@ export class OrdersService {
         }
       });
 
-      await tx.inventoryReservation.updateMany({
-        where: {
-          batchId: batch.id,
-          orderLineId: line.id,
-          status: InventoryReservationStatus.ACTIVE
-        },
-        data: {
-          status: InventoryReservationStatus.CONSUMED,
-          statusReason: `订单 ${order.orderNo} 提交生产消费库存`,
-          consumedAt: new Date()
-        }
-      });
+      await this.consumeActiveInventoryReservations(tx, order, line, batch, usedQuantity);
 
       if (purpose === 'STOCK') {
         const sourceTask = batch.sourceProductionTaskNo ? sourceTaskMap.get(batch.sourceProductionTaskNo) : null;
@@ -1818,6 +2005,7 @@ export class OrdersService {
             transactionNo: `IT-STOCK-IN-${order.orderNo}-${suffix}`,
             transactionType: 'IN',
             batchId: orderBatch.id,
+            orderLineId: line.id,
             partCode: line.partCode,
             partName: line.partName,
             orderNo: order.orderNo,
@@ -1836,6 +2024,49 @@ export class OrdersService {
       remainingQuantity = this.roundQuantity(remainingQuantity - usedQuantity);
       sequence += 1;
     }
+  }
+
+  private async consumeActiveInventoryReservations(
+    tx: Prisma.TransactionClient,
+    order: { id: string; orderNo: string },
+    line: { id: string; partCode: string; partName: string; unit: string },
+    batch: { id: string; batchNo: string; unit: string },
+    usedQuantity: number
+  ) {
+    const reservations = await tx.inventoryReservation.findMany({
+      where: {
+        batchId: batch.id,
+        orderId: order.id,
+        orderLineId: line.id,
+        status: InventoryReservationStatus.ACTIVE
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+    });
+    const reservedQuantity = this.roundQuantity(
+      reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
+    );
+
+    // 提交生产时必须把草稿预占、实际扣库存和库存流水逐批对齐，避免旧数据造成少生产或重复占用。
+    if (Math.abs(reservedQuantity - usedQuantity) > 0.0001) {
+      throw new BadRequestException(
+        `库存批次 ${batch.batchNo} 的草稿预占数量异常：本次应消费 ${usedQuantity}${batch.unit}，` +
+          `实际 ACTIVE 预占 ${reservedQuantity}${batch.unit}。请重新保存订单库存来源后再提交生产。`
+      );
+    }
+    if (reservations.length === 0) {
+      throw new BadRequestException(
+        `库存批次 ${batch.batchNo} 缺少草稿库存预占记录，请重新保存订单库存来源后再提交生产。`
+      );
+    }
+
+    await tx.inventoryReservation.updateMany({
+      where: { id: { in: reservations.map((reservation) => reservation.id) } },
+      data: {
+        status: InventoryReservationStatus.CONSUMED,
+        statusReason: `订单 ${order.orderNo} 提交生产消费库存`,
+        consumedAt: new Date()
+      }
+    });
   }
 
   private stockAvailabilitySummary(batches: any[], currentOrderId?: string) {
@@ -1857,7 +2088,6 @@ export class OrdersService {
         );
         const selectedQuantity = this.roundQuantity(Number(batch.selectedQuantity || 0));
         const reservationText = reservationRows
-          .slice(0, 3)
           .map((reservation: any) => {
             const orderNo = reservation.orderNo || reservation.order?.orderNo || '草稿订单';
             const partName = reservation.partName || reservation.orderLine?.partName || reservation.partCode || reservation.orderLine?.partCode || '-';
@@ -1877,6 +2107,13 @@ export class OrdersService {
   }
 
   private validateSelectedStockSourceManualConfirmations(selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>) {
+    const missingReviewSource = selectedSources.find((source) => !source.compatibilityStatus);
+    if (missingReviewSource) {
+      throw new BadRequestException(
+        `已选库存批次 ${missingReviewSource.batchNo || missingReviewSource.batchId} 缺少库存来源核对结果，请重新打开库存来源并确认后再保存`
+      );
+    }
+
     const incompleteSource = selectedSources.find(
       (source) => source.compatibilityStatus && source.compatibilityStatus !== 'MATCHED' && !this.stockSourceManualConfirmationComplete(source)
     );
@@ -2153,6 +2390,7 @@ export class OrdersService {
           transactionNo: this.buildOrderCancelTransactionNo('OUT', order.orderNo, line.lineNo),
           transactionType: 'OUT',
           batchId: batch.id,
+          orderLineId: line.id,
           partCode: batch.partCode,
           partName: batch.partName,
           orderNo: order.orderNo,
@@ -2205,6 +2443,7 @@ export class OrdersService {
           transactionNo: this.buildOrderCancelTransactionNo('IN', order.orderNo, line.lineNo),
           transactionType: 'IN',
           batchId: sourceBatch.id,
+          orderLineId: line.id,
           partCode: transaction.partCode,
           partName: transaction.partName,
           orderNo: null,
@@ -2456,6 +2695,30 @@ export class OrdersService {
     this.validateStockSourceSelectionQuantity(line, label, fulfillmentMode, orderQuantity, productionPlanQuantity, requireStockSources);
   }
 
+  private persistedOrderLineToValidationDto(line: any): CreateOrderLineDto {
+    // 提交生产必须基于数据库中的草稿明细重新校验，不能只依赖前端创建/编辑时的校验结果。
+    return {
+      partCode: line.partCode,
+      partName: line.partName,
+      drawingNo: line.drawingNo || undefined,
+      drawingVersion: line.drawingVersion || undefined,
+      drawingFileName: line.drawingFileName || undefined,
+      drawingFileUrl: line.drawingFileUrl || undefined,
+      partThickness: decimalToNumber(line.partThickness),
+      partSpecification: line.partSpecification || undefined,
+      quantity: decimalToNumber(line.quantity),
+      productionPlanQuantity: decimalToNumber(line.productionPlanQuantity ?? 0),
+      productionPlanOverrideByCode: line.productionPlanOverrideByCode || undefined,
+      productionPlanOverrideReason: line.productionPlanOverrideReason || undefined,
+      fulfillmentMode: this.normalizeFulfillmentMode(line.fulfillmentMode || undefined),
+      unit: line.unit,
+      deliveryDate: line.deliveryDate ? new Date(line.deliveryDate).toISOString().slice(0, 10) : undefined,
+      remark: line.remark || undefined,
+      processSteps: this.processRowsToSnapshots(line.processSteps || []),
+      selectedStockSources: this.jsonToStockSourceSelections(line.stockSourceSelections)
+    };
+  }
+
   private validateStockSourceSelectionQuantity(
     line: CreateOrderLineDto,
     label: string,
@@ -2481,8 +2744,8 @@ export class OrdersService {
       throw new BadRequestException(`${label}必须先选择库存批次并完成来源核对`);
     }
     this.validateSelectedStockSourceManualConfirmations(selectedSources);
-    // STOCK 允许只选择部分库存，剩余数量自动生成生产计划；REWORK 必须选满领料数量。
-    if (fulfillmentMode !== OrderLineFulfillmentMode.STOCK && selectedQuantity + 0.0001 < requiredQuantity) {
+    // 草稿允许库存来源暂存未选满；提交生产时 REWORK 才必须选满领料数量。
+    if (requireStockSources && fulfillmentMode !== OrderLineFulfillmentMode.STOCK && selectedQuantity + 0.0001 < requiredQuantity) {
       throw new BadRequestException(`${label}已选库存数量少于本次需要数量：需要 ${requiredQuantity}，已选 ${selectedQuantity}`);
     }
     if (selectedQuantity > requiredQuantity + 0.0001) {
@@ -2498,7 +2761,11 @@ export class OrdersService {
     return this.roundQuantity(sources.reduce((sum, source) => sum + source.quantity, 0));
   }
 
-  private async validateOrderStockSourceSelections(lines: CreateOrderDto['lines'], excludeOrderId?: string) {
+  private async validateOrderStockSourceSelections(
+    lines: CreateOrderDto['lines'],
+    currentOrder?: StockReservationPriorityOrder,
+    client: Prisma.TransactionClient | PrismaService = this.prisma
+  ) {
     const selectedRows = lines.flatMap((line, lineIndex) =>
       this.normalizeStockSourceSelections(line.selectedStockSources).map((source) => ({ line, lineIndex, source }))
     );
@@ -2507,7 +2774,7 @@ export class OrdersService {
     }
 
     const batchIds = [...new Set(selectedRows.map((row) => row.source.batchId))];
-    const batches = await this.prisma.inventoryBatch.findMany({
+    const batches = await client.inventoryBatch.findMany({
       where: {
         id: { in: batchIds },
         sourceOrderId: null,
@@ -2528,7 +2795,7 @@ export class OrdersService {
       }
     });
     const batchMap = new Map(batches.map((batch) => [batch.id, batch]));
-    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(this.prisma, batchIds, excludeOrderId);
+    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(client, batchIds, currentOrder);
     const selectedQuantityByBatchId = new Map<string, number>();
     for (const { source } of selectedRows) {
       selectedQuantityByBatchId.set(
@@ -2547,13 +2814,13 @@ export class OrdersService {
         throw new BadRequestException(
           `已选库存批次 ${batch.batchNo} 可用库存不足：${this.stockAvailabilitySummary(
             [{ ...batch, reservedByOtherOrders: reservedQuantity, availableQuantity: Math.max(availableQuantity, 0), selectedQuantity }],
-            excludeOrderId
+            currentOrder?.id
           )}，本次合计选用 ${selectedQuantity}`
         );
       }
     }
-    const usageCandidateBatches = await this.findAvailableStockUsageCandidateBatches(this.prisma, batches, excludeOrderId);
-    const sourceTaskMap = await this.findStockSourceTaskMapByBatches(usageCandidateBatches);
+    const usageCandidateBatches = await this.findAvailableStockUsageCandidateBatches(client, batches, currentOrder?.id);
+    const sourceTaskMap = await this.findStockSourceTaskMapByBatches(client, usageCandidateBatches);
 
     for (const { line, lineIndex, source } of selectedRows) {
       const label = `第 ${lineIndex + 1} 个零件`;
@@ -2570,7 +2837,7 @@ export class OrdersService {
         throw new BadRequestException(
           `${label}已选库存批次 ${batch.batchNo} 的使用数量超过当前可用库存：${this.stockAvailabilitySummary(
             [{ ...batch, reservedByOtherOrders: batchReservedQuantity, availableQuantity: Math.max(batchAvailableQuantity, 0), selectedQuantity: source.quantity }],
-            excludeOrderId
+            currentOrder?.id
           )}`
         );
       }
@@ -2583,11 +2850,11 @@ export class OrdersService {
         sourceTaskMap,
         lineSources,
         usageCandidateBatches,
-        excludeOrderId
+        currentOrder?.id
       );
       if (fulfillmentMode === OrderLineFulfillmentMode.STOCK) {
         if (
-          this.stockSourceSelectionNeedsManualConfirmation(line, batch, sourceTaskMap, lineSources, usageCandidateBatches, excludeOrderId) &&
+          this.stockSourceSelectionNeedsManualConfirmation(line, batch, sourceTaskMap, lineSources, usageCandidateBatches, currentOrder?.id) &&
           !this.stockSourceManualConfirmationComplete(source)
         ) {
           throw new BadRequestException(
@@ -2611,25 +2878,90 @@ export class OrdersService {
   private async activeReservationQuantityByBatchId(
     client: {
       inventoryReservation: {
-        groupBy: (args: any) => Promise<Array<{ batchId: string; _sum: { quantity: Prisma.Decimal | null } }>>;
+        findMany: (args: any) => Promise<any[]>;
+      };
+      customerOrder?: {
+        findUnique: (args: any) => Promise<any>;
       };
     },
     batchIds: string[],
-    excludeOrderId?: string
+    currentOrder?: string | StockReservationPriorityOrder
   ) {
     if (batchIds.length === 0) {
       return new Map<string, number>();
     }
-    const rows = await client.inventoryReservation.groupBy({
-      by: ['batchId'],
+    const currentPriorityOrder = await this.resolveStockReservationPriorityOrder(client, currentOrder);
+    const rows = await client.inventoryReservation.findMany({
       where: {
         batchId: { in: batchIds },
         status: InventoryReservationStatus.ACTIVE,
-        ...(excludeOrderId ? { orderId: { not: excludeOrderId } } : {})
+        ...(currentPriorityOrder ? { orderId: { not: currentPriorityOrder.id } } : {})
       },
-      _sum: { quantity: true }
+      select: {
+        batchId: true,
+        quantity: true,
+        order: {
+          select: {
+            id: true,
+            orderNo: true,
+            status: true,
+            createdAt: true
+          }
+        }
+      }
     });
-    return new Map(rows.map((row) => [row.batchId, this.roundQuantity(decimalToNumber(row._sum.quantity || 0))]));
+    const reservedQuantityByBatchId = new Map<string, number>();
+    for (const row of rows) {
+      if (!this.stockReservationConsumesAvailability(row.order, currentPriorityOrder)) {
+        continue;
+      }
+      reservedQuantityByBatchId.set(
+        row.batchId,
+        this.roundQuantity((reservedQuantityByBatchId.get(row.batchId) || 0) + decimalToNumber(row.quantity))
+      );
+    }
+    return reservedQuantityByBatchId;
+  }
+
+  private async resolveStockReservationPriorityOrder(
+    client: { customerOrder?: { findUnique: (args: any) => Promise<any> } },
+    currentOrder?: string | StockReservationPriorityOrder
+  ) {
+    if (!currentOrder) {
+      return undefined;
+    }
+    if (typeof currentOrder !== 'string') {
+      return currentOrder;
+    }
+    if (!client.customerOrder) {
+      return undefined;
+    }
+    return (
+      (await client.customerOrder.findUnique({
+        where: { id: currentOrder },
+        select: { id: true, orderNo: true, status: true, createdAt: true }
+      })) || undefined
+    );
+  }
+
+  private stockReservationConsumesAvailability(
+    reservationOrder: StockReservationPriorityOrder,
+    currentOrder?: StockReservationPriorityOrder
+  ) {
+    if (!currentOrder) {
+      return true;
+    }
+    if (reservationOrder.id === currentOrder.id) {
+      return false;
+    }
+    if (reservationOrder.status !== OrderStatus.DRAFT || currentOrder.status !== OrderStatus.DRAFT) {
+      return true;
+    }
+    const createdAtDiff = reservationOrder.createdAt.getTime() - currentOrder.createdAt.getTime();
+    if (createdAtDiff !== 0) {
+      return createdAtDiff < 0;
+    }
+    return reservationOrder.orderNo.localeCompare(currentOrder.orderNo) < 0;
   }
 
   private async releaseOrderInventoryReservations(tx: Prisma.TransactionClient, orderId: string, reason: string) {
@@ -2771,7 +3103,7 @@ export class OrdersService {
       }
     });
     const batchMap = new Map(batches.map((batch) => [batch.id, batch]));
-    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(tx, batchIds, order.id);
+    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(tx, batchIds, order);
     const selectedQuantityByBatchId = new Map<string, number>();
     for (const { source } of selectedRows) {
       selectedQuantityByBatchId.set(
@@ -2780,6 +3112,7 @@ export class OrdersService {
       );
     }
 
+    // 同一张草稿订单可能有多个零件共用一个库存批次，必须先按批次合计，再和扣除其他订单预占后的可用量比较。
     for (const [batchId, selectedQuantity] of selectedQuantityByBatchId) {
       const batch = batchMap.get(batchId);
       if (!batch) {
@@ -2805,12 +3138,15 @@ export class OrdersService {
     }
   }
 
-  private async findStockSourceTaskMapByBatches(batches: any[]) {
+  private async findStockSourceTaskMapByBatches(
+    client: { productionTask: { findMany: (args: any) => Promise<any[]> } },
+    batches: any[]
+  ) {
     const taskNos = [...new Set(batches.map((batch) => batch.sourceProductionTaskNo).filter(Boolean))] as string[];
     if (taskNos.length === 0) {
       return new Map<string, any>();
     }
-    const tasks = await this.prisma.productionTask.findMany({
+    const tasks = await client.productionTask.findMany({
       where: { productionTaskNo: { in: taskNos } },
       include: { orderLine: true }
     });
@@ -2868,12 +3204,22 @@ export class OrdersService {
 
   private async prepareOrderLinePlan(line: CreateOrderDto['lines'][number], label: string): Promise<PreparedOrderLinePlan> {
     const fulfillmentMode = this.normalizeFulfillmentMode(line.fulfillmentMode);
-    const productionPlanQuantity = this.normalizeQuantity(
+    let productionPlanQuantity = this.normalizeQuantity(
       this.resolveProductionPlanQuantity(line),
       `${label} production plan quantity`,
       true
     );
     const suggestedQuantity = this.resolveSuggestedProductionPlanQuantity(line);
+    const stockCoversCustomerQuantity =
+      fulfillmentMode === OrderLineFulfillmentMode.STOCK &&
+      suggestedQuantity <= 0 &&
+      this.selectedStockSourceQuantity(line) + 0.0001 >= decimalToNumber(line.quantity);
+    const hasExplicitProductionPlanOverride = Boolean(
+      line.productionPlanOverrideByCode?.trim() || line.productionPlanOverrideReason?.trim()
+    );
+    if (stockCoversCustomerQuantity && productionPlanQuantity > 0 && !hasExplicitProductionPlanOverride) {
+      productionPlanQuantity = suggestedQuantity;
+    }
 
     if (Math.abs(productionPlanQuantity - suggestedQuantity) <= 0.0001) {
       return {
@@ -2921,13 +3267,17 @@ export class OrdersService {
   private hasProductionPlanOverrideRecord(line: {
     productionPlanOverrideByCode?: string | null;
     productionPlanOverrideByName?: string | null;
+    productionPlanOverrideByRole?: string | null;
     productionPlanOverrideAt?: Date | string | null;
     productionPlanOverrideReason?: string | null;
   }) {
+    const overrideAt = line.productionPlanOverrideAt ? new Date(line.productionPlanOverrideAt) : null;
     return Boolean(
       line.productionPlanOverrideByCode?.trim() &&
         line.productionPlanOverrideByName?.trim() &&
-        line.productionPlanOverrideAt &&
+        line.productionPlanOverrideByRole?.trim() &&
+        overrideAt &&
+        !Number.isNaN(overrideAt.getTime()) &&
         line.productionPlanOverrideReason?.trim()
     );
   }
@@ -3125,6 +3475,7 @@ export class OrdersService {
     const quantityByUnit = this.toOrderQuantityByUnit(order.lines);
     const totalQuantity = quantityByUnit.reduce((sum, row) => sum + row.totalQuantity, 0);
     const totalProductionPlanQuantity = quantityByUnit.reduce((sum, row) => sum + row.totalProductionPlanQuantity, 0);
+    const unresolvedShortageInfo = this.toOrderUnresolvedShortageInfo(order.productionTasks || []);
 
     return {
       id: order.id,
@@ -3144,9 +3495,50 @@ export class OrdersService {
       unit: order.lines[0]?.unit || '件',
       productionStatus: this.toOrderProductionStatus(order),
       warehouseStage: this.toOrderWarehouseStage(order),
+      ...unresolvedShortageInfo,
       remark: order.remark,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt
+    };
+  }
+
+  private toOrderUnresolvedShortageInfo(tasks: any[]) {
+    const shortageRecords = this.toShortageRecords(tasks) as any[];
+    const records = this.toEffectiveUnresolvedShortageRecords(tasks);
+    const pendingProductionRecords = shortageRecords.filter((record) => this.isPendingProductionReplenishmentRecord(record));
+    const unresolvedQuantityInfo = this.toShortageQuantityInfo(records);
+    const pendingProductionQuantityInfo = this.toShortageQuantityInfo(pendingProductionRecords);
+
+    return {
+      unresolvedShortageLineCount: unresolvedQuantityInfo.lineCount,
+      unresolvedShortageQuantity: unresolvedQuantityInfo.quantity,
+      unresolvedShortageUnit: unresolvedQuantityInfo.unit,
+      unresolvedShortageQuantityByUnit: unresolvedQuantityInfo.quantityByUnit,
+      needsReplenishmentAction: records.length > 0,
+      pendingProductionReplenishmentLineCount: pendingProductionQuantityInfo.lineCount,
+      pendingProductionReplenishmentQuantity: pendingProductionQuantityInfo.quantity,
+      pendingProductionReplenishmentUnit: pendingProductionQuantityInfo.unit,
+      pendingProductionReplenishmentQuantityByUnit: pendingProductionQuantityInfo.quantityByUnit,
+      needsProductionReplenishmentReview: pendingProductionRecords.length > 0
+    };
+  }
+
+  private toShortageQuantityInfo(records: any[]) {
+    const lineKeys = new Set(records.map((record) => record.orderLineId || record.productionTaskNo));
+    const unitMap = new Map<string, number>();
+    for (const record of records) {
+      const unit = record.unit || '件';
+      unitMap.set(unit, (unitMap.get(unit) || 0) + record.shortageQuantity);
+    }
+    const quantityByUnit = Array.from(unitMap.entries())
+      .map(([unit, quantity]) => ({ unit, quantity: this.roundQuantity(quantity) }))
+      .sort((left, right) => left.unit.localeCompare(right.unit, 'zh-Hans-CN'));
+
+    return {
+      lineCount: lineKeys.size,
+      quantity: this.roundQuantity(records.reduce((sum, record) => sum + record.shortageQuantity, 0)),
+      unit: quantityByUnit.length === 1 ? quantityByUnit[0].unit : undefined,
+      quantityByUnit
     };
   }
 
@@ -3165,18 +3557,36 @@ export class OrdersService {
 
   private toOrderShippedQuantityByUnit(order: any) {
     const shippedQuantityByUnit = new Map<string, number>();
-    for (const batch of order.inventoryBatches || []) {
-      if (!batch.sourceOrderId) {
-        continue;
-      }
-      for (const transaction of batch.transactions || []) {
+    const countedTransactionIds = new Set<string>();
+    for (const line of order.lines || []) {
+      for (const transaction of line.inventoryTransactions || []) {
         if (
+          countedTransactionIds.has(transaction.id) ||
           transaction.transactionType !== InventoryTransactionType.OUT ||
           transaction.sourceRecordType !== 'InventoryBatch' ||
           transaction.orderNo !== order.orderNo
         ) {
           continue;
         }
+        countedTransactionIds.add(transaction.id);
+        const unit = transaction.unit || line.unit || '件';
+        shippedQuantityByUnit.set(unit, (shippedQuantityByUnit.get(unit) || 0) + decimalToNumber(transaction.quantity));
+      }
+    }
+    for (const batch of order.inventoryBatches || []) {
+      if (!batch.sourceOrderId) {
+        continue;
+      }
+      for (const transaction of batch.transactions || []) {
+        if (
+          countedTransactionIds.has(transaction.id) ||
+          transaction.transactionType !== InventoryTransactionType.OUT ||
+          transaction.sourceRecordType !== 'InventoryBatch' ||
+          transaction.orderNo !== order.orderNo
+        ) {
+          continue;
+        }
+        countedTransactionIds.add(transaction.id);
         const unit = transaction.unit || batch.unit || '件';
         shippedQuantityByUnit.set(unit, (shippedQuantityByUnit.get(unit) || 0) + decimalToNumber(transaction.quantity));
       }
@@ -3245,30 +3655,39 @@ export class OrdersService {
     };
   }
 
-  private async getStockSourceInfoByBatchId(batchIds: string[]) {
+  private async getStockSourceInfoByBatchId(batchIds: string[], currentOrderId?: string) {
     const ids = [...new Set(batchIds.filter(Boolean))];
     if (ids.length === 0) {
       return new Map<string, ReturnType<OrdersService['toStockSourceSelectionInfo']>>();
     }
 
-    const batches = await this.prisma.inventoryBatch.findMany({
-      where: { id: { in: ids } },
-      include: { productionTask: true }
-    });
+    const [batches, reservedQuantityByBatchId] = await Promise.all([
+      this.prisma.inventoryBatch.findMany({
+        where: { id: { in: ids } },
+        include: { productionTask: true }
+      }),
+      this.activeReservationQuantityByBatchId(this.prisma, ids, currentOrderId)
+    ]);
 
-    return new Map(batches.map((batch) => [batch.id, this.toStockSourceSelectionInfo(batch)]));
+    return new Map(
+      batches.map((batch) => [
+        batch.id,
+        this.toStockSourceSelectionInfo(batch, reservedQuantityByBatchId.get(batch.id) || 0)
+      ])
+    );
   }
 
-  private toStockSourceSelectionInfo(batch: any) {
+  private toStockSourceSelectionInfo(batch: any, reservedByOtherOrders = 0) {
     const replenishmentSourceType = batch.replenishmentSourceType || batch.productionTask?.replenishmentSourceType || undefined;
     const replenishmentSourceRequestNo =
       batch.replenishmentSourceRequestNo || batch.productionTask?.replenishmentSourceRequestNo || undefined;
+    const physicalQuantity = batch.status === 'AVAILABLE' ? decimalToNumber(batch.quantity) : 0;
     return {
       batchId: batch.id,
       batchNo: batch.batchNo,
       partCode: batch.partCode,
       partName: batch.partName,
-      availableQuantity: decimalToNumber(batch.quantity),
+      availableQuantity: Math.max(this.roundQuantity(physicalQuantity - reservedByOtherOrders), 0),
       unit: batch.unit,
       replenishmentSourceType,
       replenishmentSourceRequestNo,
@@ -3461,11 +3880,13 @@ export class OrdersService {
     if (order.status === OrderStatus.COMPLETED) {
       return 'ORDER_SHIPPED_COMPLETED';
     }
+    if (order.warehouseStage === 'PARTIAL_SHIPPED') {
+      return 'PARTIAL_SHIPPED';
+    }
     if (
       order.productionStatus === ProductionStatus.COMPLETED ||
       order.warehouseStage === 'WAITING_RECEIPT' ||
-      order.warehouseStage === 'WAITING_SHIPMENT' ||
-      order.warehouseStage === 'PARTIAL_SHIPPED'
+      order.warehouseStage === 'WAITING_SHIPMENT'
     ) {
       return 'ORDER_COMPLETED_UNSHIPPED';
     }
@@ -3508,6 +3929,13 @@ export class OrdersService {
       lineBatches.find((batch: any) => batch.status === 'USED');
     if (tasks.length === 0) {
       if (visibleLineBatch) {
+        const shippedQuantity = this.toLineShippedQuantity(line, orderNo);
+        const warehouseStage =
+          shippedQuantity + 0.0001 >= decimalToNumber(line.quantity)
+            ? 'SHIPPED'
+            : shippedQuantity > 0
+              ? 'PARTIAL_SHIPPED'
+              : 'WAITING_SHIPMENT';
         return {
           productionTaskNo: null,
           productionStatus: null,
@@ -3521,7 +3949,7 @@ export class OrdersService {
           productionReplenishmentRequestNos: [],
           productionShortageReasons: [],
           productionProgressText: '使用库存，无生产工序',
-          warehouseStage: visibleLineBatch.status === 'AVAILABLE' ? 'WAITING_SHIPMENT' : 'SHIPPED',
+          warehouseStage,
           inventoryBatchNo: visibleLineBatch.batchNo,
           inventoryStatus: visibleLineBatch.status,
           warehouseName: visibleLineBatch.warehouse?.warehouseName || null,
@@ -3653,7 +4081,21 @@ export class OrdersService {
   }
 
   private toLineShippedQuantity(line: any, orderNo?: string) {
-    return (line.inventoryBatches || []).reduce((sum: number, batch: any) => {
+    const countedTransactionIds = new Set<string>();
+    let lineShipmentQuantity = 0;
+    for (const transaction of line.inventoryTransactions || []) {
+      if (
+        countedTransactionIds.has(transaction.id) ||
+        transaction.transactionType !== InventoryTransactionType.OUT ||
+        transaction.sourceRecordType !== 'InventoryBatch' ||
+        (orderNo && transaction.orderNo !== orderNo)
+      ) {
+        continue;
+      }
+      countedTransactionIds.add(transaction.id);
+      lineShipmentQuantity += decimalToNumber(transaction.quantity);
+    }
+    return lineShipmentQuantity + (line.inventoryBatches || []).reduce((sum: number, batch: any) => {
       if (!batch.sourceOrderId) {
         return sum;
       }
@@ -3661,12 +4103,14 @@ export class OrdersService {
         sum +
         (batch.transactions || []).reduce((batchSum: number, transaction: any) => {
           if (
+            countedTransactionIds.has(transaction.id) ||
             transaction.transactionType !== InventoryTransactionType.OUT ||
             transaction.sourceRecordType !== 'InventoryBatch' ||
             (orderNo && transaction.orderNo !== orderNo)
           ) {
             return batchSum;
           }
+          countedTransactionIds.add(transaction.id);
           return batchSum + decimalToNumber(transaction.quantity);
         }, 0)
       );
@@ -3723,28 +4167,64 @@ export class OrdersService {
     return quantityMap;
   }
 
-  private toLineShortageInfo(tasks: any[]) {
-    const shortageRecords = tasks
+  private finalProcessCompletion(task: any) {
+    return (task.processCompletions || []).reduce((current: any, item: any) => {
+      if (!current || item.stepNo > current.stepNo) {
+        return item;
+      }
+      return current;
+    }, null);
+  }
+
+  private toShortageRecords(tasks: any[]) {
+    return tasks
       .map((task) => {
-        const finalCompletion = (task.processCompletions || []).reduce((current: any, item: any) => {
-          if (!current || item.stepNo > current.stepNo) {
-            return item;
-          }
-          return current;
-        }, null);
+        const finalCompletion = this.finalProcessCompletion(task);
         return finalCompletion
           ? {
+              completionId: finalCompletion.id,
+              productionTaskNo: task.productionTaskNo,
+              orderLineId: task.orderLineId,
+              partCode: task.partCode,
+              partName: task.partName,
               shortageQuantity: decimalToNumber(finalCompletion.shortageQuantity),
               scrapQuantity: decimalToNumber(finalCompletion.scrapQuantity),
               shortageMode: finalCompletion.shortageMode,
               replenishmentTaskNo: finalCompletion.replenishmentTaskNo,
               replenishmentRequestNo: finalCompletion.replenishmentRequests?.[0]?.requestNo,
+              replenishmentRequestStatus: finalCompletion.replenishmentRequests?.[0]?.status,
               managerName: finalCompletion.managerName,
-              shortageReason: finalCompletion.shortageReason
+              shortageReason: finalCompletion.shortageReason,
+              shortageResolutionMode: finalCompletion.shortageResolutionMode,
+              shortageResolutionBy: finalCompletion.shortageResolutionBy,
+              shortageResolutionReason: finalCompletion.shortageResolutionReason,
+              shortageResolvedAt: finalCompletion.shortageResolvedAt,
+              unit: finalCompletion.unit || task.unit || '件'
             }
           : null;
       })
       .filter((record) => record && record.shortageQuantity > 0);
+  }
+
+  private isUnresolvedShortageRecord(record: any) {
+    return record.shortageMode === 'MANAGER_APPROVED' && !record.shortageResolutionMode;
+  }
+
+  private isPendingProductionReplenishmentRecord(record: any) {
+    return (
+      record.shortageMode === 'REPLENISHMENT_REQUEST' &&
+      !record.replenishmentTaskNo &&
+      record.replenishmentRequestStatus !== 'REJECTED'
+    );
+  }
+
+  private toUnresolvedShortageRecords(tasks: any[]) {
+    return this.toEffectiveUnresolvedShortageRecords(tasks);
+  }
+
+  private toLineShortageInfo(tasks: any[]) {
+    const shortageRecords = this.toShortageRecords(tasks);
+    const unresolvedShortageRecords = this.toEffectiveUnresolvedShortageRecords(tasks);
 
     const productionReplenishmentTaskNos = shortageRecords
       .map((record: any) => record.replenishmentTaskNo)
@@ -3775,7 +4255,65 @@ export class OrdersService {
               : 'MANAGER_APPROVED',
       productionReplenishmentTaskNos,
       productionReplenishmentRequestNos,
-      productionShortageReasons
+      productionShortageReasons,
+      unresolvedShortageQuantity: unresolvedShortageRecords.reduce(
+        (sum: number, record: any) => sum + decimalToNumber(record.shortageQuantity),
+        0
+      ),
+      unresolvedShortageCount: unresolvedShortageRecords.length,
+      unresolvedShortageRecords: unresolvedShortageRecords.map((record: any) => ({
+        completionId: record.completionId,
+        productionTaskNo: record.productionTaskNo,
+        partCode: record.partCode,
+        partName: record.partName,
+        shortageQuantity: record.shortageQuantity,
+        scrapQuantity: record.scrapQuantity,
+        managerName: record.managerName,
+        shortageReason: record.shortageReason,
+        unit: record.unit
+      }))
     };
+  }
+
+  private toEffectiveUnresolvedShortageRecords(tasks: any[]) {
+    const records = this.toShortageRecords(tasks).filter((record: any) => this.isUnresolvedShortageRecord(record));
+    if (records.length === 0) {
+      return [];
+    }
+
+    const completedReplenishmentQuantityByLine = this.toCompletedReplenishmentQuantityByLine(tasks);
+    return records.flatMap((record: any) => {
+      const key = record.orderLineId || record.productionTaskNo;
+      const coveringQuantity = completedReplenishmentQuantityByLine.get(key) || 0;
+      if (coveringQuantity <= 0) {
+        return [record];
+      }
+
+      const usedQuantity = Math.min(record.shortageQuantity, coveringQuantity);
+      const remainingQuantity = this.roundQuantity(record.shortageQuantity - usedQuantity);
+      completedReplenishmentQuantityByLine.set(key, this.roundQuantity(coveringQuantity - usedQuantity));
+      if (remainingQuantity <= 0) {
+        return [];
+      }
+      return [{ ...record, shortageQuantity: remainingQuantity }];
+    });
+  }
+
+  private toCompletedReplenishmentQuantityByLine(tasks: any[]) {
+    const quantityByLine = new Map<string, number>();
+    for (const task of tasks) {
+      if (!task?.isReplenishment || this.toEffectiveTaskProductionStatus(task) !== ProductionStatus.COMPLETED) {
+        continue;
+      }
+      const key = task.orderLineId || task.sourceProductionTaskNo || task.productionTaskNo;
+      const quantity = this.roundQuantity(
+        this.toEffectiveTaskCompletedQuantity(task) || decimalToNumber(task.plannedQuantity)
+      );
+      if (quantity <= 0) {
+        continue;
+      }
+      quantityByLine.set(key, this.roundQuantity((quantityByLine.get(key) || 0) + quantity));
+    }
+    return quantityByLine;
   }
 }

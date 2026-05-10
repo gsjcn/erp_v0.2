@@ -69,59 +69,167 @@
         :closable="false"
         class="mt-16"
       />
+      <el-alert
+        v-if="orderNeedsReplenishmentAction"
+        :title="orderReplenishmentActionText"
+        type="warning"
+        :closable="false"
+        class="mt-16"
+      >
+        <template #default>
+          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">查看需要补单零件</el-button>
+        </template>
+      </el-alert>
+      <el-alert
+        v-else-if="orderHasShortageRecords"
+        :title="orderShortageRecordText"
+        type="success"
+        :closable="false"
+        class="mt-16"
+      >
+        <template #default>
+          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">查看短缺零件</el-button>
+        </template>
+      </el-alert>
+
+      <section v-if="orderNeedsReplenishmentAction" class="pending-shortage-panel mt-16">
+        <div class="pending-shortage-header">
+          <div>
+            <strong>待处理短缺清单</strong>
+            <p>用于防止生产报废或管理确认缺货后忘记补单、客户减量或无需补单说明。</p>
+          </div>
+          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">定位第一个零件</el-button>
+        </div>
+        <div class="pending-shortage-list">
+          <article v-for="line in linesNeedingReplenishmentAction" :key="line.id" class="pending-shortage-item">
+            <div>
+              <strong>{{ line.partName }}</strong>
+              <span>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
+            </div>
+            <p>{{ formatLineShortageText(line) }}</p>
+            <div class="pending-shortage-actions">
+              <el-button size="small" plain @click="scrollToShortageLine(line)">定位</el-button>
+              <el-button v-if="lineNeedsReplenishmentAction(line)" size="small" type="warning" plain @click="openShortageResolution(line)">
+                处理补单
+              </el-button>
+            </div>
+          </article>
+        </div>
+      </section>
+      <section v-else-if="orderHasShortageRecords" class="pending-shortage-panel resolved-shortage-panel mt-16">
+        <div class="pending-shortage-header">
+          <div>
+            <strong>已处理短缺记录</strong>
+            <p>这些短缺已通过补单完成、客户数量调整或无需补单说明关闭，不再属于待处理提醒。</p>
+          </div>
+          <el-button size="small" type="success" plain @click="scrollToFirstShortageLine">定位第一个零件</el-button>
+        </div>
+        <div class="pending-shortage-list">
+          <article v-for="line in linesWithShortageRecords" :key="line.id" class="pending-shortage-item">
+            <div>
+              <strong>{{ line.partName }}</strong>
+              <span>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
+            </div>
+            <p>{{ formatLineShortageText(line) }}</p>
+            <div class="pending-shortage-actions">
+              <el-tag type="success" effect="light" round>已处理</el-tag>
+              <el-button size="small" plain @click="scrollToShortageLine(line)">定位</el-button>
+            </div>
+          </article>
+        </div>
+      </section>
 
       <div class="line-cards mt-24">
-        <article v-for="line in order.lines" :key="line.id" class="line-card">
+        <article
+          v-for="line in order.lines"
+          :key="line.id"
+          class="line-card order-detail-line-card"
+          :class="{ expanded: isOrderDetailLineExpanded(line.id) }"
+        >
           <div class="line-title">
-            <strong>{{ line.partName }}</strong>
-            <span class="muted">订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
+            <div class="line-title-main">
+              <strong>{{ line.partName }}</strong>
+              <span class="muted">{{ line.partCode }}</span>
+            </div>
+            <div class="line-title-actions">
+              <span class="muted">订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
+              <el-button
+                v-if="isMobileLayout"
+                link
+                type="primary"
+                :aria-expanded="isOrderDetailLineExpanded(line.id)"
+                @click="toggleOrderDetailLine(line.id)"
+              >
+                {{ isOrderDetailLineExpanded(line.id) ? '收起' : '详情' }}
+              </el-button>
+            </div>
           </div>
-          <div class="muted">来源 {{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</div>
-          <div v-if="stockSourceSummary(line)" class="stock-source-summary">
-            库存来源：{{ stockSourceSummary(line) }}
+          <div v-if="isMobileLayout" class="line-compact-summary">
+            <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}</span>
+            <span>计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
+            <StatusTag :value="line.warehouseStage" compact />
           </div>
-          <div v-if="stockFulfillmentHint(line)" class="stock-fulfillment-hint">
-            {{ stockFulfillmentHint(line) }}
-          </div>
-          <div class="muted">交期 {{ formatDate(line.deliveryDate || order.deliveryDate) }}</div>
-          <div class="muted">{{ line.partCode }} / {{ line.drawingNo || '-' }} / 版本 {{ line.drawingVersion || '-' }}</div>
-          <div class="muted">厚度 {{ line.partThickness }} mm / 成品规格 {{ line.partSpecification || '-' }}</div>
           <div class="line-status-row">
             <StatusTag :value="line.warehouseStage" compact />
             <span class="muted">{{ formatLineWarehouseText(line) }}</span>
           </div>
-          <div v-if="formatLineShortageText(line)" class="line-shortage">
+          <div v-if="formatLineShortageText(line)" :id="lineShortageAnchorId(line)" class="line-shortage">
             {{ formatLineShortageText(line) }}
           </div>
-          <div class="line-progress">{{ formatLineProductionProgressText(line) }}</div>
-          <DrawingPreviewLink :file-name="line.drawingFileName" :file-url="line.drawingFileUrl" :title="`${line.partName} 图纸预览`" />
-          <div class="process-chain mt-16">
-            <span v-for="step in line.processSteps" :key="step" class="process-pill">{{ processStepDisplay(line, step) }}</span>
-            <span v-if="line.processSteps.length === 0" class="muted">
-              {{ lineRequiresProductionProcess(line) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
-            </span>
+          <div v-if="lineNeedsReplenishmentAction(line)" :id="`shortage-line-${line.id}`" class="line-replenishment-warning">
+              <strong>{{ formatLineReplenishmentActionText(line) }}</strong>
+            <el-button size="small" type="warning" plain @click="openShortageResolution(line)">处理补单</el-button>
           </div>
-          <div class="line-actions">
-            <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
-              <span class="action-tooltip-wrap">
-                <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openReplenishment(line)">订单补单</el-button>
+          <div v-show="showOrderDetailLineDetails(line.id)" class="order-detail-line-body">
+            <div class="muted">来源 {{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</div>
+            <div v-if="stockSourceSummary(line)" class="stock-source-summary">
+              库存来源：{{ stockSourceSummary(line) }}
+            </div>
+            <div v-if="stockFulfillmentHint(line)" class="stock-fulfillment-hint">
+              {{ stockFulfillmentHint(line) }}
+            </div>
+            <div class="muted">交期 {{ formatDate(line.deliveryDate || order.deliveryDate) }}</div>
+            <div class="muted">{{ line.partCode }} / {{ line.drawingNo || '-' }} / 版本 {{ line.drawingVersion || '-' }}</div>
+            <div class="muted">厚度 {{ line.partThickness }} mm / 成品规格 {{ line.partSpecification || '-' }}</div>
+            <div class="line-progress">{{ formatLineProductionProgressText(line) }}</div>
+            <DrawingPreviewLink :file-name="line.drawingFileName" :file-url="line.drawingFileUrl" :title="`${line.partName} 图纸预览`" />
+            <div class="process-chain mt-16">
+              <span v-for="step in line.processSteps" :key="step" class="process-pill">{{ processStepDisplay(line, step) }}</span>
+              <span v-if="line.processSteps.length === 0" class="muted">
+                {{ lineRequiresProductionProcess(line) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
               </span>
-            </el-tooltip>
-            <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
-              <span class="action-tooltip-wrap">
-                <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openQuantityChange(line)">数量变更</el-button>
-              </span>
-            </el-tooltip>
-            <el-button
-              v-for="task in cancelableReplenishmentTasks(line)"
-              :key="task.productionTaskNo"
-              size="small"
-              type="danger"
-              plain
-              @click="openCancelReplenishment(line, task)"
-            >
-              取消补单 {{ task.productionTaskNo }}
-            </el-button>
+            </div>
+            <div class="line-actions">
+              <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
+                <span class="action-tooltip-wrap">
+                  <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openReplenishment(line)">订单补单</el-button>
+                </span>
+              </el-tooltip>
+              <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
+                <span class="action-tooltip-wrap">
+                  <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openQuantityChange(line)">数量变更</el-button>
+                </span>
+              </el-tooltip>
+                <el-tooltip
+                  v-for="task in orderChangeReplenishmentTasks(line)"
+                  :key="task.productionTaskNo"
+                  :content="cancelReplenishmentDisabledReason(task)"
+                  :disabled="canCancelReplenishmentTask(task)"
+                  placement="top"
+                >
+                  <span class="action-tooltip-wrap">
+                    <el-button
+                      size="small"
+                      type="danger"
+                      plain
+                      :disabled="!canCancelReplenishmentTask(task)"
+                      @click="openCancelReplenishment(line, task)"
+                    >
+                      取消补单 {{ task.productionTaskNo }}
+                    </el-button>
+                  </span>
+                </el-tooltip>
+            </div>
           </div>
         </article>
       </div>
@@ -185,6 +293,10 @@
               <span :class="{ 'line-shortage-inline': formatLineShortageText(row) }">
                 {{ formatLineShortageText(row) || '-' }}
               </span>
+              <div v-if="lineNeedsReplenishmentAction(row)" class="line-replenishment-warning table-warning">
+                <span>{{ formatLineReplenishmentActionText(row) }}</span>
+                <el-button link type="warning" @click="openShortageResolution(row)">处理补单</el-button>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="当前生产进度" min-width="260">
@@ -220,15 +332,24 @@
                   <el-button link type="primary" :disabled="!canCreateProductionChange(row)" @click="openQuantityChange(row)">变更</el-button>
                 </span>
               </el-tooltip>
-              <el-button
-                v-for="task in cancelableReplenishmentTasks(row)"
+              <el-tooltip
+                v-for="task in orderChangeReplenishmentTasks(row)"
                 :key="task.productionTaskNo"
-                link
-                type="danger"
-                @click="openCancelReplenishment(row, task)"
+                :content="cancelReplenishmentDisabledReason(task)"
+                :disabled="canCancelReplenishmentTask(task)"
+                placement="top"
               >
-                取消补单
-              </el-button>
+                <span class="action-tooltip-wrap">
+                  <el-button
+                    link
+                    type="danger"
+                    :disabled="!canCancelReplenishmentTask(task)"
+                    @click="openCancelReplenishment(row, task)"
+                  >
+                    取消补单
+                  </el-button>
+                </span>
+              </el-tooltip>
             </template>
           </el-table-column>
         </el-table>
@@ -284,6 +405,7 @@
           :lines="editForm.lines"
           :default-delivery-date="editForm.deliveryDate"
           :exclude-order-no="order?.orderNo || ''"
+          :exclude-order-id="order?.id || ''"
           :inventory-summary="inventorySummary"
           @remove="removeLine"
           @quantity-change="syncPlanQuantity"
@@ -317,6 +439,7 @@
           :min-lines="1"
           :default-delivery-date="order?.deliveryDate?.slice(0, 10) || ''"
           :exclude-order-no="order?.orderNo || ''"
+          :exclude-order-id="order?.id || ''"
           :inventory-summary="inventorySummary"
           @remove="removeAdditionalMaterialLine"
           @quantity-change="syncPlanQuantity"
@@ -489,13 +612,70 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="closeSubmitOrderDialog">返回</el-button>
-        <el-button type="primary" :disabled="!submitPlanOperatorCode" :loading="saving" @click="confirmSubmitOrder">确认提交生产</el-button>
+        <el-button type="primary" :disabled="!submitPlanOperatorCode || submitOrderBlockingWarnings.length > 0" :loading="saving" @click="confirmSubmitOrder">确认提交生产</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="shortageResolutionVisible" title="需要补单处理" width="min(680px, calc(100vw - 32px))">
+      <div v-if="activeLine" class="shortage-resolution-panel">
+        <el-alert
+          :title="`不同于普通状态提示，这里必须把 ${activeLine.partCode} / ${activeLine.partName} 的短缺处理闭环，避免生产报废后忘记补单。`"
+          type="warning"
+          :closable="false"
+          class="mb-16"
+        />
+        <div class="shortage-resolution-summary">
+          <p>
+            <span>客户订单</span>
+            <strong>{{ formatQuantity(activeLine.quantity, activeLine.unit) }}</strong>
+          </p>
+          <p>
+            <span>待处理短缺</span>
+            <strong>{{ formatQuantity(activeLine.unresolvedShortageQuantity || 0, activeLine.unit) }}</strong>
+          </p>
+          <p>
+            <span>当前进度</span>
+            <strong>{{ formatLineProductionProgressText(activeLine) }}</strong>
+          </p>
+        </div>
+        <div class="shortage-record-list">
+          <article v-for="record in activeLine.unresolvedShortageRecords || []" :key="record.completionId || record.productionTaskNo" class="shortage-record">
+            <strong>{{ record.productionTaskNo || activeLine.productionTaskNo }}</strong>
+            <span>
+              短缺 {{ formatQuantity(record.shortageQuantity, record.unit || activeLine.unit) }}，
+              报废 {{ formatQuantity(record.scrapQuantity || 0, record.unit || activeLine.unit) }}
+            </span>
+            <small>{{ record.managerName || '-' }}确认：{{ record.shortageReason || '-' }}</small>
+          </article>
+        </div>
+        <div class="shortage-resolution-actions">
+          <el-button type="primary" @click="createReplenishmentFromShortage">创建订单补单</el-button>
+          <el-button @click="openQuantityChangeFromShortage">客户确认减少数量</el-button>
+        </div>
+        <el-divider>无需补单</el-divider>
+        <el-form label-width="96px">
+          <el-form-item label="处理人员" required>
+            <el-input v-model="shortageResolutionForm.managerName" placeholder="填写当前操作人员或管理人员姓名" />
+          </el-form-item>
+          <el-form-item label="说明" required>
+            <el-input
+              v-model="shortageResolutionForm.reason"
+              type="textarea"
+              :rows="3"
+              placeholder="例如：客户接受缺货发货；现场找到其他替代件，不计入库存；无需再补生产。"
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="shortageResolutionVisible = false">取消</el-button>
+        <el-button type="warning" :loading="saving" @click="saveShortageNoReplenishment">确认无需补单</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="replenishmentVisible" title="创建订单补单" width="min(560px, calc(100vw - 32px))">
       <el-alert
-        title="这里用于销售或计划决定的客户追加、订单数量增加。生产过程中因报废缺件需要补齐时，必须在生产页面提交生产报废补单申请，由车间主管确认。"
+        :title="replenishmentDialogNotice"
         type="info"
         :closable="false"
         class="mb-16"
@@ -684,7 +864,7 @@
 
 <script setup lang="ts">
 import type { CreateOrderLinePayload } from '../api/erp';
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { WarningFilled } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -693,6 +873,7 @@ import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import OrderLineEditor from '../components/OrderLineEditor.vue';
 import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import StatusTag from '../components/StatusTag.vue';
+import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
   InventorySummaryRow,
   OrderDetail,
@@ -716,12 +897,14 @@ import {
   restoreSavedStockSourceReview,
   sanitizeOrderLinePayload,
   selectedStockSourceQuantity,
+  suggestedProductionPlanQuantity,
   validateDraftStockSourceLines
 } from '../utils/stockSourceReview';
 import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
 
 const route = useRoute();
 const router = useRouter();
+const { isMobileLayout } = useDeviceProfile();
 const order = ref<OrderDetail>();
 const inventorySummary = ref<InventorySummaryRow[]>([]);
 const loading = ref(false);
@@ -729,6 +912,7 @@ const saving = ref(false);
 const editVisible = ref(false);
 const additionalMaterialVisible = ref(false);
 const replenishmentVisible = ref(false);
+const shortageResolutionVisible = ref(false);
 const cancelReplenishmentVisible = ref(false);
 const quantityChangeVisible = ref(false);
 const cancelOrderVisible = ref(false);
@@ -740,6 +924,7 @@ const submitPlanOperatorLoading = ref(false);
 const operatorCache = reactive<Record<string, ProductionOperator>>({});
 const activeLine = ref<OrderLine>();
 const activeReplenishmentTask = ref<OrderLineProductionTask>();
+const expandedMobileOrderDetailLineIds = ref<string[]>([]);
 const checkingOrderNo = ref(false);
 const orderNoAvailable = ref(false);
 const orderNoCheckText = ref('');
@@ -765,6 +950,10 @@ const replenishmentForm = ref({
   managerName: '',
   reason: ''
 });
+const shortageResolutionForm = ref({
+  managerName: '',
+  reason: ''
+});
 const cancelReplenishmentForm = ref({
   managerName: '',
   reason: ''
@@ -782,6 +971,7 @@ const quantityChangeForm = ref({
   managerName: '',
   reason: ''
 });
+const quantityChangeLastSuggestedQuantity = ref(0);
 const cancelOrderForm = ref({
   cancelAt: '',
   managerName: '',
@@ -803,6 +993,7 @@ type CancelHandlingPlanRow = {
 };
 const cancelHandlingPlanRows = ref<CancelHandlingPlanRow[]>([]);
 const submitPlanOperatorOptionRows = computed(() => operatorRowsWithSelected(submitPlanOperators.value, submitPlanOperatorCode.value));
+const submitOrderBlockingWarnings = computed(() => (order.value?.lines || []).map((line) => submitOrderLineWarning(line)).filter(Boolean));
 const canAddAdditionalMaterial = computed(() =>
   Boolean(
     order.value &&
@@ -885,6 +1076,31 @@ const processActionText = computed(() => {
   }
   return order.value ? orderWarehouseActionText(order.value) || '生产详情' : '生产详情';
 });
+const linesNeedingReplenishmentAction = computed(() =>
+  order.value?.lines.filter((line) => lineNeedsReplenishmentAction(line)) || []
+);
+const orderNeedsReplenishmentAction = computed(() => linesNeedingReplenishmentAction.value.length > 0);
+const linesWithShortageRecords = computed(() =>
+  order.value?.lines.filter((line) => Boolean(formatLineShortageText(line))) || []
+);
+const orderHasShortageRecords = computed(() => linesWithShortageRecords.value.length > 0);
+const orderReplenishmentActionText = computed(() => {
+  if (!order.value || !orderNeedsReplenishmentAction.value) {
+    return '';
+  }
+  return `需要补单处理：${linesNeedingReplenishmentAction.value.length} 个零件，${formatShortageQuantityByUnit(order.value.unresolvedShortageQuantityByUnit, order.value.unresolvedShortageQuantity, order.value.unresolvedShortageUnit || order.value.unit)}`;
+});
+const orderShortageRecordText = computed(() => {
+  if (!order.value || !orderHasShortageRecords.value) {
+    return '';
+  }
+  return `该订单存在已处理生产短缺记录：${linesWithShortageRecords.value.length} 个零件。已完成补单、客户数量调整或无需补单说明后，不再列入待处理提醒。`;
+});
+const replenishmentDialogNotice = computed(() =>
+  activeLine.value && lineNeedsReplenishmentAction(activeLine.value)
+    ? '该补单用于处理生产短缺闭环。生成补单后，当前短缺提醒会关闭；补单任务仍需按正常生产流程确认。'
+    : '这里用于销售或计划决定的客户追加、订单数量增加。生产过程中因报废缺件需要补齐时，必须在生产页面提交生产报废补单申请，由车间主管确认。'
+);
 const quantityChangeSuggestedProductionQuantity = computed(() => {
   const orderQuantity = Math.max(Number(quantityChangeForm.value.quantity || 0), 0);
   if (activeLine.value?.fulfillmentMode !== 'STOCK') {
@@ -918,6 +1134,10 @@ async function loadOrder() {
   loading.value = true;
   try {
     order.value = await erpApi.order(orderNo);
+    if (route.query.shortage) {
+      await nextTick();
+      scrollToFirstShortageLine();
+    }
   } catch (error) {
     order.value = undefined;
     ElMessage.error(error instanceof Error ? error.message : '订单明细加载失败');
@@ -1243,18 +1463,47 @@ function openQuantityChange(line: OrderLine) {
     managerName: '',
     reason: ''
   };
+  quantityChangeLastSuggestedQuantity.value = quantityChangeSuggestedProductionQuantity.value;
   quantityChangeVisible.value = true;
 }
 
-function cancelableReplenishmentTasks(line: OrderLine) {
+function syncQuantityChangePlanWithSuggestion() {
+  if (!quantityChangeVisible.value) {
+    return;
+  }
+  const nextSuggestedQuantity = quantityChangeSuggestedProductionQuantity.value;
+  const previousSuggestedQuantity = quantityChangeLastSuggestedQuantity.value;
+  const currentPlanQuantity = Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0);
+  const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
+  quantityChangeLastSuggestedQuantity.value = nextSuggestedQuantity;
+  if (!planWasFollowingSuggestion) {
+    return;
+  }
+  quantityChangeForm.value.productionPlanQuantity = nextSuggestedQuantity;
+  quantityChangeForm.value.productionPlanOverrideByCode = '';
+  quantityChangeForm.value.productionPlanOverrideReason = '';
+}
+
+function orderChangeReplenishmentTasks(line: OrderLine) {
   return (line.productionTasks || []).filter(
-    (task) => task.isReplenishment && task.replenishmentSourceType !== 'PRODUCTION_SCRAP' && task.canCancelReplenishment
+    (task) => task.isReplenishment && task.replenishmentSourceType !== 'PRODUCTION_SCRAP'
   );
+}
+
+function canCancelReplenishmentTask(task: OrderLineProductionTask) {
+  return Boolean(task.canCancelReplenishment);
+}
+
+function cancelReplenishmentDisabledReason(task: OrderLineProductionTask) {
+  if (task.canCancelReplenishment) return '';
+  if (task.replenishmentSourceType === 'PRODUCTION_SCRAP') return '生产报废补单请到生产页面处理';
+  if (task.status !== 'PENDING') return '补单已经开始生产或已完成，请到生产页面使用管理撤回';
+  return '当前补单不能在订单明细直接取消，请到生产页面处理';
 }
 
 function openCancelReplenishment(line: OrderLine, task: OrderLineProductionTask) {
   if (!task.canCancelReplenishment) {
-    ElMessage.warning('补单已经开始生产，请到生产页面使用管理撤回');
+    ElMessage.warning(cancelReplenishmentDisabledReason(task));
     return;
   }
   activeLine.value = line;
@@ -1605,15 +1854,29 @@ async function checkEditOrderNo(silent = false, expectedSequence?: number) {
 }
 
 function syncPlanQuantity(line: CreateOrderLinePayload) {
+  const nextSuggestedQuantity = suggestedProductionPlanQuantity(line);
+  const previousSuggestedQuantity = Number(line.productionPlanSuggestedQuantity ?? line.productionPlanQuantity ?? nextSuggestedQuantity);
+  const currentPlanQuantity = Number(line.productionPlanQuantity ?? previousSuggestedQuantity);
+  const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
+  line.productionPlanSuggestedQuantity = nextSuggestedQuantity;
+
   if (line.fulfillmentMode === 'STOCK') {
-    line.productionPlanQuantity = Math.max(Number(line.quantity || 0) - selectedStockSourceQuantity(line), 0);
-    line.productionPlanOverrideByCode = '';
-    line.productionPlanOverrideReason = '';
+    if (planWasFollowingSuggestion) {
+      line.productionPlanQuantity = nextSuggestedQuantity;
+      line.productionPlanOverrideByCode = '';
+      line.productionPlanOverrideReason = '';
+    }
     return;
   }
-  // 编辑订单数量时只补默认值；少做或多做需要在订单行里填写偏差说明。
+  // 编辑订单数量时，只在计划仍跟随建议数量时自动同步；手动多做或少做必须保留说明。
   if (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) {
-    line.productionPlanQuantity = line.quantity;
+    line.productionPlanQuantity = nextSuggestedQuantity;
+    return;
+  }
+  if (planWasFollowingSuggestion) {
+    line.productionPlanQuantity = nextSuggestedQuantity;
+    line.productionPlanOverrideByCode = '';
+    line.productionPlanOverrideReason = '';
   }
 }
 
@@ -1625,12 +1888,31 @@ function lineRequiresProductionProcess(line: OrderLine | CreateOrderLinePayload)
   return Number(line.productionPlanQuantity || 0) > 0;
 }
 
+function reworkStockShortageQuantity(line: OrderLine | CreateOrderLinePayload) {
+  if (line.fulfillmentMode !== 'REWORK') {
+    return 0;
+  }
+  return Math.max(
+    Math.round(
+      (Number(line.productionPlanQuantity || 0) -
+        selectedStockSourceQuantity(line as unknown as CreateOrderLinePayload) +
+        Number.EPSILON) *
+        1000
+    ) / 1000,
+    0
+  );
+}
+
 function submitOrderLineWarning(line: OrderLine) {
   if (
     (line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') &&
     selectedStockSourceQuantity(line as unknown as CreateOrderLinePayload) <= 0
   ) {
     return '该零件尚未选择库存批次，提交生产前必须完成库存来源核对。';
+  }
+  const reworkShortageQuantity = reworkStockShortageQuantity(line);
+  if (reworkShortageQuantity > 0) {
+    return `库存再加工已选库存少于生产计划，仍需补选 ${formatQuantity(reworkShortageQuantity, line.unit)}。`;
   }
   if (lineRequiresProductionProcess(line) && line.processSteps.length === 0) {
     return '该零件尚未设置生产流程，提交时会被后端拒绝。';
@@ -1712,7 +1994,11 @@ function stockSourceReplenishmentText(source: ReturnType<typeof normalizeSelecte
 
 async function loadInventorySummary() {
   try {
-    inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+    inventorySummary.value = await erpApi.inventorySummary({
+      status: 'AVAILABLE',
+      excludeOrderNo: order.value?.orderNo,
+      excludeOrderId: order.value?.id
+    });
     return true;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '库存汇总加载失败');
@@ -1764,13 +2050,14 @@ function formatLineShortageText(line: OrderLine) {
 
   const shortage = formatQuantity(line.productionShortageQuantity, line.unit);
   const scrap = formatQuantity(line.productionScrapQuantity || 0, line.unit);
+  const completedReplenishmentText = lineCompletedReplenishmentText(line);
   if (line.productionShortageMode === 'REPLENISHMENT_REQUEST') {
     const requestNos = line.productionReplenishmentRequestNos?.length ? line.productionReplenishmentRequestNos.join('、') : '-';
     return `短缺 ${shortage}，报废 ${scrap}，生产报废补单申请待主管确认 ${requestNos}`;
   }
   if (line.productionShortageMode === 'REPLENISHMENT') {
     const taskNos = line.productionReplenishmentTaskNos?.length ? line.productionReplenishmentTaskNos.join('、') : '-';
-    return `短缺 ${shortage}，报废 ${scrap}，补单 ${taskNos}`;
+    return `短缺 ${shortage}，报废 ${scrap}，${completedReplenishmentText || `补单 ${taskNos}`}`;
   }
 
   const reasonText = line.productionShortageReasons?.length
@@ -1778,7 +2065,111 @@ function formatLineShortageText(line: OrderLine) {
         .map((item) => `${item.managerName || '-'}确认：${item.shortageReason || '-'}`)
         .join('；')
     : '管理确认缺货完成';
-  return `短缺 ${shortage}，报废 ${scrap}，${reasonText}`;
+  return `短缺 ${shortage}，报废 ${scrap}，${reasonText}${completedReplenishmentText ? `；${completedReplenishmentText}` : ''}`;
+}
+
+function lineCompletedReplenishmentText(line: OrderLine) {
+  const completedTasks = (line.productionTasks || []).filter(
+    (task) => task.isReplenishment && task.status === 'COMPLETED' && Number(task.completedQuantity || task.plannedQuantity || 0) > 0
+  );
+  if (completedTasks.length === 0) {
+    return '';
+  }
+  const quantity = completedTasks.reduce(
+    (sum, task) => sum + Number(task.completedQuantity || task.plannedQuantity || 0),
+    0
+  );
+  const taskNos = completedTasks.map((task) => task.productionTaskNo).join('、');
+  return `补单已完成 ${formatQuantity(quantity, line.unit)}：${taskNos}`;
+}
+
+function lineNeedsReplenishmentAction(line: OrderLine) {
+  return Boolean(line.unresolvedShortageQuantity && line.unresolvedShortageQuantity > 0);
+}
+
+function formatLineReplenishmentActionText(line: OrderLine) {
+  return `需要补单处理：${formatQuantity(line.unresolvedShortageQuantity || 0, line.unit)}`;
+}
+
+function formatShortageQuantityByUnit(
+  rows?: Array<{ unit: string; quantity: number }>,
+  fallbackQuantity?: number,
+  fallbackUnit = '件'
+) {
+  if (rows?.length) {
+    return rows.map((row) => formatQuantity(row.quantity, row.unit)).join('、');
+  }
+  return formatQuantity(fallbackQuantity || 0, fallbackUnit);
+}
+
+function lineShortageAnchorId(line: OrderLine) {
+  return `shortage-record-line-${line.id}`;
+}
+
+function isOrderDetailLineExpanded(lineId: string) {
+  return expandedMobileOrderDetailLineIds.value.includes(lineId);
+}
+
+function showOrderDetailLineDetails(lineId: string) {
+  return !isMobileLayout.value || isOrderDetailLineExpanded(lineId);
+}
+
+function toggleOrderDetailLine(lineId: string) {
+  expandedMobileOrderDetailLineIds.value = isOrderDetailLineExpanded(lineId)
+    ? expandedMobileOrderDetailLineIds.value.filter((item) => item !== lineId)
+    : [...expandedMobileOrderDetailLineIds.value, lineId];
+}
+
+function scrollToFirstShortageLine() {
+  const first = linesNeedingReplenishmentAction.value[0] || linesWithShortageRecords.value[0];
+  if (!first) {
+    return;
+  }
+  scrollToShortageLine(first);
+}
+
+function scrollToShortageLine(line: OrderLine) {
+  const targetId = lineNeedsReplenishmentAction(line) ? `shortage-line-${line.id}` : lineShortageAnchorId(line);
+  window.document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function openShortageResolution(line: OrderLine) {
+  activeLine.value = line;
+  shortageResolutionForm.value = {
+    managerName: '',
+    reason: ''
+  };
+  shortageResolutionVisible.value = true;
+}
+
+function createReplenishmentFromShortage() {
+  if (!activeLine.value) {
+    return;
+  }
+  const line = activeLine.value;
+  shortageResolutionVisible.value = false;
+  replenishmentForm.value = {
+    quantity: Math.max(Number(line.unresolvedShortageQuantity || 0), 0.001),
+    managerName: '',
+    reason: `生产短缺补单：${formatLineShortageText(line) || formatLineReplenishmentActionText(line)}`
+  };
+  replenishmentVisible.value = true;
+}
+
+function openQuantityChangeFromShortage() {
+  if (!activeLine.value) {
+    return;
+  }
+  const line = activeLine.value;
+  shortageResolutionVisible.value = false;
+  openQuantityChange(line);
+  const nextQuantity = Math.max(Number(line.quantity || 0) - Number(line.unresolvedShortageQuantity || 0), 0);
+  quantityChangeForm.value.quantity = nextQuantity;
+  quantityChangeForm.value.productionPlanQuantity = Math.min(
+    Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0),
+    nextQuantity
+  );
+  quantityChangeForm.value.reason = `客户确认减少生产短缺数量：${formatLineShortageText(line) || formatLineReplenishmentActionText(line)}`;
 }
 
 async function saveReplenishment() {
@@ -1793,6 +2184,10 @@ async function saveReplenishment() {
     ElMessage.warning('请填写补单原因');
     return;
   }
+  if (lineNeedsReplenishmentAction(activeLine.value) && !replenishmentForm.value.managerName.trim()) {
+    ElMessage.warning('处理生产短缺补单时，请填写管理人员或当前操作人员');
+    return;
+  }
 
   saving.value = true;
   try {
@@ -1805,6 +2200,35 @@ async function saveReplenishment() {
     replenishmentVisible.value = false;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '创建补单失败');
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function saveShortageNoReplenishment() {
+  if (!order.value || !activeLine.value) {
+    return;
+  }
+  if (!shortageResolutionForm.value.managerName.trim()) {
+    ElMessage.warning('请填写处理人员');
+    return;
+  }
+  if (!shortageResolutionForm.value.reason.trim()) {
+    ElMessage.warning('请填写无需补单说明');
+    return;
+  }
+
+  saving.value = true;
+  try {
+    order.value = await erpApi.resolveLineShortage(order.value.orderNo, activeLine.value.id, {
+      resolutionMode: 'NO_REPLENISHMENT',
+      managerName: shortageResolutionForm.value.managerName.trim(),
+      reason: shortageResolutionForm.value.reason.trim()
+    });
+    ElMessage.success('短缺处理已记录');
+    shortageResolutionVisible.value = false;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '短缺处理失败');
   } finally {
     saving.value = false;
   }
@@ -1849,6 +2273,14 @@ async function saveQuantityChange() {
   }
   if (!quantityChangeForm.value.reason.trim()) {
     ElMessage.warning('请填写数量变更原因');
+    return;
+  }
+  if (
+    lineNeedsReplenishmentAction(activeLine.value) &&
+    quantityChangeForm.value.quantity < activeLine.value.quantity &&
+    !quantityChangeForm.value.managerName.trim()
+  ) {
+    ElMessage.warning('处理生产短缺数量变更时，请填写管理人员或当前操作人员');
     return;
   }
   if (quantityChangeNeedsPlanOverride.value && !quantityChangeForm.value.productionPlanOverrideByCode.trim()) {
@@ -1947,6 +2379,10 @@ async function confirmSubmitOrder() {
   }
   if (!submitPlanOperatorCode.value) {
     ElMessage.warning('请选择下单/计划操作员');
+    return;
+  }
+  if (submitOrderBlockingWarnings.value.length > 0) {
+    ElMessage.warning(submitOrderBlockingWarnings.value[0]);
     return;
   }
   saving.value = true;
@@ -2056,6 +2492,7 @@ async function loadSubmitPlanOperators(keyword = '') {
 }
 
 watch(() => route.params.orderNo, loadOrder);
+watch(() => quantityChangeForm.value.quantity, syncQuantityChangePlanWithSuggestion);
 onMounted(async () => {
   await loadProcessDefinitions();
   await loadOrder();
@@ -2256,6 +2693,109 @@ onBeforeUnmount(() => {
   margin: 10px 0;
 }
 
+.line-title-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.line-title-main strong,
+.line-title-main span {
+  overflow-wrap: anywhere;
+}
+
+.line-title-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.line-compact-summary {
+  display: none;
+}
+
+.order-detail-line-body {
+  display: grid;
+  gap: 8px;
+}
+
+.pending-shortage-panel {
+  padding: 14px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
+.resolved-shortage-panel {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.pending-shortage-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pending-shortage-header p {
+  margin: 4px 0 0;
+  color: #9a3412;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.resolved-shortage-panel .pending-shortage-header p {
+  color: #166534;
+}
+
+.pending-shortage-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.pending-shortage-item {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(240px, 2fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+}
+
+.resolved-shortage-panel .pending-shortage-item {
+  border-color: #bbf7d0;
+}
+
+.pending-shortage-item span {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.pending-shortage-item p {
+  margin: 0;
+  color: #b45309;
+  line-height: 20px;
+}
+
+.resolved-shortage-panel .pending-shortage-item p {
+  color: #166534;
+}
+
+.pending-shortage-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .line-shortage,
 .line-shortage-inline {
   color: #b45309;
@@ -2268,6 +2808,69 @@ onBeforeUnmount(() => {
   background: #fffbeb;
   border: 1px solid #fde68a;
   border-radius: 6px;
+}
+
+.line-replenishment-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  color: #9a3412;
+  font-size: 13px;
+  line-height: 20px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+}
+
+.line-replenishment-warning.table-warning {
+  align-items: flex-start;
+  margin-top: 6px;
+}
+
+.shortage-resolution-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.shortage-resolution-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.shortage-resolution-summary p,
+.shortage-record {
+  margin: 0;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.shortage-resolution-summary span,
+.shortage-record small {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.shortage-record-list {
+  display: grid;
+  gap: 8px;
+}
+
+.shortage-record {
+  display: grid;
+  gap: 4px;
+}
+
+.shortage-resolution-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .line-progress {
@@ -2488,9 +3091,48 @@ onBeforeUnmount(() => {
     width: 100%;
   }
 
+  .order-detail-line-card {
+    padding: 14px;
+  }
+
+  .line-title {
+    align-items: flex-start;
+    margin-bottom: 8px;
+  }
+
+  .line-title-actions {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .line-compact-summary {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 8px 0;
+    color: #475569;
+    font-size: 13px;
+  }
+
+  .line-compact-summary span {
+    overflow-wrap: anywhere;
+  }
+
   .line-actions,
   .additional-process-actions {
     align-items: stretch;
+  }
+
+  .pending-shortage-header,
+  .pending-shortage-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pending-shortage-item {
+    grid-template-columns: 1fr;
   }
 
   .line-actions .el-button,

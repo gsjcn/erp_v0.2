@@ -3,12 +3,28 @@
     <div class="page-header">
       <h2 class="page-title">每个零件的生产流程选择</h2>
       <div class="process-actions">
-        <el-button :disabled="!order" @click="goOrderDetail">查看订单明细</el-button>
-        <el-button :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
-        <el-button type="primary" :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存零件流程</el-button>
-        <el-button type="success" :disabled="!canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog">
-          提交生产
-        </el-button>
+        <el-tooltip :disabled="!orderDetailDisabledReason" :content="orderDetailDisabledReason" placement="bottom">
+          <span class="action-tooltip-wrap">
+            <el-button :disabled="!order" @click="goOrderDetail">查看订单明细</el-button>
+          </span>
+        </el-tooltip>
+        <el-tooltip :disabled="!processSaveDisabledReason" :content="processSaveDisabledReason" placement="bottom">
+          <span class="action-tooltip-wrap">
+            <el-button :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
+          </span>
+        </el-tooltip>
+        <el-tooltip :disabled="!processSaveDisabledReason" :content="processSaveDisabledReason" placement="bottom">
+          <span class="action-tooltip-wrap">
+            <el-button type="primary" :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存零件流程</el-button>
+          </span>
+        </el-tooltip>
+        <el-tooltip :disabled="!submitOrderDisabledReason" :content="submitOrderDisabledReason" placement="bottom">
+          <span class="action-tooltip-wrap">
+            <el-button type="success" :disabled="!canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog">
+              提交生产
+            </el-button>
+          </span>
+        </el-tooltip>
       </div>
     </div>
 
@@ -81,6 +97,14 @@
               <StatusTag :value="orderProductionStatusValue(row)" :label-override="orderProductionStatusLabel(row)" compact />
             </template>
           </el-table-column>
+          <el-table-column label="待补单" min-width="170">
+            <template #default="{ row }">
+              <el-button v-if="orderNeedsShortageAttention(row)" link type="warning" @click="goOrderShortageDetail(row)">
+                {{ orderShortageActionText(row) }}
+              </el-button>
+              <span v-else class="muted">-</span>
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="170" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="selectOrderFromList(row.orderNo)">{{ processEntryActionText(row) }}</el-button>
@@ -91,7 +115,12 @@
       </div>
 
       <div class="mobile-card-list">
-        <article v-for="item in orders" :key="item.id" class="mobile-card">
+        <article
+          v-for="item in orders"
+          :key="item.id"
+          class="mobile-card mobile-order-card"
+          :class="{ expanded: isMobileOrderExpanded(item.id) }"
+        >
           <div class="mobile-card-header">
             <div class="mobile-card-title">
               <strong>
@@ -99,8 +128,19 @@
               </strong>
               <small>{{ item.customerName }}</small>
             </div>
+            <div class="mobile-card-header-actions">
+              <StatusTag :value="orderDisplayStatus(item)" compact />
+              <el-button link type="primary" @click.stop="toggleMobileOrderCard(item.id)">
+                {{ isMobileOrderExpanded(item.id) ? '收起' : '详情' }}
+              </el-button>
+            </div>
           </div>
-          <div class="mobile-card-fields">
+          <div class="mobile-card-compact-summary">
+            <span>交期 {{ formatDate(item.deliveryDate) }}</span>
+            <span>零件 {{ item.partCount }} 个</span>
+            <span>{{ formatOrderQuantity(item, 'totalProductionPlanQuantity') }}</span>
+          </div>
+          <div v-show="isMobileOrderExpanded(item.id)" class="mobile-card-fields">
             <div class="mobile-field">
               <label>订单状态</label>
               <span><StatusTag :value="orderDisplayStatus(item)" compact /></span>
@@ -129,10 +169,17 @@
               <label>生产计划数量</label>
               <span>{{ formatOrderQuantity(item, 'totalProductionPlanQuantity') }}</span>
             </div>
+            <div v-if="orderNeedsShortageAttention(item)" class="mobile-field mobile-full warning">
+              <label>待补单</label>
+              <span>{{ orderShortageActionText(item) }}</span>
+            </div>
           </div>
           <div class="mobile-card-actions">
             <el-button link type="primary" @click="selectOrderFromList(item.orderNo)">{{ processEntryActionText(item) }}</el-button>
             <el-button link type="primary" @click="goOrderSummaryDetail(item.orderNo)">订单明细</el-button>
+            <el-button v-if="orderNeedsShortageAttention(item)" link type="warning" @click="goOrderShortageDetail(item)">
+              处理补单
+            </el-button>
           </div>
         </article>
       </div>
@@ -155,15 +202,16 @@
           </div>
           <p v-if="missingLineNames.length" class="missing-text">未配置：{{ missingLineNames.join('、') }}</p>
           <p v-if="missingStockSourceLineNames.length" class="missing-text">库存未核对：{{ missingStockSourceLineNames.join('、') }}</p>
-          <p v-if="!missingLineNames.length && !missingStockSourceLineNames.length" class="ready-text">
+          <p v-if="insufficientReworkSourceLineNames.length" class="missing-text">库存再加工未补齐：{{ insufficientReworkSourceLineNames.join('、') }}</p>
+          <p v-if="!missingLineNames.length && !missingStockSourceLineNames.length && !insufficientReworkSourceLineNames.length" class="ready-text">
             {{ processReadyText }}
           </p>
-          <p v-if="order.status !== 'DRAFT'" class="locked-text">当前订单已提交，生产流程只能查看，不能修改。</p>
+          <p v-if="processReadOnlyText" class="locked-text">{{ processReadOnlyText }}</p>
         </div>
 
         <div class="panel-header">
           <h3 class="panel-title">订单零件</h3>
-          <span class="muted">{{ order.orderNo }}</span>
+          <OrderNoLink :order-no="order.orderNo" />
         </div>
         <button
           v-for="line in order.lines"
@@ -177,7 +225,7 @@
             <small>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</small>
             <small>{{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</small>
           </span>
-          <em>{{ !lineRequiresProductionProcess(line) ? '使用库存' : line.processSteps.length ? `${line.processSteps.length} 道` : '未选择' }}</em>
+          <em>{{ lineProcessBadgeText(line) }}</em>
         </button>
       </div>
 
@@ -247,15 +295,33 @@
           />
         </div>
         <div class="available-processes">
-          <el-button v-for="process in filteredQuickProcessOptions" :key="process" round :disabled="!canEditProcess" @click="addStep(process)">
-            {{ process }}
-          </el-button>
+          <el-tooltip
+            v-for="process in filteredQuickProcessOptions"
+            :key="process"
+            :disabled="!processEditDisabledReason"
+            :content="processEditDisabledReason"
+            placement="top"
+          >
+            <span class="action-tooltip-wrap">
+              <el-button round :disabled="!canEditProcess" @click="addStep(process)">
+                {{ process }}
+              </el-button>
+            </span>
+          </el-tooltip>
           <span v-if="quickProcessFilterKeyword && filteredQuickProcessOptions.length === 0" class="process-empty-text">没有匹配工序</span>
         </div>
         <div class="inline-process-create">
           <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸、抛光" maxlength="30" :disabled="!canEditProcess" />
-          <el-button :loading="creatingProcess" :disabled="!canEditProcess" @click="createProcessDefinition">新建工序</el-button>
-          <el-button :disabled="!canEditProcess" @click="processDefinitionManagerVisible = true">管理工序</el-button>
+          <el-tooltip :disabled="!processEditDisabledReason" :content="processEditDisabledReason" placement="top">
+            <span class="action-tooltip-wrap">
+              <el-button :loading="creatingProcess" :disabled="!canEditProcess" @click="createProcessDefinition">新建工序</el-button>
+            </span>
+          </el-tooltip>
+          <el-tooltip :disabled="!processEditDisabledReason" :content="processEditDisabledReason" placement="top">
+            <span class="action-tooltip-wrap">
+              <el-button :disabled="!canEditProcess" @click="processDefinitionManagerVisible = true">管理工序</el-button>
+            </span>
+          </el-tooltip>
         </div>
 
         <div class="standard-process-help">
@@ -279,9 +345,21 @@
             </el-select>
             <el-input v-model="step.processRemark" placeholder="参数备注，例如 4次 / M6孔" :disabled="!canEditProcess" />
             <div class="step-actions">
-              <el-button link :disabled="!canEditProcess || index === 0" @click="moveStep(index, -1)">上移</el-button>
-              <el-button link :disabled="!canEditProcess || index === draftSteps.length - 1" @click="moveStep(index, 1)">下移</el-button>
-              <el-button link type="danger" :disabled="!canEditProcess" @click="removeStep(index)">删除</el-button>
+              <el-tooltip :disabled="!stepMoveUpDisabledReason(index)" :content="stepMoveUpDisabledReason(index)" placement="top">
+                <span class="action-tooltip-wrap">
+                  <el-button link :disabled="!canEditProcess || index === 0" @click="moveStep(index, -1)">上移</el-button>
+                </span>
+              </el-tooltip>
+              <el-tooltip :disabled="!stepMoveDownDisabledReason(index)" :content="stepMoveDownDisabledReason(index)" placement="top">
+                <span class="action-tooltip-wrap">
+                  <el-button link :disabled="!canEditProcess || index === draftSteps.length - 1" @click="moveStep(index, 1)">下移</el-button>
+                </span>
+              </el-tooltip>
+              <el-tooltip :disabled="!processEditDisabledReason" :content="processEditDisabledReason" placement="top">
+                <span class="action-tooltip-wrap">
+                  <el-button link type="danger" :disabled="!canEditProcess" @click="removeStep(index)">删除</el-button>
+                </span>
+              </el-tooltip>
             </div>
           </div>
           <el-empty v-if="draftSteps.length === 0" description="当前零件未选择生产流程" />
@@ -351,7 +429,9 @@
         </el-form>
         <p class="submit-production-row">
           <span>订单号</span>
-          <strong>{{ order?.orderNo }}</strong>
+          <strong>
+            <OrderNoLink :order-no="order?.orderNo" />
+          </strong>
         </p>
         <p class="submit-production-row">
           <span>客户</span>
@@ -457,6 +537,7 @@ const submitPlanOperators = ref<ProductionOperator[]>([]);
 const submitPlanOperatorLoading = ref(false);
 const operatorCache = reactive<Record<string, ProductionOperator>>({});
 const discardChangesDialogVisible = ref(false);
+const expandedMobileOrderIds = ref<string[]>([]);
 let discardChangesResolver: ((confirmed: boolean) => void) | undefined;
 let restoringProcessRoute = false;
 
@@ -472,7 +553,7 @@ const configuredLineCount = computed(() => processRequiredLines.value.filter((li
 const processPercent = computed(() =>
   totalLineCount.value
     ? Math.round((configuredLineCount.value / totalLineCount.value) * 100)
-    : order.value?.lines.length && missingStockSourceLineNames.value.length === 0
+    : order.value?.lines.length && missingStockSourceLineNames.value.length === 0 && insufficientReworkSourceLineNames.value.length === 0
       ? 100
       : 0
 );
@@ -482,9 +563,15 @@ const missingStockSourceLineNames = computed(() =>
     .filter((line) => (line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && selectedStockSourceQuantity(line) <= 0)
     .map((line) => line.partName)
 );
-const processReadyText = computed(() =>
-  totalLineCount.value === 0 ? '全部零件全量使用库存，无需配置生产流程' : '全部零件已配置流程'
+const insufficientReworkSourceLineNames = computed(() =>
+  (order.value?.lines || [])
+    .filter((line) => reworkStockShortageQuantity(line) > 0)
+    .map((line) => line.partName)
 );
+const processReadyText = computed(() =>
+  totalLineCount.value === 0 ? '全部零件无生产任务，无需配置生产流程' : '全部零件已配置流程'
+);
+const processReadOnlyText = computed(() => (order.value?.status === 'DRAFT' ? '' : processOrderReadOnlyReason(order.value)));
 const canEditProcessBase = computed(() => order.value?.status === 'DRAFT' && Boolean(selectedLine.value && lineRequiresProductionProcess(selectedLine.value)));
 const canEditProcess = computed(() => canEditProcessBase.value && Boolean(processEditorCode.value));
 const processEditorNotice = computed(() => {
@@ -492,18 +579,27 @@ const processEditorNotice = computed(() => {
     return '';
   }
   if (order.value.status !== 'DRAFT') {
-    return '当前订单已提交生产，生产流程只能查看，不能修改。';
+    return processOrderReadOnlyReason(order.value);
   }
   if (!selectedLine.value) {
     return '请先选择需要维护生产流程的订单零件。';
   }
   if (!lineRequiresProductionProcess(selectedLine.value)) {
-    return '当前零件已全量使用库存，不生成生产任务，也不需要填写生产流程。';
+    return selectedLine.value.fulfillmentMode === 'STOCK'
+      ? '当前零件已全量使用库存，不生成生产任务，也不需要填写生产流程。'
+      : '当前零件生产计划为 0，不生成生产任务，也不需要填写生产流程。';
   }
   if (!processEditorCode.value) {
     return '请先选择下单/计划流程填写人员，选择后才可编辑工序。';
   }
   return '';
+});
+const processEditDisabledReason = computed(() => (!canEditProcess.value ? processEditorNotice.value || '请先选择订单零件和流程填写人员。' : ''));
+const processSaveDisabledReason = computed(() => {
+  if (!selectedLine.value) {
+    return '请先选择需要维护生产流程的订单零件。';
+  }
+  return processEditDisabledReason.value;
 });
 const canSubmitOrder = computed(
   () =>
@@ -511,23 +607,67 @@ const canSubmitOrder = computed(
     (order.value?.lines.length || 0) > 0 &&
     missingLineNames.value.length === 0 &&
     missingStockSourceLineNames.value.length === 0 &&
+    insufficientReworkSourceLineNames.value.length === 0 &&
     !isDirty.value
 );
+const orderDetailDisabledReason = computed(() => (!order.value ? '请先选择订单，再查看订单明细。' : ''));
+const submitOrderDisabledReason = computed(() => {
+  if (!order.value) {
+    return '请先选择订单。';
+  }
+  if (order.value.status !== 'DRAFT') {
+    return '当前订单已提交生产，不能重复提交。';
+  }
+  if ((order.value.lines.length || 0) === 0) {
+    return '订单没有零件，不能提交生产。';
+  }
+  if (missingLineNames.value.length > 0) {
+    return `仍有零件未配置生产流程：${missingLineNames.value.join('、')}。`;
+  }
+  if (missingStockSourceLineNames.value.length > 0) {
+    return `仍有库存来源未核对：${missingStockSourceLineNames.value.join('、')}。`;
+  }
+  if (insufficientReworkSourceLineNames.value.length > 0) {
+    return `库存再加工来源未补齐：${insufficientReworkSourceLineNames.value.join('、')}。`;
+  }
+  if (isDirty.value) {
+    return '当前零件流程有未保存修改，请先保存。';
+  }
+  return '';
+});
 const returnToPath = computed(() => normalizeReturnTo(route.query.returnTo));
 const filteredQuickProcessOptions = computed(() => filterPinyinSearchOptions(processOptions.value, quickProcessFilterKeyword.value));
 const filteredProcessOptions = computed(() => filterPinyinSearchOptions(processOptions.value, draftProcessFilterKeyword.value));
 
 function lineRequiresProductionProcess(line: OrderLine) {
-  return line.fulfillmentMode !== 'STOCK' || Number(line.productionPlanQuantity || 0) > 0;
+  return Number(line.productionPlanQuantity ?? 0) > 0;
+}
+
+function lineProcessBadgeText(line: OrderLine) {
+  if (lineRequiresProductionProcess(line)) {
+    return line.processSteps.length ? `${line.processSteps.length} 道` : '未选择';
+  }
+  return line.fulfillmentMode === 'STOCK' ? '使用库存' : '无生产任务';
 }
 
 function selectedStockSourceQuantity(line: OrderLine) {
   return (line.selectedStockSources || []).reduce((sum, source) => sum + Number(source.quantity || 0), 0);
 }
 
+function reworkStockShortageQuantity(line: OrderLine) {
+  if (line.fulfillmentMode !== 'REWORK') {
+    return 0;
+  }
+  return Math.max(Math.round((Number(line.productionPlanQuantity || 0) - selectedStockSourceQuantity(line) + Number.EPSILON) * 1000) / 1000, 0);
+}
+
 function submitOrderLineWarning(line: OrderLine) {
   if ((line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && selectedStockSourceQuantity(line) <= 0) {
     return '该零件尚未选择库存批次，提交生产前必须完成库存来源核对。';
+  }
+  const reworkShortageQuantity = reworkStockShortageQuantity(line);
+  if (reworkShortageQuantity > 0) {
+    return `库存再加工已选库存少于生产计划，仍需补选 ${formatQuantity(reworkShortageQuantity, line.unit)}。`;
   }
   if (lineRequiresProductionProcess(line) && line.processSteps.length === 0) {
     return '该零件尚未设置生产流程，提交时会被后端拒绝。';
@@ -553,6 +693,46 @@ function formatOrderQuantity(order: OrderSummary, field: 'totalQuantity' | 'tota
     return order.quantityByUnit.map((row) => formatQuantity(row[field], row.unit)).join(' / ');
   }
   return formatQuantity(order[field], order.unit);
+}
+
+function orderShortageActionText(order: OrderSummary) {
+  if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
+    const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
+      ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+      : formatQuantity(order.pendingProductionReplenishmentQuantity || 0, order.pendingProductionReplenishmentUnit || order.unit || '件');
+    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount || 0} 个 / ${quantityText}`;
+  }
+  const quantityText = order.unresolvedShortageQuantityByUnit?.length
+    ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+    : formatQuantity(order.unresolvedShortageQuantity || 0, order.unresolvedShortageUnit || order.unit || '件');
+  return `需补单 ${order.unresolvedShortageLineCount || 0} 个 / ${quantityText}`;
+}
+
+function orderNeedsShortageAttention(order: OrderSummary) {
+  return Boolean(order.needsReplenishmentAction || order.needsProductionReplenishmentReview);
+}
+
+function processOrderReadOnlyReason(item?: { status?: string; warehouseStage?: string }) {
+  if (!item) {
+    return '';
+  }
+  if (item.status === 'CANCELLED') {
+    return '当前订单已取消，生产流程只能查看，不能编辑工序。';
+  }
+  if (item.status === 'COMPLETED' || item.warehouseStage === 'SHIPPED') {
+    return '当前订单已完成发货，生产流程只能查看，不能编辑工序。';
+  }
+  return '当前订单已提交生产，生产流程只能查看，不能修改。';
+}
+
+function isMobileOrderExpanded(orderId: string) {
+  return expandedMobileOrderIds.value.includes(orderId);
+}
+
+function toggleMobileOrderCard(orderId: string) {
+  expandedMobileOrderIds.value = isMobileOrderExpanded(orderId)
+    ? expandedMobileOrderIds.value.filter((id) => id !== orderId)
+    : [...expandedMobileOrderIds.value, orderId];
 }
 
 async function loadProcessDefinitions() {
@@ -702,6 +882,20 @@ function warnProcessEditUnavailable() {
   return true;
 }
 
+function stepMoveUpDisabledReason(index: number) {
+  if (processEditDisabledReason.value) {
+    return processEditDisabledReason.value;
+  }
+  return index === 0 ? '当前工序已经是第一道，不能继续上移。' : '';
+}
+
+function stepMoveDownDisabledReason(index: number) {
+  if (processEditDisabledReason.value) {
+    return processEditDisabledReason.value;
+  }
+  return index === draftSteps.value.length - 1 ? '当前工序已经是最后一道，不能继续下移。' : '';
+}
+
 function warnProcessSaveUnavailable() {
   if (!warnProcessEditUnavailable()) {
     return false;
@@ -765,7 +959,7 @@ function applySelectedLine(lineId: string) {
 }
 
 function defaultProcessLineId(orderDetail: OrderDetail) {
-  // 全量使用库存的零件不需要配置工序；部分使用库存时，剩余生产数量仍需要维护流程。
+  // 生产计划为 0 的零件不生成生产任务；计划数量大于 0 时仍需要维护流程。
   return (
     orderDetail.lines.find((line) => lineRequiresProductionProcess(line) && line.processSteps.length === 0)?.id ||
     orderDetail.lines.find(lineRequiresProductionProcess)?.id ||
@@ -942,6 +1136,16 @@ function goOrderSummaryDetail(orderNo: string) {
   });
 }
 
+function goOrderShortageDetail(order: OrderSummary) {
+  void router.push({
+    path: `/orders/${encodeURIComponent(order.orderNo)}`,
+    query: {
+      returnTo: normalizeReturnTo(route.fullPath) || '/processes',
+      shortage: '1'
+    }
+  });
+}
+
 function normalizeReturnTo(value: unknown) {
   const raw = Array.isArray(value) ? value[0] : value;
   const path = String(raw || '').trim();
@@ -1096,6 +1300,10 @@ function validateSubmitOrderReady() {
     ElMessage.warning(`还有零件未选择库存来源：${missingStockSourceLineNames.value.join('、')}`);
     return false;
   }
+  if (insufficientReworkSourceLineNames.value.length > 0) {
+    ElMessage.warning(`库存再加工零件未补齐库存来源：${insufficientReworkSourceLineNames.value.join('、')}`);
+    return false;
+  }
   return true;
 }
 
@@ -1130,7 +1338,11 @@ async function confirmSubmitOrderFromProcess() {
   }
   submitting.value = true;
   try {
-    const inventorySummary = await erpApi.inventorySummary({ status: 'AVAILABLE' });
+    const inventorySummary = await erpApi.inventorySummary({
+      status: 'AVAILABLE',
+      excludeOrderNo: order.value.orderNo,
+      excludeOrderId: order.value.id
+    });
     const stockCheck = validateStockModeLines(order.value.lines, inventorySummary);
     if (!stockCheck.ok) {
       ElMessage.warning(stockCheck.message);
@@ -1278,6 +1490,11 @@ onMounted(loadInitialState);
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.action-tooltip-wrap {
+  display: inline-flex;
+  max-width: 100%;
 }
 
 .process-layout {
@@ -1628,6 +1845,10 @@ onMounted(loadInitialState);
   }
 
   .process-actions .el-button {
+    width: 100%;
+  }
+
+  .process-actions .action-tooltip-wrap {
     width: 100%;
   }
 

@@ -22,6 +22,14 @@ export class InventoryQueryDto {
   @IsOptional()
   @IsEnum(InventoryStatus)
   status?: InventoryStatus;
+
+  @IsOptional()
+  @IsString()
+  excludeOrderNo?: string;
+
+  @IsOptional()
+  @IsString()
+  excludeOrderId?: string;
 }
 
 export class MaterialSuggestionQueryDto {
@@ -36,6 +44,14 @@ export class MaterialSuggestionQueryDto {
   @IsOptional()
   @IsIn(['ALL', 'ORDER', 'STOCK'])
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
+
+  @IsOptional()
+  @IsString()
+  excludeOrderNo?: string;
+
+  @IsOptional()
+  @IsString()
+  excludeOrderId?: string;
 }
 
 export class InventorySourceDetailQueryDto {
@@ -54,6 +70,10 @@ export class InventorySourceDetailQueryDto {
   @IsOptional()
   @IsString()
   excludeOrderNo?: string;
+
+  @IsOptional()
+  @IsString()
+  excludeOrderId?: string;
 }
 
 export class AdjustInventoryBatchDto {

@@ -147,7 +147,7 @@ export function validateDraftStockSourceLines(lines: CreateOrderLinePayload[]) {
       };
     }
 
-    const selectedQuantityIssue = findSelectedStockSourceQuantityIssue(line);
+    const selectedQuantityIssue = findSelectedStockSourceQuantityIssue(line, { requireFullRework: false });
     if (selectedQuantityIssue) {
       return {
         ok: false,
@@ -348,7 +348,7 @@ export function productionPlanOverrideRequired(line: CreateOrderLinePayload) {
   return Math.abs(plannedQuantity - suggestedQuantity) > 0.0001;
 }
 
-export function findProductionPlanOverrideIssue(line: CreateOrderLinePayload) {
+export function findProductionPlanOverrideIssue(line: CreateOrderLinePayload, options: { requireResolvedOperator?: boolean } = {}) {
   if (!productionPlanOverrideRequired(line)) {
     return '';
   }
@@ -358,6 +358,15 @@ export function findProductionPlanOverrideIssue(line: CreateOrderLinePayload) {
   }
   if (!line.productionPlanOverrideReason?.trim()) {
     return `${partText} 生产计划数量与建议数量不一致，必须填写调整说明。`;
+  }
+  if (options.requireResolvedOperator) {
+    if (!line.productionPlanOverrideByName?.trim() || !line.productionPlanOverrideByRole?.trim()) {
+      return `${partText} 生产计划调整操作员资料不完整，请重新保存订单后再提交生产。`;
+    }
+    const overrideAt = line.productionPlanOverrideAt ? new Date(line.productionPlanOverrideAt) : null;
+    if (!overrideAt || Number.isNaN(overrideAt.getTime())) {
+      return `${partText} 生产计划调整时间无效，请重新保存订单后再提交生产。`;
+    }
   }
   return '';
 }
@@ -377,7 +386,7 @@ export function findOverSelectedStockSourceQuantity(line: CreateOrderLinePayload
   return '';
 }
 
-export function findSelectedStockSourceQuantityIssue(line: CreateOrderLinePayload) {
+export function findSelectedStockSourceQuantityIssue(line: CreateOrderLinePayload, options: { requireFullRework?: boolean } = {}) {
   if (!stockSourceReviewRequired(line)) {
     return '';
   }
@@ -388,7 +397,12 @@ export function findSelectedStockSourceQuantityIssue(line: CreateOrderLinePayloa
   if (requiredQuantity > 0 && selectedQuantity <= 0) {
     return `${partText} 必须先选择库存批次并完成来源核对，不能由系统自动扣减库存。`;
   }
-  if (line.fulfillmentMode !== 'STOCK' && requiredQuantity > 0 && selectedQuantity + 0.0001 < requiredQuantity) {
+  if (
+    options.requireFullRework !== false &&
+    line.fulfillmentMode !== 'STOCK' &&
+    requiredQuantity > 0 &&
+    selectedQuantity + 0.0001 < requiredQuantity
+  ) {
     return `${partText} 已选库存 ${formatQuantity(selectedQuantity, unit)}，少于本次需要 ${formatQuantity(
       requiredQuantity,
       unit
@@ -510,6 +524,15 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
   return [...rows.values()];
 }
 
+export function normalizeSelectedStockSourcesForPayload(line: CreateOrderLinePayload) {
+  return normalizeSelectedStockSources(line).map((source) => {
+    // availableQuantity 只用于前端显示和本地重复选用校验，真实可用库存必须由后端实时计算。
+    const { availableQuantity, ...payload } = source;
+    void availableQuantity;
+    return payload;
+  });
+}
+
 export function findMissingStockSourceManualConfirmation(line: CreateOrderLinePayload) {
   const selectedSources = normalizeSelectedStockSources(line);
   if (!stockSourceReviewRequired(line) || selectedSources.length === 0) {
@@ -534,7 +557,17 @@ export function findMissingStockSourceManualConfirmation(line: CreateOrderLinePa
 }
 
 export function findDirectStockSourceBlockedIssue(line: CreateOrderLinePayload) {
-  return '';
+  if (!stockSourceReviewRequired(line)) {
+    return '';
+  }
+  const missingReviewSource = normalizeSelectedStockSources(line).find((source) => !source.compatibilityStatus);
+  if (!missingReviewSource) {
+    return '';
+  }
+  const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
+  return `${partText} 已选库存批次 ${
+    missingReviewSource.batchNo || missingReviewSource.batchId
+  } 缺少库存来源核对结果，请重新打开库存来源并确认后再保存。`;
 }
 
 export function selectedStockSourceNeedsManualConfirmation(
@@ -547,7 +580,6 @@ export function selectedStockSourceNeedsManualConfirmation(
     source.compatibilityStatus === 'INCOMPLETE' ||
     source.compatibilityStatus === 'UNKNOWN';
   return (
-    // 兼容旧待提交生产订单：历史库存选择可能没有 compatibilityStatus，前端不直接判死，保存/提交时仍由后端按真实批次复核。
     explicitCompatibilityIssue ||
     !requiredTextMatches(line.partCode, source.partCode) ||
     Boolean(line.fulfillmentMode === 'STOCK' && missingOrderInfo.length > 0)
@@ -641,6 +673,6 @@ export function sanitizeOrderLinePayload(line: CreateOrderLinePayload, fallbackD
     deliveryDate: line.deliveryDate || fallbackDeliveryDate,
     remark: line.remark,
     processSteps: fulfillmentMode === 'STOCK' && productionPlanQuantity <= 0 ? [] : line.processSteps || [],
-    selectedStockSources: stockSourceReviewRequired(line) ? normalizeSelectedStockSources(line) : []
+    selectedStockSources: stockSourceReviewRequired(line) ? normalizeSelectedStockSourcesForPayload(line) : []
   };
 }

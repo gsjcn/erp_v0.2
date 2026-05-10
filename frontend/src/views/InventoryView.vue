@@ -146,14 +146,29 @@
     </div>
 
     <div v-loading="loading" class="mobile-card-list summary-mobile-list">
-      <article v-for="row in inventorySummary" :key="`${row.partCode}-${row.partName}-${row.unit}`" class="mobile-card">
+      <article
+        v-for="row in inventorySummary"
+        :key="`${row.partCode}-${row.partName}-${row.unit}`"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileInventoryCardExpanded(summaryCardKey(row)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ row.partName }}</strong>
             <small>{{ row.partCode }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <el-button link type="primary" @click.stop="toggleMobileInventoryCard(summaryCardKey(row))">
+              {{ isMobileInventoryCardExpanded(summaryCardKey(row)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>可用 {{ formatQuantity(row.availableQuantity, row.unit) }}</span>
+          <span>预占 {{ formatQuantity(row.reservedQuantity || 0, row.unit) }}</span>
+          <span>{{ row.batchCount }} 批 / {{ row.warehouseCount }} 仓</span>
+        </div>
+        <div v-show="isMobileInventoryCardExpanded(summaryCardKey(row))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>当前可用库存</label>
             <strong>{{ formatQuantity(row.availableQuantity, row.unit) }}</strong>
@@ -276,14 +291,30 @@
     </div>
 
     <div v-loading="loading" class="mobile-card-list">
-      <article v-for="batch in inventory" :key="batch.id" class="mobile-card">
+      <article
+        v-for="batch in inventory"
+        :key="batch.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileInventoryCardExpanded(batchCardKey(batch)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ batch.partName }}</strong>
             <small>{{ batch.batchNo }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <StatusTag :value="batch.status" compact />
+            <el-button link type="primary" @click.stop="toggleMobileInventoryCard(batchCardKey(batch))">
+              {{ isMobileInventoryCardExpanded(batchCardKey(batch)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>可用 {{ formatQuantity(batchAvailableQuantity(batch), batch.unit) }}</span>
+          <span>账面 {{ formatQuantity(batch.quantity, batch.unit) }}</span>
+          <span>{{ batch.warehouseName }} / {{ batch.locationName || '-' }}</span>
+        </div>
+        <div v-show="isMobileInventoryCardExpanded(batchCardKey(batch))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
             <span><StatusTag :value="batch.status" /></span>
@@ -568,6 +599,7 @@ const adjustmentFileInput = ref<HTMLInputElement>();
 const adjustmentFile = ref<File | null>(null);
 const adjustmentHistory = ref<InventoryAdjustment[]>([]);
 const adjustmentHistoryLoading = ref(false);
+const expandedMobileInventoryCardKeys = ref<string[]>([]);
 const adjustForm = reactive({
   afterQuantity: 0,
   countedBy: '',
@@ -754,6 +786,24 @@ function warehouseSummaryText(row: InventorySummaryRow) {
   return row.warehouses
     .map((warehouse) => `${warehouse.warehouseName} ${formatQuantity(warehouse.availableQuantity, row.unit)}`)
     .join('，');
+}
+
+function summaryCardKey(row: InventorySummaryRow) {
+  return `summary:${row.partCode}:${row.partName}:${row.unit}`;
+}
+
+function batchCardKey(row: InventoryBatch) {
+  return `batch:${row.id}`;
+}
+
+function isMobileInventoryCardExpanded(key: string) {
+  return expandedMobileInventoryCardKeys.value.includes(key);
+}
+
+function toggleMobileInventoryCard(key: string) {
+  expandedMobileInventoryCardKeys.value = isMobileInventoryCardExpanded(key)
+    ? expandedMobileInventoryCardKeys.value.filter((item) => item !== key)
+    : [...expandedMobileInventoryCardKeys.value, key];
 }
 
 function canAdjustBatch(row: InventoryBatch) {

@@ -42,7 +42,7 @@ function toStockSourcePayload(line: OrderLine): CreateOrderLinePayload {
 export async function validateSubmitStockSources(lines: OrderLine[]) {
   const payloadLines = lines.map(toStockSourcePayload);
   for (const line of payloadLines) {
-    const planOverrideIssue = findProductionPlanOverrideIssue(line);
+    const planOverrideIssue = findProductionPlanOverrideIssue(line, { requireResolvedOperator: true });
     if (planOverrideIssue) {
       return {
         ok: false,

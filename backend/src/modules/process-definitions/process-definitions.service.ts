@@ -1,8 +1,14 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CommonStatus } from '@prisma/client';
 import { buildPinyinSearchText, normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin-search';
+import { processSnapshotToDetails } from '../../common/serializers';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProcessDefinitionDto, ProcessDefinitionQueryDto, UpdateProcessDefinitionDto } from './dto';
+
+type ProcessDefinitionReferenceSummary = {
+  total: number;
+  samples: string[];
+};
 
 @Injectable()
 export class ProcessDefinitionsService {
@@ -59,7 +65,16 @@ export class ProcessDefinitionsService {
     const processName = dto.processName !== undefined ? this.normalizeProcessName(dto.processName) : existing.processName;
     const processNameNormalized = this.normalizeProcessNameKey(processName);
     const remark = dto.remark !== undefined ? dto.remark.trim() || null : existing.remark;
+    const nextStatus = dto.status || existing.status;
     this.validateRemark(remark);
+
+    // 标准工序被订单流程或流程记忆引用后，不能改名或停用，否则历史流程会失去对应的启用工序。
+    if (processNameNormalized !== existing.processNameNormalized || nextStatus === CommonStatus.DISABLED) {
+      const references = await this.findProcessDefinitionReferences(existing.processNameNormalized);
+      if (references.total > 0) {
+        throw this.referencedProcessDefinitionError(existing.processName, references, nextStatus === CommonStatus.DISABLED ? '停用' : '改名');
+      }
+    }
 
     if (processNameNormalized !== existing.processNameNormalized) {
       const duplicated = await this.prisma.processDefinition.findUnique({ where: { processNameNormalized } });
@@ -74,7 +89,7 @@ export class ProcessDefinitionsService {
         processName,
         processNameNormalized,
         remark,
-        status: dto.status || existing.status,
+        status: nextStatus,
         searchText: this.buildSearchText(processName, remark)
       }
     });
@@ -82,7 +97,11 @@ export class ProcessDefinitionsService {
   }
 
   async delete(id: string) {
-    await this.ensureExists(id);
+    const existing = await this.ensureExists(id);
+    const references = await this.findProcessDefinitionReferences(existing.processNameNormalized);
+    if (references.total > 0) {
+      throw this.referencedProcessDefinitionError(existing.processName, references, '停用');
+    }
     const updated = await this.prisma.processDefinition.update({
       where: { id },
       data: { status: CommonStatus.DISABLED }
@@ -114,6 +133,65 @@ export class ProcessDefinitionsService {
       throw new NotFoundException('标准工序不存在');
     }
     return row;
+  }
+
+  private async findProcessDefinitionReferences(processNameNormalized: string): Promise<ProcessDefinitionReferenceSummary> {
+    const [orderSteps, templates] = await Promise.all([
+      this.prisma.orderLineProcessStep.findMany({
+        select: {
+          processName: true,
+          stepNo: true,
+          orderLine: {
+            select: {
+              lineNo: true,
+              partCode: true,
+              order: { select: { orderNo: true } }
+            }
+          }
+        },
+        orderBy: [{ orderLine: { order: { orderNo: 'asc' } } }, { orderLine: { lineNo: 'asc' } }, { stepNo: 'asc' }]
+      }),
+      this.prisma.processTemplate.findMany({
+        select: {
+          templateName: true,
+          steps: true
+        },
+        orderBy: { templateName: 'asc' }
+      })
+    ]);
+
+    const samples: string[] = [];
+    let total = 0;
+    const addReference = (label: string) => {
+      total += 1;
+      if (samples.length < 5) {
+        samples.push(label);
+      }
+    };
+
+    for (const step of orderSteps) {
+      if (this.normalizeProcessNameKey(step.processName) !== processNameNormalized) {
+        continue;
+      }
+      addReference(`订单 ${step.orderLine.order.orderNo} / ${step.orderLine.partCode} / 第 ${step.stepNo} 道`);
+    }
+
+    for (const template of templates) {
+      if (!processSnapshotToDetails(template.steps).some((step) => this.normalizeProcessNameKey(step.processName) === processNameNormalized)) {
+        continue;
+      }
+      addReference(`流程记忆 ${template.templateName}`);
+    }
+
+    return { total, samples };
+  }
+
+  private referencedProcessDefinitionError(processName: string, references: ProcessDefinitionReferenceSummary, action: '停用' | '改名') {
+    const sampleText = references.samples.join('；');
+    const moreText = references.total > references.samples.length ? ` 等 ${references.total} 处` : '';
+    return new BadRequestException(
+      `标准工序“${processName}”已被${sampleText}${moreText}引用，不能${action}；请先调整对应订单流程或流程记忆`
+    );
   }
 
   private normalizeProcessName(value: string | undefined) {

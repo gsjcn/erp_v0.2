@@ -4,11 +4,14 @@ import vue from '@vitejs/plugin-vue';
 export default defineConfig({
   plugins: [vue()],
   build: {
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
         manualChunks: {
           vue: ['vue', 'vue-router'],
-          elementPlus: ['element-plus', '@element-plus/icons-vue']
+          elementPlus: ['element-plus'],
+          elementPlusIcons: ['@element-plus/icons-vue'],
+          pinyin: ['pinyin-pro']
         }
       }
     }

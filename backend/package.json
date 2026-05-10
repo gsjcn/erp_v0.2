@@ -7,10 +7,12 @@
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "db:generate": "prisma generate --schema ../database/prisma/schema.prisma",
-    "db:migrate": "prisma migrate dev --schema ../database/prisma/schema.prisma",
-    "db:deploy": "prisma migrate deploy --schema ../database/prisma/schema.prisma",
-    "db:seed": "prisma db seed --schema ../database/prisma/schema.prisma"
+    "db:generate": "node scripts/prisma-with-root-env.cjs generate --schema ../database/prisma/schema.prisma",
+    "db:migrate": "node scripts/prisma-with-root-env.cjs migrate dev --schema ../database/prisma/schema.prisma",
+    "db:deploy": "node scripts/prisma-with-root-env.cjs migrate deploy --schema ../database/prisma/schema.prisma",
+    "db:seed": "node scripts/prisma-with-root-env.cjs db seed --schema ../database/prisma/schema.prisma",
+    "verify:first-stage": "tsx ../database/prisma/verify-first-stage.ts",
+    "repair:first-stage": "tsx ../database/prisma/repair-first-stage.ts"
   },
   "prisma": {
     "seed": "tsx ../database/prisma/seed.ts"

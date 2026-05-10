@@ -70,7 +70,10 @@
         <el-radio-button value="TASK_DETAIL">零件任务明细</el-radio-button>
       </el-radio-group>
       <div v-if="selectedProductionOrderNo" class="detail-scope">
-        <span>当前订单：{{ selectedProductionOrderNo }}</span>
+        <span class="current-order-text">
+          当前订单：
+          <OrderNoLink :order-no="selectedProductionOrderNo" />
+        </span>
         <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
         <el-button size="small" @click="backToOrderSummary">返回订单汇总</el-button>
         <el-button
@@ -175,6 +178,14 @@
               </div>
             </template>
           </el-table-column>
+          <el-table-column label="待补单" min-width="180">
+            <template #default="{ row }">
+              <el-button v-if="orderSummaryNeedsShortageAttention(row)" link type="warning" @click="goOrderShortageDetail(row)">
+                {{ orderSummaryShortageActionText(row) }}
+              </el-button>
+              <span v-else class="muted">-</span>
+            </template>
+          </el-table-column>
           <el-table-column label="状态分布" min-width="230">
             <template #default="{ row }">
               <div class="summary-status-chain">
@@ -196,6 +207,9 @@
           <el-table-column label="操作" width="220" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="openOrderProductionDetail(row)">进入生产详情</el-button>
+              <el-button v-if="orderSummaryNeedsShortageAttention(row)" link type="warning" @click="goOrderShortageDetail(row)">
+                处理补单
+              </el-button>
               <el-button v-if="row.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(row)">
                 批量开始生产
               </el-button>
@@ -205,17 +219,32 @@
       </div>
 
       <div v-loading="loading" class="mobile-card-list">
-        <article v-for="summary in filteredOrderSummaries" :key="summary.orderId" class="mobile-card">
+        <article
+          v-for="summary in filteredOrderSummaries"
+          :key="summary.orderId"
+          class="mobile-card mobile-order-card"
+          :class="{ expanded: isMobileProductionOrderExpanded(summary.orderId) }"
+        >
           <div class="mobile-card-header">
             <div class="mobile-card-title">
               <strong><OrderNoLink :order-no="summary.orderNo" /></strong>
               <small>{{ summary.customerName }}</small>
             </div>
-            <el-tag :type="productionStatusTagType(summary.status)" effect="light" round>
-              {{ productionStatusLabel(summary.status) }}
-            </el-tag>
+            <div class="mobile-card-header-actions">
+              <el-tag :type="productionStatusTagType(summary.status)" effect="light" round>
+                {{ productionStatusLabel(summary.status) }}
+              </el-tag>
+              <el-button link type="primary" @click.stop="toggleMobileProductionOrderCard(summary.orderId)">
+                {{ isMobileProductionOrderExpanded(summary.orderId) ? '收起' : '详情' }}
+              </el-button>
+            </div>
           </div>
-          <div class="mobile-card-fields">
+          <div class="mobile-card-compact-summary">
+            <span>交期 {{ formatDate(summary.deliveryDate) }}</span>
+            <span>任务 {{ summary.taskCount }} 个</span>
+            <span>{{ summary.progressPercent }}%</span>
+          </div>
+          <div v-show="isMobileProductionOrderExpanded(summary.orderId)" class="mobile-card-fields">
             <div class="mobile-field">
               <label>订单日期</label>
               <span>{{ formatDate(summary.orderDate) }}</span>
@@ -240,9 +269,16 @@
               <label>当前进度</label>
               <span>{{ orderSummaryProgressItems(summary).join('、') || '-' }}</span>
             </div>
+            <div v-if="orderSummaryNeedsShortageAttention(summary)" class="mobile-field mobile-full warning">
+              <label>待补单</label>
+              <span>{{ orderSummaryShortageActionText(summary) }}</span>
+            </div>
           </div>
           <div class="mobile-card-actions">
             <el-button link type="primary" @click="openOrderProductionDetail(summary)">进入生产详情</el-button>
+            <el-button v-if="orderSummaryNeedsShortageAttention(summary)" link type="warning" @click="goOrderShortageDetail(summary)">
+              处理补单
+            </el-button>
             <el-button v-if="summary.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(summary)">
               批量开始生产
             </el-button>
@@ -275,7 +311,7 @@
         <template #default>
           <div class="empty-production-hint">
             <span>
-              {{ selectedProductionOrderNo }} 可能已全量使用库存，订单库存已进入仓库待发货。可查看订单明细或到仓库待发货继续处理。
+              <OrderNoLink :order-no="selectedProductionOrderNo" /> 可能已全量使用库存，订单库存已进入仓库待发货。可查看订单明细或到仓库待发货继续处理。
             </span>
             <div class="empty-production-actions">
               <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
@@ -400,24 +436,39 @@
     </div>
 
     <div v-loading="loading" class="mobile-card-list">
-      <article v-for="task in filteredTasks" :key="task.id" class="mobile-card">
+      <article
+        v-for="task in filteredTasks"
+        :key="task.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileProductionTaskExpanded(task.id) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ task.partName }}</strong>
             <small>{{ task.productionTaskNo }}</small>
             <small v-if="taskRelationText(task)">{{ taskRelationText(task) }}</small>
           </div>
-          <el-checkbox
-            v-if="selectedProductionOrderNo && shouldShowStartAction(task)"
-            :model-value="selectedStartableTaskIds.includes(task.id)"
-            :value="task.id"
-            class="mobile-start-checkbox"
-            @change="toggleMobileStartSelection(task, Boolean($event))"
-          >
-            勾选生产
-          </el-checkbox>
+          <div class="mobile-card-header-actions production-task-header-actions">
+            <el-checkbox
+              v-if="selectedProductionOrderNo && shouldShowStartAction(task)"
+              :model-value="selectedStartableTaskIds.includes(task.id)"
+              :value="task.id"
+              class="mobile-start-checkbox"
+              @change="toggleMobileStartSelection(task, Boolean($event))"
+            >
+              勾选生产
+            </el-checkbox>
+            <el-button link type="primary" @click.stop="toggleMobileProductionTaskCard(task.id)">
+              {{ isMobileProductionTaskExpanded(task.id) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span><StatusTag :value="effectiveProductionStatus(task)" :label-override="productionStatusLabel(effectiveProductionStatus(task))" compact /></span>
+          <span>{{ formatCompletedPlan(task) }}</span>
+          <span>{{ currentProcessText(task) }}</span>
+        </div>
+        <div v-show="isMobileProductionTaskExpanded(task.id)" class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
             <span>
@@ -485,7 +536,7 @@
             <span>{{ processProgressText(task) }}</span>
           </div>
         </div>
-        <div class="mobile-card-actions">
+        <div v-show="isMobileProductionTaskExpanded(task.id)" class="mobile-card-actions">
           <el-button
             v-if="pendingProductionReplenishmentRequest(task)"
             link
@@ -693,7 +744,10 @@
           <div>
             <strong>{{ productionNoticeTitle(notice) }}</strong>
             <p>{{ notice.reason }}</p>
-            <small>{{ formatDateTime(notice.createdAt) }}</small>
+            <small>通知时间：{{ formatDateTime(notice.createdAt) }}</small>
+            <small v-if="notice.status === 'ACKNOWLEDGED'" class="notice-ack-text">
+              确认：{{ notice.acknowledgedBy || '-' }} / {{ formatDateTime(notice.acknowledgedAt) }}
+            </small>
           </div>
           <el-button
             v-if="notice.status === 'PENDING'"
@@ -1716,6 +1770,8 @@ const scrapLoading = ref(false);
 const scrapRecords = ref<ProductionScrapRecord[]>([]);
 const scrapOrderOptions = ref<OrderSummary[]>([]);
 const scrapDateRange = ref<string[]>([]);
+const expandedMobileProductionOrderIds = ref<string[]>([]);
+const expandedMobileProductionTaskIds = ref<string[]>([]);
 const processVisible = ref(false);
 const processSaving = ref(false);
 const quantityOverrideDialogVisible = ref(false);
@@ -1960,6 +2016,26 @@ function handleProductionStatClick(status: ProductionStatCardKey) {
     return;
   }
   activeStatus.value = status;
+}
+
+function isMobileProductionOrderExpanded(orderId: string) {
+  return expandedMobileProductionOrderIds.value.includes(orderId);
+}
+
+function toggleMobileProductionOrderCard(orderId: string) {
+  expandedMobileProductionOrderIds.value = isMobileProductionOrderExpanded(orderId)
+    ? expandedMobileProductionOrderIds.value.filter((id) => id !== orderId)
+    : [...expandedMobileProductionOrderIds.value, orderId];
+}
+
+function isMobileProductionTaskExpanded(taskId: string) {
+  return expandedMobileProductionTaskIds.value.includes(taskId);
+}
+
+function toggleMobileProductionTaskCard(taskId: string) {
+  expandedMobileProductionTaskIds.value = isMobileProductionTaskExpanded(taskId)
+    ? expandedMobileProductionTaskIds.value.filter((id) => id !== taskId)
+    : [...expandedMobileProductionTaskIds.value, taskId];
 }
 
 const selectedStartableTasks = computed(() => selectedTaskRows.value.filter((task) => shouldShowStartAction(task)));
@@ -2473,7 +2549,7 @@ async function resetFilters() {
 function productionNoticeTitle(notice: ProductionNotice) {
   const quantityText =
     notice.deltaQuantity && notice.unit ? `，变化 ${formatQuantity(Math.abs(notice.deltaQuantity), notice.unit)}` : '';
-  const partText = [notice.orderNo, notice.partCode, notice.partName].filter(Boolean).join(' / ');
+  const partText = [notice.customerName, notice.orderNo, notice.partCode, notice.partName].filter(Boolean).join(' / ');
   const typeMap: Record<string, string> = {
     QUANTITY_INCREASE: '客户数量增加',
     QUANTITY_DECREASE: '客户数量减少',
@@ -2570,6 +2646,16 @@ function openOrderProductionDetail(row: ProductionOrderSummary) {
   activeStatus.value = 'ALL';
   viewMode.value = 'TASK_DETAIL';
   pushProductionRouteForOrder(row.orderNo);
+}
+
+function goOrderShortageDetail(row: ProductionOrderSummary) {
+  void router.push({
+    path: `/orders/${encodeURIComponent(row.orderNo)}`,
+    query: {
+      returnTo: route.fullPath,
+      shortage: '1'
+    }
+  });
 }
 
 function goSelectedOrderDetail() {
@@ -2826,7 +2912,14 @@ function isProcessCompleted(row: ProductionTask, processName: string) {
 }
 
 function isAllProcessConfirmed(row: ProductionTask) {
-  return row.status === 'COMPLETED' || (row.processSteps.length > 0 && row.processSteps.every((step) => Boolean(getProcessCompletion(row, step)?.isCompleted)));
+  if (row.status === 'COMPLETED') {
+    return true;
+  }
+  if (row.processSteps.length === 0) {
+    // 兼容历史无工序快照任务：开始生产后允许直接进入最终完成确认，并在确认时记录短缺处理。
+    return row.status !== 'PENDING';
+  }
+  return row.processSteps.every((step) => Boolean(getProcessCompletion(row, step)?.isCompleted));
 }
 
 function effectiveProductionStatus(row: ProductionTask): ProductionDisplayStatus {
@@ -3541,6 +3634,23 @@ function orderSummaryQuantityText(row: ProductionOrderSummary) {
     .join('；');
 }
 
+function orderSummaryShortageActionText(row: ProductionOrderSummary) {
+  if (row.needsProductionReplenishmentReview && !row.needsReplenishmentAction) {
+    const quantityText = row.pendingProductionReplenishmentQuantityByUnit?.length
+      ? row.pendingProductionReplenishmentQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join('、')
+      : formatQuantity(row.pendingProductionReplenishmentQuantity || 0, row.pendingProductionReplenishmentUnit || row.unit || '件');
+    return `生产报废补单待确认 ${row.pendingProductionReplenishmentLineCount || 0} 个零件 / ${quantityText}`;
+  }
+  const quantityText = row.unresolvedShortageQuantityByUnit?.length
+    ? row.unresolvedShortageQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join('、')
+    : formatQuantity(row.unresolvedShortageQuantity || 0, row.unresolvedShortageUnit || row.unit || '件');
+  return `需补单 ${row.unresolvedShortageLineCount || 0} 个零件 / ${quantityText}`;
+}
+
+function orderSummaryNeedsShortageAttention(row: ProductionOrderSummary) {
+  return Boolean(row.needsReplenishmentAction || row.needsProductionReplenishmentReview);
+}
+
 function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSummary | undefined {
   const first = rows[0];
   if (!first) {
@@ -3565,6 +3675,11 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
   >();
   const pendingTasks: ProductionOrderSummaryTask[] = [];
   const customerOrderLineKeys = new Set<string>();
+  const unresolvedShortageLineKeys = new Set<string>();
+  const unresolvedShortageQuantityByUnit = new Map<string, number>();
+  const pendingProductionReplenishmentLineKeys = new Set<string>();
+  const pendingProductionReplenishmentQuantityByUnit = new Map<string, number>();
+  const shortageActionTasks: NonNullable<ProductionOrderSummary['shortageActionTasks']> = [];
 
   for (const task of rows) {
     partKeys.add(`${task.partCode}__${task.partName}`);
@@ -3601,6 +3716,32 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
         processStepDetails: task.processStepDetails
       });
     }
+    if (Number(task.unresolvedShortageQuantity || 0) > 0) {
+      unresolvedShortageLineKeys.add(task.orderLineId || task.id);
+      const unit = task.unresolvedShortageUnit || task.unit || '件';
+      unresolvedShortageQuantityByUnit.set(
+        unit,
+        (unresolvedShortageQuantityByUnit.get(unit) || 0) + Number(task.unresolvedShortageQuantity || 0)
+      );
+      shortageActionTasks.push({
+        id: task.id,
+        orderLineId: task.orderLineId,
+        productionTaskNo: task.productionTaskNo,
+        partCode: task.partCode,
+        partName: task.partName,
+        shortageQuantity: Number(task.unresolvedShortageQuantity || 0),
+        unit
+      });
+    }
+    if (Number(task.pendingProductionReplenishmentQuantity || 0) > 0) {
+      pendingProductionReplenishmentLineKeys.add(task.orderLineId || task.id);
+      const unit = task.pendingProductionReplenishmentUnit || task.unit || '件';
+      pendingProductionReplenishmentQuantityByUnit.set(
+        unit,
+        (pendingProductionReplenishmentQuantityByUnit.get(unit) || 0) +
+          Number(task.pendingProductionReplenishmentQuantity || 0)
+      );
+    }
   }
 
   const totalPlannedQuantity = rows.reduce((sum, task) => sum + Number(task.plannedQuantity || 0), 0);
@@ -3627,6 +3768,32 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
     status: resolveOrderSummaryStatusFromCounts(rows.length, counts),
     progressPercent: rows.length > 0 ? Math.round((doneCount / rows.length) * 100) : 0,
     quantityByUnit: Array.from(quantityByUnit.values()),
+    unresolvedShortageLineCount: unresolvedShortageLineKeys.size,
+    unresolvedShortageQuantity: Array.from(unresolvedShortageQuantityByUnit.values()).reduce((sum, quantity) => sum + quantity, 0),
+    unresolvedShortageUnit:
+      unresolvedShortageQuantityByUnit.size === 1 ? Array.from(unresolvedShortageQuantityByUnit.keys())[0] : undefined,
+    unresolvedShortageQuantityByUnit: Array.from(unresolvedShortageQuantityByUnit.entries()).map(([unit, quantity]) => ({
+      unit,
+      quantity
+    })),
+    needsReplenishmentAction: unresolvedShortageLineKeys.size > 0,
+    pendingProductionReplenishmentLineCount: pendingProductionReplenishmentLineKeys.size,
+    pendingProductionReplenishmentQuantity: Array.from(pendingProductionReplenishmentQuantityByUnit.values()).reduce(
+      (sum, quantity) => sum + quantity,
+      0
+    ),
+    pendingProductionReplenishmentUnit:
+      pendingProductionReplenishmentQuantityByUnit.size === 1
+        ? Array.from(pendingProductionReplenishmentQuantityByUnit.keys())[0]
+        : undefined,
+    pendingProductionReplenishmentQuantityByUnit: Array.from(pendingProductionReplenishmentQuantityByUnit.entries()).map(
+      ([unit, quantity]) => ({
+        unit,
+        quantity
+      })
+    ),
+    needsProductionReplenishmentReview: pendingProductionReplenishmentLineKeys.size > 0,
+    shortageActionTasks,
     pendingTaskIds: pendingTasks.map((task) => task.id),
     pendingTasks
   };
@@ -3893,6 +4060,15 @@ function shortageSummary(row: ProductionTask) {
   if (completion.shortageMode === 'REPLENISHMENT') {
     const sourceText = completion.replenishmentSource === 'PRODUCTION_SCRAP' ? '生产报废补单' : '补单';
     return `缺 ${shortage}，报废 ${scrap}，${sourceText} ${completion.replenishmentTaskNo || '-'}`;
+  }
+  if (completion.shortageResolutionMode) {
+    const modeText =
+      completion.shortageResolutionMode === 'NO_REPLENISHMENT'
+        ? '无需补单'
+        : completion.shortageResolutionMode === 'CUSTOMER_QUANTITY_CHANGED'
+          ? '客户数量已变更'
+          : '已创建订单补单';
+    return `缺 ${shortage}，报废 ${scrap}，${modeText}：${completion.shortageResolutionReason || '-'}`;
   }
 
   return `缺 ${shortage}，报废 ${scrap}，${completion.managerName || '-'}确认：${completion.shortageReason || '-'}`;
@@ -4327,6 +4503,12 @@ onMounted(async () => {
   font-size: 14px;
 }
 
+.current-order-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .order-production-overview {
   display: grid;
   grid-template-columns: minmax(190px, 0.8fr) minmax(360px, 1.5fr) minmax(260px, 1fr);
@@ -4482,6 +4664,12 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
+.production-task-header-actions {
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .mobile-start-checkbox :deep(.el-checkbox__label) {
   color: #2563eb;
   font-weight: 600;
@@ -4574,7 +4762,12 @@ onMounted(async () => {
 }
 
 .notice-item small {
+  display: block;
   color: #60708a;
+}
+
+.notice-ack-text {
+  margin-top: 2px;
 }
 
 .process-operator-list {

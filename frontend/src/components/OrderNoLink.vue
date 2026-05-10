@@ -51,9 +51,11 @@ function normalizeReturnTo(value: string | undefined) {
 .order-no-link {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   min-height: 24px;
   color: #2563eb;
   font-weight: 600;
+  overflow-wrap: anywhere;
   text-decoration: none;
   border-bottom: 1px solid transparent;
 }

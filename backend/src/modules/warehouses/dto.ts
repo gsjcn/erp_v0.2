@@ -1,6 +1,19 @@
 import { InventoryTransactionType, ProductionNoticeStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { ArrayNotEmpty, IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import {
+  ArrayNotEmpty,
+  IsArray,
+  IsBoolean,
+  IsDateString,
+  IsEnum,
+  IsIn,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  ValidateNested
+} from 'class-validator';
 
 export class CreateWarehouseDto {
   @IsOptional()
@@ -34,10 +47,49 @@ export class ConfirmReceiptDto {
   remark?: string;
 }
 
+export class ConfirmShipmentItemDto {
+  @IsString()
+  @IsNotEmpty()
+  batchId!: string;
+
+  @IsOptional()
+  @IsString()
+  orderLineId?: string;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  shipmentQuantity!: number;
+}
+
 export class ConfirmShipmentDto {
   @IsOptional()
   @IsString()
+  warehouseConfirmedBy?: string;
+
+  @IsOptional()
+  @IsString()
+  salesConfirmedBy?: string;
+
+  @IsOptional()
+  @IsString()
+  overShipmentReason?: string;
+
+  @IsOptional()
+  @IsString()
   remark?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  shipmentQuantity?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ConfirmShipmentItemDto)
+  batchShipments?: ConfirmShipmentItemDto[];
 }
 
 export class ConfirmBatchShipmentDto extends ConfirmShipmentDto {

@@ -4,6 +4,7 @@
     :title="title"
     width="min(520px, calc(100vw - 32px))"
     append-to-body
+    class="responsive-dialog notice-acknowledge-dialog"
     @update:model-value="emit('update:modelValue', $event)"
     @closed="resetForm"
   >
@@ -24,6 +25,9 @@
             @keyup.enter="submit"
           />
         </el-form-item>
+        <el-form-item label="确认时间">
+          <el-input :model-value="acknowledgeTimeText" disabled />
+        </el-form-item>
       </el-form>
     </div>
 
@@ -35,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 
 const props = withDefaults(
@@ -68,18 +72,33 @@ const emit = defineEmits<{
 }>();
 
 const acknowledgedBy = ref('');
+const acknowledgeTime = ref(new Date());
+
+const acknowledgeTimeText = computed(() => formatLocalDateTime(acknowledgeTime.value));
 
 watch(
   () => props.modelValue,
   (visible) => {
     if (visible) {
       acknowledgedBy.value = '';
+      acknowledgeTime.value = new Date();
     }
   }
 );
 
 function resetForm() {
   acknowledgedBy.value = '';
+  acknowledgeTime.value = new Date();
+}
+
+function formatLocalDateTime(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  const hours = String(value.getHours()).padStart(2, '0');
+  const minutes = String(value.getMinutes()).padStart(2, '0');
+  const seconds = String(value.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
 function submit() {
@@ -111,12 +130,14 @@ function submit() {
   color: #0f172a;
   font-size: 16px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .notice-summary p {
   margin: 8px 0;
   color: #334155;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .notice-summary small {
@@ -126,6 +147,10 @@ function submit() {
 @media (max-width: 900px) {
   .notice-summary {
     padding: 12px;
+  }
+
+  .notice-summary strong {
+    font-size: 15px;
   }
 }
 </style>

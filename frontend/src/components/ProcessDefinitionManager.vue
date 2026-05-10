@@ -36,12 +36,15 @@
           </div>
         </template>
 
-        <article class="process-definition-card">
-          <div>
+        <article class="process-definition-card" :class="{ expanded: isMobileDefinitionExpanded(definition.id) }">
+          <div class="process-definition-main">
             <strong>{{ definition.processName }}</strong>
             <small v-if="definition.remark">{{ definition.remark }}</small>
             <small v-else>暂无备注</small>
           </div>
+          <el-button class="process-definition-detail-toggle" link type="primary" @click.stop="toggleMobileDefinitionCard(definition.id)">
+            {{ isMobileDefinitionExpanded(definition.id) ? '收起' : '详情' }}
+          </el-button>
           <div class="process-definition-actions">
             <el-button link type="primary" @click="openEditDialog(definition)">编辑</el-button>
             <el-button link type="danger" @click="openDeleteDialog(definition)">删除</el-button>
@@ -130,6 +133,7 @@ const deleteDialogVisible = ref(false);
 const editingDefinitionId = ref('');
 const searchTimer = ref<number>();
 const activeDeleteDefinition = ref<ProcessDefinition>();
+const expandedMobileDefinitionIds = ref<string[]>([]);
 const form = reactive({
   processName: '',
   remark: ''
@@ -203,6 +207,18 @@ function processDefinitionNameExists(processName: string) {
 
 function normalizeProcessDefinitionName(processName: string) {
   return processName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
+}
+
+function toggleMobileDefinitionCard(definitionId: string) {
+  if (expandedMobileDefinitionIds.value.includes(definitionId)) {
+    expandedMobileDefinitionIds.value = expandedMobileDefinitionIds.value.filter((id) => id !== definitionId);
+    return;
+  }
+  expandedMobileDefinitionIds.value = [...expandedMobileDefinitionIds.value, definitionId];
+}
+
+function isMobileDefinitionExpanded(definitionId: string) {
+  return expandedMobileDefinitionIds.value.includes(definitionId);
 }
 
 function openDeleteDialog(definition: ProcessDefinition) {
@@ -291,6 +307,10 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   border-radius: 6px;
 }
 
+.process-definition-main {
+  min-width: 0;
+}
+
 .process-definition-card strong,
 .process-definition-card small {
   display: block;
@@ -311,6 +331,10 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 
 .process-definition-actions .el-button {
   margin-left: 0;
+}
+
+.process-definition-detail-toggle {
+  display: none;
 }
 
 :global(.process-definition-popper) {
@@ -382,6 +406,37 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 
   .process-definition-list {
     grid-template-columns: 1fr;
+  }
+
+  .process-definition-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: flex-start;
+  }
+
+  .process-definition-detail-toggle {
+    display: inline-flex;
+    min-height: 44px;
+    padding: 0 4px;
+  }
+
+  .process-definition-actions {
+    grid-column: 1 / -1;
+    display: none;
+    justify-content: stretch;
+  }
+
+  .process-definition-card.expanded .process-definition-actions {
+    display: flex;
+  }
+
+  .process-definition-card:not(.expanded) small {
+    display: none;
+  }
+
+  .process-definition-actions .el-button {
+    flex: 1 1 96px;
+    min-height: 44px;
   }
 }
 </style>

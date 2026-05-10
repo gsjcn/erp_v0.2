@@ -226,6 +226,7 @@ model OrderLine {
   productionTasks ProductionTask[]
   inventoryBatches InventoryBatch[]
   inventoryReservations InventoryReservation[]
+  inventoryTransactions InventoryTransaction[]
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
@@ -323,6 +324,10 @@ model ProductionProcessCompletion {
   replenishmentTaskNo String?
   managerName       String?
   shortageReason    String?
+  shortageResolutionMode String?
+  shortageResolutionBy String?
+  shortageResolutionReason String?
+  shortageResolvedAt DateTime?
   unit              String
   operatorCode      String?
   operatorName      String?
@@ -339,6 +344,7 @@ model ProductionProcessCompletion {
   @@index([processName])
   @@index([isCompleted])
   @@index([completedAt])
+  @@index([shortageResolutionMode])
 }
 
 /// 工序完成表单修改日志，只追加，不覆盖。
@@ -560,6 +566,8 @@ model InventoryTransaction {
   transactionType        InventoryTransactionType
   batchId                String?
   batch                  InventoryBatch?          @relation(fields: [batchId], references: [id])
+  orderLineId            String?
+  orderLine              OrderLine?               @relation(fields: [orderLineId], references: [id], onDelete: SetNull)
   partCode               String
   partName               String
   orderNo                String?
@@ -580,6 +588,7 @@ model InventoryTransaction {
   @@index([transactionType])
   @@index([partCode])
   @@index([orderNo])
+  @@index([orderLineId])
   @@index([transactionTime])
 }
 

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InventoryReservationStatus, Prisma } from '@prisma/client';
+import { InventoryReservationStatus, OrderStatus, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
@@ -43,6 +43,13 @@ type InventoryCustomerScope = {
   customerName?: string;
   orderNos: string[];
   productionTaskNos: string[];
+};
+
+type StockReservationPriorityOrder = {
+  id: string;
+  orderNo: string;
+  status: OrderStatus;
+  createdAt: Date;
 };
 
 const adjustmentAttachmentPrefix = '/uploads/inventory-adjustments/';
@@ -359,6 +366,65 @@ export class InventoryService {
     };
   }
 
+  private activeReservationWhere(excludeOrderNo?: string, excludeOrderId?: string): Prisma.InventoryReservationWhereInput {
+    const normalizedExcludeOrderId = excludeOrderId?.trim();
+    const normalizedExcludeOrderNo = excludeOrderNo?.trim();
+    return {
+      status: InventoryReservationStatus.ACTIVE,
+      ...(normalizedExcludeOrderId
+        ? { orderId: { not: normalizedExcludeOrderId } }
+        : normalizedExcludeOrderNo
+          ? { orderNo: { not: normalizedExcludeOrderNo } }
+          : {})
+    };
+  }
+
+  private activeReservationWhereForPriority(currentOrder?: StockReservationPriorityOrder | null): Prisma.InventoryReservationWhereInput {
+    return {
+      status: InventoryReservationStatus.ACTIVE,
+      ...(currentOrder ? { orderId: { not: currentOrder.id } } : {})
+    };
+  }
+
+  private async resolveStockReservationPriorityOrder(query: { excludeOrderNo?: string; excludeOrderId?: string }) {
+    const excludeOrderId = query.excludeOrderId?.trim();
+    if (excludeOrderId) {
+      return this.prisma.customerOrder.findUnique({
+        where: { id: excludeOrderId },
+        select: { id: true, orderNo: true, status: true, createdAt: true }
+      });
+    }
+
+    const excludeOrderNo = query.excludeOrderNo?.trim();
+    if (!excludeOrderNo) {
+      return null;
+    }
+    return this.prisma.customerOrder.findFirst({
+      where: { orderNo: { equals: excludeOrderNo, mode: 'insensitive' } },
+      select: { id: true, orderNo: true, status: true, createdAt: true }
+    });
+  }
+
+  private stockReservationConsumesAvailability(
+    reservationOrder: StockReservationPriorityOrder | null | undefined,
+    currentOrder?: StockReservationPriorityOrder | null
+  ) {
+    if (!currentOrder || !reservationOrder) {
+      return true;
+    }
+    if (reservationOrder.id === currentOrder.id) {
+      return false;
+    }
+    if (reservationOrder.status !== OrderStatus.DRAFT || currentOrder.status !== OrderStatus.DRAFT) {
+      return true;
+    }
+    const createdAtDiff = reservationOrder.createdAt.getTime() - currentOrder.createdAt.getTime();
+    if (createdAtDiff !== 0) {
+      return createdAtDiff < 0;
+    }
+    return reservationOrder.orderNo.localeCompare(currentOrder.orderNo) < 0;
+  }
+
   private async getWarehouseSnapshot(warehouseId: string) {
     const warehouse = await this.prisma.warehouse.findUnique({
       where: { id: warehouseId },
@@ -368,6 +434,10 @@ export class InventoryService {
   }
 
   async summary(query: InventoryQueryDto) {
+    const currentOrder = await this.resolveStockReservationPriorityOrder(query);
+    const reservationWhere = currentOrder
+      ? this.activeReservationWhereForPriority(currentOrder)
+      : this.activeReservationWhere(query.excludeOrderNo, query.excludeOrderId);
     const batches = await this.prisma.inventoryBatch.findMany({
       where: await this.buildInventoryWhere(query),
       select: {
@@ -389,8 +459,11 @@ export class InventoryService {
         sourceOrder: { select: { orderNo: true, customerName: true } },
         productionTask: { select: { orderNo: true, customerName: true } },
         reservations: {
-          where: { status: InventoryReservationStatus.ACTIVE },
-          select: { quantity: true }
+          where: reservationWhere,
+          select: {
+            quantity: true,
+            order: { select: { id: true, orderNo: true, status: true, createdAt: true } }
+          }
         }
       },
       orderBy: [{ partCode: 'asc' }, { partName: 'asc' }]
@@ -406,7 +479,9 @@ export class InventoryService {
       const quantity = decimalToNumber(batch.quantity);
       const isAvailable = batch.status === 'AVAILABLE' && quantity > 0;
       const reservedQuantity = isAvailable && !batch.sourceOrderId
-        ? batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
+        ? batch.reservations
+            .filter((reservation) => this.stockReservationConsumesAvailability(reservation.order, currentOrder))
+            .reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
         : 0;
       const availableQuantity = isAvailable ? Math.max(Math.round((quantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0) : 0;
       row.batchCount += 1;
@@ -641,7 +716,8 @@ export class InventoryService {
       }
     });
     const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(
-      batches.filter((batch) => !batch.sourceOrderId).map((batch) => batch.id)
+      batches.filter((batch) => !batch.sourceOrderId).map((batch) => batch.id),
+      query
     );
 
     const quantityMap = new Map<
@@ -712,11 +788,10 @@ export class InventoryService {
       where.sourceOrderId = { not: null };
     }
 
-    const excludeOrderNo = query.excludeOrderNo?.trim();
-    const reservationWhere: Prisma.InventoryReservationWhereInput = {
-      status: InventoryReservationStatus.ACTIVE,
-      ...(excludeOrderNo ? { orderNo: { not: excludeOrderNo } } : {})
-    };
+    const currentOrder = await this.resolveStockReservationPriorityOrder(query);
+    const reservationWhere = currentOrder
+      ? this.activeReservationWhereForPriority(currentOrder)
+      : this.activeReservationWhere(query.excludeOrderNo, query.excludeOrderId);
     const batches = await this.prisma.inventoryBatch.findMany({
       where,
       include: {
@@ -728,7 +803,7 @@ export class InventoryService {
         reservations: {
           where: reservationWhere,
           include: {
-            order: { select: { orderNo: true, customerName: true, orderDate: true } },
+            order: { select: { id: true, orderNo: true, status: true, createdAt: true, customerName: true, orderDate: true } },
             orderLine: { select: { lineNo: true, partCode: true, partName: true } }
           },
           orderBy: [{ createdAt: 'asc' }]
@@ -745,7 +820,7 @@ export class InventoryService {
     const firstBatch = batches[0];
     const unit = query.unit?.trim() || firstBatch?.unit || material?.unit || '件';
 
-    const sources = batches.map((batch) => this.toInventorySourceDetail(batch, sourceTaskMap));
+    const sources = batches.map((batch) => this.toInventorySourceDetail(batch, sourceTaskMap, currentOrder));
     return {
       partCode: firstBatch?.partCode || material?.partCode || normalizedPartCode,
       partName: firstBatch?.partName || material?.partName || '',
@@ -816,7 +891,6 @@ export class InventoryService {
           : batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0);
         if (afterQuantity + 0.0001 < reservedQuantity) {
           const reservationText = batch.reservations
-            .slice(0, 3)
             .map((reservation) => {
               const orderNo = reservation.orderNo || reservation.order?.orderNo || '草稿订单';
               const partName = reservation.partName || reservation.orderLine?.partName || reservation.partCode || reservation.orderLine?.partCode || '-';
@@ -983,40 +1057,55 @@ export class InventoryService {
     return sourceRequestNo ? `${prefix}：${sourceRequestNo}` : prefix;
   }
 
-  private async activeReservationQuantityByBatchId(batchIds: string[], excludeOrderNo?: string) {
+  private async activeReservationQuantityByBatchId(
+    batchIds: string[],
+    query: { excludeOrderNo?: string; excludeOrderId?: string } = {}
+  ) {
     if (batchIds.length === 0) {
       return new Map<string, number>();
     }
-    const rows = await this.prisma.inventoryReservation.groupBy({
-      by: ['batchId'],
+    const currentOrder = await this.resolveStockReservationPriorityOrder(query);
+    const rows = await this.prisma.inventoryReservation.findMany({
       where: {
         batchId: { in: batchIds },
-        status: InventoryReservationStatus.ACTIVE,
-        ...(excludeOrderNo?.trim() ? { orderNo: { not: excludeOrderNo.trim() } } : {})
+        ...(currentOrder ? this.activeReservationWhereForPriority(currentOrder) : this.activeReservationWhere(query.excludeOrderNo, query.excludeOrderId))
       },
-      _sum: { quantity: true }
+      select: {
+        batchId: true,
+        quantity: true,
+        order: { select: { id: true, orderNo: true, status: true, createdAt: true } }
+      }
     });
-    return new Map(rows.map((row) => [row.batchId, decimalToNumber(row._sum.quantity || 0)]));
+    const quantityByBatchId = new Map<string, number>();
+    for (const row of rows) {
+      if (!this.stockReservationConsumesAvailability(row.order, currentOrder)) {
+        continue;
+      }
+      quantityByBatchId.set(row.batchId, (quantityByBatchId.get(row.batchId) || 0) + decimalToNumber(row.quantity));
+    }
+    return quantityByBatchId;
   }
 
-  private toInventorySourceDetail(batch: any, sourceTaskMap: Map<string, any>) {
+  private toInventorySourceDetail(batch: any, sourceTaskMap: Map<string, any>, currentOrder?: StockReservationPriorityOrder | null) {
     const sourceTask = this.resolveInventorySourceTask(batch, sourceTaskMap);
     const sourceLine = this.resolveInventorySourceLine(batch, sourceTask);
     const sourceOrder = this.resolveInventorySourceOrder(batch, sourceTask);
-    const reservations = (batch.reservations || []).map((reservation: any) => ({
-      id: reservation.id,
-      orderNo: reservation.orderNo || reservation.order?.orderNo,
-      customerName: reservation.order?.customerName,
-      orderDate: reservation.order?.orderDate,
-      orderLineId: reservation.orderLineId,
-      lineNo: reservation.orderLine?.lineNo,
-      partCode: reservation.partCode || reservation.orderLine?.partCode,
-      partName: reservation.partName || reservation.orderLine?.partName,
-      quantity: decimalToNumber(reservation.quantity),
-      unit: reservation.unit,
-      statusReason: reservation.statusReason,
-      createdAt: reservation.createdAt
-    }));
+    const reservations = (batch.reservations || [])
+      .filter((reservation: any) => this.stockReservationConsumesAvailability(reservation.order, currentOrder))
+      .map((reservation: any) => ({
+        id: reservation.id,
+        orderNo: reservation.orderNo || reservation.order?.orderNo,
+        customerName: reservation.order?.customerName,
+        orderDate: reservation.order?.orderDate,
+        orderLineId: reservation.orderLineId,
+        lineNo: reservation.orderLine?.lineNo,
+        partCode: reservation.partCode || reservation.orderLine?.partCode,
+        partName: reservation.partName || reservation.orderLine?.partName,
+        quantity: decimalToNumber(reservation.quantity),
+        unit: reservation.unit,
+        statusReason: reservation.statusReason,
+        createdAt: reservation.createdAt
+      }));
     const reservedQuantity = reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
     const physicalQuantity = batch.status === 'AVAILABLE' ? decimalToNumber(batch.quantity) : 0;
     const quantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
@@ -1061,6 +1150,10 @@ export class InventoryService {
 
   async findAll(query: InventoryQueryDto) {
     const where = await this.buildInventoryWhere(query);
+    const currentOrder = await this.resolveStockReservationPriorityOrder(query);
+    const reservationWhere = currentOrder
+      ? this.activeReservationWhereForPriority(currentOrder)
+      : this.activeReservationWhere(query.excludeOrderNo, query.excludeOrderId);
 
     const rawBatches = await this.prisma.inventoryBatch.findMany({
       where,
@@ -1071,9 +1164,9 @@ export class InventoryService {
         sourceOrderLine: true,
         productionTask: { include: { order: true, orderLine: true } },
         reservations: {
-          where: { status: InventoryReservationStatus.ACTIVE },
+          where: reservationWhere,
           include: {
-            order: { select: { orderNo: true, customerName: true, orderDate: true } },
+            order: { select: { id: true, orderNo: true, status: true, createdAt: true, customerName: true, orderDate: true } },
             orderLine: { select: { lineNo: true, partCode: true, partName: true } }
           },
           orderBy: [{ createdAt: 'asc' }]
@@ -1090,20 +1183,22 @@ export class InventoryService {
     return batches.map((batch) => {
       const storedQuantity = decimalToNumber(batch.quantity);
       const physicalQuantity = batch.status === 'AVAILABLE' ? storedQuantity : 0;
-      const reservations = (batch.reservations || []).map((reservation: any) => ({
-        id: reservation.id,
-        orderNo: reservation.orderNo || reservation.order?.orderNo,
-        customerName: reservation.order?.customerName,
-        orderDate: reservation.order?.orderDate,
-        orderLineId: reservation.orderLineId,
-        lineNo: reservation.orderLine?.lineNo,
-        partCode: reservation.partCode || reservation.orderLine?.partCode,
-        partName: reservation.partName || reservation.orderLine?.partName,
-        quantity: decimalToNumber(reservation.quantity),
-        unit: reservation.unit,
-        statusReason: reservation.statusReason,
-        createdAt: reservation.createdAt
-      }));
+      const reservations = (batch.reservations || [])
+        .filter((reservation: any) => this.stockReservationConsumesAvailability(reservation.order, currentOrder))
+        .map((reservation: any) => ({
+          id: reservation.id,
+          orderNo: reservation.orderNo || reservation.order?.orderNo,
+          customerName: reservation.order?.customerName,
+          orderDate: reservation.order?.orderDate,
+          orderLineId: reservation.orderLineId,
+          lineNo: reservation.orderLine?.lineNo,
+          partCode: reservation.partCode || reservation.orderLine?.partCode,
+          partName: reservation.partName || reservation.orderLine?.partName,
+          quantity: decimalToNumber(reservation.quantity),
+          unit: reservation.unit,
+          statusReason: reservation.statusReason,
+          createdAt: reservation.createdAt
+        }));
       const reservedQuantity = batch.sourceOrderId ? 0 : reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
       const availableQuantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
       const sourceTask = this.resolveInventorySourceTask(batch, sourceTaskMap);

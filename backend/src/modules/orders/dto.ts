@@ -308,6 +308,19 @@ export class UpdateLineQuantityDto {
   managerName?: string;
 }
 
+export class ResolveLineShortageDto {
+  @IsIn(['NO_REPLENISHMENT'])
+  resolutionMode!: 'NO_REPLENISHMENT';
+
+  @IsString()
+  @IsNotEmpty()
+  managerName!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  reason!: string;
+}
+
 export class CancelOrderHandlingPlanItemDto {
   @IsString()
   @IsNotEmpty()

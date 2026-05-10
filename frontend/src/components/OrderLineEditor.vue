@@ -329,6 +329,9 @@
     :detail="sourceDetails"
     :expected="sourceExpected"
     :selected-sources="currentSourceLine?.selectedStockSources || []"
+    :draft-reserved-sources="otherLineSelectedStockSources"
+    :exclude-order-no="excludeOrderNo"
+    :exclude-order-id="excludeOrderId"
     review-mode
     :reviewed="Boolean(currentSourceLine && isStockSourceReviewed(currentSourceLine))"
     @source-search="loadStockDetailsForPart"
@@ -338,7 +341,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import type { UploadRequestOptions } from 'element-plus';
 import { Delete } from '@element-plus/icons-vue';
@@ -366,25 +369,37 @@ const props = withDefaults(
     minLines?: number;
     defaultDeliveryDate?: string;
     excludeOrderNo?: string;
+    excludeOrderId?: string;
     inventorySummary?: InventorySummaryRow[];
   }>(),
   {
     minLines: 1,
     defaultDeliveryDate: '',
     excludeOrderNo: '',
+    excludeOrderId: '',
     inventorySummary: () => []
   }
 );
 
 const lines = computed(() => props.lines);
 const defaultDeliveryDate = computed(() => props.defaultDeliveryDate);
+const excludeOrderNo = computed(() => props.excludeOrderNo);
+const excludeOrderId = computed(() => props.excludeOrderId);
 const removeButtonText = computed(() => (props.lines.length > props.minLines ? '删除' : '清空'));
 const sourceDetailsVisible = ref(false);
 const sourceDetailsLoading = ref(false);
 const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
 const sourceExpected = ref<InventorySourceExpected | null>(null);
 const currentSourceLine = ref<CreateOrderLinePayload | null>(null);
+const stockCoverAutoSyncedLines = new WeakSet<CreateOrderLinePayload>();
 const materialSuggestionRequestSeq = ref(0);
+const otherLineSelectedStockSources = computed(() =>
+  currentSourceLine.value
+    ? props.lines
+        .filter((line) => line !== currentSourceLine.value)
+        .flatMap((line) => line.selectedStockSources || [])
+    : []
+);
 
 const emit = defineEmits<{
   remove: [index: number];
@@ -438,12 +453,57 @@ function stockShortageProductionQuantity(line: CreateOrderLinePayload) {
   return Math.max(Math.round((customerQuantity - selectedQuantity + Number.EPSILON) * 1000) / 1000, 0);
 }
 
-function syncStockProductionPlanQuantity(line: CreateOrderLinePayload) {
+function syncStockProductionPlanQuantity(
+  line: CreateOrderLinePayload,
+  previousSuggestedQuantity = suggestedProductionPlanQuantity(line),
+  options: { forceWhenStockCovers?: boolean } = {}
+) {
   if (line.fulfillmentMode === 'STOCK') {
-    line.productionPlanQuantity = stockShortageProductionQuantity(line);
-    clearProductionPlanOverride(line);
+    const currentPlanQuantity = Number(line.productionPlanQuantity ?? previousSuggestedQuantity);
+    const nextSuggestedQuantity = stockShortageProductionQuantity(line);
+    line.productionPlanSuggestedQuantity = nextSuggestedQuantity;
+    const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
+    const stockCoversCustomerQuantity =
+      nextSuggestedQuantity <= 0 && selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity || 0);
+    // 库存已完全覆盖客户数量时默认不生产，减少操作人员手动改 0。
+    if (options.forceWhenStockCovers && stockCoversCustomerQuantity) {
+      line.productionPlanQuantity = nextSuggestedQuantity;
+      clearProductionPlanOverride(line);
+      return;
+    }
+    // 库存来源变化时只同步“仍跟随建议值”的生产计划；操作人员手动多做/少做后必须保留其计划和说明。
+    if (planWasFollowingSuggestion) {
+      line.productionPlanQuantity = nextSuggestedQuantity;
+      clearProductionPlanOverride(line);
+      return;
+    }
+    if (!stockProductionPlanDiffers(line)) {
+      clearProductionPlanOverride(line);
+    }
   }
 }
+
+function syncInitialStockCoveredPlanQuantity(line: CreateOrderLinePayload) {
+  if (stockCoverAutoSyncedLines.has(line)) {
+    return;
+  }
+  stockCoverAutoSyncedLines.add(line);
+  if (
+    line.fulfillmentMode === 'STOCK' &&
+    selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity || 0) &&
+    Number(line.productionPlanQuantity || 0) > 0
+  ) {
+    syncStockProductionPlanQuantity(line, suggestedProductionPlanQuantity(line), { forceWhenStockCovers: true });
+  }
+}
+
+watch(
+  () => props.lines,
+  (rows) => {
+    rows.forEach(syncInitialStockCoveredPlanQuantity);
+  },
+  { immediate: true }
+);
 
 function clearProductionPlanOverride(line: CreateOrderLinePayload) {
   line.productionPlanOverrideByCode = '';
@@ -681,7 +741,8 @@ async function loadStockDetailsForPart(partCode: string) {
     sourceDetails.value = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
       unit: currentSourceLine.value.unit,
       sourceType: 'STOCK',
-      excludeOrderNo: props.excludeOrderNo
+      excludeOrderNo: props.excludeOrderNo,
+      excludeOrderId: props.excludeOrderId
     });
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败');
@@ -694,12 +755,13 @@ function handleStockSourceSelectionChange(sources: StockSourceSelectionPayload[]
   if (!currentSourceLine.value) {
     return;
   }
+  const previousSuggestedQuantity = suggestedProductionPlanQuantity(currentSourceLine.value);
   currentSourceLine.value.selectedStockSources = sources;
   currentSourceLine.value.stockSourceReviewed = false;
   currentSourceLine.value.stockSourceReviewSignature = '';
   currentSourceLine.value.stockSourceAvailableQuantity = sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
   currentSourceLine.value.stockSourceMatchedQuantity = currentSourceLine.value.stockSourceAvailableQuantity;
-  syncStockProductionPlanQuantity(currentSourceLine.value);
+  syncStockProductionPlanQuantity(currentSourceLine.value, previousSuggestedQuantity, { forceWhenStockCovers: true });
 }
 
 function handleStockSourceReviewed() {
@@ -711,11 +773,7 @@ function handleStockSourceReviewed() {
     ElMessage.warning('当前没有可用库存来源，不能确认');
     return;
   }
-  if (currentSourceLine.value.fulfillmentMode !== 'STOCK' && selectedQuantity + 0.0001 < stockRequiredQuantity(currentSourceLine.value)) {
-    ElMessage.warning('已选库存数量不足，不能确认');
-    return;
-  }
-  syncStockProductionPlanQuantity(currentSourceLine.value);
+  syncStockProductionPlanQuantity(currentSourceLine.value, undefined, { forceWhenStockCovers: true });
   currentSourceLine.value.stockSourceAvailableQuantity = selectedQuantity;
   currentSourceLine.value.stockSourceMatchedQuantity = selectedQuantity;
   markStockSourceReviewed(currentSourceLine.value);
@@ -728,7 +786,13 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
   const requestId = ++materialSuggestionRequestSeq.value;
   callback([]);
   try {
-    const result = await erpApi.inventoryMaterialSuggestions(normalizedKeyword);
+    const result = await erpApi.inventoryMaterialSuggestions(
+      normalizedKeyword,
+      undefined,
+      undefined,
+      props.excludeOrderNo,
+      props.excludeOrderId
+    );
     if (requestId === materialSuggestionRequestSeq.value) {
       callback(result);
     }

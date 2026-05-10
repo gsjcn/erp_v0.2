@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { InventoryTransactionType, OrderStatus, ProductionStatus } from '@prisma/client';
+import { InventoryTransactionType, OrderStatus, Prisma, ProductionStatus } from '@prisma/client';
 import { decimalToNumber } from '../../common/serializers';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrderStatisticsQueryDto, StatisticsPeriod } from './dto';
@@ -93,7 +93,8 @@ export class StatisticsService {
                 orderNo: { in: orderNos },
                 // 订单发货数量只统计仓库确认发货生成的 OUT 流水；取消、盘点和备货领用不能混入发货口径。
                 sourceRecordType: 'InventoryBatch'
-              }
+              },
+              include: { batch: { select: { sourceOrderLineId: true } } }
             }),
             this.prisma.inventoryTransaction.findMany({
               where: {
@@ -121,6 +122,7 @@ export class StatisticsService {
     }
 
     const shippedQuantityByOrderUnit = new Map<string, Map<string, number>>();
+    const shippedQuantityByOrderLineId = new Map<string, number>();
     for (const transaction of shipmentTransactions) {
       if (!transaction.orderNo) {
         continue;
@@ -140,9 +142,14 @@ export class StatisticsService {
       const quantity = decimalToNumber(transaction.quantity);
       row.shippedOrderQuantity += quantity;
       this.addOrderUnitQuantity(shippedQuantityByOrderUnit, transaction.orderNo, transaction.unit, quantity);
+      const orderLineId = transaction.orderLineId || transaction.batch?.sourceOrderLineId;
+      if (orderLineId) {
+        this.addLineQuantity(shippedQuantityByOrderLineId, orderLineId, quantity);
+      }
     }
 
     const stockAllocatedQuantityByOrderUnit = new Map<string, Map<string, number>>();
+    const stockAllocatedQuantityByOrderLineId = new Map<string, number>();
     for (const transaction of stockAllocationTransactions) {
       if (!transaction.orderNo) {
         continue;
@@ -162,6 +169,9 @@ export class StatisticsService {
       const quantity = decimalToNumber(transaction.quantity);
       // 使用库存转订单待发货库存只代表该数量已经可发货；统计页“实际完成数量”仍只统计真实生产入库。
       this.addOrderUnitQuantity(stockAllocatedQuantityByOrderUnit, transaction.orderNo, transaction.unit, quantity);
+      if (transaction.orderLineId) {
+        this.addLineQuantity(stockAllocatedQuantityByOrderLineId, transaction.orderLineId, quantity);
+      }
     }
 
     const taskNos = Array.from(taskPeriodMap.keys());
@@ -208,6 +218,7 @@ export class StatisticsService {
     }
 
     const completedProductionQuantityByOrderUnit = new Map<string, Map<string, number>>();
+    const completedProductionQuantityByOrderLineId = new Map<string, number>();
     for (const task of productionTasks) {
       const orderPeriod = taskPeriodMap.get(task.productionTaskNo);
       if (!orderPeriod) {
@@ -221,11 +232,18 @@ export class StatisticsService {
       );
       row.completedProductionQuantity += completedQuantity;
       this.addOrderUnitQuantity(completedProductionQuantityByOrderUnit, task.orderNo, task.unit, completedQuantity);
+      if (task.orderLineId) {
+        this.addLineQuantity(completedProductionQuantityByOrderLineId, task.orderLineId, completedQuantity);
+      }
     }
 
     const completedFulfillmentQuantityByOrderUnit = this.mergeOrderUnitQuantityMaps(
       completedProductionQuantityByOrderUnit,
       stockAllocatedQuantityByOrderUnit
+    );
+    const completedFulfillmentQuantityByOrderLineId = this.mergeLineQuantityMaps(
+      completedProductionQuantityByOrderLineId,
+      stockAllocatedQuantityByOrderLineId
     );
 
     // 统计页只读展示，所有周期均按 CustomerOrder.orderDate 归属，不按生产完成或发货日期归属。
@@ -260,11 +278,14 @@ export class StatisticsService {
         status: order.status,
         statisticsStatus: this.resolveOrderStatisticsStatus(
           order.status,
+          order.lines,
           quantityByUnit,
           tasksByOrderNo.get(order.orderNo) || [],
           completedProductionQuantityByOrderUnit.get(order.orderNo) || new Map<string, number>(),
           completedFulfillmentQuantityByOrderUnit.get(order.orderNo) || new Map<string, number>(),
           shippedQuantityByOrderUnit.get(order.orderNo) || new Map<string, number>(),
+          completedFulfillmentQuantityByOrderLineId,
+          shippedQuantityByOrderLineId,
           order.inventoryBatches || []
         ),
         partCount: order.lines.length,
@@ -290,6 +311,20 @@ export class StatisticsService {
     target.set(orderNo, unitMap);
   }
 
+  private addLineQuantity(target: Map<string, number>, orderLineId: string, quantity: number) {
+    target.set(orderLineId, (target.get(orderLineId) || 0) + quantity);
+  }
+
+  private mergeLineQuantityMaps(...sources: Array<Map<string, number>>) {
+    const merged = new Map<string, number>();
+    for (const source of sources) {
+      for (const [orderLineId, quantity] of source.entries()) {
+        this.addLineQuantity(merged, orderLineId, quantity);
+      }
+    }
+    return merged;
+  }
+
   private mergeOrderUnitQuantityMaps(...sources: Array<Map<string, Map<string, number>>>) {
     const merged = new Map<string, Map<string, number>>();
     for (const source of sources) {
@@ -304,11 +339,14 @@ export class StatisticsService {
 
   private resolveOrderStatisticsStatus(
     orderStatus: OrderStatus,
+    lines: Array<{ id: string; quantity: unknown }>,
     quantityByUnit: Array<{ unit: string; totalQuantity: number; totalProductionPlanQuantity: number }>,
     tasks: Array<{ status: ProductionStatus }>,
     completedProductionQuantityByUnit: Map<string, number>,
     completedFulfillmentQuantityByUnit: Map<string, number>,
     shippedQuantityByUnit: Map<string, number>,
+    completedFulfillmentQuantityByLineId: Map<string, number>,
+    shippedQuantityByLineId: Map<string, number>,
     orderBatches: Array<{ status: string }>
   ) {
     if (orderStatus === OrderStatus.DRAFT) {
@@ -317,15 +355,32 @@ export class StatisticsService {
     if (orderStatus === OrderStatus.CANCELLED) {
       return 'ORDER_CANCELLED';
     }
-    if (this.allUnitsReached(quantityByUnit, 'totalQuantity', shippedQuantityByUnit)) {
+    const hasLineShipmentData = this.hasLineQuantity(lines, shippedQuantityByLineId);
+    const hasLineFulfillmentData = this.hasLineQuantity(lines, completedFulfillmentQuantityByLineId);
+    if (
+      hasLineShipmentData
+        ? this.allLinesReached(lines, shippedQuantityByLineId)
+        : this.allUnitsReached(quantityByUnit, 'totalQuantity', shippedQuantityByUnit)
+    ) {
       return 'ORDER_SHIPPED_COMPLETED';
+    }
+    if (
+      hasLineShipmentData
+        ? this.totalQuantityFromLineMap(lines, shippedQuantityByLineId) > 0
+        : this.totalQuantityFromUnitMap(shippedQuantityByUnit) > 0
+    ) {
+      return 'PARTIAL_SHIPPED';
     }
     if (orderStatus === OrderStatus.COMPLETED) {
       // 当前第一阶段只有仓库全量发货闭环后才把 CustomerOrder.status 置为 COMPLETED。
       // 旧数据若缺少发货 OUT 流水，也应按业务状态展示为已完成发货。
       return 'ORDER_SHIPPED_COMPLETED';
     }
-    if (this.allUnitsReached(quantityByUnit, 'totalQuantity', completedFulfillmentQuantityByUnit)) {
+    if (
+      hasLineFulfillmentData
+        ? this.allLinesReached(lines, completedFulfillmentQuantityByLineId)
+        : this.allUnitsReached(quantityByUnit, 'totalQuantity', completedFulfillmentQuantityByUnit)
+    ) {
       return 'ORDER_COMPLETED_UNSHIPPED';
     }
     if (this.orderUsesOnlyAllocatedStock(quantityByUnit, orderBatches)) {
@@ -371,6 +426,29 @@ export class StatisticsService {
       return false;
     }
     return targets.every((row) => (actualQuantityByUnit.get(row.unit || '件') || 0) + 0.0001 >= Number(row[field] || 0));
+  }
+
+  private totalQuantityFromUnitMap(quantityByUnit: Map<string, number>) {
+    return Array.from(quantityByUnit.values()).reduce((sum, quantity) => sum + quantity, 0);
+  }
+
+  private hasLineQuantity(lines: Array<{ id: string }>, quantityByLineId: Map<string, number>) {
+    return lines.some((line) => (quantityByLineId.get(line.id) || 0) > 0);
+  }
+
+  private allLinesReached(lines: Array<{ id: string; quantity: unknown }>, quantityByLineId: Map<string, number>) {
+    const targets = lines.filter((line) => decimalToNumber(line.quantity as Prisma.Decimal | number | string | null | undefined) > 0);
+    if (targets.length === 0) {
+      return false;
+    }
+    return targets.every((line) => {
+      const targetQuantity = decimalToNumber(line.quantity as Prisma.Decimal | number | string | null | undefined);
+      return (quantityByLineId.get(line.id) || 0) + 0.0001 >= targetQuantity;
+    });
+  }
+
+  private totalQuantityFromLineMap(lines: Array<{ id: string }>, quantityByLineId: Map<string, number>) {
+    return lines.reduce((sum, line) => sum + (quantityByLineId.get(line.id) || 0), 0);
   }
 
   private toOrderQuantityByUnit(lines: any[]) {

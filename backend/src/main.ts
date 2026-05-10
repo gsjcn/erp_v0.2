@@ -4,7 +4,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import { uploadRootPath } from './storage/upload-paths';
+import { exportRootPath, uploadRootPath } from './storage/upload-paths';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -12,6 +12,8 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api');
   app.useStaticAssets(uploadRootPath(), { prefix: '/uploads/' });
+  // NAS 部署时导出目录也必须在启动阶段校验和创建，避免首次导出才暴露挂载权限问题。
+  exportRootPath();
   app.enableCors({
     origin: corsOrigin && corsOrigin.length > 0 ? corsOrigin : true
   });

@@ -41,12 +41,15 @@
           </div>
         </template>
 
-        <article class="process-template-card">
+        <article class="process-template-card" :class="{ expanded: isMobileTemplateExpanded(template.id) }">
           <button class="process-template-main" type="button" @click="handleTemplateMainClick(template)">
             <strong>{{ template.templateName }}</strong>
             <small>{{ templateStepSummary(template.steps) }}</small>
             <em v-if="template.remark">{{ template.remark }}</em>
           </button>
+          <el-button class="process-template-detail-toggle" link type="primary" @click.stop="toggleMobileTemplateCard(template.id)">
+            {{ isMobileTemplateExpanded(template.id) ? '收起' : '详情' }}
+          </el-button>
           <div class="process-template-card-actions">
             <el-button v-if="selectable" link type="primary" :disabled="disabled" @click.stop="applyTemplate(template)">应用</el-button>
             <el-button link type="primary" @click.stop="openPreviewDialog(template)">查看</el-button>
@@ -231,6 +234,7 @@ const deleteDialogVisible = ref(false);
 const previewTemplate = ref<ProcessTemplate>();
 const activeDeleteTemplate = ref<ProcessTemplate>();
 const editingTemplateId = ref('');
+const expandedMobileTemplateIds = ref<string[]>([]);
 const newStepName = ref('');
 const newProcessName = ref('');
 const searchTimer = ref<number>();
@@ -312,6 +316,18 @@ function handleTemplateMainClick(template: ProcessTemplate) {
     return;
   }
   openEditDialog(template);
+}
+
+function toggleMobileTemplateCard(templateId: string) {
+  if (expandedMobileTemplateIds.value.includes(templateId)) {
+    expandedMobileTemplateIds.value = expandedMobileTemplateIds.value.filter((id) => id !== templateId);
+    return;
+  }
+  expandedMobileTemplateIds.value = [...expandedMobileTemplateIds.value, templateId];
+}
+
+function isMobileTemplateExpanded(templateId: string) {
+  return expandedMobileTemplateIds.value.includes(templateId);
 }
 
 function applyTemplate(template: ProcessTemplate) {
@@ -695,6 +711,7 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   align-content: start;
   gap: 6px;
   width: 100%;
+  min-width: 0;
   padding: 0;
   text-align: left;
   background: transparent;
@@ -727,6 +744,10 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 
 .process-template-card-actions .el-button {
   margin-left: 0;
+}
+
+.process-template-detail-toggle {
+  display: none;
 }
 
 .template-step-editor {
@@ -882,12 +903,35 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   }
 
   .process-template-card-actions {
+    grid-column: 1 / -1;
+    display: none;
     justify-content: stretch;
+  }
+
+  .process-template-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: flex-start;
+  }
+
+  .process-template-detail-toggle {
+    display: inline-flex;
+    min-height: 44px;
+    padding: 0 4px;
+  }
+
+  .process-template-card.expanded .process-template-card-actions {
+    display: flex;
+  }
+
+  .process-template-card:not(.expanded) .process-template-main em {
+    display: none;
   }
 
   .process-template-card-actions .el-button {
     flex: 1 1 72px;
     min-width: 0;
+    min-height: 44px;
   }
 
   .template-step-add .el-select,

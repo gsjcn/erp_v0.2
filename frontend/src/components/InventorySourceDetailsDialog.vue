@@ -65,7 +65,7 @@
         </div>
         <div>
           <span>当前可用</span>
-          <strong>{{ formatQuantity(detail.availableQuantity, detail.unit) }}</strong>
+          <strong>{{ formatQuantity(effectiveDetailAvailableQuantity, detail.unit) }}</strong>
         </div>
         <div>
           <span>库存批次</span>
@@ -161,10 +161,11 @@
         <div class="selected-source-title">
           <div>
             <strong>已选库存批次</strong>
-            <span>这里会保留跨物料搜索后选中的批次，默认按库存数量从少到多使用。</span>
+            <span>这里会保留跨物料搜索后选中的批次；取消勾选某批次后，系统会从后续批次自动补足，不会再选回该批次。</span>
           </div>
           <div class="selected-source-actions">
             <el-button size="small" @click="autoSelectSources">按默认顺序选用库存</el-button>
+            <el-button size="small" @click="rebalanceCurrentSelectedSourcesByQueue">按当前顺序重算</el-button>
             <el-button size="small" @click="clearSelectedSources">清空选择</el-button>
           </div>
         </div>
@@ -174,6 +175,9 @@
               <strong>{{ index + 1 }}. {{ source.batchNo || source.batchId }}</strong>
               <span>{{ source.partCode || '-' }} / {{ source.partName || '-' }}</span>
               <small>{{ formatQuantity(source.quantity, source.unit || expected?.unit || detail?.unit || '件') }}</small>
+              <small class="selected-source-availability-note">
+                {{ selectedSourceAvailabilityText(source) }}
+              </small>
               <small v-if="selectedSourceReplenishmentText(source)" class="selected-source-replenishment-note">
                 {{ selectedSourceReplenishmentText(source) }}
               </small>
@@ -195,11 +199,13 @@
                 @change="handleSelectedSourceQuantityChange(source, $event)"
               />
             </div>
-            <el-tag v-if="sourceNeedsManualConfirmation(source)" type="warning" effect="plain">
+            <el-tag v-if="selectedSourceQueuePlaceholder(source)" type="info" effect="plain">队列占位</el-tag>
+            <el-tag v-else-if="sourceNeedsManualConfirmation(source)" type="warning" effect="plain">
               {{ manualConfirmationReason(source) }}
             </el-tag>
             <el-tag v-else type="success" effect="plain">已匹配</el-tag>
             <div class="selected-source-sort-actions">
+              <el-button link size="small" @click="focusSelectedSource(source)">查看该库存</el-button>
               <el-button link size="small" :disabled="index === 0" @click="moveSelectedSource(index, -1)">上移</el-button>
               <el-button link size="small" :disabled="index === selectedSourceRows.length - 1" @click="moveSelectedSource(index, 1)">下移</el-button>
             </div>
@@ -290,12 +296,15 @@
                 已预占 {{ formatQuantity(row.reservedQuantity, row.unit) }}
               </div>
             </el-tooltip>
+            <div v-if="draftReservedQuantity(row)" class="cell-subtext warning-text">
+              本订单其他零件已选 {{ formatQuantity(draftReservedQuantity(row), row.unit) }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column v-if="hasReservedSources" label="预占订单" min-width="240">
           <template #default="{ row }">
             <div v-if="row.reservations?.length" class="reservation-list">
-              <div v-for="reservation in limitedReservations(row)" :key="reservation.id" class="reservation-item">
+              <div v-for="reservation in displayReservations(row)" :key="reservation.id" class="reservation-item">
                 <div>
                   <el-button
                     v-if="reservation.orderNo"
@@ -313,9 +322,6 @@
                 </div>
                 <small>{{ reservation.partName || reservation.partCode || '-' }}</small>
               </div>
-              <small v-if="hiddenReservationCount(row) > 0" class="cell-subtext">
-                还有 {{ hiddenReservationCount(row) }} 条预占
-              </small>
             </div>
             <span v-else class="muted">-</span>
           </template>
@@ -377,7 +383,12 @@
       </el-table>
 
       <div v-if="detail" class="mobile-section source-mobile-list">
-        <article v-for="row in sourceRows" :key="row.id || row.batchNo" class="mobile-card source-mobile-card">
+        <article
+          v-for="row in sourceRows"
+          :key="row.id || row.batchNo"
+          class="mobile-card source-mobile-card mobile-order-card"
+          :class="{ expanded: isMobileSourceBatchExpanded(sourceBatchCardKey(row)) }"
+        >
           <div class="mobile-card-header">
             <div class="mobile-card-title">
               <strong>{{ row.batchNo }}</strong>
@@ -387,11 +398,25 @@
                 <template v-if="row.physicalQuantity !== undefined"> / 账面 {{ formatQuantity(row.physicalQuantity, row.unit) }}</template>
                 <template v-if="row.reservedQuantity"> / 已预占 {{ formatQuantity(row.reservedQuantity, row.unit) }}</template>
               </small>
+              <small v-if="draftReservedQuantity(row)" class="warning-text">
+                本订单其他零件已选 {{ formatQuantity(draftReservedQuantity(row), row.unit) }}
+              </small>
               <small v-if="row.reservedQuantity" class="warning-text">{{ reservationSummary(row) }}</small>
             </div>
-            <el-tag v-if="expected && hasExpectedInfo" :type="compatibilityResult(row).type" effect="plain">
-              {{ compatibilityResult(row).label }}
-            </el-tag>
+            <div class="mobile-card-header-actions source-mobile-header-actions">
+              <el-tag v-if="expected && hasExpectedInfo" :type="compatibilityResult(row).type" effect="plain">
+                {{ compatibilityResult(row).label }}
+              </el-tag>
+              <el-button link type="primary" @click="toggleMobileSourceBatch(sourceBatchCardKey(row))">
+                {{ isMobileSourceBatchExpanded(sourceBatchCardKey(row)) ? '收起' : '详情' }}
+              </el-button>
+            </div>
+          </div>
+
+          <div class="mobile-card-compact-summary source-mobile-compact-summary">
+            <span>{{ row.partCode || '-' }}</span>
+            <span>{{ row.warehouseName || '-' }} / {{ row.locationName || '-' }}</span>
+            <span>{{ drawingTitle(row) }}</span>
           </div>
 
           <div v-if="reviewMode" class="mobile-source-selection">
@@ -408,7 +433,7 @@
             />
           </div>
 
-          <div class="mobile-card-fields">
+          <div v-show="isMobileSourceBatchExpanded(sourceBatchCardKey(row))" class="mobile-card-fields">
             <div class="mobile-field">
               <label>仓库 / 库位</label>
               <span>{{ row.warehouseName || '-' }} / {{ row.locationName || '-' }}</span>
@@ -457,7 +482,7 @@
             </div>
           </div>
 
-          <div class="mobile-card-actions">
+          <div v-show="isMobileSourceBatchExpanded(sourceBatchCardKey(row))" class="mobile-card-actions">
             <DrawingPreviewLink
               :file-name="row.drawingFileName"
               :file-url="row.drawingFileUrl"
@@ -468,7 +493,7 @@
         </article>
       </div>
 
-      <el-empty v-if="detail && detail.sources.length === 0" description="当前条件下没有可用库存来源" />
+      <el-empty v-if="detail && adjustedSourceRows.length === 0" description="当前条件下没有可用库存来源" />
     </div>
 
     <template v-if="reviewMode" #footer>
@@ -579,6 +604,9 @@ const props = defineProps<{
   focusBatchId?: string;
   focusBatchNo?: string;
   selectedSources?: StockSourceSelectionPayload[];
+  draftReservedSources?: StockSourceSelectionPayload[];
+  excludeOrderNo?: string;
+  excludeOrderId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -594,6 +622,13 @@ type ManualConfirmForm = {
   confirmedAt: Date;
   remark: string;
 };
+type SourceRow = InventorySourceBatchDetail & {
+  backendAvailableQuantity?: number;
+  draftReservedQuantity?: number;
+};
+type SelectedSourceRow = StockSourceSelectionPayload & {
+  currentAvailableQuantity?: number;
+};
 
 const expected = computed(() => props.expected || null);
 const sourceSearchKeyword = ref('');
@@ -603,11 +638,37 @@ const lastInventorySuggestions = ref<InventoryMaterialSuggestion[]>([]);
 const reviewConfirmChecked = ref(false);
 const bulkEachQuantity = ref(1);
 const manualConfirmForms = ref<Record<string, ManualConfirmForm>>({});
+const expandedMobileSourceBatchKeys = ref<string[]>([]);
 const orderPreviewVisible = ref(false);
 const orderPreviewLoading = ref(false);
 const orderPreview = ref<OrderDetail | null>(null);
+const draftReservedQuantityByBatchId = computed(() => {
+  const rows = new Map<string, number>();
+  for (const source of props.draftReservedSources || []) {
+    const batchId = source.batchId?.trim();
+    const quantity = Number(source.quantity || 0);
+    if (!batchId || quantity <= 0) {
+      continue;
+    }
+    rows.set(batchId, (rows.get(batchId) || 0) + quantity);
+  }
+  return rows;
+});
+const adjustedSourceRows = computed<SourceRow[]>(() =>
+  (props.detail?.sources || []).map((row) => {
+    const draftReservedQuantity = draftReservedQuantityByBatchId.value.get(row.id) || 0;
+    const backendAvailableQuantity = row.quantity;
+    return {
+      ...row,
+      backendAvailableQuantity,
+      draftReservedQuantity,
+      quantity: Math.max(Math.round((backendAvailableQuantity - draftReservedQuantity + Number.EPSILON) * 1000) / 1000, 0),
+      reservedQuantity: Number(row.reservedQuantity || 0) + draftReservedQuantity
+    };
+  })
+);
 const sourceRows = computed(() => {
-  const rows = props.detail?.sources || [];
+  const rows = adjustedSourceRows.value;
   if (
     !props.reviewMode &&
     !props.focusBatchId &&
@@ -629,15 +690,36 @@ const sourceRows = computed(() => {
     )
     .map((item) => item.row);
 });
+
+function sourceBatchCardKey(row: Pick<InventorySourceBatchDetail, 'id' | 'batchNo'>) {
+  return row.id || row.batchNo || '';
+}
+
+function isMobileSourceBatchExpanded(key: string) {
+  return expandedMobileSourceBatchKeys.value.includes(key);
+}
+
+function toggleMobileSourceBatch(key: string) {
+  expandedMobileSourceBatchKeys.value = isMobileSourceBatchExpanded(key)
+    ? expandedMobileSourceBatchKeys.value.filter((item) => item !== key)
+    : [...expandedMobileSourceBatchKeys.value, key];
+}
+
 const hasReservedSources = computed(() =>
-  (props.detail?.sources || []).some((row) => Number(row.reservedQuantity || 0) > 0 || Boolean(row.reservations?.length))
+  adjustedSourceRows.value.some((row) => Number(row.reservedQuantity || 0) > 0 || Boolean(row.reservations?.length))
 );
-const selectedSourceRows = computed(() => {
-  const sourceMap = new Map((props.detail?.sources || []).map((row) => [row.id, row]));
+const selectedSourceRows = computed<SelectedSourceRow[]>(() => {
+  const sourceMap = new Map(adjustedSourceRows.value.map((row) => [row.id, row]));
   return normalizeSelectedSources(props.selectedSources || []).map((source) => {
     const row = sourceMap.get(source.batchId);
     if (!row) {
-      return source;
+      const draftReservedQuantity = draftReservedQuantityByBatchId.value.get(source.batchId) || 0;
+      const sourceAvailableQuantity = Number(source.availableQuantity ?? source.quantity ?? 0);
+      return {
+        ...source,
+        availableQuantity: sourceAvailableQuantity,
+        currentAvailableQuantity: Math.max(Math.round((sourceAvailableQuantity - draftReservedQuantity + Number.EPSILON) * 1000) / 1000, 0)
+      };
     }
     const compatibility = compatibilityResult(row);
     const nextCompatibilityStatus = selectionCompatibilityStatus(row);
@@ -649,7 +731,8 @@ const selectedSourceRows = computed(() => {
       partCode: row.partCode || source.partCode,
       partName: row.partName || source.partName,
       unit: row.unit || source.unit,
-      availableQuantity: row.quantity,
+      availableQuantity: sourceBackendAvailableQuantity(row),
+      currentAvailableQuantity: row.quantity,
       replenishmentSourceType: row.replenishmentSourceType || source.replenishmentSourceType,
       replenishmentSourceRequestNo: row.replenishmentSourceRequestNo || source.replenishmentSourceRequestNo,
       replenishmentSourceLabel: row.replenishmentSourceLabel || source.replenishmentSourceLabel,
@@ -671,7 +754,20 @@ const hasReviewableSource = computed(() => Boolean(props.detail && (props.detail
 const selectedQuantityOverRequired = computed(
   () => props.reviewMode && requiredQuantity.value > 0 && selectedQuantityTotal.value > requiredQuantity.value + 0.0001
 );
-const selectedIssueSources = computed(() => selectedSourceRows.value.filter((source) => sourceNeedsManualConfirmation(source)));
+const selectedQuantityOverAvailableSource = computed(() =>
+  selectedSourceRows.value.find((source) => {
+    const availableQuantity = selectedSourceCurrentAvailableQuantity(source);
+    return source.quantity > availableQuantity + 0.0001;
+  })
+);
+const selectedIssueSources = computed(() =>
+  selectedSourceRows.value.filter((source) => Number(source.quantity || 0) > 0 && sourceNeedsManualConfirmation(source))
+);
+
+function selectedSourceQueuePlaceholder(source: StockSourceSelectionPayload) {
+  return Number(source.quantity || 0) <= 0;
+}
+
 const selectedIssueSourceForms = computed(() =>
   selectedIssueSources.value.map((source) => ({
     source,
@@ -679,15 +775,27 @@ const selectedIssueSourceForms = computed(() =>
   }))
 );
 const directStockBlockedIssue = computed(() => {
-  return '';
+  if (!props.reviewMode) {
+    return '';
+  }
+  const missingReviewSource = selectedSourceRows.value.find((source) => Number(source.quantity || 0) > 0 && !source.compatibilityStatus);
+  if (!missingReviewSource) {
+    return '';
+  }
+  return `已选库存批次 ${
+    missingReviewSource.batchNo || missingReviewSource.batchId
+  } 缺少库存来源核对结果，请重新打开库存来源并确认后再保存。`;
 });
 const matchedQuantity = computed(() =>
-  (props.detail?.sources || []).reduce(
+  adjustedSourceRows.value.reduce(
     (sum, row) => sum + (compatibilityResult(row).label === '图纸匹配' ? row.quantity : 0),
     0
   )
 );
-const unmatchedQuantity = computed(() => Math.max((props.detail?.availableQuantity || 0) - matchedQuantity.value, 0));
+const effectiveDetailAvailableQuantity = computed(() =>
+  Math.max(Math.round((adjustedSourceRows.value.reduce((sum, row) => sum + row.quantity, 0) + Number.EPSILON) * 1000) / 1000, 0)
+);
+const unmatchedQuantity = computed(() => Math.max(effectiveDetailAvailableQuantity.value - matchedQuantity.value, 0));
 const fulfillmentModeText = computed(() => {
   if (expected.value?.fulfillmentMode === 'STOCK') {
     return '使用库存';
@@ -720,15 +828,18 @@ const stockReviewQuantityOk = computed(() => {
     return false;
   }
   if (props.reviewMode) {
+    if (selectedQuantityOverAvailableSource.value) {
+      return false;
+    }
     if (expected.value?.fulfillmentMode === 'STOCK') {
       return selectedQuantityTotal.value > 0 && !selectedQuantityOverRequired.value;
     }
-    return selectedQuantityTotal.value + 0.0001 >= requiredQuantity.value && !selectedQuantityOverRequired.value;
+    return selectedQuantityTotal.value > 0 && !selectedQuantityOverRequired.value;
   }
   if (expected.value?.fulfillmentMode === 'STOCK') {
-    return detail.availableQuantity > 0;
+    return effectiveDetailAvailableQuantity.value > 0;
   }
-  return detail.availableQuantity + 0.0001 >= requiredQuantity.value;
+  return effectiveDetailAvailableQuantity.value + 0.0001 >= requiredQuantity.value;
 });
 const stockReviewQuantityText = computed(() => {
   if (!props.detail || (!props.detail.sources.length && !selectedSourceRows.value.length)) {
@@ -741,6 +852,13 @@ const stockReviewQuantityText = computed(() => {
     if (selectedQuantityOverRequired.value) {
       return `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，超过本次需要 ${formatQuantity(requiredQuantity.value, expected.value?.unit || props.detail.unit)}`;
     }
+    if (selectedQuantityOverAvailableSource.value) {
+      const source = selectedQuantityOverAvailableSource.value;
+      return `已选库存批次 ${source.batchNo || source.batchId} 超过当前可用：可用 ${formatQuantity(
+        selectedSourceCurrentAvailableQuantity(source),
+        source.unit || expected.value?.unit || props.detail.unit
+      )}，已选 ${formatQuantity(source.quantity, source.unit || expected.value?.unit || props.detail.unit)}`;
+    }
     if (expected.value?.fulfillmentMode === 'STOCK') {
       const shortageQuantity = Math.max(requiredQuantity.value - selectedQuantityTotal.value, 0);
       return shortageQuantity > 0
@@ -748,7 +866,10 @@ const stockReviewQuantityText = computed(() => {
         : `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，库存已覆盖本次需要`;
     }
     if (selectedQuantityTotal.value + 0.0001 < requiredQuantity.value) {
-      return `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，仍不足本次需要`;
+      return `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，仍需补选 ${formatQuantity(
+        Math.max(requiredQuantity.value - selectedQuantityTotal.value, 0),
+        expected.value?.unit || props.detail.unit
+      )}；草稿可先保存，提交生产前必须补齐`;
     }
     return `已选 ${formatQuantity(selectedQuantityTotal.value, expected.value?.unit || props.detail.unit)}，满足本次需要`;
   }
@@ -772,7 +893,7 @@ const canConfirmReview = computed(() =>
   Boolean(!props.loading && stockReviewQuantityOk.value && !directStockBlockedIssue.value && reviewConfirmChecked.value && manualConfirmationOk.value)
 );
 const sourceKindSummaryText = computed(() => {
-  const rows = props.detail?.sources || [];
+  const rows = adjustedSourceRows.value;
   if (!rows.length) {
     return '';
   }
@@ -814,7 +935,13 @@ const hasExpectedInfo = computed(() => {
 async function queryInventorySuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
   const requestId = ++inventorySuggestionRequestSeq.value;
   try {
-    const result = await erpApi.inventoryMaterialSuggestions(keyword.trim(), undefined, 'STOCK');
+    const result = await erpApi.inventoryMaterialSuggestions(
+      keyword.trim(),
+      undefined,
+      'STOCK',
+      props.excludeOrderNo,
+      props.excludeOrderId
+    );
     if (requestId === inventorySuggestionRequestSeq.value) {
       lastInventorySuggestions.value = result;
       callback(result);
@@ -867,7 +994,13 @@ async function searchInventoryKeyword() {
   }
 
   try {
-    const suggestions = await erpApi.inventoryMaterialSuggestions(keyword, undefined, 'STOCK');
+    const suggestions = await erpApi.inventoryMaterialSuggestions(
+      keyword,
+      undefined,
+      'STOCK',
+      props.excludeOrderNo,
+      props.excludeOrderId
+    );
     lastInventorySuggestions.value = suggestions;
     const first = suggestions[0];
     if (!first) {
@@ -914,26 +1047,151 @@ function selectedQuantityWithout(batchId: string) {
 }
 
 function sourceMaxSelectableQuantity(row: InventorySourceBatchDetail) {
-  if (!props.reviewMode || requiredQuantity.value <= 0) {
-    return row.quantity;
-  }
-  return Math.max(0, Math.min(row.quantity, requiredQuantity.value - selectedQuantityWithout(row.id)));
+  return row.quantity;
 }
 
 function selectedSourceMaxQuantity(source: StockSourceSelectionPayload) {
-  const availableQuantity = Number(source.availableQuantity ?? source.quantity ?? 0);
-  if (!props.reviewMode || requiredQuantity.value <= 0) {
-    return availableQuantity;
+  return selectedSourceCurrentAvailableQuantity(source);
+}
+
+function selectedSourceCurrentAvailableQuantity(source: StockSourceSelectionPayload) {
+  return Number((source as SelectedSourceRow).currentAvailableQuantity ?? source.availableQuantity ?? source.quantity ?? 0);
+}
+
+function selectedSourceAvailabilityText(source: StockSourceSelectionPayload) {
+  const unit = source.unit || expected.value?.unit || props.detail?.unit || '件';
+  const backendAvailableQuantity = Number(source.availableQuantity ?? selectedSourceCurrentAvailableQuantity(source));
+  const currentAvailableQuantity = selectedSourceCurrentAvailableQuantity(source);
+  if (Math.abs(backendAvailableQuantity - currentAvailableQuantity) <= 0.0001) {
+    return `当前可用 ${formatQuantity(currentAvailableQuantity, unit)}`;
   }
-  return Math.max(0, Math.min(availableQuantity, requiredQuantity.value - selectedQuantityWithout(source.batchId)));
+  return `批次总可用 ${formatQuantity(backendAvailableQuantity, unit)} / 本行可用 ${formatQuantity(currentAvailableQuantity, unit)}`;
+}
+
+function sourceBackendAvailableQuantity(row: InventorySourceBatchDetail) {
+  // availableQuantity 保存后端扣除其他订单预占后的批次总可用；currentAvailableQuantity 才扣除本订单其他零件已选数量。
+  return Number((row as SourceRow).backendAvailableQuantity ?? row.quantity ?? 0);
 }
 
 function defaultSelectableRows() {
-  return (props.detail?.sources || [])
+  return adjustedSourceRows.value
     .filter((row) => row.quantity > 0)
     .map((row, index) => ({ row, index }))
     .sort((left, right) => compatibilityRank(left.row) - compatibilityRank(right.row) || left.row.quantity - right.row.quantity || left.index - right.index)
     .map((item) => item.row);
+}
+
+function roundSelectionQuantity(value: number) {
+  return Math.max(Math.round((Number(value || 0) + Number.EPSILON) * 1000) / 1000, 0);
+}
+
+function selectedSourceCapacity(source: StockSourceSelectionPayload) {
+  return roundSelectionQuantity(selectedSourceCurrentAvailableQuantity(source));
+}
+
+function createSelectionFromRow(row: InventorySourceBatchDetail, quantity: number, previous?: StockSourceSelectionPayload) {
+  const compatibility = compatibilityResult(row);
+  return {
+    batchId: row.id,
+    batchNo: row.batchNo,
+    partCode: row.partCode,
+    partName: row.partName,
+    quantity: roundSelectionQuantity(quantity),
+    availableQuantity: sourceBackendAvailableQuantity(row),
+    unit: row.unit,
+    replenishmentSourceType: row.replenishmentSourceType,
+    replenishmentSourceRequestNo: row.replenishmentSourceRequestNo,
+    replenishmentSourceLabel: row.replenishmentSourceLabel,
+    compatibilityStatus: selectionCompatibilityStatus(row),
+    compatibilityReason: selectionCompatibilityReason(compatibility),
+    manualConfirmedBy: previous?.manualConfirmedBy,
+    manualConfirmedAt: previous?.manualConfirmedAt,
+    manualConfirmRemark: previous?.manualConfirmRemark
+  } satisfies StockSourceSelectionPayload;
+}
+
+function selectedQueueTargetQuantity(sources: StockSourceSelectionPayload[], refillToRequired: boolean) {
+  if (!refillToRequired) {
+    return roundSelectionQuantity(sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0));
+  }
+  return Math.max(requiredQuantity.value > 0 ? requiredQuantity.value : effectiveDetailAvailableQuantity.value, 0);
+}
+
+function shouldRefillSelectedSourceQueue(sources: StockSourceSelectionPayload[], explicitRefill?: boolean) {
+  if (explicitRefill !== undefined) {
+    return explicitRefill;
+  }
+  if (requiredQuantity.value <= 0) {
+    return false;
+  }
+  const nextQueueQuantity = sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
+  const queueAlreadyCoveredNeed = Math.max(selectedQuantityTotal.value, nextQueueQuantity) >= requiredQuantity.value - 0.0001;
+  const hasQueuePlaceholder = sources.some((source) => Number(source.quantity || 0) <= 0);
+  return queueAlreadyCoveredNeed || hasQueuePlaceholder;
+}
+
+function rebalanceSelectedSourceQueue(
+  sources: StockSourceSelectionPayload[],
+  options: {
+    lockIndex?: number;
+    lockQuantity?: number;
+    refillToRequired?: boolean;
+    distributeByQueue?: boolean;
+    excludedBatchIds?: Set<string>;
+  } = {}
+) {
+  const normalizedSources = normalizeSelectedSources(sources);
+  const targetQuantity = selectedQueueTargetQuantity(normalizedSources, Boolean(options.refillToRequired));
+  if (!props.reviewMode || targetQuantity <= 0) {
+    return normalizedSources;
+  }
+
+  const sourceMap = new Map(adjustedSourceRows.value.map((row) => [row.id, row]));
+  const rows: StockSourceSelectionPayload[] = [];
+  let remainingQuantity = targetQuantity;
+
+  normalizedSources.forEach((source, index) => {
+    const row = sourceMap.get(source.batchId);
+    const normalizedSource = row ? createSelectionFromRow(row, source.quantity, source) : source;
+    const capacity = selectedSourceCapacity(normalizedSource);
+    const requestedQuantity =
+      options.distributeByQueue && (options.lockIndex === undefined || index !== options.lockIndex)
+        ? capacity
+        : options.lockIndex !== undefined && index === options.lockIndex
+          ? Number(options.lockQuantity || 0)
+          : normalizedSource.quantity;
+    const nextQuantity =
+      options.lockIndex !== undefined && index > options.lockIndex
+        ? Math.min(capacity, remainingQuantity)
+        : Math.min(Math.max(Number(requestedQuantity || 0), 0), capacity, remainingQuantity);
+
+    rows.push({ ...normalizedSource, quantity: roundSelectionQuantity(nextQuantity) });
+    remainingQuantity = roundSelectionQuantity(remainingQuantity - nextQuantity);
+  });
+
+  if (options.refillToRequired && remainingQuantity > 0.0001) {
+    const selectedBatchIds = new Set(rows.map((source) => source.batchId));
+    for (const row of defaultSelectableRows()) {
+      if (remainingQuantity <= 0.0001) {
+        break;
+      }
+      if (selectedBatchIds.has(row.id)) {
+        continue;
+      }
+      if (options.excludedBatchIds?.has(row.id)) {
+        continue;
+      }
+      const quantity = Math.min(row.quantity, remainingQuantity);
+      if (quantity <= 0) {
+        continue;
+      }
+      rows.push(createSelectionFromRow(row, quantity));
+      selectedBatchIds.add(row.id);
+      remainingQuantity = roundSelectionQuantity(remainingQuantity - quantity);
+    }
+  }
+
+  return normalizeSelectedSources(rows);
 }
 
 function autoSelectSources() {
@@ -942,7 +1200,7 @@ function autoSelectSources() {
   }
   const preservedRows = selectedSourcesOutsideCurrentDetail();
   const preservedQuantity = preservedRows.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
-  const targetQuantity = Math.max((requiredQuantity.value > 0 ? requiredQuantity.value : props.detail.availableQuantity) - preservedQuantity, 0);
+  const targetQuantity = Math.max((requiredQuantity.value > 0 ? requiredQuantity.value : effectiveDetailAvailableQuantity.value) - preservedQuantity, 0);
   if (targetQuantity <= 0) {
     ElMessage.warning('当前已选库存已满足本次需要，如需重选请先清空选择');
     return;
@@ -964,7 +1222,7 @@ function autoSelectSources() {
       partCode: row.partCode,
       partName: row.partName,
       quantity,
-      availableQuantity: row.quantity,
+      availableQuantity: sourceBackendAvailableQuantity(row),
       unit: row.unit,
       replenishmentSourceType: row.replenishmentSourceType,
       replenishmentSourceRequestNo: row.replenishmentSourceRequestNo,
@@ -996,7 +1254,7 @@ function bulkSelectSourcesByQuantity() {
 
   const preservedRows = selectedSourcesOutsideCurrentDetail();
   const preservedQuantity = preservedRows.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
-  const targetQuantity = Math.max((requiredQuantity.value > 0 ? requiredQuantity.value : props.detail.availableQuantity) - preservedQuantity, 0);
+  const targetQuantity = Math.max((requiredQuantity.value > 0 ? requiredQuantity.value : effectiveDetailAvailableQuantity.value) - preservedQuantity, 0);
   if (targetQuantity <= 0) {
     ElMessage.warning('当前已选库存已满足本次需要，如需重选请先清空选择');
     return;
@@ -1018,7 +1276,7 @@ function bulkSelectSourcesByQuantity() {
       partCode: row.partCode,
       partName: row.partName,
       quantity,
-      availableQuantity: row.quantity,
+      availableQuantity: sourceBackendAvailableQuantity(row),
       unit: row.unit,
       replenishmentSourceType: row.replenishmentSourceType,
       replenishmentSourceRequestNo: row.replenishmentSourceRequestNo,
@@ -1048,8 +1306,24 @@ function clearSelectedSources() {
   emit('selectionChange', []);
 }
 
+function rebalanceCurrentSelectedSourcesByQueue() {
+  if (!selectedSourceRows.value.length) {
+    ElMessage.warning('请先选择库存批次');
+    return;
+  }
+  resetReviewConfirmation();
+  emit(
+    'selectionChange',
+    rebalanceSelectedSourceQueue(selectedSourceRows.value, {
+      refillToRequired: true,
+      distributeByQueue: true
+    })
+  );
+  ElMessage.success('已按当前队列重新分配使用数量');
+}
+
 function isSourceSelected(row: InventorySourceBatchDetail) {
-  return selectedSourceQuantity(row) > 0;
+  return selectedSourceMap.value.has(row.id);
 }
 
 function handleSourceChecked(row: InventorySourceBatchDetail, value: string | number | boolean) {
@@ -1062,35 +1336,23 @@ function handleSourceQuantityChange(row: InventorySourceBatchDetail, value: numb
 
 function toggleSourceSelection(row: InventorySourceBatchDetail, checked: boolean) {
   if (!checked) {
-    updateSourceSelection(row, 0);
+    removeSelectedSource(row.id);
     return;
   }
   const remainingQuantity = Math.max(requiredQuantity.value - selectedQuantityTotal.value, 0);
-  updateSourceSelection(row, Math.min(row.quantity, remainingQuantity || row.quantity));
+  updateSourceSelection(row, Math.min(row.quantity, remainingQuantity || 0), { keepQueuedWhenZero: true });
 }
 
-function updateSourceSelection(row: InventorySourceBatchDetail, quantity: number) {
+function updateSourceSelection(
+  row: InventorySourceBatchDetail,
+  quantity: number,
+  options: { keepQueuedWhenZero?: boolean; refillToRequired?: boolean } = {}
+) {
   const nextQuantity = Math.max(0, Math.min(Number(quantity || 0), sourceMaxSelectableQuantity(row)));
   const previous = selectedSourceMap.value.get(row.id);
   const nextSource =
-    nextQuantity > 0
-      ? {
-          batchId: row.id,
-          batchNo: row.batchNo,
-          partCode: row.partCode,
-          partName: row.partName,
-          quantity: nextQuantity,
-          availableQuantity: row.quantity,
-          unit: row.unit,
-          replenishmentSourceType: row.replenishmentSourceType,
-          replenishmentSourceRequestNo: row.replenishmentSourceRequestNo,
-          replenishmentSourceLabel: row.replenishmentSourceLabel,
-          compatibilityStatus: selectionCompatibilityStatus(row),
-          compatibilityReason: selectionCompatibilityReason(compatibilityResult(row)),
-          manualConfirmedBy: previous?.manualConfirmedBy,
-          manualConfirmedAt: previous?.manualConfirmedAt,
-          manualConfirmRemark: previous?.manualConfirmRemark
-        }
+    nextQuantity > 0 || options.keepQueuedWhenZero
+      ? createSelectionFromRow(row, nextQuantity, previous)
       : undefined;
   const rows: StockSourceSelectionPayload[] = [];
   let replaced = false;
@@ -1108,26 +1370,46 @@ function updateSourceSelection(row: InventorySourceBatchDetail, quantity: number
     if (!replaced && nextSource) {
       rows.push(nextSource);
     }
+  } else if (options.keepQueuedWhenZero && !replaced && nextSource) {
+    rows.push(nextSource);
   }
-  resetReviewConfirmation();
-  emit('selectionChange', normalizeSelectedSources(rows));
-}
-
-function removeSelectedSource(batchId: string) {
+  const lockIndex = rows.findIndex((source) => source.batchId === row.id);
   resetReviewConfirmation();
   emit(
     'selectionChange',
-    selectedSourceRows.value.filter((source) => source.batchId !== batchId)
+    rebalanceSelectedSourceQueue(rows, {
+      lockIndex: lockIndex >= 0 ? lockIndex : undefined,
+      lockQuantity: nextQuantity,
+      refillToRequired: shouldRefillSelectedSourceQueue(rows, options.refillToRequired)
+    })
+  );
+}
+
+function removeSelectedSource(batchId: string) {
+  const shouldRefill = shouldRefillSelectedSourceQueue(selectedSourceRows.value);
+  resetReviewConfirmation();
+  emit(
+    'selectionChange',
+    rebalanceSelectedSourceQueue(
+      selectedSourceRows.value.filter((source) => source.batchId !== batchId),
+      { refillToRequired: shouldRefill, distributeByQueue: shouldRefill, excludedBatchIds: new Set([batchId]) }
+    )
   );
 }
 
 function handleSelectedSourceQuantityChange(source: StockSourceSelectionPayload, value: number | undefined) {
   const nextQuantity = Math.max(0, Math.min(Number(value || 0), selectedSourceMaxQuantity(source)));
-  const rows = selectedSourceRows.value
-    .map((item) => (item.batchId === source.batchId ? { ...item, quantity: nextQuantity } : item))
-    .filter((item) => item.quantity > 0);
+  const rows = selectedSourceRows.value.map((item) => (item.batchId === source.batchId ? { ...item, quantity: nextQuantity } : item));
+  const lockIndex = rows.findIndex((item) => item.batchId === source.batchId);
   resetReviewConfirmation();
-  emit('selectionChange', normalizeSelectedSources(rows));
+  emit(
+    'selectionChange',
+    rebalanceSelectedSourceQueue(rows, {
+      lockIndex: lockIndex >= 0 ? lockIndex : undefined,
+      lockQuantity: nextQuantity,
+      refillToRequired: shouldRefillSelectedSourceQueue(rows)
+    })
+  );
 }
 
 function moveSelectedSource(index: number, direction: -1 | 1) {
@@ -1139,11 +1421,28 @@ function moveSelectedSource(index: number, direction: -1 | 1) {
   const [current] = rows.splice(index, 1);
   rows.splice(nextIndex, 0, current);
   resetReviewConfirmation();
-  emit('selectionChange', normalizeSelectedSources(rows));
+  emit(
+    'selectionChange',
+    rebalanceSelectedSourceQueue(rows, {
+      refillToRequired: shouldRefillSelectedSourceQueue(rows),
+      distributeByQueue: true
+    })
+  );
+}
+
+function focusSelectedSource(source: StockSourceSelectionPayload) {
+  const partCode = source.partCode?.trim();
+  if (!partCode) {
+    ElMessage.warning('该库存批次缺少零件编码，无法直接查询');
+    return;
+  }
+  activeSearchFocusBatchNo.value = source.batchNo || '';
+  sourceSearchKeyword.value = source.partName ? `${partCode} ${source.partName}` : partCode;
+  emit('sourceSearch', partCode);
 }
 
 function selectedSourcesOutsideCurrentDetail() {
-  const currentBatchIds = new Set((props.detail?.sources || []).map((row) => row.id));
+  const currentBatchIds = new Set(adjustedSourceRows.value.map((row) => row.id));
   return selectedSourceRows.value.filter((source) => !currentBatchIds.has(source.batchId));
 }
 
@@ -1156,7 +1455,7 @@ function normalizeSelectedSources(sources: StockSourceSelectionPayload[]) {
   for (const source of sources || []) {
     const batchId = source.batchId?.trim();
     const quantity = Number(source.quantity || 0);
-    if (!batchId || quantity <= 0) {
+    if (!batchId || quantity < 0) {
       continue;
     }
     const current = rows.get(batchId);
@@ -1204,23 +1503,32 @@ function sourceKindText(kind?: string) {
 
 function reservationSummary(row: InventorySourceBatchDetail) {
   const reservations = row.reservations || [];
+  const draftReserved = draftReservedQuantity(row);
   if (!reservations.length) {
-    return row.reservedQuantity ? `已被其他订单预占 ${formatQuantity(row.reservedQuantity, row.unit)}` : '';
+    const backendReservedQuantity = Math.max(Number(row.reservedQuantity || 0) - draftReserved, 0);
+    const parts = [
+      backendReservedQuantity ? `已被其他订单预占 ${formatQuantity(backendReservedQuantity, row.unit)}` : '',
+      draftReserved ? `本订单其他零件已选 ${formatQuantity(draftReserved, row.unit)}` : ''
+    ].filter(Boolean);
+    return parts.join('；');
   }
-  return reservations
+  const reservationText = reservations
     .map((reservation) => {
       const lineText = reservation.partName || reservation.partCode ? ` / ${reservation.partName || reservation.partCode}` : '';
       return `${reservation.orderNo || '草稿订单'}${lineText} 预占 ${formatQuantity(reservation.quantity, reservation.unit || row.unit)}`;
     })
     .join('；');
+  return draftReserved
+    ? `${reservationText}；本订单其他零件已选 ${formatQuantity(draftReserved, row.unit)}`
+    : reservationText;
 }
 
-function limitedReservations(row: InventorySourceBatchDetail) {
-  return (row.reservations || []).slice(0, 2);
+function draftReservedQuantity(row: InventorySourceBatchDetail) {
+  return Number((row as SourceRow).draftReservedQuantity || 0);
 }
 
-function hiddenReservationCount(row: InventorySourceBatchDetail) {
-  return Math.max((row.reservations || []).length - limitedReservations(row).length, 0);
+function displayReservations(row: InventorySourceBatchDetail) {
+  return row.reservations || [];
 }
 
 function isFocusedSource(row: InventorySourceBatchDetail) {
@@ -1375,7 +1683,7 @@ function selectionCompatibilityReason(result: ReturnType<typeof compatibilityRes
 }
 
 function sourceUsageOrderIssue(source: StockSourceSelectionPayload) {
-  const sourceMap = new Map((props.detail?.sources || []).map((row) => [row.id, row]));
+  const sourceMap = new Map(adjustedSourceRows.value.map((row) => [row.id, row]));
   const row = sourceMap.get(source.batchId);
   if (!row || Number(source.quantity || 0) <= 0) {
     return '';
@@ -1411,6 +1719,9 @@ function manualConfirmationReason(source: StockSourceSelectionPayload) {
 }
 
 function sourceNeedsManualConfirmation(source: StockSourceSelectionPayload) {
+  if (Number(source.quantity || 0) <= 0) {
+    return false;
+  }
   return (
     Boolean(sourceUsageOrderIssue(source)) ||
     source.compatibilityStatus !== 'MATCHED' ||
@@ -1935,6 +2246,10 @@ watch(
   color: #2563eb;
 }
 
+.selected-source-item .selected-source-availability-note {
+  color: #475569;
+}
+
 .selected-source-quantity-editor {
   display: grid;
   gap: 4px;
@@ -2020,6 +2335,16 @@ watch(
 
 .source-mobile-card {
   border-color: #dbe3ef;
+}
+
+.source-mobile-header-actions {
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.source-mobile-compact-summary {
+  margin-top: 8px;
 }
 
 .source-dialog-footer {

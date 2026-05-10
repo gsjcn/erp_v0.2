@@ -111,6 +111,14 @@
             <StatusTag :value="orderProductionStatusValue(row)" :label-override="orderProductionStatusLabel(row)" compact />
           </template>
         </el-table-column>
+        <el-table-column label="待补单" width="150">
+          <template #default="{ row }">
+            <el-button v-if="orderNeedsShortageAttention(row)" link type="warning" @click.stop="goShortageDetail(row)">
+              {{ orderShortageActionText(row) }}
+            </el-button>
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="goProcess(row)">{{ orderProcessActionText(row) }}</el-button>
@@ -125,14 +133,30 @@
     </div>
 
     <div v-loading="loading" class="mobile-card-list">
-      <article v-for="order in orders" :key="order.id" class="mobile-card">
+      <article
+        v-for="order in orders"
+        :key="order.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileOrderExpanded(order.id) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong><OrderNoLink :order-no="order.orderNo" /></strong>
             <small>{{ order.customerName }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <StatusTag :value="orderDisplayStatus(order)" compact />
+            <el-button link type="primary" @click.stop="toggleMobileOrderCard(order.id)">
+              {{ isMobileOrderExpanded(order.id) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>交期 {{ formatDate(order.deliveryDate) }}</span>
+          <span>零件 {{ order.partCount }} 个</span>
+          <span>{{ formatOrderQuantity(order, 'totalProductionPlanQuantity') }}</span>
+        </div>
+        <div v-show="isMobileOrderExpanded(order.id)" class="mobile-card-fields">
           <div class="mobile-field">
             <label>订单状态</label>
             <span><StatusTag :value="orderDisplayStatus(order)" compact /></span>
@@ -161,9 +185,16 @@
             <label>生产计划数量</label>
             <span>{{ formatOrderQuantity(order, 'totalProductionPlanQuantity') }}</span>
           </div>
+          <div v-if="orderNeedsShortageAttention(order)" class="mobile-field mobile-full warning">
+            <label>待补单</label>
+            <span>{{ orderShortageActionText(order) }}</span>
+          </div>
         </div>
         <div class="mobile-card-actions">
           <el-button link type="primary" @click="goDetail(order)">订单明细</el-button>
+          <el-button v-if="orderNeedsShortageAttention(order)" link type="warning" @click="goShortageDetail(order)">
+            处理补单
+          </el-button>
           <el-button link type="primary" @click="goProcess(order)">{{ orderProcessActionText(order) }}</el-button>
           <el-tooltip :content="cancelOrderDisabledReason(order)" :disabled="canCancelOrder(order)" placement="top">
             <span class="action-tooltip-wrap">
@@ -373,7 +404,11 @@ import {
 } from '../utils/orderLineDuplicateChecks';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
 import { orderDisplayStatus } from '../utils/orderStatus';
-import { sanitizeOrderLinePayload, selectedStockSourceQuantity, validateDraftStockSourceLines } from '../utils/stockSourceReview';
+import {
+  sanitizeOrderLinePayload,
+  suggestedProductionPlanQuantity,
+  validateDraftStockSourceLines
+} from '../utils/stockSourceReview';
 
 const router = useRouter();
 const customers = ref<Customer[]>([]);
@@ -389,6 +424,7 @@ const cancelOrderVisible = ref(false);
 const processDefinitionManagerVisible = ref(false);
 const activeCancelOrder = ref<OrderSummary>();
 const activeCancelOrderDetail = ref<OrderDetail>();
+const expandedMobileOrderIds = ref<string[]>([]);
 
 const orderStatusOptions: Array<{ label: string; value: OrderStatus }> = [
   { label: '待提交生产', value: 'DRAFT' },
@@ -402,6 +438,7 @@ const productionStatusOptions: Array<{ label: string; value: OrderProductionFilt
   { label: '待确认生产', value: 'WAITING_PRODUCTION' },
   { label: '生产中', value: 'ORDER_IN_PRODUCTION' },
   { label: '已完成未发货', value: 'ORDER_COMPLETED_UNSHIPPED' },
+  { label: '部分发货', value: 'PARTIAL_SHIPPED' },
   { label: '已完成发货', value: 'ORDER_SHIPPED_COMPLETED' },
   { label: '已取消', value: 'ORDER_CANCELLED' }
 ];
@@ -609,6 +646,33 @@ function formatOrderQuantity(order: OrderSummary, field: 'totalQuantity' | 'tota
     return order.quantityByUnit.map((row) => formatQuantity(row[field], row.unit)).join(' / ');
   }
   return formatQuantity(order[field], order.unit);
+}
+
+function orderShortageActionText(order: OrderSummary) {
+  if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
+    const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
+      ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+      : formatQuantity(order.pendingProductionReplenishmentQuantity || 0, order.pendingProductionReplenishmentUnit || order.unit);
+    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount || 0} 个 / ${quantityText}`;
+  }
+  const quantityText = order.unresolvedShortageQuantityByUnit?.length
+    ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+    : formatQuantity(order.unresolvedShortageQuantity || 0, order.unresolvedShortageUnit || order.unit);
+  return `需补单 ${order.unresolvedShortageLineCount || 0} 个 / ${quantityText}`;
+}
+
+function orderNeedsShortageAttention(order: OrderSummary) {
+  return Boolean(order.needsReplenishmentAction || order.needsProductionReplenishmentReview);
+}
+
+function isMobileOrderExpanded(orderId: string) {
+  return expandedMobileOrderIds.value.includes(orderId);
+}
+
+function toggleMobileOrderCard(orderId: string) {
+  expandedMobileOrderIds.value = isMobileOrderExpanded(orderId)
+    ? expandedMobileOrderIds.value.filter((id) => id !== orderId)
+    : [...expandedMobileOrderIds.value, orderId];
 }
 
 async function openCreate() {
@@ -843,15 +907,29 @@ async function checkOrderNo(silent = false, expectedSequence?: number) {
 }
 
 function syncPlanQuantity(line: CreateOrderLinePayload) {
+  const nextSuggestedQuantity = suggestedProductionPlanQuantity(line);
+  const previousSuggestedQuantity = Number(line.productionPlanSuggestedQuantity ?? line.productionPlanQuantity ?? nextSuggestedQuantity);
+  const currentPlanQuantity = Number(line.productionPlanQuantity ?? previousSuggestedQuantity);
+  const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
+  line.productionPlanSuggestedQuantity = nextSuggestedQuantity;
+
   if (line.fulfillmentMode === 'STOCK') {
-    line.productionPlanQuantity = Math.max(Number(line.quantity || 0) - selectedStockSourceQuantity(line), 0);
-    line.productionPlanOverrideByCode = '';
-    line.productionPlanOverrideReason = '';
+    if (planWasFollowingSuggestion) {
+      line.productionPlanQuantity = nextSuggestedQuantity;
+      line.productionPlanOverrideByCode = '';
+      line.productionPlanOverrideReason = '';
+    }
     return;
   }
-  // 客户订单数量变化时只补默认值；少做或多做需要在订单行里填写偏差说明。
+  // 客户订单数量变化时，只在计划仍跟随建议数量时自动同步；手动多做或少做必须保留说明。
   if (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) {
-    line.productionPlanQuantity = line.quantity;
+    line.productionPlanQuantity = nextSuggestedQuantity;
+    return;
+  }
+  if (planWasFollowingSuggestion) {
+    line.productionPlanQuantity = nextSuggestedQuantity;
+    line.productionPlanOverrideByCode = '';
+    line.productionPlanOverrideReason = '';
   }
 }
 
@@ -861,6 +939,13 @@ function normalizedLines() {
 
 function goDetail(row: OrderSummary) {
   void router.push(orderDetailPath(row.orderNo));
+}
+
+function goShortageDetail(row: OrderSummary) {
+  void router.push({
+    path: orderDetailPath(row.orderNo),
+    query: { shortage: '1', returnTo: '/orders' }
+  });
 }
 
 function orderDetailPath(orderNo: string) {

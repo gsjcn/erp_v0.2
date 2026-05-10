@@ -139,6 +139,8 @@ export interface InventoryFilters {
   warehouseId?: string;
   orderNo?: string;
   status?: InventoryStatus;
+  excludeOrderNo?: string;
+  excludeOrderId?: string;
 }
 
 export interface InventorySourceDetailFilters {
@@ -146,6 +148,7 @@ export interface InventorySourceDetailFilters {
   warehouseId?: string;
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
   excludeOrderNo?: string;
+  excludeOrderId?: string;
 }
 
 export interface AdjustInventoryBatchPayload {
@@ -195,6 +198,21 @@ export interface WarehouseWorkFilters {
 
 export interface WarehouseTransactionFilters extends WarehouseWorkFilters {
   transactionType?: 'IN' | 'OUT';
+}
+
+export interface ConfirmShipmentItemPayload {
+  batchId: string;
+  orderLineId?: string;
+  shipmentQuantity: number;
+}
+
+export interface ConfirmShipmentPayload {
+  shipmentQuantity?: number;
+  batchShipments?: ConfirmShipmentItemPayload[];
+  warehouseConfirmedBy?: string;
+  salesConfirmedBy?: string;
+  overShipmentReason?: string;
+  remark?: string;
 }
 
 export interface CompleteProcessStepPayload {
@@ -286,6 +304,12 @@ export interface UpdateLineQuantityPayload {
   productionPlanOverrideReason?: string;
   reason: string;
   managerName?: string;
+}
+
+export interface ResolveLineShortagePayload {
+  resolutionMode: 'NO_REPLENISHMENT';
+  managerName: string;
+  reason: string;
 }
 
 export interface CancelStartedOrderPayload {
@@ -480,6 +504,12 @@ export const erpApi = {
       body: JSON.stringify(payload)
     });
   },
+  resolveLineShortage(orderNo: string, lineId: string, payload: ResolveLineShortagePayload) {
+    return request<OrderDetail>(`/orders/${orderNo}/lines/${lineId}/shortage-resolution`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
   cancelOrder(orderNo: string, payload: CancelStartedOrderPayload) {
     return request<OrderDetail>(`/orders/${orderNo}/cancel`, {
       method: 'POST',
@@ -650,19 +680,25 @@ export const erpApi = {
       })}`
     );
   },
-  confirmShipment(batchId: string, remark?: string) {
-    return request(`/warehouse/shipments/${batchId}/confirm`, { method: 'POST', body: JSON.stringify({ remark }) });
+  // compatibility: confirmShipment(batchId: string, remark?: string)
+  confirmShipment(batchId: string, payload: ConfirmShipmentPayload | string = {}) {
+    const body = typeof payload === 'string' ? { remark: payload } : payload;
+    return request(`/warehouse/shipments/${batchId}/confirm`, { method: 'POST', body: JSON.stringify(body) });
   },
-  confirmBatchShipment(batchIds: string[], remark?: string) {
+  // compatibility: confirmBatchShipment(batchIds: string[], remark?: string)
+  confirmBatchShipment(batchIds: string[], payload: ConfirmShipmentPayload | string = {}) {
+    const body = typeof payload === 'string' ? { remark: payload } : payload;
     return request('/warehouse/shipments/batch-confirm', {
       method: 'POST',
-      body: JSON.stringify({ batchIds, remark })
+      body: JSON.stringify({ batchIds, ...body })
     });
   },
-  confirmOrderShipment(orderNo: string, remark?: string) {
+  // compatibility: confirmOrderShipment(orderNo: string, remark?: string)
+  confirmOrderShipment(orderNo: string, payload: ConfirmShipmentPayload | string = {}) {
+    const body = typeof payload === 'string' ? { remark: payload } : payload;
     return request(`/warehouse/shipments/orders/${encodeURIComponent(orderNo)}/confirm`, {
       method: 'POST',
-      body: JSON.stringify({ remark })
+      body: JSON.stringify(body)
     });
   },
   warehouseNotices(status?: ProductionNoticeStatus) {
@@ -693,7 +729,9 @@ export const erpApi = {
         customerId: filters.customerId,
         warehouseId: filters.warehouseId,
         orderNo: filters.orderNo,
-        status: filters.status
+        status: filters.status,
+        excludeOrderNo: filters.excludeOrderNo,
+        excludeOrderId: filters.excludeOrderId
       })}`
     );
   },
@@ -704,16 +742,26 @@ export const erpApi = {
         customerId: filters.customerId,
         warehouseId: filters.warehouseId,
         orderNo: filters.orderNo,
-        status: filters.status
+        status: filters.status,
+        excludeOrderNo: filters.excludeOrderNo,
+        excludeOrderId: filters.excludeOrderId
       })}`
     );
   },
-  inventoryMaterialSuggestions(keyword: string, warehouseId?: string, sourceType?: 'ALL' | 'ORDER' | 'STOCK') {
+  inventoryMaterialSuggestions(
+    keyword: string,
+    warehouseId?: string,
+    sourceType?: 'ALL' | 'ORDER' | 'STOCK',
+    excludeOrderNo?: string,
+    excludeOrderId?: string
+  ) {
     return request<InventoryMaterialSuggestion[]>(
       `/inventory/materials/suggestions${toQuery({
         keyword,
         warehouseId,
-        sourceType
+        sourceType,
+        excludeOrderNo,
+        excludeOrderId
       })}`
     );
   },
@@ -723,7 +771,8 @@ export const erpApi = {
         unit: filters.unit,
         warehouseId: filters.warehouseId,
         sourceType: filters.sourceType,
-        excludeOrderNo: filters.excludeOrderNo
+        excludeOrderNo: filters.excludeOrderNo,
+        excludeOrderId: filters.excludeOrderId
       })}`
     );
   },

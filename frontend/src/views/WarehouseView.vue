@@ -136,15 +136,31 @@
 
     <div v-loading="loading" class="mobile-section">
       <h3 class="mobile-section-title">生产完成待入库</h3>
-      <article v-for="receipt in receipts" :key="receipt.id" class="mobile-card">
+      <article
+        v-for="receipt in receipts"
+        :key="receipt.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileWarehouseCardExpanded(receiptCardKey(receipt)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ receipt.partName }}</strong>
             <small>{{ receipt.productionTaskNo }}</small>
             <small v-if="taskRelationText(receipt)">{{ taskRelationText(receipt) }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <StatusTag :value="receipt.status" compact />
+            <el-button link type="primary" @click.stop="toggleMobileWarehouseCard(receiptCardKey(receipt))">
+              {{ isMobileWarehouseCardExpanded(receiptCardKey(receipt)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>{{ receipt.customerName }}</span>
+          <span>订单 {{ formatQuantity(receipt.customerOrderQuantity || receipt.quantity, receipt.unit) }}</span>
+          <span>入库 {{ formatQuantity(receipt.orderReceiptQuantity ?? receipt.quantity, receipt.unit) }}</span>
+        </div>
+        <div v-show="isMobileWarehouseCardExpanded(receiptCardKey(receipt))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
             <span>{{ receipt.status }}</span>
@@ -229,10 +245,12 @@
           <div>
             <strong><OrderNoLink :order-no="group.orderNo" /></strong>
             <span>{{ group.customerName || '-' }}</span>
-            <small>{{ group.partCount }} 种零件 / {{ group.batchCount }} 批 / {{ group.totalText }}</small>
+            <small>{{ group.partCount }} 种零件 / {{ group.batchCount }} 批 / 可发 {{ group.totalText }}</small>
+            <small>已发 {{ group.shippedText }} / 未发 {{ group.remainingText }} / 本次建议 {{ group.suggestedText }}</small>
+            <small v-if="group.shortageText" class="shipment-shortage-warning">{{ group.shortageText }}</small>
           </div>
           <el-button size="small" type="primary" plain @click="openOrderShipmentConfirm(group.rows[0])">
-            整单发货
+            订单发货
           </el-button>
         </article>
       </div>
@@ -283,16 +301,33 @@
         <el-table-column label="数量" width="100">
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
         </el-table-column>
+        <el-table-column label="已发货" width="110">
+          <template #default="{ row }">{{ formatQuantity(row.shippedQuantity || 0, row.unit) }}</template>
+        </el-table-column>
+        <el-table-column label="未发货" width="110">
+          <template #default="{ row }">{{ formatQuantity(row.remainingQuantity || 0, row.unit) }}</template>
+        </el-table-column>
+        <el-table-column label="本次建议" width="110">
+          <template #default="{ row }">{{ formatQuantity(row.suggestedShipmentQuantity || 0, row.unit) }}</template>
+        </el-table-column>
         <el-table-column label="仓库 / 库位" min-width="160">
           <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="100" />
         <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="selectShipmentOrder(row)">选中整单</el-button>
-            <el-button link type="primary" @click="openOrderShipmentConfirm(row)">整单发货</el-button>
+            <el-button link type="primary" @click="selectShipmentOrder(row)">选中订单</el-button>
+            <el-button link type="primary" @click="openOrderShipmentConfirm(row)">订单发货</el-button>
             <el-button link type="primary" @click="openShipmentSourceDetails(row)">来源/图纸</el-button>
-            <el-button link type="primary" @click="openShipmentConfirm(row)">确认发货</el-button>
+            <el-button
+              link
+              type="primary"
+              :disabled="Boolean(shipmentShortageText(row))"
+              :title="shipmentShortageText(row)"
+              @click="openShipmentConfirm(row)"
+            >
+              确认发货
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -301,39 +336,82 @@
     <div v-loading="loading" class="mobile-section">
       <h3 class="mobile-section-title">待发货库存</h3>
       <div v-if="shipmentOrderGroups.length" class="mobile-shipment-order-groups">
-        <article v-for="group in shipmentOrderGroups" :key="group.orderNo" class="mobile-card shipment-mobile-order-card">
+        <article
+          v-for="group in shipmentOrderGroups"
+          :key="group.orderNo"
+          class="mobile-card mobile-order-card shipment-mobile-order-card"
+          :class="{ expanded: isMobileWarehouseCardExpanded(shipmentOrderCardKey(group.orderNo)) }"
+        >
           <div class="mobile-card-header">
             <div class="mobile-card-title">
               <strong><OrderNoLink :order-no="group.orderNo" /></strong>
               <small>{{ group.customerName || '-' }}</small>
             </div>
+            <div class="mobile-card-header-actions">
+              <el-button link type="primary" @click.stop="toggleMobileWarehouseCard(shipmentOrderCardKey(group.orderNo))">
+                {{ isMobileWarehouseCardExpanded(shipmentOrderCardKey(group.orderNo)) ? '收起' : '详情' }}
+              </el-button>
+            </div>
           </div>
-          <div class="mobile-card-fields">
+          <div class="mobile-card-compact-summary">
+            <span>{{ group.partCount }} 种 / {{ group.batchCount }} 批</span>
+            <span>未发 {{ group.remainingText }}</span>
+            <span>建议 {{ group.suggestedText }}</span>
+          </div>
+          <div v-show="isMobileWarehouseCardExpanded(shipmentOrderCardKey(group.orderNo))" class="mobile-card-fields">
             <div class="mobile-field">
               <label>零件 / 批次</label>
               <span>{{ group.partCount }} 种 / {{ group.batchCount }} 批</span>
             </div>
             <div class="mobile-field">
-              <label>待发货数量</label>
+              <label>可发数量</label>
               <span>{{ group.totalText }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>已发货</label>
+              <span>{{ group.shippedText }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>未发货</label>
+              <span>{{ group.remainingText }}</span>
+            </div>
+            <div class="mobile-field">
+              <label>本次建议</label>
+              <span>{{ group.suggestedText }}</span>
             </div>
           </div>
           <div class="mobile-card-actions">
             <el-button size="small" type="primary" plain @click="openOrderShipmentConfirm(group.rows[0])">
-              整单发货
+              订单发货
             </el-button>
           </div>
         </article>
       </div>
-      <article v-for="shipment in shipments" :key="shipment.id" class="mobile-card">
+      <article
+        v-for="shipment in shipments"
+        :key="shipment.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileWarehouseCardExpanded(shipmentCardKey(shipment)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ shipment.partName }}</strong>
             <small>{{ shipment.batchNo }}</small>
             <small v-if="taskRelationText(shipment)">{{ taskRelationText(shipment) }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <StatusTag :value="shipment.status" compact />
+            <el-button link type="primary" @click.stop="toggleMobileWarehouseCard(shipmentCardKey(shipment))">
+              {{ isMobileWarehouseCardExpanded(shipmentCardKey(shipment)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>{{ shipment.customerName || '-' }}</span>
+          <span>未发 {{ formatQuantity(shipment.remainingQuantity || 0, shipment.unit) }}</span>
+          <span>建议 {{ formatQuantity(shipment.suggestedShipmentQuantity || 0, shipment.unit) }}</span>
+        </div>
+        <div v-show="isMobileWarehouseCardExpanded(shipmentCardKey(shipment))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
             <span>{{ shipment.status }}</span>
@@ -367,6 +445,18 @@
             <span>{{ formatQuantity(shipment.quantity, shipment.unit) }}</span>
           </div>
           <div class="mobile-field">
+            <label>已发货</label>
+            <span>{{ formatQuantity(shipment.shippedQuantity || 0, shipment.unit) }}</span>
+          </div>
+          <div class="mobile-field">
+            <label>未发货</label>
+            <span>{{ formatQuantity(shipment.remainingQuantity || 0, shipment.unit) }}</span>
+          </div>
+          <div class="mobile-field">
+            <label>本次建议</label>
+            <span>{{ formatQuantity(shipment.suggestedShipmentQuantity || 0, shipment.unit) }}</span>
+          </div>
+          <div class="mobile-field">
             <label>仓库 / 库位</label>
             <span>{{ shipment.warehouseName }} / {{ shipment.locationName || '-' }}</span>
           </div>
@@ -379,8 +469,16 @@
             :title="`${shipment.partName} 发货图纸`"
           />
           <el-button link type="primary" @click="openShipmentSourceDetails(shipment)">来源/图纸</el-button>
-          <el-button link type="primary" @click="openShipmentConfirm(shipment)">确认发货</el-button>
-          <el-button link type="primary" @click="openOrderShipmentConfirm(shipment)">整单发货</el-button>
+          <el-button
+            link
+            type="primary"
+            :disabled="Boolean(shipmentShortageText(shipment))"
+            :title="shipmentShortageText(shipment)"
+            @click="openShipmentConfirm(shipment)"
+          >
+            确认发货
+          </el-button>
+          <el-button link type="primary" @click="openOrderShipmentConfirm(shipment)">订单发货</el-button>
         </div>
       </article>
       <div v-if="!shipments.length && !loading" class="mobile-empty">暂无待发货库存</div>
@@ -405,14 +503,29 @@
 
     <div class="mobile-section">
       <h3 class="mobile-section-title">仓库 / 库位</h3>
-      <article v-for="row in warehouseRows" :key="`${row.warehouseCode}-${row.locationCode}`" class="mobile-card">
+      <article
+        v-for="row in warehouseRows"
+        :key="warehouseLocationCardKey(row)"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileWarehouseCardExpanded(warehouseLocationCardKey(row)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ row.warehouseName }}</strong>
             <small>{{ row.warehouseCode }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <el-button link type="primary" @click.stop="toggleMobileWarehouseCard(warehouseLocationCardKey(row))">
+              {{ isMobileWarehouseCardExpanded(warehouseLocationCardKey(row)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>{{ row.locationCode }}</span>
+          <span>{{ row.locationName }}</span>
+          <span><StatusTag :value="row.status" compact /></span>
+        </div>
+        <div v-show="isMobileWarehouseCardExpanded(warehouseLocationCardKey(row))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>状态</label>
             <span><StatusTag :value="row.status" /></span>
@@ -487,14 +600,29 @@
         <h3 class="mobile-section-title">库存流水</h3>
         <el-segmented v-model="transactionType" :options="transactionOptions" @change="loadTransactions" />
       </div>
-      <article v-for="transaction in transactions" :key="transaction.id" class="mobile-card">
+      <article
+        v-for="transaction in transactions"
+        :key="transaction.id"
+        class="mobile-card mobile-order-card"
+        :class="{ expanded: isMobileWarehouseCardExpanded(transactionCardKey(transaction)) }"
+      >
         <div class="mobile-card-header">
           <div class="mobile-card-title">
             <strong>{{ transaction.partName }}</strong>
             <small>{{ transaction.transactionNo }}</small>
           </div>
+          <div class="mobile-card-header-actions">
+            <el-button link type="primary" @click.stop="toggleMobileWarehouseCard(transactionCardKey(transaction))">
+              {{ isMobileWarehouseCardExpanded(transactionCardKey(transaction)) ? '收起' : '详情' }}
+            </el-button>
+          </div>
         </div>
-        <div class="mobile-card-fields">
+        <div class="mobile-card-compact-summary">
+          <span>{{ transaction.transactionType === 'IN' ? '入库' : '出库' }}</span>
+          <span>{{ formatQuantity(transaction.quantity, transaction.unit) }}</span>
+          <span>{{ transaction.batchNo || '-' }}</span>
+        </div>
+        <div v-show="isMobileWarehouseCardExpanded(transactionCardKey(transaction))" class="mobile-card-fields">
           <div class="mobile-field">
             <label>类型</label>
             <span>{{ transaction.transactionType === 'IN' ? '入库' : '出库' }}</span>
@@ -648,6 +776,13 @@
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetShipmentDialog"
     >
+      <div v-if="activeShipmentShortageText" class="shipment-shortage-block mb-16">
+        <div>
+          <strong>该订单仍有待补单短缺，暂不能单批发货</strong>
+          <p>{{ activeShipmentShortageText }}</p>
+        </div>
+        <el-button type="warning" plain @click="goActiveShipmentShortageDetail">处理补单</el-button>
+      </div>
       <el-form label-width="92px">
         <el-form-item label="库存批次">
           <strong>{{ activeShipment?.batchNo }}</strong>
@@ -680,6 +815,49 @@
         <el-form-item label="数量">
           {{ activeShipment ? formatQuantity(activeShipment.quantity, activeShipment.unit) : '-' }}
         </el-form-item>
+        <el-form-item label="已发货">
+          {{ activeShipment ? formatQuantity(activeShipment.shippedQuantity || 0, activeShipment.unit) : '-' }}
+        </el-form-item>
+        <el-form-item label="未发货">
+          {{ activeShipment ? formatQuantity(activeShipment.remainingQuantity || 0, activeShipment.unit) : '-' }}
+        </el-form-item>
+        <el-form-item label="本次发货" required>
+          <el-input-number
+            v-model="shipmentForm.shipmentQuantity"
+            :min="0"
+            :max="activeShipment?.quantity || 0"
+            :precision="3"
+            :step="1"
+            style="width: 220px"
+          />
+          <span class="unit-text">{{ activeShipment?.unit || '件' }}</span>
+          <small v-if="activeShipmentQuantityAdjustmentText" class="shipment-adjustment-note">
+            {{ activeShipmentQuantityAdjustmentText }}
+          </small>
+        </el-form-item>
+        <el-form-item label="仓库确认" required>
+          <el-input v-model="shipmentForm.warehouseConfirmedBy" maxlength="30" placeholder="填写仓库管理确认人" />
+        </el-form-item>
+        <el-alert
+          v-if="activeShipmentOverQuantity > 0"
+          class="mb-16"
+          type="warning"
+          :closable="false"
+          :title="`本次超出未发货数量 ${formatQuantity(activeShipmentOverQuantity, activeShipment?.unit || '件')}，需要销售确认和说明。`"
+        />
+        <el-form-item v-if="activeShipmentOverQuantity > 0" label="销售确认" required>
+          <el-input v-model="shipmentForm.salesConfirmedBy" maxlength="30" placeholder="填写销售确认人" />
+        </el-form-item>
+        <el-form-item v-if="activeShipmentOverQuantity > 0" label="超发说明" required>
+          <el-input
+            v-model="shipmentForm.overShipmentReason"
+            type="textarea"
+            :rows="2"
+            maxlength="160"
+            show-word-limit
+            placeholder="例如：客户临时要求多发，已由销售确认。"
+          />
+        </el-form-item>
         <el-form-item label="仓库">
           {{
             activeShipment
@@ -711,13 +889,13 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="shipmentVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="confirmShipment">确认发货</el-button>
+        <el-button type="primary" :loading="saving" :disabled="Boolean(activeShipmentShortageText)" @click="confirmShipment">确认发货</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
       v-model="batchShipmentVisible"
-      :title="batchShipmentIsOrderMode ? '整单确认发货' : '批量确认发货'"
+      :title="batchShipmentIsOrderMode ? '订单发货确认' : '批量确认发货'"
       width="min(760px, calc(100vw - 32px))"
       :close-on-click-modal="false"
       :before-close="handleSavingDialogBeforeClose"
@@ -729,6 +907,13 @@
         :closable="false"
         class="mb-16"
       />
+      <div v-if="batchShipmentShortageText" class="shipment-shortage-block mb-16">
+        <div>
+          <strong>该订单仍有待补单短缺，暂不能整单或批量发货</strong>
+          <p>{{ batchShipmentShortageText }}</p>
+        </div>
+        <el-button type="warning" plain @click="goBatchShipmentShortageDetail">处理补单</el-button>
+      </div>
       <el-form label-width="92px">
         <el-form-item label="订单号">
           <OrderNoLink v-if="batchShipmentOrderNo" :order-no="batchShipmentOrderNo" />
@@ -737,14 +922,57 @@
         <el-form-item label="客户">
           <strong>{{ batchShipmentCustomerName || '-' }}</strong>
         </el-form-item>
+        <el-form-item label="仓库确认" required>
+          <el-input v-model="batchShipmentForm.warehouseConfirmedBy" maxlength="30" placeholder="填写仓库管理确认人" />
+        </el-form-item>
+        <el-form-item label="销售确认">
+          <el-input v-model="batchShipmentForm.salesConfirmedBy" maxlength="30" placeholder="如存在超发，请填写销售确认人" />
+        </el-form-item>
+        <el-form-item label="超发说明">
+          <el-input
+            v-model="batchShipmentForm.overShipmentReason"
+            type="textarea"
+            :rows="2"
+            maxlength="160"
+            show-word-limit
+            placeholder="如存在超发，必须填写原因"
+          />
+        </el-form-item>
         <el-form-item :label="batchShipmentIsOrderMode ? '当前可见' : '选中批次'">
           <span>
-            {{ batchShipmentRows.length }} 批 / {{ batchShipmentTotalText }}
-            <span v-if="batchShipmentIsOrderMode" class="muted">，确认时以后端该订单全部待发货库存为准</span>
+            {{ batchShipmentRows.length }} 批 / 可发 {{ batchShipmentTotalText }}
+            <span class="muted">，可按客户分批发货要求修改每批本次数量</span>
           </span>
         </el-form-item>
+        <el-form-item label="发货汇总">
+          <span>
+            已发 {{ formatShipmentLineTotal(batchShipmentRows, 'shippedQuantity') }} /
+            未发 {{ formatShipmentLineTotal(batchShipmentRows, 'remainingQuantity') }} /
+            本次建议 {{ formatShipmentTotal(batchShipmentRows, 'suggestedShipmentQuantity') }} /
+            本次发货 {{ batchShipmentCurrentText || '0 件' }}
+          </span>
+        </el-form-item>
+        <el-alert
+          v-if="batchShipmentOverText"
+          class="mb-12"
+          type="warning"
+          :closable="false"
+          :title="`本次发货超过订单未发货数量 ${batchShipmentOverText}，必须填写销售确认人和超发说明。`"
+        />
+        <el-alert
+          v-if="batchShipmentHasStockOverRows && !batchShipmentOverText"
+          class="mb-12"
+          type="warning"
+          :closable="false"
+          title="本次发货已加入备货库存作为客户额外发货来源，必须填写销售确认人和超发说明。"
+        />
         <el-table :data="batchShipmentRows" max-height="260px" class="batch-shipment-table">
-          <el-table-column prop="batchNo" label="库存批次" min-width="190" />
+          <el-table-column label="库存批次" min-width="190">
+            <template #default="{ row }">
+              <div class="cell-main">{{ row.batchNo }}</div>
+              <el-tag v-if="row.isStockOverShipment" size="small" type="warning">备货超发</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="partName" label="零件" min-width="160" />
           <el-table-column label="图纸" min-width="180">
             <template #default="{ row }">
@@ -763,12 +991,51 @@
           <el-table-column label="数量" width="110">
             <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
           </el-table-column>
+          <el-table-column label="已发货" width="110">
+            <template #default="{ row }">{{ formatQuantity(row.shippedQuantity || 0, row.unit) }}</template>
+          </el-table-column>
+          <el-table-column label="未发货" width="110">
+            <template #default="{ row }">{{ formatQuantity(row.remainingQuantity || 0, row.unit) }}</template>
+          </el-table-column>
+          <el-table-column label="本次建议" width="110">
+            <template #default="{ row }">{{ formatQuantity(row.suggestedShipmentQuantity || 0, row.unit) }}</template>
+          </el-table-column>
+          <el-table-column label="本次发货" width="170">
+            <template #default="{ row }">
+              <el-input-number
+                v-model="row.currentShipmentQuantity"
+                :min="0"
+                :max="row.quantity"
+                :precision="3"
+                :step="1"
+                controls-position="right"
+                class="shipment-quantity-input"
+              />
+              <small v-if="shipmentQuantityAdjustmentText(row)" class="shipment-adjustment-note">
+                {{ shipmentQuantityAdjustmentText(row) }}
+              </small>
+            </template>
+          </el-table-column>
           <el-table-column label="仓库 / 库位" min-width="160">
             <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
           </el-table-column>
           <el-table-column label="来源/图纸" width="100">
             <template #default="{ row }">
               <el-button link type="primary" @click="openShipmentSourceDetails(row)">查看</el-button>
+            </template>
+          </el-table-column>
+          <el-table-column v-if="batchShipmentIsOrderMode" label="备货超发" width="120" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="!row.isStockOverShipment"
+                link
+                type="primary"
+                :loading="stockSourceLoading"
+                @click="appendStockOverShipment(row)"
+              >
+                添加备货
+              </el-button>
+              <el-button v-else link type="danger" @click="removeStockOverShipment(row)">移除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -785,8 +1052,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="batchShipmentVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="confirmBatchShipment">
-          {{ batchShipmentIsOrderMode ? '确认整单发货' : '确认批量发货' }}
+        <el-button type="primary" :loading="saving" :disabled="Boolean(batchShipmentShortageText)" @click="confirmBatchShipment">
+          {{ batchShipmentIsOrderMode ? '确认本次发货' : '确认批量发货' }}
         </el-button>
       </template>
     </el-dialog>
@@ -843,7 +1110,10 @@
           <div>
             <strong>{{ warehouseNoticeTitle(notice) }}</strong>
             <p>{{ notice.reason }}</p>
-            <small>{{ formatDateTime(notice.createdAt) }}</small>
+            <small>通知时间：{{ formatDateTime(notice.createdAt) }}</small>
+            <small v-if="notice.status === 'ACKNOWLEDGED'" class="notice-ack-text">
+              确认：{{ notice.acknowledgedBy || '-' }} / {{ formatDateTime(notice.acknowledgedAt) }}
+            </small>
           </div>
           <el-button
             v-if="notice.status === 'PENDING'"
@@ -905,6 +1175,9 @@
           <el-form-item label="仓库确认人员" required>
             <el-input v-model="stockNoticeForm.acknowledgedBy" maxlength="30" show-word-limit placeholder="请输入仓库确认人员姓名" />
           </el-form-item>
+          <el-form-item label="确认时间">
+            <el-input :model-value="stockNoticeConfirmTimeText" disabled />
+          </el-form-item>
           <el-form-item v-if="showCustomerChangeHandlingFields" label="处理方式" required>
             <el-radio-group v-model="stockNoticeForm.handlingMode" @change="handleStockNoticeModeChange">
               <el-radio-button value="STOCK">转备货库存</el-radio-button>
@@ -957,7 +1230,7 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Bell } from '@element-plus/icons-vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
@@ -968,6 +1241,7 @@ import OrderNoLink from '../components/OrderNoLink.vue';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import StatusTag from '../components/StatusTag.vue';
 import type {
+  InventorySourceBatchDetail,
   InventorySourceDetailResponse,
   OrderSummary,
   ProductionNotice,
@@ -978,13 +1252,20 @@ import type {
 } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
 
+type EditableWarehouseShipment = WarehouseShipment & {
+  currentShipmentQuantity?: number;
+  isStockOverShipment?: boolean;
+  targetOrderLineId?: string;
+};
+
 const route = useRoute();
+const router = useRouter();
 const orderOptions = ref<OrderSummary[]>([]);
 const warehouses = ref<Warehouse[]>([]);
 const receipts = ref<WarehouseReceipt[]>([]);
 const shipments = ref<WarehouseShipment[]>([]);
 const selectedShipments = ref<WarehouseShipment[]>([]);
-const batchShipmentRows = ref<WarehouseShipment[]>([]);
+const batchShipmentRows = ref<EditableWarehouseShipment[]>([]);
 const transactions = ref<WarehouseTransaction[]>([]);
 const warehouseNotices = ref<ProductionNotice[]>([]);
 const dateRange = ref<string[]>([]);
@@ -995,6 +1276,8 @@ const acknowledgeVisible = ref(false);
 const acknowledgeSaving = ref(false);
 const stockNoticeVisible = ref(false);
 const stockNoticeSaving = ref(false);
+const stockSourceLoading = ref(false);
+const stockNoticeConfirmTime = ref('');
 const saving = ref(false);
 const noticeVisible = ref(false);
 const confirmVisible = ref(false);
@@ -1012,6 +1295,7 @@ const shipmentSourceDetails = ref<InventorySourceDetailResponse | null>(null);
 const shipmentSourceFocusBatchId = ref('');
 const shipmentSourceFocusBatchNo = ref('');
 const shipmentTableRef = ref();
+const expandedMobileWarehouseCardKeys = ref<string[]>([]);
 
 const filters = reactive<{
   customerId?: string;
@@ -1023,9 +1307,16 @@ const receiptForm = reactive({
   remark: ''
 });
 const shipmentForm = reactive({
+  shipmentQuantity: 0,
+  warehouseConfirmedBy: '',
+  salesConfirmedBy: '',
+  overShipmentReason: '',
   remark: ''
 });
 const batchShipmentForm = reactive({
+  warehouseConfirmedBy: '',
+  salesConfirmedBy: '',
+  overShipmentReason: '',
   remark: ''
 });
 const stockNoticeForm = reactive({
@@ -1059,6 +1350,10 @@ type ShipmentOrderGroup = {
   partCount: number;
   batchCount: number;
   totalText: string;
+  shippedText: string;
+  remainingText: string;
+  suggestedText: string;
+  shortageText?: string;
 };
 
 const locationCount = computed(() => warehouses.value.reduce((sum, item) => sum + item.locations.length, 0));
@@ -1088,23 +1383,51 @@ const stockNoticeConfirmText = computed(() => {
   }
   return '确认无实物处理';
 });
+const stockNoticeConfirmTimeText = computed(() => stockNoticeConfirmTime.value || formatDateTime(new Date().toISOString()));
 const selectedShipmentOrderNo = computed(() => {
   const orderNos = Array.from(new Set(selectedShipments.value.map((item) => item.orderNo).filter(Boolean)));
   return orderNos.length === 1 ? orderNos[0] : '';
 });
+const activeShipmentOverQuantity = computed(() => {
+  if (!activeShipment.value) {
+    return 0;
+  }
+  return Math.max(Number(shipmentForm.shipmentQuantity || 0) - Number(activeShipment.value.remainingQuantity || 0), 0);
+});
+const activeShipmentQuantityAdjustmentText = computed(() =>
+  activeShipment.value
+    ? shipmentQuantityAdjustmentText({
+        ...activeShipment.value,
+        currentShipmentQuantity: shipmentForm.shipmentQuantity
+      })
+    : ''
+);
 const batchShipmentOrderNo = computed(() => {
   const orderNos = Array.from(new Set(batchShipmentRows.value.map((item) => item.orderNo).filter(Boolean)));
   return orderNos.length === 1 ? orderNos[0] : '';
 });
 const batchShipmentCustomerName = computed(() => batchShipmentRows.value[0]?.customerName || '');
 const batchShipmentTotalText = computed(() => formatShipmentTotal(batchShipmentRows.value));
+const batchShipmentCurrentText = computed(() => formatShipmentTotal(batchShipmentRows.value, 'currentShipmentQuantity'));
+const batchShipmentOverText = computed(() => formatBatchShipmentOverText(batchShipmentRows.value));
+const batchShipmentHasStockOverRows = computed(() =>
+  batchShipmentRows.value.some((row) => row.isStockOverShipment && Number(row.currentShipmentQuantity || 0) > 0)
+);
+const batchShipmentRequiresSalesConfirmation = computed(
+  () => Boolean(batchShipmentOverText.value) || batchShipmentHasStockOverRows.value
+);
+const batchShipmentOrder = computed(() => orderOptions.value.find((order) => order.orderNo === batchShipmentOrderNo.value));
+const batchShipmentShortageText = computed(() =>
+  batchShipmentOrder.value && orderNeedsShortageAttention(batchShipmentOrder.value) ? orderShortageActionText(batchShipmentOrder.value) : ''
+);
+const activeShipmentShortageText = computed(() => shipmentShortageText(activeShipment.value));
 const batchShipmentAlertTitle = computed(() =>
   batchShipmentIsOrderMode.value
-    ? '整单发货会以后端该订单全部待发货库存为准，不只发当前可见行；若仍有未入库或未完成零件，订单会继续保持待发货或流转中。'
-    : '批量发货只允许选择同一订单的待发货库存。确认后，选中批次会一次性出库；若该订单所有零件都已发完，订单自动完成。'
+    ? '整单发货默认带出该订单当前可发批次的建议数量；仓库可按客户要求逐批改本次发货数量。'
+    : '批量发货只允许选择同一订单的待发货库存；仓库可逐批填写本次发货数量。'
 );
 const batchShipmentRemarkPlaceholder = computed(() =>
-  batchShipmentIsOrderMode.value ? '例如：按订单整单发货' : '例如：按订单批量发货'
+  batchShipmentIsOrderMode.value ? '例如：按客户要求本次发货 500 件' : '例如：按订单批量发货'
 );
 const shipmentOrderGroups = computed(() => {
   const groupMap = new Map<string, ShipmentOrderGroup>();
@@ -1121,12 +1444,21 @@ const shipmentOrderGroups = computed(() => {
         rows: [],
         partCount: 0,
         batchCount: 0,
-        totalText: ''
+        totalText: '',
+        shippedText: '',
+        remainingText: '',
+        suggestedText: '',
+        shortageText: ''
       };
     group.rows.push(row);
     group.partCount = new Set(group.rows.map((item) => item.partCode)).size;
     group.batchCount = group.rows.length;
     group.totalText = formatShipmentTotal(group.rows);
+    group.shippedText = formatShipmentLineTotal(group.rows, 'shippedQuantity');
+    group.remainingText = formatShipmentLineTotal(group.rows, 'remainingQuantity');
+    group.suggestedText = formatShipmentTotal(group.rows, 'suggestedShipmentQuantity');
+    const order = orderOptions.value.find((item) => item.orderNo === key);
+    group.shortageText = order && orderNeedsShortageAttention(order) ? `部分发货，${orderShortageActionText(order)}` : '';
     groupMap.set(key, group);
   }
   return [...groupMap.values()].sort((a, b) => a.orderNo.localeCompare(b.orderNo, 'zh-Hans-CN'));
@@ -1142,6 +1474,36 @@ const warehouseRows = computed(() =>
     }))
   )
 );
+
+function receiptCardKey(receipt: WarehouseReceipt) {
+  return `receipt:${receipt.id}`;
+}
+
+function shipmentOrderCardKey(orderNo: string) {
+  return `shipment-order:${orderNo}`;
+}
+
+function shipmentCardKey(shipment: WarehouseShipment) {
+  return `shipment:${shipment.id}`;
+}
+
+function warehouseLocationCardKey(row: { warehouseCode: string; locationCode: string }) {
+  return `warehouse-location:${row.warehouseCode}:${row.locationCode}`;
+}
+
+function transactionCardKey(transaction: WarehouseTransaction) {
+  return `transaction:${transaction.id}`;
+}
+
+function isMobileWarehouseCardExpanded(key: string) {
+  return expandedMobileWarehouseCardKeys.value.includes(key);
+}
+
+function toggleMobileWarehouseCard(key: string) {
+  expandedMobileWarehouseCardKeys.value = isMobileWarehouseCardExpanded(key)
+    ? expandedMobileWarehouseCardKeys.value.filter((item) => item !== key)
+    : [...expandedMobileWarehouseCardKeys.value, key];
+}
 
 function warehouseWorkParams() {
   return {
@@ -1255,7 +1617,7 @@ async function openWarehouseNotices() {
 function warehouseNoticeTitle(notice: ProductionNotice) {
   const quantityText =
     notice.deltaQuantity && notice.unit ? `，变化 ${formatQuantity(Math.abs(notice.deltaQuantity), notice.unit)}` : '';
-  const partText = [notice.orderNo, notice.partCode, notice.partName].filter(Boolean).join(' / ');
+  const partText = [notice.customerName, notice.orderNo, notice.partCode, notice.partName].filter(Boolean).join(' / ');
   const typeMap: Record<string, string> = {
     QUANTITY_INCREASE: '客户数量增加',
     QUANTITY_DECREASE: '客户数量减少',
@@ -1271,6 +1633,7 @@ function acknowledgeWarehouseNotice(notice: ProductionNotice) {
   if (requiresWithdrawStockReceipt(notice) || requiresCustomerChangeHandling(notice)) {
     const handlingPlan = notice.handlingPlan;
     stockNoticeForm.acknowledgedBy = '';
+    stockNoticeConfirmTime.value = formatDateTime(new Date().toISOString());
     stockNoticeForm.handlingMode = requiresWithdrawStockReceipt(notice)
       ? 'STOCK'
       : handlingPlan?.handlingMode || 'NONE';
@@ -1415,8 +1778,113 @@ function openConfirm(row: WarehouseReceipt) {
   confirmVisible.value = true;
 }
 
+function defaultShipmentQuantity(row: WarehouseShipment) {
+  const suggestedQuantity = Number(row.suggestedShipmentQuantity || 0);
+  if (suggestedQuantity > 0) {
+    return suggestedQuantity;
+  }
+  if (row.remainingQuantity === undefined || row.remainingQuantity === null) {
+    return Number(row.quantity || 0);
+  }
+  const remainingQuantity = Number(row.remainingQuantity || 0);
+  return remainingQuantity > 0 ? Math.min(Number(row.quantity || 0), remainingQuantity) : 0;
+}
+
+function prepareBatchShipmentRows(rows: WarehouseShipment[]): EditableWarehouseShipment[] {
+  return rows.map((row) => ({
+    ...row,
+    currentShipmentQuantity: defaultShipmentQuantity(row)
+  }));
+}
+
+function toStockOverShipmentRow(source: InventorySourceBatchDetail, targetLine: EditableWarehouseShipment): EditableWarehouseShipment {
+  return {
+    id: source.id,
+    batchNo: source.batchNo,
+    orderLineId: targetLine.orderLineId,
+    targetOrderLineId: targetLine.orderLineId,
+    customerId: targetLine.customerId,
+    orderNo: targetLine.orderNo,
+    customerName: targetLine.customerName,
+    orderDate: targetLine.orderDate,
+    deliveryDate: targetLine.deliveryDate,
+    partCode: source.partCode,
+    partName: source.partName,
+    quantity: Number(source.quantity || 0),
+    customerOrderQuantity: targetLine.customerOrderQuantity,
+    shippedQuantity: targetLine.shippedQuantity,
+    remainingQuantity: targetLine.remainingQuantity,
+    suggestedShipmentQuantity: 0,
+    physicalQuantity: source.physicalQuantity,
+    reservedQuantity: source.reservedQuantity,
+    unit: source.unit,
+    warehouseId: source.warehouseId,
+    warehouseName: source.warehouseName || '-',
+    locationId: source.locationId,
+    locationName: source.locationName,
+    inventorySourceType: source.inventorySourceType,
+    sourceKind: source.sourceKind,
+    productionSourceOrderNo: source.productionSourceOrderNo,
+    productionSourceCustomerName: source.productionSourceCustomerName,
+    productionDate: source.productionDate,
+    drawingNo: source.drawingNo || targetLine.drawingNo,
+    drawingVersion: source.drawingVersion || targetLine.drawingVersion,
+    drawingFileName: source.drawingFileName || targetLine.drawingFileName,
+    drawingFileUrl: source.drawingFileUrl || targetLine.drawingFileUrl,
+    partThickness: source.partThickness ?? targetLine.partThickness,
+    partSpecification: source.partSpecification || targetLine.partSpecification,
+    status: source.status,
+    currentShipmentQuantity: 0,
+    isStockOverShipment: true
+  };
+}
+
+async function appendStockOverShipment(row: EditableWarehouseShipment) {
+  if (!batchShipmentIsOrderMode.value) {
+    return;
+  }
+  if (!row.partCode?.trim()) {
+    ElMessage.warning('该零件缺少零件编码，无法查询备货库存');
+    return;
+  }
+  stockSourceLoading.value = true;
+  try {
+    const detail = await erpApi.inventoryMaterialSourceDetails(row.partCode.trim(), {
+      unit: row.unit,
+      sourceType: 'STOCK',
+      excludeOrderNo: batchShipmentOrderNo.value || row.orderNo
+    });
+    const existingIds = new Set(batchShipmentRows.value.map((item) => item.id));
+    const source = detail.sources
+      .filter((item) => item.inventorySourceType === 'STOCK' && Number(item.quantity || 0) > 0 && !existingIds.has(item.id))
+      .sort(
+        (a, b) =>
+          Number(a.quantity || 0) - Number(b.quantity || 0) ||
+          String(a.batchNo || '').localeCompare(String(b.batchNo || ''), 'zh-Hans-CN')
+      )[0];
+    if (!source) {
+      ElMessage.warning('没有可用于该零件的备货库存，或备货库存已加入本次发货');
+      return;
+    }
+    batchShipmentRows.value.push(toStockOverShipmentRow(source, row));
+    ElMessage.success('已加入备货库存，请填写本次发货数量、销售确认人和超发说明');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '备货库存查询失败');
+  } finally {
+    stockSourceLoading.value = false;
+  }
+}
+
+function removeStockOverShipment(row: EditableWarehouseShipment) {
+  batchShipmentRows.value = batchShipmentRows.value.filter((item) => item !== row);
+}
+
 function openShipmentConfirm(row: WarehouseShipment) {
   activeShipment.value = row;
+  shipmentForm.shipmentQuantity = defaultShipmentQuantity(row);
+  shipmentForm.warehouseConfirmedBy = '';
+  shipmentForm.salesConfirmedBy = '';
+  shipmentForm.overShipmentReason = '';
   shipmentForm.remark = '';
   shipmentVisible.value = true;
 }
@@ -1467,10 +1935,15 @@ function openOrderShipmentConfirm(row: WarehouseShipment) {
     ElMessage.warning('该库存没有来源订单，不能按订单批量发货');
     return;
   }
-  batchShipmentRows.value = shipments.value
+  batchShipmentRows.value = prepareBatchShipmentRows(
+    shipments.value
     .filter((item) => item.orderNo === row.orderNo)
-    .sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`));
+    .sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`))
+  );
   batchShipmentForm.remark = '';
+  batchShipmentForm.warehouseConfirmedBy = '';
+  batchShipmentForm.salesConfirmedBy = '';
+  batchShipmentForm.overShipmentReason = '';
   batchShipmentIsOrderMode.value = true;
   batchShipmentVisible.value = true;
 }
@@ -1490,10 +1963,39 @@ function openBatchShipmentConfirm(rows: WarehouseShipment[]) {
     return;
   }
 
-  batchShipmentRows.value = [...rows].sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`));
+  batchShipmentRows.value = prepareBatchShipmentRows(
+    [...rows].sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`))
+  );
   batchShipmentForm.remark = '';
+  batchShipmentForm.warehouseConfirmedBy = '';
+  batchShipmentForm.salesConfirmedBy = '';
+  batchShipmentForm.overShipmentReason = '';
   batchShipmentIsOrderMode.value = false;
   batchShipmentVisible.value = true;
+}
+
+function goBatchShipmentShortageDetail() {
+  const orderNo = batchShipmentOrderNo.value;
+  if (!orderNo) {
+    return;
+  }
+  batchShipmentVisible.value = false;
+  router.push({
+    path: `/orders/${encodeURIComponent(orderNo)}`,
+    query: { shortage: '1', returnTo: route.fullPath }
+  });
+}
+
+function goActiveShipmentShortageDetail() {
+  const orderNo = activeShipment.value?.orderNo;
+  if (!orderNo) {
+    return;
+  }
+  shipmentVisible.value = false;
+  router.push({
+    path: `/orders/${encodeURIComponent(orderNo)}`,
+    query: { shortage: '1', returnTo: route.fullPath }
+  });
 }
 
 function resetLocation() {
@@ -1509,6 +2011,10 @@ function resetReceiptDialog() {
 
 function resetShipmentDialog() {
   activeShipment.value = undefined;
+  shipmentForm.shipmentQuantity = 0;
+  shipmentForm.warehouseConfirmedBy = '';
+  shipmentForm.salesConfirmedBy = '';
+  shipmentForm.overShipmentReason = '';
   shipmentForm.remark = '';
 }
 
@@ -1516,6 +2022,9 @@ function resetBatchShipmentDialog() {
   if (!batchShipmentVisible.value) {
     batchShipmentIsOrderMode.value = false;
     batchShipmentRows.value = [];
+    batchShipmentForm.warehouseConfirmedBy = '';
+    batchShipmentForm.salesConfirmedBy = '';
+    batchShipmentForm.overShipmentReason = '';
     batchShipmentForm.remark = '';
   }
 }
@@ -1656,9 +2165,39 @@ async function confirmShipment() {
   if (!activeShipment.value) {
     return;
   }
+  if (activeShipmentShortageText.value) {
+    ElMessage.warning('该订单仍有待补单短缺，请先处理补单、客户减量或无需补单说明');
+    return;
+  }
+  if (shipmentForm.shipmentQuantity <= 0) {
+    ElMessage.warning('请填写本次发货数量');
+    return;
+  }
+  if (shipmentForm.shipmentQuantity > activeShipment.value.quantity) {
+    ElMessage.warning('本次发货数量不能大于当前库存数量');
+    return;
+  }
+  if (!shipmentForm.warehouseConfirmedBy.trim()) {
+    ElMessage.warning('请填写仓库确认人');
+    return;
+  }
+  if (activeShipmentOverQuantity.value > 0 && !shipmentForm.salesConfirmedBy.trim()) {
+    ElMessage.warning('超出未发货数量时必须填写销售确认人');
+    return;
+  }
+  if (activeShipmentOverQuantity.value > 0 && !shipmentForm.overShipmentReason.trim()) {
+    ElMessage.warning('超出未发货数量时必须填写超发说明');
+    return;
+  }
   saving.value = true;
   try {
-    await erpApi.confirmShipment(activeShipment.value.id, shipmentForm.remark || undefined);
+    await erpApi.confirmShipment(activeShipment.value.id, {
+      shipmentQuantity: shipmentForm.shipmentQuantity,
+      warehouseConfirmedBy: shipmentForm.warehouseConfirmedBy.trim(),
+      salesConfirmedBy: shipmentForm.salesConfirmedBy.trim() || undefined,
+      overShipmentReason: shipmentForm.overShipmentReason.trim() || undefined,
+      remark: shipmentForm.remark || undefined
+    });
     ElMessage.success('发货已确认，库存已出库');
     shipmentVisible.value = false;
     await queryWarehouseWork();
@@ -1673,26 +2212,71 @@ async function confirmBatchShipment() {
   if (batchShipmentRows.value.length === 0) {
     return;
   }
+  if (batchShipmentShortageText.value) {
+    ElMessage.warning('该订单仍有待补单短缺，请先处理补单、客户减量或无需补单说明');
+    return;
+  }
+  if (!batchShipmentForm.warehouseConfirmedBy.trim()) {
+    ElMessage.warning('请填写仓库确认人');
+    return;
+  }
+  const invalidQuantityRow = batchShipmentRows.value.find(
+    (row) => Number(row.currentShipmentQuantity || 0) < 0 || Number(row.currentShipmentQuantity || 0) > Number(row.quantity || 0)
+  );
+  if (invalidQuantityRow) {
+    ElMessage.warning(`${invalidQuantityRow.batchNo} 本次发货数量不能大于当前库存数量`);
+    return;
+  }
+  const batchShipments = batchShipmentRows.value
+    .map((row) => ({
+      batchId: row.id,
+      orderLineId: row.isStockOverShipment ? row.targetOrderLineId || row.orderLineId : row.orderLineId,
+      shipmentQuantity: Number(row.currentShipmentQuantity || 0)
+    }))
+    .filter((item) => item.shipmentQuantity > 0);
+  if (batchShipments.length === 0) {
+    ElMessage.warning('请至少填写一个批次的本次发货数量');
+    return;
+  }
+  if (batchShipmentRequiresSalesConfirmation.value && !batchShipmentForm.salesConfirmedBy.trim()) {
+    ElMessage.warning('本次发货超过订单未发货数量或使用备货库存，必须填写销售确认人');
+    return;
+  }
+  if (batchShipmentRequiresSalesConfirmation.value && !batchShipmentForm.overShipmentReason.trim()) {
+    ElMessage.warning('本次发货超过订单未发货数量或使用备货库存，必须填写超发说明');
+    return;
+  }
   saving.value = true;
   try {
+    const payload = {
+      batchShipments,
+      warehouseConfirmedBy: batchShipmentForm.warehouseConfirmedBy.trim(),
+      salesConfirmedBy: batchShipmentForm.salesConfirmedBy.trim() || undefined,
+      overShipmentReason: batchShipmentForm.overShipmentReason.trim() || undefined,
+      remark: batchShipmentForm.remark || undefined
+    };
     if (batchShipmentIsOrderMode.value) {
       const orderNo = batchShipmentOrderNo.value;
       if (!orderNo) {
         ElMessage.warning('没有可发货的订单号');
         return;
       }
-      await erpApi.confirmOrderShipment(orderNo, batchShipmentForm.remark || undefined);
-      ElMessage.success('整单发货已确认，订单状态已重新计算');
+      await erpApi.confirmOrderShipment(orderNo, payload);
+      ElMessage.success('本次发货已确认，订单状态已重新计算');
     } else {
       await erpApi.confirmBatchShipment(
-        batchShipmentRows.value.map((item) => item.id),
-        batchShipmentForm.remark || undefined
+        batchShipments.map((item) => item.batchId),
+        payload
       );
       ElMessage.success('批量发货已确认，订单状态已重新计算');
     }
     batchShipmentVisible.value = false;
     batchShipmentIsOrderMode.value = false;
     batchShipmentRows.value = [];
+    batchShipmentForm.warehouseConfirmedBy = '';
+    batchShipmentForm.salesConfirmedBy = '';
+    batchShipmentForm.overShipmentReason = '';
+    batchShipmentForm.remark = '';
     selectedShipments.value = [];
     shipmentTableRef.value?.clearSelection();
     await queryWarehouseWork();
@@ -1703,14 +2287,110 @@ async function confirmBatchShipment() {
   }
 }
 
-function formatShipmentTotal(rows: WarehouseShipment[]) {
+function formatShipmentTotal(rows: EditableWarehouseShipment[], field: keyof EditableWarehouseShipment = 'quantity') {
   const quantityByUnit = new Map<string, number>();
   rows.forEach((row) => {
-    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) || 0) + Number(row.quantity || 0));
+    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) || 0) + Number(row[field] || 0));
   });
   return Array.from(quantityByUnit.entries())
     .map(([unit, quantity]) => formatQuantity(quantity, unit))
     .join(' / ');
+}
+
+function formatShipmentLineTotal(rows: EditableWarehouseShipment[], field: keyof EditableWarehouseShipment) {
+  const seenLineKeys = new Set<string>();
+  const quantityByUnit = new Map<string, number>();
+  rows.forEach((row) => {
+    const lineKey = row.orderLineId || `${row.partCode}-${row.partName}-${row.unit}`;
+    if (seenLineKeys.has(lineKey)) {
+      return;
+    }
+    seenLineKeys.add(lineKey);
+    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) || 0) + Number(row[field] || 0));
+  });
+  return Array.from(quantityByUnit.entries())
+    .map(([unit, quantity]) => formatQuantity(quantity, unit))
+    .join(' / ');
+}
+
+function formatBatchShipmentOverText(rows: EditableWarehouseShipment[]) {
+  const lineMap = new Map<string, { current: number; remaining: number; unit: string }>();
+  rows.forEach((row) => {
+    const lineKey = row.orderLineId || `${row.partCode}-${row.partName}-${row.unit}`;
+    const current = Number(row.currentShipmentQuantity || 0);
+    const existing = lineMap.get(lineKey);
+    if (existing) {
+      existing.current += current;
+      return;
+    }
+    lineMap.set(lineKey, {
+      current,
+      remaining: Number(row.remainingQuantity || 0),
+      unit: row.unit
+    });
+  });
+
+  const overByUnit = new Map<string, number>();
+  lineMap.forEach((item) => {
+    const overQuantity = Math.max(item.current - item.remaining, 0);
+    if (overQuantity > 0) {
+      overByUnit.set(item.unit, (overByUnit.get(item.unit) || 0) + overQuantity);
+    }
+  });
+  return Array.from(overByUnit.entries())
+    .map(([unit, quantity]) => formatQuantity(quantity, unit))
+    .join(' / ');
+}
+
+function shipmentQuantityAdjustmentText(row: EditableWarehouseShipment) {
+  const currentQuantity = Number(row.currentShipmentQuantity || 0);
+  const suggestedQuantity = Number(row.suggestedShipmentQuantity || 0);
+  const remainingQuantity = Number(row.remainingQuantity || 0);
+  const unit = row.unit || '件';
+
+  if (row.isStockOverShipment && currentQuantity > 0) {
+    return `备货超发 ${formatQuantity(currentQuantity, unit)}，需销售确认`;
+  }
+  if (currentQuantity <= 0) {
+    return '本批次本次不发货';
+  }
+  if (remainingQuantity > 0 && currentQuantity > remainingQuantity + 0.0001) {
+    return `超过未发 ${formatQuantity(currentQuantity - remainingQuantity, unit)}，需销售确认`;
+  }
+  if (suggestedQuantity > 0 && Math.abs(currentQuantity - suggestedQuantity) > 0.0001) {
+    return currentQuantity < suggestedQuantity
+      ? `少于建议 ${formatQuantity(suggestedQuantity - currentQuantity, unit)}，用于客户分批发货`
+      : `多于建议 ${formatQuantity(currentQuantity - suggestedQuantity, unit)}，需销售确认`;
+  }
+  return '';
+}
+
+function orderShortageActionText(order: OrderSummary) {
+  if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
+    const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
+      ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+      : formatQuantity(order.pendingProductionReplenishmentQuantity || 0, order.pendingProductionReplenishmentUnit || order.unit);
+    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount || 0} 个 / ${quantityText}`;
+  }
+  const quantityText = order.unresolvedShortageQuantityByUnit?.length
+    ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+    : formatQuantity(order.unresolvedShortageQuantity || 0, order.unresolvedShortageUnit || order.unit);
+  return `需补单 ${order.unresolvedShortageLineCount || 0} 个 / ${quantityText}`;
+}
+
+function orderNeedsShortageAttention(order: OrderSummary) {
+  return Boolean(order.needsReplenishmentAction || order.needsProductionReplenishmentReview);
+}
+
+function shipmentShortageText(row?: WarehouseShipment) {
+  if (!row?.orderNo) {
+    return '';
+  }
+  const order = orderOptions.value.find((item) => item.orderNo === row.orderNo);
+  if (!order || !orderNeedsShortageAttention(order)) {
+    return '';
+  }
+  return orderShortageActionText(order);
 }
 
 watch(
@@ -1766,7 +2446,12 @@ onMounted(async () => {
 }
 
 .notice-item small {
+  display: block;
   color: #60708a;
+}
+
+.notice-ack-text {
+  margin-top: 2px;
 }
 
 .notice-stock-panel {
@@ -1846,6 +2531,36 @@ onMounted(async () => {
   width: 100%;
 }
 
+.shipment-quantity-input {
+  width: 140px;
+}
+
+.shipment-adjustment-note {
+  display: block;
+  margin-top: 4px;
+  color: #b45309;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.shipment-shortage-block {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #f6c453;
+  border-radius: 8px;
+  background: #fff7e6;
+  color: #92400e;
+}
+
+.shipment-shortage-block p {
+  margin: 4px 0 0;
+  color: #b45309;
+  line-height: 20px;
+}
+
 .shipment-order-groups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -1888,6 +2603,10 @@ onMounted(async () => {
 .shipment-order-card small {
   color: #64748b;
   font-size: 12px;
+}
+
+.shipment-order-card .shipment-shortage-warning {
+  color: #b45309;
 }
 
 .mobile-shipment-order-groups {

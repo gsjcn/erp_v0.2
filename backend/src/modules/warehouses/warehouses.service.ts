@@ -23,6 +23,22 @@ import {
 } from './dto';
 
 type WarehousePrismaClient = PrismaService | Prisma.TransactionClient;
+type NormalizedShipmentItem = {
+  batchId: string;
+  shipmentQuantity: number;
+  orderLineId?: string;
+};
+type ShipmentTargetOrder = {
+  id: string;
+  orderNo: string;
+};
+type ShipmentTargetOrderLine = {
+  id: string;
+  partCode: string;
+  partName: string;
+  quantity: Prisma.Decimal;
+  unit: string;
+};
 
 @Injectable()
 export class WarehousesService {
@@ -45,7 +61,7 @@ export class WarehousesService {
       },
       orderBy: [{ status: 'asc' }, { createdAt: 'desc' }]
     });
-    return notices.map((notice) => this.toNotice(notice));
+    return this.toNoticesWithCustomerNames(notices);
   }
 
   async acknowledgeWarehouseNotice(id: string, dto: AcknowledgeWarehouseNoticeDto) {
@@ -87,7 +103,8 @@ export class WarehousesService {
             acknowledgedAt: new Date()
           }
         });
-        return this.toNotice(saved);
+        const [noticeWithCustomer] = await this.toNoticesWithCustomerNames([saved], tx);
+        return noticeWithCustomer;
       },
       '当前仓库通知正在被其他操作处理，请刷新后重新确认'
     );
@@ -449,6 +466,7 @@ export class WarehousesService {
               transactionNo,
               transactionType: 'IN',
               batchId: batch.id,
+              orderLineId: task.orderLineId,
               partCode: task.partCode,
               partName: task.partName,
               orderNo: task.orderNo,
@@ -550,14 +568,29 @@ export class WarehousesService {
       orderBy: [{ createdAt: 'desc' }, { batchNo: 'asc' }]
     });
 
-    return batches.map((batch) => this.toShipment(batch));
+    const shippedQuantityByLine = await this.getShippedOrderQuantityMap(
+      batches.map((batch) => batch.sourceOrderLineId).filter((id): id is string => Boolean(id))
+    );
+
+    const remainingSuggestionQuantityByLine = new Map<string, number>();
+    return batches.map((batch) => this.toShipment(batch, shippedQuantityByLine, remainingSuggestionQuantityByLine));
   }
 
   async confirmShipment(batchId: string, dto: ConfirmShipmentDto) {
     return runSerializableTransaction(
       this.prisma,
       async (tx) => {
-        const shipped = await this.shipOneBatch(tx, batchId, dto.remark);
+        const batch = await tx.inventoryBatch.findUnique({
+          where: { id: batchId },
+          select: { sourceOrderId: true }
+        });
+        if (!batch) {
+          throw new NotFoundException('库存批次不存在');
+        }
+        if (batch.sourceOrderId) {
+          await this.assertOrderHasNoPendingShortage(tx, batch.sourceOrderId, '单批发货');
+        }
+        const shipped = await this.shipOneBatch(tx, batchId, dto);
         if (shipped.sourceOrderId) {
           await this.refreshOrderShipmentStatus(tx, shipped.sourceOrderId);
         }
@@ -568,7 +601,8 @@ export class WarehousesService {
   }
 
   async confirmBatchShipment(dto: ConfirmBatchShipmentDto) {
-    const batchIds = Array.from(new Set(dto.batchIds.map((item) => item.trim()).filter(Boolean)));
+    const batchShipmentRequest = this.normalizeBatchShipmentRequest(dto);
+    const batchIds = batchShipmentRequest.batchIds;
     if (batchIds.length === 0) {
       throw new BadRequestException('请选择需要发货的库存批次');
     }
@@ -586,14 +620,24 @@ export class WarehousesService {
         const orderIds = Array.from(
           new Set(batches.map((batch) => batch.sourceOrderId).filter((value): value is string => Boolean(value)))
         );
+        if (batches.some((batch) => !batch.sourceOrderId)) {
+          throw new BadRequestException('批量发货只能选择订单库存；备货库存超发请从订单发货中处理');
+        }
         if (orderIds.length !== 1) {
           throw new BadRequestException('批量发货只能选择同一个订单的库存批次');
         }
+        await this.assertOrderHasNoPendingShortage(tx, orderIds[0], '批量发货');
 
         // 批量发货仍逐批写 OUT 流水，但必须放在同一事务里，保证同一订单多零件出库状态一致。
         const shipped = [];
         for (const batchId of batchIds) {
-          shipped.push(await this.shipOneBatch(tx, batchId, dto.remark || '按订单批量发货'));
+          shipped.push(
+            await this.shipOneBatch(tx, batchId, {
+              ...dto,
+              shipmentQuantity: batchShipmentRequest.quantityByBatchId.get(batchId) ?? dto.shipmentQuantity,
+              remark: dto.remark || '按订单批量发货'
+            })
+          );
         }
         await this.refreshOrderShipmentStatus(tx, orderIds[0]);
         return {
@@ -611,13 +655,30 @@ export class WarehousesService {
     if (!normalizedOrderNo) {
       throw new BadRequestException('请提供订单号');
     }
+    const orderShipmentRequest = this.normalizeShipmentItems(dto);
+    if (orderShipmentRequest.hasExplicitQuantities && orderShipmentRequest.batchIds.length === 0) {
+      throw new BadRequestException('请填写本次发货数量');
+    }
 
     return runSerializableTransaction(
       this.prisma,
       async (tx) => {
         const order = await tx.customerOrder.findFirst({
           where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
-          select: { id: true, orderNo: true, status: true }
+          select: {
+            id: true,
+            orderNo: true,
+            status: true,
+            lines: {
+              select: {
+                id: true,
+                partCode: true,
+                partName: true,
+                quantity: true,
+                unit: true
+              }
+            }
+          }
         });
         if (!order) {
           throw new NotFoundException('订单不存在');
@@ -625,23 +686,63 @@ export class WarehousesService {
         if (order.status === 'CANCELLED') {
           throw new BadRequestException('已取消订单不能发货');
         }
+        if (order.status === 'DRAFT') {
+          throw new BadRequestException('待提交生产订单不能发货，请先提交生产并形成待发货库存');
+        }
+        await this.assertOrderHasNoPendingShortage(tx, order.id, '整单发货');
 
         const batches = await tx.inventoryBatch.findMany({
-          where: {
-            sourceOrderId: order.id,
-            status: 'AVAILABLE',
-            quantity: { gt: 0 }
-          },
-          select: { id: true },
+          where: orderShipmentRequest.hasExplicitQuantities
+            ? {
+                id: { in: orderShipmentRequest.batchIds },
+                status: 'AVAILABLE',
+                quantity: { gt: 0 },
+                OR: [{ sourceOrderId: order.id }, { sourceOrderId: null }]
+              }
+            : {
+                sourceOrderId: order.id,
+                status: 'AVAILABLE',
+                quantity: { gt: 0 }
+              },
+          select: { id: true, sourceOrderId: true, partCode: true, partName: true, quantity: true, unit: true },
           orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
         });
+        if (orderShipmentRequest.hasExplicitQuantities && batches.length !== orderShipmentRequest.batchIds.length) {
+          throw new BadRequestException('部分发货库存批次不存在、不可发货，或既不属于当前订单也不是备货库存');
+        }
         if (batches.length === 0) {
           throw new BadRequestException('该订单没有待发货库存');
         }
+        if (batches.some((batch) => !batch.sourceOrderId)) {
+          if (!dto.salesConfirmedBy?.trim()) {
+            throw new BadRequestException('订单发货使用备货库存时，必须填写销售确认人');
+          }
+          if (!dto.overShipmentReason?.trim()) {
+            throw new BadRequestException('订单发货使用备货库存时，必须填写超发或客户追加发货说明');
+          }
+        }
 
         const shipped = [];
-        for (const batch of batches) {
-          shipped.push(await this.shipOneBatch(tx, batch.id, dto.remark || '按订单整单发货'));
+        const shipmentBatches = [...batches].sort((a, b) => Number(!a.sourceOrderId) - Number(!b.sourceOrderId));
+        for (const batch of shipmentBatches) {
+          const shipmentItem = orderShipmentRequest.itemByBatchId.get(batch.id);
+          shipped.push(
+            await this.shipOneBatch(
+              tx,
+              batch.id,
+              {
+                ...dto,
+                shipmentQuantity: shipmentItem?.shipmentQuantity ?? dto.shipmentQuantity,
+                remark: dto.remark || '按订单本次发货'
+              },
+              batch.sourceOrderId
+                ? undefined
+                : {
+                    targetOrder: { id: order.id, orderNo: order.orderNo },
+                    targetOrderLine: this.resolveStockShipmentTargetLine(order, batch, shipmentItem)
+                  }
+            )
+          );
         }
         await this.refreshOrderShipmentStatus(tx, order.id);
         return {
@@ -930,6 +1031,44 @@ export class WarehousesService {
     return receivedMap;
   }
 
+  private async getShippedOrderQuantityMap(orderLineIds: string[], client: WarehousePrismaClient = this.prisma) {
+    const uniqueOrderLineIds = Array.from(new Set(orderLineIds.filter(Boolean)));
+    const shippedMap = new Map<string, number>();
+    if (uniqueOrderLineIds.length === 0) {
+      return shippedMap;
+    }
+
+    const transactions = await client.inventoryTransaction.findMany({
+      where: {
+        transactionType: 'OUT',
+        sourceRecordType: 'InventoryBatch',
+        OR: [
+          { orderLineId: { in: uniqueOrderLineIds } },
+          {
+            batch: {
+              sourceOrderLineId: { in: uniqueOrderLineIds },
+              sourceOrderId: { not: null }
+            }
+          }
+        ]
+      },
+      select: {
+        orderLineId: true,
+        quantity: true,
+        batch: { select: { sourceOrderLineId: true } }
+      }
+    });
+
+    for (const transaction of transactions) {
+      const orderLineId = transaction.orderLineId || transaction.batch?.sourceOrderLineId;
+      if (!orderLineId) {
+        continue;
+      }
+      shippedMap.set(orderLineId, (shippedMap.get(orderLineId) || 0) + decimalToNumber(transaction.quantity));
+    }
+    return shippedMap;
+  }
+
   private replenishmentSourceLabel(row: { replenishmentSourceType?: string | null; replenishmentSourceRequestNo?: string | null } | null | undefined) {
     if (!row?.replenishmentSourceType) {
       return null;
@@ -981,10 +1120,30 @@ export class WarehousesService {
     };
   }
 
-  private toShipment(batch: any) {
+  private toShipment(
+    batch: any,
+    shippedQuantityByLine = new Map<string, number>(),
+    remainingSuggestionQuantityByLine = new Map<string, number>()
+  ) {
+    const customerOrderQuantity = decimalToNumber(batch.sourceOrderLine?.quantity);
+    const shippedQuantity = batch.sourceOrderLineId ? shippedQuantityByLine.get(batch.sourceOrderLineId) || 0 : 0;
+    const remainingQuantity =
+      customerOrderQuantity > 0 ? Math.max(this.roundQuantity(customerOrderQuantity - shippedQuantity), 0) : decimalToNumber(batch.quantity);
+    const availableQuantity = decimalToNumber(batch.quantity);
+    const suggestionRemaining = batch.sourceOrderLineId
+      ? remainingSuggestionQuantityByLine.get(batch.sourceOrderLineId) ?? remainingQuantity
+      : remainingQuantity;
+    const suggestedShipmentQuantity = Math.min(availableQuantity, Math.max(suggestionRemaining, 0));
+    if (batch.sourceOrderLineId) {
+      remainingSuggestionQuantityByLine.set(
+        batch.sourceOrderLineId,
+        this.roundQuantity(Math.max(suggestionRemaining - suggestedShipmentQuantity, 0))
+      );
+    }
     return {
       id: batch.id,
       batchNo: batch.batchNo,
+      orderLineId: batch.sourceOrderLineId,
       productionTaskNo: batch.sourceProductionTaskNo,
       isReplenishment: Boolean(batch.productionTask?.isReplenishment),
       sourceProductionTaskNo: batch.productionTask?.sourceProductionTaskNo,
@@ -998,7 +1157,11 @@ export class WarehousesService {
       deliveryDate: batch.productionTask?.orderLine?.deliveryDate || batch.sourceOrderLine?.deliveryDate || batch.sourceOrder?.deliveryDate,
       partCode: batch.partCode,
       partName: batch.partName,
-      quantity: decimalToNumber(batch.quantity),
+      quantity: availableQuantity,
+      customerOrderQuantity,
+      shippedQuantity: this.roundQuantity(shippedQuantity),
+      remainingQuantity,
+      suggestedShipmentQuantity: this.roundQuantity(suggestedShipmentQuantity),
       unit: batch.unit,
       warehouseId: batch.warehouseId,
       warehouseName: batch.warehouse.warehouseName,
@@ -1023,51 +1186,309 @@ export class WarehousesService {
     };
   }
 
-  private async shipOneBatch(tx: Prisma.TransactionClient, batchId: string, remark?: string) {
+  private normalizeBatchShipmentRequest(dto: ConfirmBatchShipmentDto) {
+    const requestedBatchIds = Array.from(new Set(dto.batchIds.map((item) => item.trim()).filter(Boolean)));
+    const explicitRequest = this.normalizeShipmentItems(dto);
+    if (explicitRequest.hasExplicitQuantities) {
+      const requestedBatchIdSet = new Set(requestedBatchIds);
+      const outsideRequestedBatch = explicitRequest.batchIds.find((batchId) => !requestedBatchIdSet.has(batchId));
+      if (outsideRequestedBatch) {
+        throw new BadRequestException('批量发货数量明细包含未勾选的库存批次');
+      }
+      return explicitRequest;
+    }
+
+    return {
+      hasExplicitQuantities: false,
+      batchIds: requestedBatchIds,
+      quantityByBatchId: new Map<string, number>(),
+      itemByBatchId: new Map<string, NormalizedShipmentItem>()
+    };
+  }
+
+  private normalizeShipmentItems(dto: ConfirmShipmentDto) {
+    const quantityByBatchId = new Map<string, number>();
+    const itemByBatchId = new Map<string, NormalizedShipmentItem>();
+    for (const item of dto.batchShipments || []) {
+      const batchId = item.batchId?.trim();
+      if (!batchId) {
+        throw new BadRequestException('发货批次不能为空');
+      }
+      const shipmentQuantity = this.roundQuantity(decimalToNumber(item.shipmentQuantity));
+      if (shipmentQuantity <= 0) {
+        continue;
+      }
+      if (quantityByBatchId.has(batchId)) {
+        throw new BadRequestException('同一个库存批次不能重复填写发货数量');
+      }
+      quantityByBatchId.set(batchId, shipmentQuantity);
+      itemByBatchId.set(batchId, {
+        batchId,
+        shipmentQuantity,
+        orderLineId: item.orderLineId?.trim() || undefined
+      });
+    }
+
+    return {
+      hasExplicitQuantities: Boolean(dto.batchShipments && dto.batchShipments.length > 0),
+      batchIds: Array.from(quantityByBatchId.keys()),
+      quantityByBatchId,
+      itemByBatchId
+    };
+  }
+
+  private resolveStockShipmentTargetLine(
+    order: { lines: ShipmentTargetOrderLine[] },
+    batch: { partCode: string; partName: string; unit: string },
+    item?: NormalizedShipmentItem
+  ) {
+    const targetLine = item?.orderLineId
+      ? order.lines.find((line) => line.id === item.orderLineId)
+      : (() => {
+          const candidates = order.lines.filter((line) => line.partCode === batch.partCode && line.unit === batch.unit);
+          if (candidates.length !== 1) {
+            throw new BadRequestException(
+              candidates.length === 0
+                ? `备货库存 ${batch.partCode} / ${batch.partName} 无法匹配当前订单零件`
+                : `备货库存 ${batch.partCode} / ${batch.partName} 匹配到多个订单零件，请指定 orderLineId`
+            );
+          }
+          return candidates[0];
+        })();
+
+    if (!targetLine) {
+      throw new BadRequestException('备货库存超发必须指定有效的订单零件');
+    }
+    if (targetLine.partCode !== batch.partCode || targetLine.unit !== batch.unit) {
+      throw new BadRequestException('备货库存批次与目标订单零件编码或单位不一致');
+    }
+    return targetLine;
+  }
+
+  private async getShippedQuantityForTargetOrderLine(
+    tx: Prisma.TransactionClient,
+    orderNo: string,
+    line: ShipmentTargetOrderLine
+  ) {
+    const transactions = await tx.inventoryTransaction.findMany({
+      where: {
+        transactionType: 'OUT',
+        sourceRecordType: 'InventoryBatch',
+        OR: [
+          { orderLineId: line.id },
+          {
+            batch: {
+              sourceOrderLineId: line.id,
+              sourceOrderId: { not: null }
+            }
+          },
+          {
+            orderNo,
+            partCode: line.partCode,
+            unit: line.unit,
+            orderLineId: null,
+            batch: { sourceOrderId: null }
+          }
+        ]
+      },
+      select: { quantity: true }
+    });
+    return this.roundQuantity(transactions.reduce((sum, item) => sum + decimalToNumber(item.quantity), 0));
+  }
+
+  private async shipOneBatch(
+    tx: Prisma.TransactionClient,
+    batchId: string,
+    dto: ConfirmShipmentDto,
+    options?: { targetOrder?: ShipmentTargetOrder; targetOrderLine?: ShipmentTargetOrderLine }
+  ) {
     const batch = await tx.inventoryBatch.findUnique({
       where: { id: batchId },
-      include: { warehouse: true, location: true }
+      include: {
+        warehouse: true,
+        location: true,
+        sourceOrder: { select: { status: true } },
+        sourceOrderLine: true,
+        reservations: {
+          where: { status: InventoryReservationStatus.ACTIVE },
+          select: { quantity: true }
+        }
+      }
     });
     if (!batch) {
       throw new NotFoundException('库存批次不存在');
     }
-    if (!batch.sourceOrderId) {
-      throw new BadRequestException('只有订单库存可以从仓库发货');
+    const targetOrder = batch.sourceOrderId ? undefined : options?.targetOrder;
+    const targetOrderLine = batch.sourceOrderId ? undefined : options?.targetOrderLine;
+    if (!batch.sourceOrderId && (!targetOrder || !targetOrderLine)) {
+      throw new BadRequestException('备货库存只能在订单发货中作为客户超发来源使用');
+    }
+    if (targetOrderLine && (batch.partCode !== targetOrderLine.partCode || batch.unit !== targetOrderLine.unit)) {
+      throw new BadRequestException('备货库存批次与目标订单零件编码或单位不一致');
+    }
+    if (batch.sourceOrder?.status === 'DRAFT') {
+      throw new BadRequestException('待提交生产订单不能发货，请先提交生产并形成待发货库存');
+    }
+    if (batch.sourceOrder?.status === 'CANCELLED') {
+      throw new BadRequestException('已取消订单库存不能发货');
     }
     if (batch.status !== 'AVAILABLE') {
       throw new BadRequestException('只有可用库存可以发货');
     }
-    if (decimalToNumber(batch.quantity) <= 0) {
+    const availableQuantity = decimalToNumber(batch.quantity);
+    if (availableQuantity <= 0) {
       throw new BadRequestException('库存数量必须大于 0 才能发货');
     }
+    const shipmentQuantity = this.roundQuantity(
+      dto.shipmentQuantity === undefined ? availableQuantity : decimalToNumber(dto.shipmentQuantity)
+    );
+    if (shipmentQuantity <= 0) {
+      throw new BadRequestException('本次发货数量必须大于 0');
+    }
+    if (shipmentQuantity > availableQuantity + 0.0001) {
+      throw new BadRequestException(`本次发货数量不能大于当前库存 ${this.formatQuantity(availableQuantity, batch.unit)}`);
+    }
+    const reservedQuantity = !batch.sourceOrderId
+      ? batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
+      : 0;
+    const shippableQuantity = this.roundQuantity(Math.max(availableQuantity - reservedQuantity, 0));
+    if (targetOrder && shipmentQuantity > shippableQuantity + 0.0001) {
+      throw new BadRequestException(
+        `备货库存可发数量不足：账面 ${this.formatQuantity(availableQuantity, batch.unit)}，已被其他订单预占 ${this.formatQuantity(
+          reservedQuantity,
+          batch.unit
+        )}，当前可发 ${this.formatQuantity(shippableQuantity, batch.unit)}`
+      );
+    }
+    const warehouseConfirmedBy = dto.warehouseConfirmedBy?.trim();
+    if (!warehouseConfirmedBy) {
+      throw new BadRequestException('请填写仓库确认人');
+    }
+
+    const customerOrderQuantity = decimalToNumber(batch.sourceOrderLine?.quantity ?? targetOrderLine?.quantity);
+    const shippedQuantityMap = await this.getShippedOrderQuantityMap(
+      batch.sourceOrderLineId ? [batch.sourceOrderLineId] : [],
+      tx
+    );
+    const shippedQuantity = batch.sourceOrderLineId
+      ? shippedQuantityMap.get(batch.sourceOrderLineId) || 0
+      : targetOrder && targetOrderLine
+        ? await this.getShippedQuantityForTargetOrderLine(tx, targetOrder.orderNo, targetOrderLine)
+        : 0;
+    const remainingOrderQuantity =
+      customerOrderQuantity > 0 ? Math.max(this.roundQuantity(customerOrderQuantity - shippedQuantity), 0) : shipmentQuantity;
+    if (targetOrder && shipmentQuantity <= remainingOrderQuantity + 0.0001) {
+      throw new BadRequestException('备货库存只能用于超过订单未发货数量的客户额外发货；正常发货请使用订单库存');
+    }
+    const overShipmentQuantity = this.roundQuantity(Math.max(shipmentQuantity - remainingOrderQuantity, 0));
+    if (overShipmentQuantity > 0) {
+      if (!dto.salesConfirmedBy?.trim()) {
+        throw new BadRequestException('本次发货超过订单未发货数量，必须填写销售确认人');
+      }
+      if (!dto.overShipmentReason?.trim()) {
+        throw new BadRequestException('本次发货超过订单未发货数量，必须填写超发说明');
+      }
+    }
+    const remainingBatchQuantity = this.roundQuantity(availableQuantity - shipmentQuantity);
 
     // 发货状态检查和出库流水必须共用同一份最新库存批次，防止重复点击把同一批库存出两次。
     const shipped = await tx.inventoryBatch.update({
       where: { id: batch.id },
-      data: { quantity: 0, status: 'USED' },
+      data: { quantity: remainingBatchQuantity, status: remainingBatchQuantity > 0 ? 'AVAILABLE' : 'USED' },
       include: { warehouse: true, location: true }
     });
 
     await tx.inventoryTransaction.create({
       data: {
-        transactionNo: `IT-OUT-${batch.batchNo}`,
+        transactionNo: await this.generateShipmentTransactionNo(tx, batch.batchNo),
         transactionType: 'OUT',
         batchId: batch.id,
+        orderLineId: batch.sourceOrderLineId || targetOrderLine?.id,
         partCode: batch.partCode,
         partName: batch.partName,
-        orderNo: batch.sourceOrderNo,
+        orderNo: batch.sourceOrderNo || targetOrder?.orderNo,
         productionTaskNo: batch.sourceProductionTaskNo,
-        quantity: batch.quantity,
+        quantity: shipmentQuantity,
         unit: batch.unit,
         warehouseId: batch.warehouseId,
         locationId: batch.locationId,
-        remark: remark || '仓库确认发货',
+        remark: this.formatShipmentRemark(
+          dto,
+          warehouseConfirmedBy,
+          overShipmentQuantity,
+          targetOrder ? `备货库存超发：${targetOrder.orderNo}` : undefined
+        ),
         sourceRecordType: 'InventoryBatch',
         sourceRecordId: batch.id
       }
     });
 
     return shipped;
+  }
+
+  private async generateShipmentTransactionNo(tx: Prisma.TransactionClient, batchNo: string) {
+    const prefix = `IT-OUT-${batchNo}-`;
+    const lastTransaction = await tx.inventoryTransaction.findFirst({
+      where: { transactionNo: { startsWith: prefix } },
+      orderBy: { transactionNo: 'desc' },
+      select: { transactionNo: true }
+    });
+    const nextSequence = lastTransaction ? Number(lastTransaction.transactionNo.slice(prefix.length)) + 1 : 1;
+    return `${prefix}${String(nextSequence).padStart(3, '0')}`;
+  }
+
+  private formatShipmentRemark(
+    dto: ConfirmShipmentDto,
+    warehouseConfirmedBy: string,
+    overShipmentQuantity: number,
+    shipmentContext?: string
+  ) {
+    const lines = [
+      dto.remark?.trim() || '仓库确认发货',
+      shipmentContext,
+      `仓库确认人：${warehouseConfirmedBy}`,
+      dto.salesConfirmedBy?.trim() ? `销售确认人：${dto.salesConfirmedBy.trim()}` : '',
+      overShipmentQuantity > 0 ? `超发数量：${this.roundQuantity(overShipmentQuantity)}` : '',
+      overShipmentQuantity > 0 && dto.overShipmentReason?.trim() ? `超发说明：${dto.overShipmentReason.trim()}` : ''
+    ];
+    return lines.filter(Boolean).join('；');
+  }
+
+  private async assertOrderHasNoPendingShortage(tx: Prisma.TransactionClient, orderId: string, actionName: string) {
+    const completions = await tx.productionProcessCompletion.findMany({
+      where: {
+        shortageQuantity: { gt: 0 },
+        shortageResolutionMode: null,
+        OR: [
+          { shortageMode: 'MANAGER_APPROVED' },
+          { shortageMode: 'REPLENISHMENT_REQUEST' },
+          { shortageMode: 'REPLENISHMENT', replenishmentTaskNo: null }
+        ],
+        productionTask: { orderId }
+      },
+      include: {
+        productionTask: {
+          select: {
+            productionTaskNo: true,
+            partCode: true,
+            partName: true,
+            unit: true
+          }
+        }
+      },
+      orderBy: [{ completedAt: 'asc' }, { createdAt: 'asc' }]
+    });
+    if (completions.length === 0) {
+      return;
+    }
+
+    const shortageText = completions
+      .map((completion) => {
+        const task = completion.productionTask;
+        return `${task?.partCode || '-'} / ${task?.partName || '-'} 缺 ${this.formatQuantity(decimalToNumber(completion.shortageQuantity), completion.unit || task?.unit)}`;
+      })
+      .join('；');
+    throw new BadRequestException(`${actionName}前必须先处理生产短缺补单：${shortageText}。请到订单明细处理补单、客户减量或无需补单说明。`);
   }
 
   private async refreshOrderShipmentStatus(tx: Prisma.TransactionClient, orderId: string) {
@@ -1097,26 +1518,22 @@ export class WarehousesService {
   private async isOrderShipmentClosed(tx: Prisma.TransactionClient, orderId: string) {
     const order = await tx.customerOrder.findUnique({
       where: { id: orderId },
-      include: {
-        lines: {
-          include: {
-            inventoryBatches: {
-              include: { transactions: true }
-            }
-          }
-        }
-      }
+      include: { lines: true }
     });
     if (!order || order.lines.length === 0) {
       return false;
     }
 
+    const shippedQuantityByLine = await this.getShippedOrderQuantityMap(
+      order.lines.map((line) => line.id),
+      tx
+    );
     return order.lines.every((line) => {
       const customerQuantity = decimalToNumber(line.quantity);
       if (customerQuantity <= 0) {
         return true;
       }
-      return this.toLineShippedQuantity(line, order.orderNo) + 0.0001 >= customerQuantity;
+      return (shippedQuantityByLine.get(line.id) || 0) + 0.0001 >= customerQuantity;
     });
   }
 
@@ -1142,14 +1559,45 @@ export class WarehousesService {
     }, 0);
   }
 
-  private toNotice(notice: any) {
+  private async toNoticesWithCustomerNames(notices: any[], db: WarehousePrismaClient = this.prisma) {
+    const orderIds = [...new Set(notices.map((notice) => String(notice.orderId || '').trim()).filter(Boolean))];
+    const orderNos = [...new Set(notices.map((notice) => String(notice.orderNo || '').trim()).filter(Boolean))];
+    const orderWhere: Prisma.CustomerOrderWhereInput[] = [];
+    if (orderIds.length > 0) {
+      orderWhere.push({ id: { in: orderIds } });
+    }
+    if (orderNos.length > 0) {
+      orderWhere.push({ orderNo: { in: orderNos } });
+    }
+
+    const orders =
+      orderWhere.length > 0
+        ? await db.customerOrder.findMany({
+            where: { OR: orderWhere },
+            select: { id: true, orderNo: true, customerName: true }
+          })
+        : [];
+    const customerNameByOrderId = new Map(orders.map((order) => [order.id, order.customerName]));
+    const customerNameByOrderNo = new Map(orders.map((order) => [order.orderNo, order.customerName]));
+
+    return notices.map((notice) =>
+      this.toNotice(
+        notice,
+        customerNameByOrderId.get(notice.orderId) || customerNameByOrderNo.get(notice.orderNo) || undefined
+      )
+    );
+  }
+
+  private toNotice(notice: any, customerName?: string) {
     return {
       id: notice.id,
       noticeNo: notice.noticeNo,
       noticeType: notice.noticeType,
       target: notice.target,
       status: notice.status,
+      orderId: notice.orderId,
       orderNo: notice.orderNo,
+      customerName,
       orderLineId: notice.orderLineId,
       productionTaskId: notice.productionTaskId,
       productionTaskNo: notice.productionTaskNo,
@@ -1197,6 +1645,15 @@ export class WarehousesService {
       throw new BadRequestException(message);
     }
     return normalized;
+  }
+
+  private formatQuantity(value: number, unit?: string | null) {
+    const rounded = Math.round((value + Number.EPSILON) * 1000) / 1000;
+    return `${rounded} ${unit || '件'}`;
+  }
+
+  private roundQuantity(value: number) {
+    return Math.round((value + Number.EPSILON) * 1000) / 1000;
   }
 
   private async warehouseCodeExists(warehouseCode: string) {

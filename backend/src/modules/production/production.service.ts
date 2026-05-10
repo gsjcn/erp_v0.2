@@ -179,7 +179,7 @@ export class ProductionService {
       },
       orderBy: [{ status: 'asc' }, { createdAt: 'desc' }]
     });
-    return notices.map((notice) => this.toNotice(notice));
+    return this.toNoticesWithCustomerNames(notices);
   }
 
   async acknowledgeNotice(id: string, dto: AcknowledgeProductionNoticeDto) {
@@ -199,7 +199,8 @@ export class ProductionService {
         acknowledgedAt: new Date()
       }
     });
-    return this.toNotice(saved);
+    const [noticeWithCustomer] = await this.toNoticesWithCustomerNames([saved]);
+    return noticeWithCustomer;
   }
 
   async replenishmentRequests(query: ProductionReplenishmentRequestQueryDto = {}) {
@@ -469,7 +470,8 @@ export class ProductionService {
       orderBy: [{ status: 'asc' }, { orderNo: 'desc' }, { productionTaskNo: 'asc' }]
     });
 
-    return tasks.map((task) => this.toTask(task));
+    const completedReplenishmentQuantityByLine = this.toCompletedReplenishmentQuantityByLine(tasks);
+    return tasks.map((task) => this.toTask(task, completedReplenishmentQuantityByLine));
   }
 
   async orderSummary(query: ProductionTaskQueryDto) {
@@ -480,7 +482,8 @@ export class ProductionService {
     });
     const summaries = new Map<string, any>();
 
-    for (const task of tasks.map((item) => this.toTask(item))) {
+    const completedReplenishmentQuantityByLine = this.toCompletedReplenishmentQuantityByLine(tasks);
+    for (const task of tasks.map((item) => this.toTask(item, completedReplenishmentQuantityByLine))) {
       const key = task.orderId;
       const current =
         summaries.get(key) ||
@@ -509,6 +512,11 @@ export class ProductionService {
           progressBuckets: new Map<string, number>(),
           partKeys: new Set<string>(),
           customerOrderLineKeys: new Set<string>(),
+          unresolvedShortageLineKeys: new Set<string>(),
+          unresolvedShortageQuantityByUnit: new Map<string, number>(),
+          pendingProductionReplenishmentLineKeys: new Set<string>(),
+          pendingProductionReplenishmentQuantityByUnit: new Map<string, number>(),
+          shortageActionTasks: [] as any[],
           quantityByUnit: new Map<string, any>()
         };
 
@@ -535,6 +543,32 @@ export class ProductionService {
       current.quantityByUnit.set(task.unit, quantityRow);
       current.totalPlannedQuantity += Number(task.plannedQuantity || 0);
       current.totalCompletedQuantity += Number(task.completedQuantity || 0);
+      if (Number(task.unresolvedShortageQuantity || 0) > 0) {
+        current.unresolvedShortageLineKeys.add(task.orderLineId || task.id);
+        const shortageUnit = task.unresolvedShortageUnit || task.unit || '件';
+        current.unresolvedShortageQuantityByUnit.set(
+          shortageUnit,
+          (current.unresolvedShortageQuantityByUnit.get(shortageUnit) || 0) + Number(task.unresolvedShortageQuantity || 0)
+        );
+        current.shortageActionTasks.push({
+          id: task.id,
+          orderLineId: task.orderLineId,
+          productionTaskNo: task.productionTaskNo,
+          partCode: task.partCode,
+          partName: task.partName,
+          shortageQuantity: task.unresolvedShortageQuantity,
+          unit: shortageUnit
+        });
+      }
+      if (Number(task.pendingProductionReplenishmentQuantity || 0) > 0) {
+        current.pendingProductionReplenishmentLineKeys.add(task.orderLineId || task.id);
+        const shortageUnit = task.pendingProductionReplenishmentUnit || task.unit || '件';
+        current.pendingProductionReplenishmentQuantityByUnit.set(
+          shortageUnit,
+          (current.pendingProductionReplenishmentQuantityByUnit.get(shortageUnit) || 0) +
+            Number(task.pendingProductionReplenishmentQuantity || 0)
+        );
+      }
 
       const status = this.productionDisplayStatus(task);
       if (status === 'PENDING') {
@@ -601,6 +635,37 @@ export class ProductionService {
           count,
           text: `${label} ${count}`
         })),
+        unresolvedShortageLineCount: summary.unresolvedShortageLineKeys.size,
+        unresolvedShortageQuantity: this.roundQuantity(
+          Array.from((summary.unresolvedShortageQuantityByUnit as Map<string, number>).values()).reduce(
+            (sum, quantity) => sum + quantity,
+            0
+          )
+        ),
+        unresolvedShortageUnit:
+          summary.unresolvedShortageQuantityByUnit.size === 1
+            ? Array.from((summary.unresolvedShortageQuantityByUnit as Map<string, number>).keys())[0]
+            : undefined,
+        unresolvedShortageQuantityByUnit: Array.from(
+          (summary.unresolvedShortageQuantityByUnit as Map<string, number>).entries()
+        ).map(([unit, quantity]) => ({ unit, quantity: this.roundQuantity(quantity) })),
+        needsReplenishmentAction: summary.unresolvedShortageLineKeys.size > 0,
+        pendingProductionReplenishmentLineCount: summary.pendingProductionReplenishmentLineKeys.size,
+        pendingProductionReplenishmentQuantity: this.roundQuantity(
+          Array.from((summary.pendingProductionReplenishmentQuantityByUnit as Map<string, number>).values()).reduce(
+            (sum, quantity) => sum + quantity,
+            0
+          )
+        ),
+        pendingProductionReplenishmentUnit:
+          summary.pendingProductionReplenishmentQuantityByUnit.size === 1
+            ? Array.from((summary.pendingProductionReplenishmentQuantityByUnit as Map<string, number>).keys())[0]
+            : undefined,
+        pendingProductionReplenishmentQuantityByUnit: Array.from(
+          (summary.pendingProductionReplenishmentQuantityByUnit as Map<string, number>).entries()
+        ).map(([unit, quantity]) => ({ unit, quantity: this.roundQuantity(quantity) })),
+        needsProductionReplenishmentReview: summary.pendingProductionReplenishmentLineKeys.size > 0,
+        shortageActionTasks: summary.shortageActionTasks,
         pendingTaskIds: summary.pendingTaskIds,
         pendingTasks: summary.pendingTasks
       };
@@ -1020,9 +1085,10 @@ export class ProductionService {
         }
 
         const finalOperators = requestedFinalOperators ?? {
-          code: finalCompletion?.operatorCode ?? null,
-          name: finalCompletion?.operatorName ?? null,
-          role: finalCompletion?.operatorRole ?? null
+          // 无工序任务没有最后一道工序操作员，最终确认人默认记录为本次车间主任。
+          code: finalCompletion?.operatorCode ?? supervisor.code,
+          name: finalCompletion?.operatorName ?? supervisor.name,
+          role: finalCompletion?.operatorRole ?? supervisor.role
         };
 
         if (steps.length > 0 && finalCompletion) {
@@ -1075,8 +1141,25 @@ export class ProductionService {
           });
           await this.upsertProductionScrapRecord(tx, task, savedCompletion, shortageHandling.scrapQuantity);
           await this.syncProductionReplenishmentRequest(tx, task, savedCompletion, shortageHandling, finalOperators);
-        } else if (completedQuantity < plannedQuantity) {
-          throw new BadRequestException('完成数量不能小于生产计划数量');
+        } else {
+          const existingFinalCompletion = completionMap.get(1);
+          const shortageHandling = this.resolveShortageHandling(
+            dto,
+            completedQuantity,
+            plannedQuantity,
+            existingFinalCompletion?.replenishmentTaskNo
+          );
+          const savedCompletion = await this.upsertProcesslessFinalCompletion(
+            tx,
+            task,
+            existingFinalCompletion,
+            completedQuantity,
+            finalOperators,
+            shortageHandling,
+            dto.remark
+          );
+          await this.upsertProductionScrapRecord(tx, task, savedCompletion, shortageHandling.scrapQuantity);
+          await this.syncProductionReplenishmentRequest(tx, task, savedCompletion, shortageHandling, finalOperators);
         }
 
         const saved = await tx.productionTask.update({
@@ -1093,7 +1176,7 @@ export class ProductionService {
         // 订单不能在生产完成时直接完成，必须经过仓库入库和发货后才允许进入 COMPLETED。
         await this.markOrderInProduction(tx, task.orderId);
 
-        if (steps.length === 0) {
+        if (steps.length > 0) {
           await this.markAllProcessStepsCompleted(tx, task, completedQuantity, dto.remark);
         }
 
@@ -2232,17 +2315,28 @@ export class ProductionService {
     if (task.inventoryBatchNo) {
       return 'RECEIVED';
     }
+    const processSteps = Array.isArray(task.processSteps) ? task.processSteps : [];
+    const allProcessesCompleted =
+      processSteps.length === 0
+        ? task.status !== ProductionStatus.PENDING
+        : processSteps.every((step: string) =>
+            task.processCompletions?.some((completion: any) => completion.processName === step && completion.isCompleted)
+          );
     if (
       task.status !== ProductionStatus.PENDING &&
       task.status !== ProductionStatus.COMPLETED &&
-      task.processSteps.length > 0 &&
-      task.processSteps.every((step: string) =>
-        task.processCompletions?.some((completion: any) => completion.processName === step && completion.isCompleted)
-      )
+      allProcessesCompleted
     ) {
       return 'READY_TO_COMPLETE';
     }
     return task.status;
+  }
+
+  private toEffectiveTaskProductionStatus(task: any) {
+    if (task.inventoryBatch || task.status === ProductionStatus.COMPLETED) {
+      return ProductionStatus.COMPLETED;
+    }
+    return task.status === ProductionStatus.IN_PROGRESS ? ProductionStatus.IN_PROGRESS : ProductionStatus.PENDING;
   }
 
   private orderSummaryProgressLabel(task: any, status: ProductionOrderSummaryStatus) {
@@ -2312,6 +2406,43 @@ export class ProductionService {
     // 生产统计不能只依赖旧 completedQuantity；已入库历史任务用订单入库批次和转库存批次数量兜底。
     const orderInventoryQuantity = orderReceiptQuantity || (task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0);
     return orderInventoryQuantity + stockQuantity;
+  }
+
+  private toCompletedReplenishmentQuantityByLine(tasks: any[]) {
+    const quantityByLine = new Map<string, number>();
+    for (const task of tasks) {
+      if (!task?.isReplenishment || this.toEffectiveTaskProductionStatus(task) !== ProductionStatus.COMPLETED) {
+        continue;
+      }
+      const key = task.orderLineId || task.sourceProductionTaskNo || task.productionTaskNo;
+      const quantity = this.roundQuantity(
+        this.toEffectiveTaskCompletedQuantity(task) || decimalToNumber(task.plannedQuantity)
+      );
+      if (quantity <= 0) {
+        continue;
+      }
+      quantityByLine.set(key, this.roundQuantity((quantityByLine.get(key) || 0) + quantity));
+    }
+    return quantityByLine;
+  }
+
+  private resolveTaskUnresolvedShortageQuantity(
+    task: any,
+    shortageQuantity: number,
+    completedReplenishmentQuantityByLine?: Map<string, number>
+  ) {
+    if (shortageQuantity <= 0 || !completedReplenishmentQuantityByLine) {
+      return shortageQuantity;
+    }
+    const key = task.orderLineId || task.productionTaskNo;
+    const coveringQuantity = completedReplenishmentQuantityByLine.get(key) || 0;
+    if (coveringQuantity <= 0) {
+      return shortageQuantity;
+    }
+
+    const usedQuantity = Math.min(shortageQuantity, coveringQuantity);
+    completedReplenishmentQuantityByLine.set(key, this.roundQuantity(coveringQuantity - usedQuantity));
+    return this.roundQuantity(shortageQuantity - usedQuantity);
   }
 
   private async markAllProcessStepsCompleted(
@@ -2385,6 +2516,75 @@ export class ProductionService {
     }
   }
 
+  private async upsertProcesslessFinalCompletion(
+    tx: Prisma.TransactionClient,
+    task: any,
+    existing: any,
+    completedQuantity: number,
+    operators: ResolvedOperatorSnapshot,
+    shortageHandling: ResolvedShortageHandling,
+    remark?: string
+  ) {
+    const beforeSnapshot = existing ? this.toProcessCompletionSnapshot(existing) : null;
+    const saved = await tx.productionProcessCompletion.upsert({
+      where: { productionTaskId_stepNo: { productionTaskId: task.id, stepNo: 1 } },
+      update: {
+        processName: '最终确认',
+        processRemark: '无工序快照任务的最终生产确认',
+        isCompleted: true,
+        completedQuantity,
+        scrapQuantity: shortageHandling.scrapQuantity,
+        shortageQuantity: shortageHandling.shortageQuantity,
+        shortageMode: shortageHandling.shortageMode,
+        replenishmentTaskNo: shortageHandling.replenishmentTaskNo,
+        managerName: shortageHandling.managerName,
+        shortageReason: shortageHandling.shortageReason,
+        unit: task.unit,
+        operatorCode: operators.code,
+        operatorName: operators.name,
+        operatorRole: operators.role,
+        completedAt: new Date(),
+        remark: remark?.trim() || existing?.remark || null
+      },
+      create: {
+        productionTaskId: task.id,
+        stepNo: 1,
+        processName: '最终确认',
+        processRemark: '无工序快照任务的最终生产确认',
+        isCompleted: true,
+        completedQuantity,
+        scrapQuantity: shortageHandling.scrapQuantity,
+        shortageQuantity: shortageHandling.shortageQuantity,
+        shortageMode: shortageHandling.shortageMode,
+        replenishmentTaskNo: shortageHandling.replenishmentTaskNo,
+        managerName: shortageHandling.managerName,
+        shortageReason: shortageHandling.shortageReason,
+        unit: task.unit,
+        operatorCode: operators.code,
+        operatorName: operators.name,
+        operatorRole: operators.role,
+        completedAt: new Date(),
+        remark: remark?.trim() || null
+      },
+      include: { replenishmentRequests: true, logs: true }
+    });
+
+    await tx.productionProcessCompletionLog.create({
+      data: {
+        completionId: saved.id,
+        productionTaskId: task.id,
+        processName: saved.processName,
+        action: existing ? 'TASK_FINAL_UPDATE' : 'TASK_FINAL_CONFIRM',
+        operatorCode: operators.code,
+        operatorName: operators.name,
+        beforeSnapshot: beforeSnapshot ?? Prisma.JsonNull,
+        afterSnapshot: this.toProcessCompletionSnapshot(saved)
+      }
+    });
+
+    return saved;
+  }
+
   private async syncTaskStatusFromProcessSteps(
     tx: Prisma.TransactionClient,
     productionTaskId: string,
@@ -2438,6 +2638,10 @@ export class ProductionService {
       replenishmentReviewedAt: replenishmentRequest?.reviewedAt ? new Date(replenishmentRequest.reviewedAt).toISOString() : null,
       managerName: completion.managerName,
       shortageReason: completion.shortageReason,
+      shortageResolutionMode: completion.shortageResolutionMode,
+      shortageResolutionBy: completion.shortageResolutionBy,
+      shortageResolutionReason: completion.shortageResolutionReason,
+      shortageResolvedAt: completion.shortageResolvedAt ? new Date(completion.shortageResolvedAt).toISOString() : null,
       unit: completion.unit,
       operatorCode: completion.operatorCode,
       operatorName: completion.operatorName,
@@ -2448,14 +2652,49 @@ export class ProductionService {
     };
   }
 
-  private toNotice(notice: any) {
+  private async toNoticesWithCustomerNames(notices: any[]) {
+    const orderIds = [
+      ...new Set(notices.map((notice) => String(notice.orderId || '').trim()).filter(Boolean))
+    ];
+    const orderNos = [
+      ...new Set(notices.map((notice) => String(notice.orderNo || '').trim()).filter(Boolean))
+    ];
+    const orderWhere: Prisma.CustomerOrderWhereInput[] = [];
+    if (orderIds.length > 0) {
+      orderWhere.push({ id: { in: orderIds } });
+    }
+    if (orderNos.length > 0) {
+      orderWhere.push({ orderNo: { in: orderNos } });
+    }
+
+    const orders =
+      orderWhere.length > 0
+        ? await this.prisma.customerOrder.findMany({
+            where: { OR: orderWhere },
+            select: { id: true, orderNo: true, customerName: true }
+          })
+        : [];
+    const customerNameByOrderId = new Map(orders.map((order) => [order.id, order.customerName]));
+    const customerNameByOrderNo = new Map(orders.map((order) => [order.orderNo, order.customerName]));
+
+    return notices.map((notice) =>
+      this.toNotice(
+        notice,
+        customerNameByOrderId.get(notice.orderId) || customerNameByOrderNo.get(notice.orderNo) || undefined
+      )
+    );
+  }
+
+  private toNotice(notice: any, customerName?: string) {
     return {
       id: notice.id,
       noticeNo: notice.noticeNo,
       noticeType: notice.noticeType,
       status: notice.status,
       target: notice.target,
+      orderId: notice.orderId,
       orderNo: notice.orderNo,
+      customerName,
       orderLineId: notice.orderLineId,
       productionTaskId: notice.productionTaskId,
       productionTaskNo: notice.productionTaskNo,
@@ -2524,12 +2763,48 @@ export class ProductionService {
     };
   }
 
-  private toTask(task: any) {
-    const stepDetails = processSnapshotToDetails(task.processSnapshot);
+  private toTask(task: any, completedReplenishmentQuantityByLine?: Map<string, number>) {
+    const snapshotStepDetails = processSnapshotToDetails(task.processSnapshot);
+    const processlessCompletionDetails: ProcessStepSnapshot[] =
+      snapshotStepDetails.length === 0
+        ? (task.processCompletions || [])
+            .slice()
+            .sort((left: any, right: any) => left.stepNo - right.stepNo)
+            .map((completion: any) => ({
+              processName: completion.processName,
+              processRemark: completion.processRemark || ''
+            }))
+        : [];
+    const stepDetails = snapshotStepDetails.length > 0 ? snapshotStepDetails : processlessCompletionDetails;
     const steps = stepDetails.map((step) => step.processName);
     const completionMap = new Map((task.processCompletions || []).map((item: any) => [item.stepNo, item]));
     const effectiveCompletedQuantity = this.toEffectiveTaskCompletedQuantity(task);
     const isImplicitlyCompleted = Boolean(task.inventoryBatch) || task.status === ProductionStatus.COMPLETED;
+    const finalCompletion = (task.processCompletions || []).reduce((current: any, item: any) => {
+      if (!current || item.stepNo > current.stepNo) {
+        return item;
+      }
+      return current;
+    }, null);
+    const rawUnresolvedShortageQuantity =
+      finalCompletion?.shortageMode === 'MANAGER_APPROVED' &&
+      !finalCompletion.shortageResolutionMode &&
+      decimalToNumber(finalCompletion.shortageQuantity) > 0
+        ? decimalToNumber(finalCompletion.shortageQuantity)
+        : 0;
+    const unresolvedShortageQuantity = this.resolveTaskUnresolvedShortageQuantity(
+      task,
+      rawUnresolvedShortageQuantity,
+      completedReplenishmentQuantityByLine
+    );
+    const latestReplenishmentRequest = finalCompletion?.replenishmentRequests?.[0];
+    const pendingProductionReplenishmentQuantity =
+      finalCompletion?.shortageMode === 'REPLENISHMENT_REQUEST' &&
+      !finalCompletion.replenishmentTaskNo &&
+      latestReplenishmentRequest?.status !== 'REJECTED' &&
+      decimalToNumber(finalCompletion.shortageQuantity) > 0
+        ? decimalToNumber(finalCompletion.shortageQuantity)
+        : 0;
     return {
       id: task.id,
       productionTaskNo: task.productionTaskNo,
@@ -2557,6 +2832,15 @@ export class ProductionService {
       customerOrderQuantity: decimalToNumber(task.orderLine?.quantity ?? task.plannedQuantity),
       plannedQuantity: decimalToNumber(task.plannedQuantity),
       completedQuantity: effectiveCompletedQuantity,
+      unresolvedShortageQuantity,
+      unresolvedShortageUnit: unresolvedShortageQuantity > 0 ? finalCompletion?.unit || task.unit : undefined,
+      unresolvedShortageReason:
+        unresolvedShortageQuantity > 0
+          ? `${finalCompletion?.managerName || '-'}确认：${finalCompletion?.shortageReason || '管理确认缺货完成'}`
+          : undefined,
+      pendingProductionReplenishmentQuantity,
+      pendingProductionReplenishmentUnit:
+        pendingProductionReplenishmentQuantity > 0 ? finalCompletion?.unit || task.unit : undefined,
       unit: task.unit,
       status: task.status,
       inventoryBatchNo: task.inventoryBatch?.batchNo,
@@ -2590,6 +2874,10 @@ export class ProductionService {
           replenishmentApprovalRemark: replenishmentRequest?.supervisorRemark,
           managerName: completion?.managerName,
           shortageReason: completion?.shortageReason,
+          shortageResolutionMode: completion?.shortageResolutionMode,
+          shortageResolutionBy: completion?.shortageResolutionBy,
+          shortageResolutionReason: completion?.shortageResolutionReason,
+          shortageResolvedAt: completion?.shortageResolvedAt,
           unit: completion?.unit || task.unit,
           operatorCode: completion?.operatorCode,
           operatorName: completion?.operatorName,
