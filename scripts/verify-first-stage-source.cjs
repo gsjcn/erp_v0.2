@@ -46,6 +46,31 @@ function walkFiles(dir, output = []) {
   return output;
 }
 
+function sourceLineForIndex(source, index) {
+  return source.slice(0, index).split(/\r?\n/).length;
+}
+
+function verifyNoMojibakeInUserFacingSources() {
+  const sourceFiles = [
+    resolveProjectPath('README.md'),
+    resolveProjectPath('AGENTS.md'),
+    ...walkFiles(resolveProjectPath('backend/src')),
+    ...walkFiles(resolveProjectPath('frontend/src'))
+  ];
+  const mojibakePattern =
+    /[ÃÂ�]|锟|脙|脗|鈥|绗|\u95c3\u8235|\u95c3\u8236|寮€|涓€|瀵煎|璁㈠崟|鏂囦欢|缂栫爜|鍚嶇О|绮剧‘|鍖归厤|鍓嶇紑|鎷奸煶|鍥剧焊|瀹㈡埛|鍘嗗彶|搴撳瓨|鏉ユ簮|涔辩爜|淇|楠岃瘉|鏃犳硶|鏈壘|鎵惧埌|涓|尮閰|墿鏂|璇蜂粠|嬫媺|閫夋嫨|鏌ヨ|澶辫触|宸ヨ緭|闃绘柇/;
+  for (const filePath of sourceFiles) {
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+    const source = fs.readFileSync(filePath, 'utf8');
+    const match = mojibakePattern.exec(source);
+    if (match) {
+      addFailure(`User-facing source must not contain mojibake text: ${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)}`);
+    }
+  }
+}
+
 function verifyRequiredFiles() {
   const requiredFiles = [
     'frontend/src/components/CustomerSelect.vue',
@@ -249,11 +274,13 @@ function verifyResponsiveElementPlusDialogs() {
 
 function verifyCustomerSelectOnlyShowsName() {
   const componentPath = 'frontend/src/components/CustomerSelect.vue';
+  const servicePath = 'backend/src/modules/customers/customers.service.ts';
   if (!fileExists(componentPath)) {
     return;
   }
 
   const source = readFile(componentPath);
+  const serviceSource = readFile(servicePath);
   const forbiddenDetails = ['customerCode', 'contactName', 'phone', 'mobile', 'province', 'city', 'address'];
 
   if (!/function\s+customerLabel\s*\([^)]*\)\s*{[\s\S]*return\s+customer\.customerName\s*;[\s\S]*}/.test(source)) {
@@ -261,6 +288,9 @@ function verifyCustomerSelectOnlyShowsName() {
   }
 
   const template = source.match(/<template>([\s\S]*?)<\/template>/)?.[1] || '';
+  if (template.includes('default-first-option')) {
+    addFailure('CustomerSelect.vue must not enable default-first-option; similar customer names require explicit operator selection.');
+  }
   for (const field of forbiddenDetails) {
     if (template.includes(field)) {
       addFailure(`CustomerSelect.vue option template should not expose customer detail field "${field}".`);
@@ -272,6 +302,28 @@ function verifyCustomerSelectOnlyShowsName() {
     if (!source.includes(snippet)) {
       addFailure(`CustomerSelect.vue must keep mobile-friendly customer option snippet: ${snippet}`);
     }
+  }
+
+  const agentsSource = readFile('AGENTS.md');
+  if (!agentsSource.includes('不得启用 `default-first-option`')) {
+    addFailure('AGENTS.md must document CustomerSelect default-first-option safety rule.');
+  }
+  const customerSearchRankSnippets = [
+    'compareCustomerSearchResults',
+    'customerSearchRank',
+    'customerCode === keyword',
+    'customerName === keyword',
+    'customerCode.startsWith(keyword)',
+    'customerName.startsWith(keyword)',
+    'pinyinSearchMatches([customer.customerName], keyword)'
+  ];
+  for (const snippet of customerSearchRankSnippets) {
+    if (!serviceSource.includes(snippet)) {
+      addFailure(`CustomersService must keep ranked customer search snippet: ${snippet}`);
+    }
+  }
+  if (!agentsSource.includes('客户搜索结果必须按命中强度排序')) {
+    addFailure('AGENTS.md must document ranked customer search behavior.');
   }
 }
 
@@ -757,6 +809,8 @@ function verifyPlannerProcessAndSubmitGuard() {
     "const submitOperator = await this.resolveSubmitPlanOperatorFromClient(tx, dto.submittedByCode, '下单/计划操作员');",
     '只有待提交生产订单可以提交生产',
     '提交生产：${submitOperator.name}',
+    'submitMaterialIdentityConfirmationRemark',
+    '同编码多套历史资料已核对',
     'private async resolveSubmitPlanOperatorFromClient',
     '车间人员只能查看生产流程',
     'private async resolveProcessEditorOperator',
@@ -892,6 +946,8 @@ function verifyProcessPinyinSearchWorkflow() {
     "toPinyinTokens(value, 'first')",
     "entry.type === 'syllable'",
     'keyword.length <= 3',
+    'isCodeLikeKeyword(keyword)',
+    'isSubsequenceSearchMatch(entry.value, keyword)',
     'export function pinyinSearchMatches'
   ];
   for (const snippet of pinyinSnippets) {
@@ -960,6 +1016,423 @@ function verifyProcessPinyinSearchWorkflow() {
   }
 }
 
+function verifyMaterialSuggestionSearchWorkflow() {
+  const dtoPath = 'backend/src/modules/inventory/dto.ts';
+  const orderDtoPath = 'backend/src/modules/orders/dto.ts';
+  const servicePath = 'backend/src/modules/inventory/inventory.service.ts';
+  const controllerPath = 'backend/src/modules/inventory/inventory.controller.ts';
+  const editorPath = 'frontend/src/components/OrderLineEditor.vue';
+  const inventorySourceDetailsPath = 'frontend/src/components/InventorySourceDetailsDialog.vue';
+  const inventoryViewPath = 'frontend/src/views/InventoryView.vue';
+  const materialSuggestionOptionPath = 'frontend/src/components/MaterialSuggestionOption.vue';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const typesPath = 'frontend/src/types/erp.ts';
+  const ordersViewPath = 'frontend/src/views/OrdersListView.vue';
+  const orderDetailPath = 'frontend/src/views/OrderDetailView.vue';
+  const orderServicePath = 'backend/src/modules/orders/orders.service.ts';
+  const agentsPath = 'AGENTS.md';
+  const orderImportApiVerifyPath = 'scripts/verify-order-import-api.cjs';
+
+  for (const projectPath of [
+    dtoPath,
+    orderDtoPath,
+    servicePath,
+    controllerPath,
+    editorPath,
+    inventorySourceDetailsPath,
+    inventoryViewPath,
+    materialSuggestionOptionPath,
+    apiPath,
+    typesPath,
+    ordersViewPath,
+    orderDetailPath,
+    orderServicePath,
+    agentsPath,
+    orderImportApiVerifyPath
+  ]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing material suggestion search workflow file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const dtoSource = readFile(dtoPath);
+  const orderDtoSource = readFile(orderDtoPath);
+  const serviceSource = readFile(servicePath);
+  const controllerSource = readFile(controllerPath);
+  const editorSource = readFile(editorPath);
+  const inventorySourceDetailsSource = readFile(inventorySourceDetailsPath);
+  const inventoryViewSource = readFile(inventoryViewPath);
+  const materialSuggestionOptionSource = readFile(materialSuggestionOptionPath);
+  const apiSource = readFile(apiPath);
+  const typesSource = readFile(typesPath);
+  const ordersViewSource = readFile(ordersViewPath);
+  const orderDetailSource = readFile(orderDetailPath);
+  const orderServiceSource = readFile(orderServicePath);
+  const agentsSource = readFile(agentsPath);
+  const orderImportApiVerifySource = readFile(orderImportApiVerifyPath);
+
+  const requiredSnippets = [
+    { source: dtoSource, file: dtoPath, snippet: 'customerId?: string;' },
+    { source: dtoSource, file: dtoPath, snippet: 'export class MaterialQueryDto' },
+    { source: dtoSource, file: dtoPath, snippet: 'export class UpdateMaterialDto' },
+    { source: orderDtoSource, file: orderDtoPath, snippet: 'materialIdentityConfirmed?: boolean;' },
+    { source: controllerSource, file: controllerPath, snippet: "@Get('materials')" },
+    { source: controllerSource, file: controllerPath, snippet: "@Patch('materials/:materialId')" },
+    { source: controllerSource, file: controllerPath, snippet: "@Delete('materials/:materialId')" },
+    { source: serviceSource, file: servicePath, snippet: 'private async findMaterialSuggestionHistory' },
+    { source: serviceSource, file: servicePath, snippet: 'private materialHistoryLineMatchesKeyword' },
+    { source: serviceSource, file: servicePath, snippet: 'private materialSuggestionSearchMatch' },
+    { source: serviceSource, file: servicePath, snippet: 'searchMatchRank' },
+    { source: serviceSource, file: servicePath, snippet: "searchMatchText: '编码缩写匹配'" },
+    { source: serviceSource, file: servicePath, snippet: "searchMatchText: '名称前缀匹配'" },
+    { source: serviceSource, file: servicePath, snippet: "searchMatchText: '名称包含匹配'" },
+    { source: serviceSource, file: servicePath, snippet: 'where: !normalizedKeyword && customerId ? { order: { customerId } } : {}' },
+    { source: serviceSource, file: servicePath, snippet: 'customerUsageCount' },
+    { source: serviceSource, file: servicePath, snippet: 'lastCustomerOrderDateDiff' },
+    { source: serviceSource, file: servicePath, snippet: 'private sortableDateValue' },
+    { source: serviceSource, file: servicePath, snippet: 'hasQueryCustomerHistory' },
+    { source: serviceSource, file: servicePath, snippet: 'lastCustomerOrderBelongsToQueryCustomer' },
+    { source: serviceSource, file: servicePath, snippet: 'queryCustomerSnapshotOrderDate' },
+    { source: serviceSource, file: servicePath, snippet: 'identityKeys: new Set<string>()' },
+    { source: serviceSource, file: servicePath, snippet: 'identityFieldValues: new Map<string, Set<string>>()' },
+    { source: serviceSource, file: servicePath, snippet: 'identityVariantCount: history?.identityVariantCount || 0' },
+    { source: serviceSource, file: servicePath, snippet: 'hasIdentityConflict: Boolean((history?.identityVariantCount || 0) > 1)' },
+    { source: serviceSource, file: servicePath, snippet: 'identityConflictFields: this.materialSuggestionIdentityConflictFields(history)' },
+    { source: serviceSource, file: servicePath, snippet: 'const materialSuggestionIdentityFieldLabels' },
+    { source: serviceSource, file: servicePath, snippet: 'private materialSuggestionIdentityConflictFields' },
+    { source: serviceSource, file: servicePath, snippet: 'lineBelongsToQueryCustomer' },
+    { source: serviceSource, file: servicePath, snippet: 'const useQueryCustomerSnapshot = Boolean(customerId && history?.hasQueryCustomerHistory)' },
+    { source: serviceSource, file: servicePath, snippet: 'private recordMaterialSuggestionIdentity' },
+    { source: serviceSource, file: servicePath, snippet: 'private materialSuggestionIdentityValues' },
+    { source: serviceSource, file: servicePath, snippet: 'existing.identityVariantCount = this.recordMaterialSuggestionIdentity(existing, line)' },
+    { source: serviceSource, file: servicePath, snippet: 'private applyMaterialSuggestionHistorySnapshot' },
+    { source: serviceSource, file: servicePath, snippet: 'private isMaterialSuggestionHistorySnapshotNewer' },
+    { source: serviceSource, file: servicePath, snippet: 'this.applyMaterialSuggestionHistorySnapshot(existing, line)' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'type OrderLineMaterialIdentityInfo' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'private async getOrderLineMaterialIdentityInfoByPartCode' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'private recordOrderLineMaterialIdentity' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'private orderLineMaterialIdentityValues' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'materialIdentityInfoByPartCode' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'materialHasIdentityConflict' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'materialIdentityConflictFields' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'private assertSubmitMaterialIdentityConfirmed' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'private submitMaterialIdentityConfirmationRemark' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'dto.materialIdentityConfirmed' },
+    { source: orderServiceSource, file: orderServicePath, snippet: '发现同编码多套历史资料零件，提交生产前必须确认已核对' },
+    { source: orderServiceSource, file: orderServicePath, snippet: '同编码多套历史资料已核对' },
+    { source: orderServiceSource, file: orderServicePath, snippet: 'submitOperator.name}（${submitOperator.accountId} / ${submitOperator.role}）；' },
+    { source: serviceSource, file: servicePath, snippet: 'customerCode: true' },
+    { source: serviceSource, file: servicePath, snippet: 'matchedCustomerCode' },
+    { source: serviceSource, file: servicePath, snippet: 'matchedCustomerName' },
+    { source: serviceSource, file: servicePath, snippet: 'matchedHistoryOrderNo' },
+    { source: serviceSource, file: servicePath, snippet: 'historyCustomerNames' },
+    { source: serviceSource, file: servicePath, snippet: 'hasCurrentCustomerHistory: Boolean(history?.hasQueryCustomerHistory)' },
+    { source: serviceSource, file: servicePath, snippet: 'line.drawingNo' },
+    { source: serviceSource, file: servicePath, snippet: 'line.projectModel' },
+    { source: serviceSource, file: servicePath, snippet: 'line.order.orderNo' },
+    { source: serviceSource, file: servicePath, snippet: 'material.drawingNo' },
+    { source: serviceSource, file: servicePath, snippet: 'private materialDateSearchValues' },
+    { source: serviceSource, file: servicePath, snippet: '...this.materialDateSearchValues(line.drawingDate)' },
+    { source: serviceSource, file: servicePath, snippet: '...this.materialDateSearchValues(material.drawingDate)' },
+    { source: serviceSource, file: servicePath, snippet: 'material.projectModel' },
+    { source: serviceSource, file: servicePath, snippet: 'private materialThicknessSearchValues' },
+    { source: serviceSource, file: servicePath, snippet: 'for (const precision of [0, 1, 2, 3, 4])' },
+    { source: serviceSource, file: servicePath, snippet: 'values.add(`${text}mm`)' },
+    { source: serviceSource, file: servicePath, snippet: '...this.materialThicknessSearchValues(line.partThickness)' },
+    { source: serviceSource, file: servicePath, snippet: '...this.materialThicknessSearchValues(material.partThickness)' },
+    { source: serviceSource, file: servicePath, snippet: "searchMatchText: '图纸资料匹配'" },
+    { source: serviceSource, file: servicePath, snippet: "searchMatchText: '历史订单匹配'" },
+    { source: serviceSource, file: servicePath, snippet: 'if (!keyword && !customerId)' },
+    { source: serviceSource, file: servicePath, snippet: 'const shouldSeedMaterialMaster = Boolean(keyword);' },
+    { source: serviceSource, file: servicePath, snippet: 'disabledMaterialCodes.has(key)' },
+    { source: serviceSource, file: servicePath, snippet: 'const suggestionMaterials = [...materialRows.values()].filter' },
+    { source: serviceSource, file: servicePath, snippet: "sourceType === 'ALL' || item.availableQuantity > 0" },
+    { source: serviceSource, file: servicePath, snippet: 'partThickness: line.partThickness ? decimalToNumber(line.partThickness) : null' },
+    { source: serviceSource, file: servicePath, snippet: 'drawingDate: this.formatDateOnly(drawingDate)' },
+    { source: serviceSource, file: servicePath, snippet: 'async materials(query: MaterialQueryDto)' },
+    { source: serviceSource, file: servicePath, snippet: 'const historyByCode = normalizedKeyword' },
+    { source: serviceSource, file: servicePath, snippet: 'historyByCode.has(material.partCode.trim().toLocaleLowerCase())' },
+    { source: serviceSource, file: servicePath, snippet: 'async updateMaterial(materialId: string, dto: UpdateMaterialDto)' },
+    { source: serviceSource, file: servicePath, snippet: "data: { status: 'DISABLED' }" },
+    { source: editorSource, file: editorPath, snippet: 'placeholder="编码/名称/拼音/图号/厚度/客户"' },
+    { source: editorSource, file: editorPath, snippet: 'placeholder="名称/编码/拼音/图号/厚度/客户"' },
+    { source: editorSource, file: editorPath, snippet: 'value-key="partName"' },
+    { source: editorSource, file: editorPath, snippet: ':debounce="250"' },
+    { source: editorSource, file: editorPath, snippet: ':trigger-on-focus="true"' },
+    { source: editorSource, file: editorPath, snippet: 'if (!normalizedKeyword && !props.customerId?.trim())' },
+    { source: editorSource, file: editorPath, snippet: "import MaterialSuggestionOption from './MaterialSuggestionOption.vue';" },
+    { source: editorSource, file: editorPath, snippet: '<MaterialSuggestionOption :item="item" />' },
+    { source: editorSource, file: editorPath, snippet: 'function handlePartNameInput' },
+    { source: editorSource, file: editorPath, snippet: 'function fillExactMaterialFromInput' },
+    { source: editorSource, file: editorPath, snippet: "normalizeMaterialSuggestionValue(line[field]) !== normalizeMaterialSuggestionValue(keyword)" },
+    { source: editorSource, file: editorPath, snippet: 'const exactMatches = suggestions.filter' },
+    { source: editorSource, file: editorPath, snippet: 'exactMatches.length === 1' },
+    { source: editorSource, file: editorPath, snippet: 'function canAutoFillMaterialSuggestion' },
+    { source: editorSource, file: editorPath, snippet: 'return !item.hasIdentityConflict;' },
+    { source: editorSource, file: editorPath, snippet: 'function warnMaterialSuggestionNeedsManualPick' },
+    { source: editorSource, file: editorPath, snippet: 'const materialIdentityWarnings = new WeakMap' },
+    { source: editorSource, file: editorPath, snippet: 'function materialIdentityWarningText' },
+    { source: editorSource, file: editorPath, snippet: 'function materialIdentityConflictFieldsText' },
+    { source: editorSource, file: editorPath, snippet: 'function setMaterialIdentityWarning' },
+    { source: editorSource, file: editorPath, snippet: 'function clearMaterialIdentityWarningWhenMaterialIdentityChanges' },
+    { source: editorSource, file: editorPath, snippet: 'class="material-identity-warning"' },
+    { source: editorSource, file: editorPath, snippet: '同编码 ${item.identityVariantCount || \'多\'} 套历史资料，核对${materialIdentityConflictFieldsText(item, \'/\')}' },
+    { source: editorSource, file: editorPath, snippet: '请核对${materialIdentityConflictFieldsText(item)}，并从下拉候选中人工确认后再套用' },
+    { source: editorSource, file: editorPath, snippet: '已按当前候选套用，请核对${materialIdentityConflictFieldsText(item)}' },
+    { source: editorSource, file: editorPath, snippet: 'const exactFieldMatches = exactMatches.filter' },
+    { source: editorSource, file: editorPath, snippet: 'exactFieldMatches.length === 1' },
+    { source: editorSource, file: editorPath, snippet: 'exactFieldMatches.length === 0 && exactPartCodeMatches.length === 1' },
+    { source: editorSource, file: editorPath, snippet: 'exactPartCodeMatches.length === 1' },
+    { source: editorSource, file: editorPath, snippet: '请从下拉列表选择具体零件' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const exactMatches = lastInventorySuggestions.value.filter' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactMatches.length === 1' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactMatches.length > 1' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '匹配到多个精确物料，请从下拉列表中选择具体零件' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'sourceSearchManualPickRequired' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactSuggestions.length === 1' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function canAutoSwitchInventorySuggestion' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'return !item.hasIdentityConflict;' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function warnInventorySuggestionNeedsManualPick' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function materialIdentityConflictFieldsText' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function keepInventorySuggestionManualPick' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceSearchResultHint = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '同编码存在多套历史资料，请点击候选项确认' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '请核对${materialIdentityConflictFieldsText(item)}，并点击候选项人工确认后再切换库存来源' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '已按当前候选切换库存来源，请核对${materialIdentityConflictFieldsText(item)}' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '找到 1 个相似物料，请点击结果确认后再切换库存来源' },
+    { source: editorSource, file: editorPath, snippet: 'lineHadDrawingInfo' },
+    { source: editorSource, file: editorPath, snippet: 'const autoMaterialSnapshots = new WeakMap<CreateOrderLinePayload, AutoMaterialSnapshot>();' },
+    { source: editorSource, file: editorPath, snippet: 'function clearAutoMaterialFieldsWhenMaterialIdentityChanges' },
+    { source: editorSource, file: editorPath, snippet: 'clearAutoMaterialFieldsWhenMaterialIdentityChanges(line)' },
+    { source: editorSource, file: editorPath, snippet: 'partName: item.partName,' },
+    { source: editorSource, file: editorPath, snippet: 'const partCodeMatches =' },
+    { source: editorSource, file: editorPath, snippet: 'const partNameMatches =' },
+    { source: editorSource, file: editorPath, snippet: 'autoMaterialSnapshots.set(line' },
+    { source: editorSource, file: editorPath, snippet: 'function applyDefaultParentComponent' },
+    { source: editorSource, file: editorPath, snippet: 'function inheritedParentComponentNoForLine' },
+    { source: editorSource, file: editorPath, snippet: 'line.parentComponentNo = inheritedParentComponentNoForLine(line);' },
+    { source: editorSource, file: editorPath, snippet: 'const lineIndex = props.lines.indexOf(line);' },
+    { source: editorSource, file: editorPath, snippet: 'const componentNoEditSnapshots = new WeakMap<CreateOrderLinePayload, string>();' },
+    { source: editorSource, file: editorPath, snippet: 'function captureComponentNoBeforeEdit' },
+    { source: editorSource, file: editorPath, snippet: 'function syncChildParentComponentNo' },
+    { source: editorSource, file: editorPath, snippet: 'function clearChildParentComponentNo' },
+    { source: editorSource, file: editorPath, snippet: '@focus="captureComponentNoBeforeEdit(row)"' },
+    { source: editorSource, file: editorPath, snippet: '@focus="captureComponentNoBeforeEdit(line)"' },
+    { source: editorSource, file: editorPath, snippet: 'line.parentComponentNo = nextComponentNoValue;' },
+    { source: editorSource, file: editorPath, snippet: 'clearChildParentComponentNo(previousComponentNo);' },
+    { source: editorSource, file: editorPath, snippet: '@blur="() => fillExactMaterialFromInput(row, \'partCode\')"' },
+    { source: editorSource, file: editorPath, snippet: '@blur="() => fillExactMaterialFromInput(row, \'partName\')"' },
+    { source: editorSource, file: editorPath, snippet: ':customer-id="customerId"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '物料基础库' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '删除只停用记忆' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '编码 / 名称 / 拼音 / 规格 / 客户 / 订单 / 图号' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function disableMaterialMemory' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "import MaterialSuggestionOption from '../components/MaterialSuggestionOption.vue';" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'show-available' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: ':available-scope-label="selectedWarehouseName || \'全部仓库\'"' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: "import MaterialSuggestionOption from './MaterialSuggestionOption.vue';" },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '<MaterialSuggestionOption :item="item" />' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'customerId?: string;' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'props.customerId' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'placeholder="编码/名称/拼音/图号/客户/库存来源"' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'defineProps<{' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'InventoryMaterialSuggestion' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'showAvailable?: boolean' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'availableScopeLabel?: string' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'material-suggestion-identity' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '<small v-if="drawingText" class="material-suggestion-identity">{{ drawingText }}</small>' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '<small v-if="identityWarningText" class="material-suggestion-warning">{{ identityWarningText }}</small>' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: "props.item.identityConflictFields.join('/')" },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '同编码 ${props.item.identityVariantCount || \'多\'} 套历史资料，请核对${fields}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '订单库存 ${formatQuantity(props.item.orderInventoryQuantity, props.item.unit)}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '历史使用 ${props.item.historyUsageCount} 次' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '客户 ${props.item.matchedCustomerName}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '历史订单 ${props.item.matchedHistoryOrderNo}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '来源订单 ${props.item.matchedSourceOrderNo}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '当前客户用过 ${props.item.customerUsageCount} 次' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: "props.item.hasCurrentCustomerHistory ? '当前客户历史' : ''" },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '最近订单 ${props.item.lastCustomerOrderNo}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'const historyCustomerText = computed' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'if (visibleNames.length >= 3)' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '历史客户 ${visibleNames.join' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '图号 ${props.item.drawingNo}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '型号 ${props.item.projectModel}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '日期 ${props.item.drawingDate}' },
+    { source: editorSource, file: editorPath, snippet: 'props.customerId' },
+    { source: apiSource, file: apiPath, snippet: 'customerId?: string' },
+    { source: apiSource, file: apiPath, snippet: 'materialIdentityConfirmed?: boolean;' },
+    { source: apiSource, file: apiPath, snippet: 'inventoryMaterials(filters: MaterialMemoryFilters = {})' },
+    { source: apiSource, file: apiPath, snippet: 'disableInventoryMaterial(materialId: string)' },
+    { source: apiSource, file: apiPath, snippet: 'customerId,' },
+    { source: typesSource, file: typesPath, snippet: 'customerUsageCount?: number;' },
+    { source: typesSource, file: typesPath, snippet: 'searchMatchText?: string;' },
+    { source: typesSource, file: typesPath, snippet: 'matchedCustomerCode?: string;' },
+    { source: typesSource, file: typesPath, snippet: 'matchedHistoryOrderNo?: string;' },
+    { source: typesSource, file: typesPath, snippet: 'export interface MaterialMemory' },
+    { source: typesSource, file: typesPath, snippet: 'partThickness?: number | null;' },
+    { source: typesSource, file: typesPath, snippet: 'identityConflictFields?: string[];' },
+    { source: typesSource, file: typesPath, snippet: 'historyCustomerNames?: string[];' },
+    { source: typesSource, file: typesPath, snippet: 'hasCurrentCustomerHistory?: boolean;' },
+    { source: typesSource, file: typesPath, snippet: 'identityVariantCount?: number;' },
+    { source: typesSource, file: typesPath, snippet: 'hasIdentityConflict?: boolean;' },
+    { source: typesSource, file: typesPath, snippet: 'materialIdentityVariantCount?: number;' },
+    { source: typesSource, file: typesPath, snippet: 'materialHasIdentityConflict?: boolean;' },
+    { source: typesSource, file: typesPath, snippet: 'materialIdentityConflictFields?: string[];' },
+    { source: ordersViewSource, file: ordersViewPath, snippet: ':customer-id="orderForm.customerId"' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: ':customer-id="order?.customerId || \'\'"' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'function materialIdentityConflictText' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'detailLine.materialIdentityConflictFields.join' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'class="material-identity-warning"' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'const submitOrderMaterialIdentityWarnings = computed' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'const submitOrderMaterialIdentityConfirmRequired = computed' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'submitMaterialIdentityConfirmed' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: 'materialIdentityConfirmed: submitMaterialIdentityConfirmed.value' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: '已核对同编码多套历史资料零件的图号、规格、厚度和项目型号' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: '请先确认已核对同编码多套历史资料零件' },
+    { source: agentsSource, file: agentsPath, snippet: '历史客户名称 / 客户名称片段 / 客户拼音首字母 / `customerCode` / 历史订单' },
+    { source: agentsSource, file: agentsPath, snippet: '最近订单、历史客户和当前客户使用次数' },
+    { source: agentsSource, file: agentsPath, snippet: '当前客户最近订单日期' },
+    { source: agentsSource, file: agentsPath, snippet: '`lastCustomerOrderNo` / `lastCustomerOrderDate` 必须优先代表当前客户的最近使用记录' },
+    { source: agentsSource, file: agentsPath, snippet: '基础名称、规格、图号、版本、厚度和项目型号必须优先采用当前客户最近一次使用记录' },
+    { source: agentsSource, file: agentsPath, snippet: '新增 / 编辑订单、库存搜索和库存来源核对里的物料建议项' },
+    { source: agentsSource, file: agentsPath, snippet: '物料建议项可以摘要展示历史客户列表' },
+    { source: agentsSource, file: agentsPath, snippet: '物料建议项有图纸日期时必须展示图纸日期' },
+    { source: agentsSource, file: agentsPath, snippet: '以及 `2026-05-30`、`2026/5/30`、`2026530` 这类图纸日期关键词查找历史零件' },
+    { source: agentsSource, file: agentsPath, snippet: '同一 `partCode` 在历史订单中出现多个名称、规格、图号、版本、厚度或项目型号组合时' },
+    { source: agentsSource, file: agentsPath, snippet: '核对图号、规格、厚度和项目型号后再选择' },
+    { source: agentsSource, file: agentsPath, snippet: '必须返回并展示具体冲突字段' },
+    { source: agentsSource, file: agentsPath, snippet: '不得在失焦时自动套用物料资料' },
+    { source: agentsSource, file: agentsPath, snippet: '当前订单行必须持续显示核对提醒' },
+    { source: agentsSource, file: agentsPath, snippet: '订单详情页必须根据历史订单行重新计算并显示同编码多套历史资料风险' },
+    { source: agentsSource, file: agentsPath, snippet: '提交生产弹窗必须汇总同编码多套历史资料零件' },
+    { source: agentsSource, file: agentsPath, snippet: '后端提交生产接口也必须在事务内重新计算同编码多套历史资料风险' },
+    { source: agentsSource, file: agentsPath, snippet: '摘要本身必须包含提交人员和前几条风险行' },
+    { source: agentsSource, file: agentsPath, snippet: '库存来源核对弹窗里的可替代物料搜索也必须接收当前 `customerId`' },
+    { source: agentsSource, file: agentsPath, snippet: '`sourceType=STOCK` 或 `sourceType=ORDER` 的物料建议只能返回当前范围内有可用数量的物料' },
+    { source: agentsSource, file: agentsPath, snippet: '库存页的 `Material` 物料基础库搜索也必须支持历史客户、历史订单、图号和项目型号命中' },
+    { source: agentsSource, file: agentsPath, snippet: '备货库存、订单库存、单位、规格、历史使用次数和命中原因' },
+    { source: agentsSource, file: agentsPath, snippet: '不得一次返回全部物料' },
+    { source: agentsSource, file: agentsPath, snippet: '输入关键词后返回全部命中结果，不得静默截断' },
+    { source: agentsSource, file: agentsPath, snippet: '只能在唯一精确命中时自动带出物料资料' },
+    { source: agentsSource, file: agentsPath, snippet: '库存来源核对弹窗的替代物料搜索也必须遵守唯一精确命中规则' },
+    { source: agentsSource, file: agentsPath, snippet: '库存来源替代物料搜索中同一 `partCode` 存在多套历史识别资料时' },
+    { source: agentsSource, file: agentsPath, snippet: '即使接口只返回 1 个模糊命中物料，也不能自动切换库存来源' },
+    { source: agentsSource, file: agentsPath, snippet: '多个物料同名或多个结果精确命中' },
+    { source: agentsSource, file: agentsPath, snippet: '优先按当前输入字段判断唯一命中' },
+    { source: agentsSource, file: agentsPath, snippet: '当前输入值仍等于发起查询时的值' },
+    { source: agentsSource, file: agentsPath, snippet: '订单行尚未填写图纸资料' },
+    { source: agentsSource, file: agentsPath, snippet: '选中历史物料后若操作员又手工修改 `partCode` 或 `partName`' },
+    { source: agentsSource, file: agentsPath, snippet: '删除只能软停用 `Material`' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionCustomerCodeSearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertCustomerSearchRanking' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'Customer search must rank exact customerName first' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'Customer search must rank exact customerCode first' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertCustomerSearchRanking' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matched.matchedCustomerCode === order.customerCode' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'const customerNameSuggestions = await requestJson' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matchedByName.matchedCustomerName === order.customerName' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'const customerNameFragment = order.customerName.slice' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matchedByFragment.matchedCustomerName === order.customerName' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'const customerInitials = pinyinInitials(order.customerName)' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matchedByInitials.matchedCustomerName === order.customerName' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialMemoryHistorySearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'Material memory search by historical customerCode must find' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialMemoryHistorySearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: '客户已选但未输入关键字时，必须能推荐当前客户历史用料' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "const globalEmptySuggestions = await requestJson('/inventory/materials/suggestions')" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionCustomerCodeSearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionRecentCustomerHistorySort' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionRecentCustomerHistorySort' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'must sort tied history by recent order date' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionLastOrderScopedToCustomer' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionLastOrderScopedToCustomer' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'lastCustomerOrderNo must stay scoped to current customer' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'partName must prefer current customer history' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'drawingNo must prefer current customer history' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'must flag same-code identity conflicts' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matched.identityConflictFields || []' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "for (const field of ['名称', '图号', '厚度'])" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionCodeAbbreviationSearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "await assertMaterialSuggestionCodeAbbreviationSearch('mat001'" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionPinyinInitialSearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "await assertMaterialSuggestionPinyinInitialSearch('yzdg'" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "await assertMaterialSuggestionPinyinInitialSearch('yz'" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionHistoryFieldSearch' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertStockOnlySuggestionsExcludeNoStockHistory' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'sourceType=STOCK must not return history-only Material' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionHistoryFieldSearch(longRemarkLine.drawingNo' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionHistoryFieldSearch(longRemarkLine.drawingDate' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "longRemarkLine.drawingDate.replace(/-0/g, '-')" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionHistoryFieldSearch(longRemarkLine.projectModel' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionHistoryFieldSearch(`${longRemarkLine.partThickness}mm`' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'Number(longRemarkLine.partThickness).toFixed(1)' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertMaterialSuggestionHistoryFieldSearch(createdOrder.orderNo' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertStockOnlySuggestionsExcludeNoStockHistory' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matched.matchedHistoryOrderNo === keyword' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertDisabledMaterialMemoryExcludedFromSuggestions' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'status=DISABLED' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertDisabledMaterialMemoryExcludedFromSuggestions' }
+  ];
+
+  for (const item of requiredSnippets) {
+    if (!item.source.includes(item.snippet)) {
+      addFailure(`${item.file} must keep material suggestion search snippet: ${item.snippet}`);
+    }
+  }
+
+  if (
+    !/function handlePartCodeInput[\s\S]*?clearAutoMaterialFieldsWhenMaterialIdentityChanges\(line\)/.test(editorSource) ||
+    !/function handlePartNameInput[\s\S]*?clearAutoMaterialFieldsWhenMaterialIdentityChanges\(line\)/.test(editorSource)
+  ) {
+    addFailure('OrderLineEditor.vue must clear auto-filled material fields when either partCode or partName is manually changed.');
+  }
+
+  const parentComponentSelectBlocks =
+    editorSource.match(/<el-select(?=[^>]*v-model="(?:row|line)\.parentComponentNo")[^>]*>/g) || [];
+  if (parentComponentSelectBlocks.length < 2) {
+    addFailure('OrderLineEditor.vue must keep desktop and mobile parent component selects.');
+  }
+  if (parentComponentSelectBlocks.some((block) => block.includes('allow-create') || block.includes('default-first-option'))) {
+    addFailure('OrderLineEditor.vue parent component selects must not allow creating or default-picking nonexistent parent components.');
+  }
+  const partCategorySelectBlocks =
+    editorSource.match(/<el-select(?=[^>]*v-model="(?:row|line)\.partCategory")[^>]*>/g) || [];
+  if (partCategorySelectBlocks.length < 2) {
+    addFailure('OrderLineEditor.vue must keep desktop and mobile part category selects.');
+  }
+  if (partCategorySelectBlocks.some((block) => block.includes('allow-create') || block.includes('default-first-option'))) {
+    addFailure('OrderLineEditor.vue part category selects must use fixed options and avoid default-picking the first option.');
+  }
+  const partSpecificationSelectBlocks =
+    editorSource.match(/<el-select(?=[^>]*v-model="(?:row|line)\.partSpecification")[^>]*>/g) || [];
+  if (partSpecificationSelectBlocks.length < 2) {
+    addFailure('OrderLineEditor.vue must keep desktop and mobile part specification inputs/selects.');
+  }
+  if (partSpecificationSelectBlocks.some((block) => block.includes('default-first-option'))) {
+    addFailure('OrderLineEditor.vue part specification controls must not default-pick the first option while operators type a custom specification.');
+  }
+  if (!agentsSource.includes('所属组件下拉只能选择当前订单已有组件编号')) {
+    addFailure('AGENTS.md must document that parent component selection cannot create nonexistent component numbers.');
+  }
+  if (!agentsSource.includes('仍指向旧组件编号的子零件必须自动同步到新组件编号')) {
+    addFailure('AGENTS.md must document child parent component synchronization after component number edits.');
+  }
+  if (!agentsSource.includes('如果组件行被切换为零件行')) {
+    addFailure('AGENTS.md must document child parent component cleanup after a component line is changed to a part line.');
+  }
+  if (!agentsSource.includes('零件类型只能从固定类型中选择')) {
+    addFailure('AGENTS.md must document fixed part category selection and default-first-option safety.');
+  }
+  if (!agentsSource.includes('成品规格可以手工输入')) {
+    addFailure('AGENTS.md must document custom specification input without default-first-option.');
+  }
+
+  if (/materialSuggestionLimit\s*=/.test(serviceSource) || /\.slice\(0,\s*materialSuggestionLimit\)/.test(serviceSource)) {
+    addFailure('inventory.service.ts material suggestions must not silently truncate search results.');
+  }
+}
+
 function verifyProcessEditDisabledReasonWorkflow() {
   const processViewPath = 'frontend/src/views/ProcessSelectionView.vue';
   if (!fileExists(processViewPath)) {
@@ -990,6 +1463,146 @@ function verifyProcessEditDisabledReasonWorkflow() {
     if (!processViewSource.includes(snippet)) {
       addFailure(`ProcessSelectionView.vue must keep disabled operation reason snippet: ${snippet}`);
     }
+  }
+}
+
+function verifyProcessStepDragSortWorkflow() {
+  const processViewPath = 'frontend/src/views/ProcessSelectionView.vue';
+  const templateManagerPath = 'frontend/src/components/ProcessTemplateManager.vue';
+  const orderDetailPath = 'frontend/src/views/OrderDetailView.vue';
+  const agentsPath = 'AGENTS.md';
+  for (const projectPath of [processViewPath, templateManagerPath, orderDetailPath, agentsPath]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing process step drag sort workflow file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const processViewSource = readFile(processViewPath);
+  const templateManagerSource = readFile(templateManagerPath);
+  const orderDetailSource = readFile(orderDetailPath);
+  const agentsSource = readFile(agentsPath);
+  const processViewSnippets = [
+    ':key="draftStepKey(step)"',
+    'const draftStepKeys = new WeakMap<ProcessStepDetail, string>()',
+    'function draftStepKey(step: ProcessStepDetail)',
+    "import { Rank } from '@element-plus/icons-vue'",
+    'class="step-drag-handle"',
+    'aria-label="拖拽调整顺序"',
+    '<el-icon><Rank /></el-icon>',
+    ':draggable="canEditProcess"',
+    '@dragstart.stop="startStepDrag($event, index)"',
+    '@dragover.self.prevent="handleStepListDragOverEnd"',
+    '@dragleave="handleStepListDragLeave"',
+    '@drop.self.prevent="dropStepAtEnd"',
+    '@drop.prevent="dropStep($event, index)"',
+    'function reorderDraftStep',
+    'function handleStepListDragOverEnd',
+    'function dropStepAtEnd',
+    'function handleStepListDragLeave',
+    'isDragAfterRowMiddle(event)',
+    'selected-steps-title',
+    '拖动“拖拽”手柄调整顺序；上移 / 下移可作为备用操作。'
+  ];
+  for (const snippet of processViewSnippets) {
+    if (!processViewSource.includes(snippet)) {
+      addFailure(`ProcessSelectionView.vue must keep process step drag sort snippet: ${snippet}`);
+    }
+  }
+  const endStepDragStart = processViewSource.indexOf('function endStepDrag');
+  const endStepDragEnd = processViewSource.indexOf('function isDragAfterRowMiddle', endStepDragStart);
+  const endStepDragSource =
+    endStepDragStart >= 0 && endStepDragEnd > endStepDragStart
+      ? processViewSource.slice(endStepDragStart, endStepDragEnd)
+      : '';
+  if (!endStepDragSource.includes("draftProcessFilterKeyword.value = '';")) {
+    addFailure('ProcessSelectionView.vue must clear process select filter keyword when drag sorting ends.');
+  }
+
+  const templateManagerSnippets = [
+    ':key="templateStepKey(step)"',
+    'const templateStepKeys = new WeakMap<ProcessStepDetail, string>()',
+    'function templateStepKey(step: ProcessStepDetail)',
+    "import { Rank } from '@element-plus/icons-vue'",
+    'class="template-step-drag-handle"',
+    'aria-label="拖拽调整顺序"',
+    '<el-icon><Rank /></el-icon>',
+    '@dragstart.stop="startTemplateStepDrag($event, index)"',
+    '@dragover.self.prevent="handleTemplateStepListDragOverEnd"',
+    '@dragleave="handleTemplateStepListDragLeave"',
+    '@drop.self.prevent="dropTemplateStepAtEnd"',
+    '@drop.prevent="dropTemplateStep($event, index)"',
+    'function reorderTemplateStep',
+    'function handleTemplateStepListDragOverEnd',
+    'function dropTemplateStepAtEnd',
+    'function handleTemplateStepListDragLeave',
+    'isTemplateStepDragAfterRowMiddle(event)',
+    'template-step-help',
+    '拖动“拖拽”手柄调整顺序；上移 / 下移可作为备用操作。'
+  ];
+  for (const snippet of templateManagerSnippets) {
+    if (!templateManagerSource.includes(snippet)) {
+      addFailure(`ProcessTemplateManager.vue must keep process template step drag sort snippet: ${snippet}`);
+    }
+  }
+  const endTemplateStepDragStart = templateManagerSource.indexOf('function endTemplateStepDrag');
+  const endTemplateStepDragEnd = templateManagerSource.indexOf(
+    'function isTemplateStepDragAfterRowMiddle',
+    endTemplateStepDragStart
+  );
+  const endTemplateStepDragSource =
+    endTemplateStepDragStart >= 0 && endTemplateStepDragEnd > endTemplateStepDragStart
+      ? templateManagerSource.slice(endTemplateStepDragStart, endTemplateStepDragEnd)
+      : '';
+  if (!endTemplateStepDragSource.includes("templateProcessFilterKeyword.value = '';")) {
+    addFailure('ProcessTemplateManager.vue must clear template process select filter keyword when drag sorting ends.');
+  }
+
+  const orderDetailSnippets = [
+    ':key="additionalMaterialProcessStepKey(step)"',
+    'const additionalMaterialProcessStepKeys = new WeakMap<ProcessStepDetail, string>()',
+    'function additionalMaterialProcessStepKey(step: ProcessStepDetail)',
+    "import { Rank, WarningFilled } from '@element-plus/icons-vue'",
+    'class="additional-process-drag-handle"',
+    'aria-label="拖拽调整顺序"',
+    '<el-icon><Rank /></el-icon>',
+    '@dragstart.stop="startAdditionalProcessDrag($event, index)"',
+    '@dragover.self.prevent="handleAdditionalProcessListDragOverEnd"',
+    '@dragleave="handleAdditionalProcessListDragLeave"',
+    '@drop.self.prevent="dropAdditionalMaterialProcessAtEnd"',
+    '@drop.prevent="dropAdditionalMaterialProcess($event, index)"',
+    'function reorderAdditionalMaterialProcess',
+    'function handleAdditionalProcessListDragOverEnd',
+    'function dropAdditionalMaterialProcessAtEnd',
+    'function handleAdditionalProcessListDragLeave',
+    'isAdditionalProcessDragAfterRowMiddle(event)'
+  ];
+  for (const snippet of orderDetailSnippets) {
+    if (!orderDetailSource.includes(snippet)) {
+      addFailure(`OrderDetailView.vue must keep additional material process drag sort snippet: ${snippet}`);
+    }
+  }
+  const endAdditionalProcessDragStart = orderDetailSource.indexOf('function endAdditionalProcessDrag');
+  const endAdditionalProcessDragEnd = orderDetailSource.indexOf(
+    'function isAdditionalProcessDragAfterRowMiddle',
+    endAdditionalProcessDragStart
+  );
+  const endAdditionalProcessDragSource =
+    endAdditionalProcessDragStart >= 0 && endAdditionalProcessDragEnd > endAdditionalProcessDragStart
+      ? orderDetailSource.slice(endAdditionalProcessDragStart, endAdditionalProcessDragEnd)
+      : '';
+  if (!endAdditionalProcessDragSource.includes("additionalProcessFilterKeyword.value = '';")) {
+    addFailure('OrderDetailView.vue must clear additional material process select filter keyword when drag sorting ends.');
+  }
+
+  if (!agentsSource.includes('生产流程选择页、流程记忆编辑页和订单补单物料流程编辑页的工序排序必须支持拖拽调整')) {
+    addFailure('AGENTS.md must document process step drag sorting requirement.');
+  }
+  if (!agentsSource.includes('拖拽排序手柄必须使用图标按钮')) {
+    addFailure('AGENTS.md must document process step drag handle icon button requirement.');
+  }
+  if (!agentsSource.includes('拖拽排序结束后必须清理工序下拉筛选关键字')) {
+    addFailure('AGENTS.md must document process step drag filter cleanup requirement.');
   }
 }
 
@@ -1045,6 +1658,30 @@ function verifyMobileCompactOrderCards() {
       addFailure(`ProcessSelectionView.vue must keep compact mobile process-order card snippet: ${snippet}`);
     }
   }
+  const ordersMobilePauseSnippets = [
+    'orders-page-header-actions',
+    'requireDesktopOrderListMutation',
+    '手机端订单列表仅用于查看明细'
+  ];
+  for (const snippet of ordersMobilePauseSnippets) {
+    if (!ordersSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue must keep mobile order list read-only snippet: ${snippet}`);
+    }
+  }
+  const forbiddenMobileOrderListActions = [
+    '@click="goShortageDetail(order)"',
+    '@click="goProcess(order)"',
+    '@click="openDeleteDraftOrder(order)"',
+    '@click="openCancelOrder(order)"'
+  ];
+  for (const snippet of forbiddenMobileOrderListActions) {
+    if (ordersSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue mobile order card must stay detail-only and not expose mutation action: ${snippet}`);
+    }
+  }
+  if (/\.mobile-card-list\s*\{[\s\S]*display:\s*none/.test(ordersSource)) {
+    addFailure('OrdersListView.vue mobile order list must remain visible as read-only entry to order detail.');
+  }
   const productionSnippets = [
     'mobile-card-compact-summary',
     'mobile-card-header-actions',
@@ -1053,7 +1690,9 @@ function verifyMobileCompactOrderCards() {
     'isMobileProductionOrderExpanded',
     'toggleMobileProductionTaskCard',
     'isMobileProductionTaskExpanded',
-    'production-task-header-actions'
+    'production-task-header-actions',
+    'normalizeDisplayFileName',
+    'displayFileName(activeTask.drawingFileName || activeTask.drawingFileUrl)'
   ];
   for (const snippet of productionSnippets) {
     if (!productionSource.includes(snippet)) {
@@ -1129,7 +1768,16 @@ function verifyMobileCompactOrderCards() {
     'expandAllOrderDetailLines',
     'collapseAllOrderDetailLines',
     'showOrderDetailLineDetails',
-    'isOrderDetailLineExpanded'
+    'isOrderDetailLineExpanded',
+    'requireDesktopOrderMutation',
+    '手机端仅用于查看订单明细',
+    'v-if="!isMobileLayout" class="page-actions order-detail-page-actions"',
+    '查看生产流程',
+    'v-if="!isMobileLayout" class="line-actions"',
+    'v-if="!isMobileLayout && lineNeedsReplenishmentAction(line)"',
+    'openImportSourcePreview',
+    '来源 Excel 预览',
+    '预览来源Excel'
   ];
   for (const snippet of orderDetailSnippets) {
     if (!orderDetailSource.includes(snippet)) {
@@ -1634,7 +2282,7 @@ function verifyOrderChangeAndCancellationWorkflow() {
 
   const serviceSource = readFile(servicePath);
   if (
-    !/async\s+update\(orderNo:\s*string,\s*dto:\s*UpdateOrderDto\)\s*{[\s\S]*order\.status !== OrderStatus\.DRAFT[\s\S]*this\.validateOrderLines\(dto\.lines,\s*\{\s*requireStockSources:\s*false\s*\}\)/.test(
+    !/async\s+update\(orderNo:\s*string,\s*dto:\s*UpdateOrderDto\)\s*{[\s\S]*order\.status !== OrderStatus\.DRAFT[\s\S]*const lines = this\.normalizeEditableOrderLineComponentFields\(await this\.normalizeOrderLineImportReferences\(dto\.lines\)\)[\s\S]*this\.validateOrderLines\(lines,\s*\{\s*requireStockSources:\s*false\s*\}\)/.test(
       serviceSource
     )
   ) {
@@ -2442,6 +3090,11 @@ function verifySharedLinkComponents() {
     'responsive-dialog',
     'isImageDrawing',
     'isPdfDrawing',
+    'normalizeDisplayFileName',
+    'displayFileName',
+    'fileNameFromUrl',
+    'props.fileName || fileNameFromUrl(props.fileUrl)',
+    'split(/[?#]/)',
     '@media (max-width: 900px)',
     'min-height: 44px',
     'overflow-wrap: anywhere',
@@ -2540,6 +3193,8 @@ function verifyDrawingDuplicateConfirmationWorkflow() {
     'export async function confirmExistingDrawingFiles',
     'export async function confirmUploadDrawingFileName',
     'confirmDrawingDuplicateDialog',
+    'normalizeDisplayFileName',
+    'displayDrawingFileName',
     'ElDialog',
     'innerHTML: options.html',
     'closeOnClickModal: false',
@@ -3037,13 +3692,27 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     'function rebalanceCurrentSelectedSourcesByQueue()',
     '@click="rebalanceCurrentSelectedSourcesByQueue"',
     'function moveSelectedSource',
+    "import { Rank } from '@element-plus/icons-vue'",
+    'class="selected-source-drag-handle"',
+    'aria-label="拖拽调整使用顺序"',
+    '<el-icon><Rank /></el-icon>',
+    '@dragstart.stop="startSelectedSourceDrag($event, index)"',
+    '@dragover.self.prevent="handleSelectedSourceListDragOverEnd"',
+    '@dragleave="handleSelectedSourceListDragLeave"',
+    '@drop.self.prevent="dropSelectedSourceAtEnd"',
+    '@drop.prevent="dropSelectedSource($event, index)"',
+    'function reorderSelectedSource',
+    'function handleSelectedSourceListDragOverEnd',
+    'function dropSelectedSourceAtEnd',
+    'function handleSelectedSourceListDragLeave',
+    'isSelectedSourceDragAfterRowMiddle(event)',
     'function handleSelectedSourceQuantityChange(source: StockSourceSelectionPayload, value: number | undefined)',
     'const rows = selectedSourceRows.value.map((item) => (item.batchId === source.batchId ? { ...item, quantity: nextQuantity } : item))',
     'const lockIndex = rows.findIndex((item) => item.batchId === source.batchId)',
     'lockQuantity: nextQuantity',
     'refillToRequired: shouldRefillSelectedSourceQueue(rows)',
     'const [current] = rows.splice(index, 1)',
-    'rows.splice(nextIndex, 0, current)',
+    'rows.splice(target, 0, current)',
     'function sourceUsageOrderIssue',
     '未优先使用较小库存批次'
   ];
@@ -3051,6 +3720,9 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     if (!dialogSource.includes(snippet)) {
       addFailure(`InventorySourceDetailsDialog.vue must keep current-order stock reservation UI snippet: ${snippet}`);
     }
+  }
+  if (!readFile('AGENTS.md').includes('操作人员可以拖拽调整已选库存使用顺序')) {
+    addFailure('AGENTS.md must document that selected stock source order supports drag sorting.');
   }
 
   const editorSnippets = [
@@ -3298,9 +3970,12 @@ function verifyInventoryAdjustmentWorkflow() {
     "@Post('adjustments/upload')",
     "FileInterceptor('file'",
     'inventoryAdjustmentUploadPath()',
+    'normalizeMultipartFileName',
     'allowedAdjustmentExtensions',
     'allowedAdjustmentMimeTypes',
     'genericUploadMimeTypes',
+    'const originalName = normalizeMultipartFileName(file.originalname)',
+    'fileName: normalizeMultipartFileName(file.originalname)',
     "callback(new BadRequestException('库存盘点附件格式不支持'), false)",
     'fileUrl: `/uploads/inventory-adjustments/${file.filename}`',
     "@Post('batches/:batchId/adjust')",
@@ -3403,6 +4078,10 @@ function verifyInventoryAdjustmentWorkflow() {
     'type="file"',
     'accept="application/pdf,image/*,.pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff"',
     '必须上传盘点工单、现场照片或 PDF',
+    'normalizeDisplayFileName',
+    'adjustment-selected-file',
+    'adjustment-attachment-link',
+    'displayFileName(file.name).toLowerCase()',
     'adjustmentHistory.value = await erpApi.inventoryBatchAdjustments(batchId)',
     'function adjustmentDisabledReason(row?: InventoryBatch)',
     '只有可用库存或数量为 0 的历史批次可以盘点调整。',
@@ -3693,6 +4372,630 @@ function verifyReadmeRepairSafetyDocs() {
   }
 }
 
+function verifyOrderExcelImportWorkflow() {
+  const servicePath = 'backend/src/modules/orders/orders.service.ts';
+  const controllerPath = 'backend/src/modules/orders/orders.controller.ts';
+  const dtoPath = 'backend/src/modules/orders/dto.ts';
+  const schemaPath = 'database/prisma/schema.prisma';
+  const ordersViewPath = 'frontend/src/views/OrdersListView.vue';
+  const orderDetailPath = 'frontend/src/views/OrderDetailView.vue';
+  const lineEditorPath = 'frontend/src/components/OrderLineEditor.vue';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const typesPath = 'frontend/src/types/erp.ts';
+  const uploadFileNamePath = 'backend/src/common/upload-filenames.ts';
+  const frontendFileNamePath = 'frontend/src/utils/fileNames.ts';
+  const mainPath = 'backend/src/main.ts';
+  const readmePath = 'README.md';
+  const packagePath = 'package.json';
+  const regressionScriptPath = 'scripts/verify-order-import-api.cjs';
+  const uploadFileNameRegressionScriptPath = 'scripts/verify-upload-filenames-api.cjs';
+  const fileNameNormalizerRegressionScriptPath = 'scripts/verify-file-name-normalizers.cjs';
+  const workbookRegressionScriptPath = 'scripts/verify-order-import-workbooks.cjs';
+
+  for (const projectPath of [
+    servicePath,
+    controllerPath,
+    dtoPath,
+    schemaPath,
+    ordersViewPath,
+    orderDetailPath,
+    lineEditorPath,
+    apiPath,
+    typesPath,
+    uploadFileNamePath,
+    frontendFileNamePath,
+    mainPath,
+    readmePath,
+    packagePath,
+    regressionScriptPath,
+    uploadFileNameRegressionScriptPath,
+    fileNameNormalizerRegressionScriptPath,
+    workbookRegressionScriptPath
+  ]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing Excel order import source file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const serviceSource = readFile(servicePath);
+  const controllerSource = readFile(controllerPath);
+  const dtoSource = readFile(dtoPath);
+  const schemaSource = readFile(schemaPath);
+  const ordersViewSource = readFile(ordersViewPath);
+  const orderDetailSource = readFile(orderDetailPath);
+  const lineEditorSource = readFile(lineEditorPath);
+  const apiSource = readFile(apiPath);
+  const typesSource = readFile(typesPath);
+  const uploadFileNameSource = readFile(uploadFileNamePath);
+  const frontendFileNameSource = readFile(frontendFileNamePath);
+  const mainSource = readFile(mainPath);
+  const readmeSource = readFile(readmePath);
+  const packageSource = readFile(packagePath);
+  const regressionScriptSource = readFile(regressionScriptPath);
+  const uploadFileNameRegressionScriptSource = readFile(uploadFileNameRegressionScriptPath);
+  const fileNameNormalizerRegressionScriptSource = readFile(fileNameNormalizerRegressionScriptPath);
+  const workbookRegressionScriptSource = readFile(workbookRegressionScriptPath);
+
+  const serviceSnippets = [
+    "workbook.getWorksheet('ERP上传净表')",
+    'Excel 文件必须包含名为 ERP上传净表 的工作表',
+    'ERP上传净表必须连续填写',
+    'ERP上传净表不允许包含订单头行',
+    'this.applyOrderImportAutomaticFields(rows)',
+    'normalizeImportRowsForSessionPreview',
+    'lineType: row.lineType',
+    'componentNo: row.componentNo || undefined',
+    'parentComponentNo: row.parentComponentNo || undefined',
+    'normalizeEditableOrderLineComponentFields',
+    'this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences(dto.lines))',
+    'this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences([dto]))[0]',
+    'componentNo: this.normalizeEditableComponentNo(line.componentNo) || undefined',
+    'parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || undefined',
+    'quantity: row.demandQuantity',
+    'productionPlanQuantity: row.demandQuantity',
+    'status: OrderStatus.DRAFT',
+    'Excel 导入只保存 DRAFT 草稿，不触发 submit，也不生成生产任务或库存扣减',
+    'commitImportSession',
+    'const orderImportRowPreviewSelect',
+    'select: orderImportRowPreviewSelect',
+    'file: { select: { id: true, createdAt: true } }',
+    "files: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }",
+    "const fileIdCompare = String(left.file?.id || left.fileId || '')",
+    'buildImportPreviewToken',
+    '导入提交必须携带 previewToken',
+    '导入预览已变化，请刷新预览后重新提交',
+    'submitValidationLines',
+    'this.validateOrderLineComponentStructure(submitValidationLines)',
+    'buildOrderImportIssueReport',
+    'formatImportDateOnly',
+    "mode: 'insensitive' as const",
+    'allSelectable',
+    'excludedOrderNos',
+    'orders: selectableOrders.map',
+    'selectedOrderNos.has(this.normalizeOrderNo(order.orderNo))',
+    'excludedOrderNos.has(this.normalizeOrderNo(order.orderNo))',
+    'deleteDraft(orderNo: string)',
+    'orderNoReservation.deleteMany',
+    'sourceImportSessionId',
+    'sourceImportFileName',
+    'sourceImportRowNo',
+    'findCurrentImportCommittedOrderNosBySessionIds',
+    'findCurrentImportCommittedOrderNoSummariesBySessionIds',
+    'ROW_NUMBER() OVER (PARTITION BY "sourceImportSessionId" ORDER BY "orderNo" ASC)',
+    'jsonb_array_length("committedOrderNos")',
+    'committedOrderNos: created.map((order) => order.orderNo)',
+    'skippedSelectableCount',
+    'excludedOrderCount',
+    'committedOrderCount: committedOrderNos.length',
+    'currentCommittedOrderCount: currentCommittedOrderNos.length',
+    'committedOrderNos: committedOrderNosPreview',
+    'currentCommittedOrderNos: currentCommittedOrderNosPreview',
+    'materialSyncCount',
+    'materialSyncPreview',
+    'selectableOrderNos',
+    'importDisplayFileName',
+    'normalizeMultipartFileName',
+    'sourceFileName: this.importDisplayFileName',
+    'sourceImportFileId: row.sourceImportFileId || row.fileId',
+    'sourceImportFileId: line.sourceImportFileId?.trim() || null',
+    'sourceImportFileId: line.sourceImportFileId || importSourceFile?.id',
+    'sourceImportFileName: this.importDisplayFileName(line.sourceImportFileName)',
+    'importSessionFilePreview(sessionId: string, fileId: string',
+    'const targetOrderKeys = new Set<string>()',
+    'importSourceFilePreview(orderNo: string, fileId: string, query: GetOrderImportFilePreviewQueryDto',
+    'sourceRowNo: { in: sourceRowNos }',
+    'sourceImportFileId || (line.sourceImportSessionId && line.sourceImportRowNo)',
+    'filesById',
+    'normalizeOrderLineImportReferences',
+    'dto = this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences([dto]))[0]',
+    'file.sessionId !== sourceImportSessionId',
+    'sourceImportFileName && sourceImportFileName !== fileDisplayName',
+    "basename(storedFileName?.trim() || '')",
+    'importRowPageOptions(query: GetOrderImportFilePreviewQueryDto',
+    'getImportSourceFileInfoByLineId',
+    'toImportSourceFileInfo',
+    'sourceImportFileUrl',
+    'sourceImportSheetName'
+  ];
+  for (const snippet of serviceSnippets) {
+    if (!serviceSource.includes(snippet)) {
+      addFailure(`orders.service.ts must keep Excel import workflow snippet: ${snippet}`);
+    }
+  }
+
+  const uploadFileNameSnippets = [
+    'normalizeMultipartFileName',
+    'const parts = sanitizedName.split(/[\\\\/]+/)',
+    'decodePercentFileName',
+    'decodeURIComponent(encodedName)',
+    'attempt < 3',
+    "Buffer.from(candidateName, 'latin1').toString('utf8')"
+  ];
+  for (const snippet of uploadFileNameSnippets) {
+    if (!uploadFileNameSource.includes(snippet)) {
+      addFailure(`upload-filenames.ts must keep Chinese upload filename normalization snippet: ${snippet}`);
+    }
+  }
+
+  const frontendFileNameSnippets = [
+    'normalizeDisplayFileName',
+    'cleanDisplayFileName',
+    'decodePercentFileName',
+    'decodeURIComponent(encodedName)',
+    'decodeLatin1Mojibake',
+    "new TextDecoder('utf-8').decode(bytes)",
+    'attempt < 3'
+  ];
+  for (const snippet of frontendFileNameSnippets) {
+    if (!frontendFileNameSource.includes(snippet)) {
+      addFailure(`fileNames.ts must keep frontend Chinese filename display normalization snippet: ${snippet}`);
+    }
+  }
+
+  const mainSnippets = [
+    'API_BODY_LIMIT',
+    'bodyParser: false',
+    "app.useBodyParser('json'",
+    "app.useBodyParser('urlencoded'",
+    'UploadExceptionFilter',
+    'app.useGlobalFilters(new UploadExceptionFilter())'
+  ];
+  for (const snippet of mainSnippets) {
+    if (!mainSource.includes(snippet)) {
+      addFailure(`main.ts must keep large import request body handling snippet: ${snippet}`);
+    }
+  }
+
+  const uploadExceptionFilterSource = readFile('backend/src/common/upload-exception.filter.ts');
+  const uploadExceptionFilterSnippets = [
+    '@Catch(multer.MulterError)',
+    "exception.code === 'LIMIT_FILE_SIZE'",
+    '上传文件超过大小限制',
+    'code: exception.code'
+  ];
+  for (const snippet of uploadExceptionFilterSnippets) {
+    if (!uploadExceptionFilterSource.includes(snippet)) {
+      addFailure(`upload-exception.filter.ts must keep clear upload error handling snippet: ${snippet}`);
+    }
+  }
+
+  const commitStart = serviceSource.indexOf('async commitImportSession');
+  const commitEnd = serviceSource.indexOf('private async removeOrderImportStoredFile', commitStart);
+  const commitSource = commitStart >= 0 && commitEnd > commitStart ? serviceSource.slice(commitStart, commitEnd) : '';
+  const forbiddenCommitSnippets = ['this.submit(', 'productionTask.create', 'ProductionTask'];
+  for (const snippet of forbiddenCommitSnippets) {
+    if (commitSource.includes(snippet)) {
+      addFailure(`Excel import commit must not submit production or create production tasks: ${snippet}`);
+    }
+  }
+
+  const controllerSnippets = [
+    "@Post('import-sessions')",
+    "@Get('import-template')",
+    "@Get('import-sessions/:sessionId/error-report')",
+    "@Get('import-config')",
+    "@Post('import-sessions/:sessionId/files')",
+    "@Get('import-sessions/:sessionId/files/:fileId/preview')",
+    "@Post('import-sessions/:sessionId/commit')",
+    "@Delete('import-sessions/:sessionId/files/:fileId')",
+    "@Delete('import-sessions/:sessionId')",
+    "@Get(':orderNo/import-source-files/:fileId/preview')",
+    "@Delete(':orderNo')",
+    'orderImportUploadMaxBytes()',
+    'normalizeMultipartFileName',
+    'randomUUID().slice(0, 8)',
+    "const allowedOrderImportExtensions = new Set(['.xlsx'])"
+  ];
+  for (const snippet of controllerSnippets) {
+    if (!controllerSource.includes(snippet)) {
+      addFailure(`orders.controller.ts must keep Excel import API snippet: ${snippet}`);
+    }
+  }
+
+  const dtoSnippets = [
+    'CreateOrderImportSessionDto',
+    'GetOrderImportSessionQueryDto',
+    'CommitOrderImportSessionDto',
+    'sourceImportFileId?: string',
+    'allSelectable',
+    'orderNos',
+    'excludedOrderNos',
+    'previewToken'
+  ];
+  for (const snippet of dtoSnippets) {
+    if (!dtoSource.includes(snippet)) {
+      addFailure(`orders dto must keep Excel import DTO snippet: ${snippet}`);
+    }
+  }
+  if (dtoSource.includes('MaxLength')) {
+    addFailure('orders dto must not add MaxLength to order/import fields; Excel uploaded business text must not be artificially truncated.');
+  }
+
+  const schemaSnippets = [
+    'model OrderImportSession',
+    'model OrderImportFile',
+    'model OrderImportRow',
+    '@@unique([sessionId, fileHash])',
+    '@@unique([sessionId, rowHash])',
+    '@@index([sessionId, orderNo, sourceRowNo])',
+    'sourceImportSessionId',
+    'sourceImportFileId',
+    'sourceImportFile OrderImportFile? @relation("OrderLineSourceImportFile"',
+    '@@index([sourceImportFileId])',
+    'sourceImportFileName',
+    'sourceImportRowNo',
+    'committedOrderNos',
+    'componentNo',
+    'parentComponentNo'
+  ];
+  for (const snippet of schemaSnippets) {
+    if (!schemaSource.includes(snippet)) {
+      addFailure(`Prisma schema must keep Excel import persistence snippet: ${snippet}`);
+    }
+  }
+  const orderSchemaStart = schemaSource.indexOf('model CustomerOrder');
+  const productionTaskSchemaStart = schemaSource.indexOf('model ProductionTask');
+  const orderSchemaSource =
+    orderSchemaStart >= 0 && productionTaskSchemaStart > orderSchemaStart
+      ? schemaSource.slice(orderSchemaStart, productionTaskSchemaStart)
+      : '';
+  if (orderSchemaSource.includes('@db.VarChar')) {
+    addFailure('Order import/order line text fields must stay unbounded text in Prisma; do not use @db.VarChar for uploaded Excel business text.');
+  }
+
+  const frontendSnippets = [
+    '导入订单',
+    '上传 ERP上传净表',
+    '创建全部可导入草稿',
+    '不会自动提交生产、不会占用库存、不会生成生产任务',
+    '同步物料基础资料',
+    '台账页不能直接上传',
+    'import-drop-zone',
+    'is-drag-over',
+    'handleImportDragEnter',
+    "event.dataTransfer.dropEffect = importUploading.value || importSessionCreating.value ? 'none' : 'copy'",
+    'handleImportFileDrop',
+    'Array.from(event.dataTransfer?.files || [])',
+    'uploadImportFiles',
+    'normalizeDisplayFileName',
+    'displayImportFileName',
+    "displayImportFileName(file.name).toLowerCase().endsWith('.xlsx')",
+    'displayImportFileName(firstSkipped.name)',
+    'displayImportSourceFileName',
+    'mobile-order-paused',
+    'isMobileOrderWorkspacePaused',
+    'multiple class="hidden-file-input"',
+    'uploadSummaries',
+    'importCurrentCommittedOrderNosSummary',
+    'orderImportConfig',
+    'downloadOrderImportIssueReport',
+    'orderImportSelectableOrderNos',
+    'allSelectableImportOrderNos',
+    'allSelectableImportOrderWarnings',
+    'syncImportSelectionAgainstSelectableOrders',
+    'confirmImportWarnings',
+    '导入警告复核',
+    'visibleSelectableCovered',
+    'useAllSelectableCommit ? [] : orderNos',
+    'useAllSelectableCommit ? excludedOrderNos : []',
+    '未创建 ${result.skippedSelectableCount} 个可导入订单',
+    'result.materialSyncCount',
+    'result.materialSyncPreview',
+    'importPreview.summary.materialSyncCount',
+    'importPreview.summary.materialSyncPreview',
+    '预计同步物料',
+    'session.materialSyncCount',
+    'session.materialSyncPreview',
+    'materialSyncPreviewSuffix',
+    '个物料基础资料',
+    'commitOrderImportSession(importPreview.value.id, [], previewToken, true)',
+    '导入预览已过期，请刷新预览后再创建草稿',
+    'importPreview.value.previewToken',
+    'deleteDraftOrder',
+    '组件编号',
+    '所属组件',
+    'orderImportSourceFilePreview',
+    'orderImportFilePreview',
+    'OrderImportFilePreview',
+    'openImportFilePreview',
+    '上传文件预览',
+    'OrderImportSourceFilePreview',
+    'loadMoreImportSourcePreviewRows',
+    '当前订单已加载',
+    '手机端仅用于查看订单明细',
+    '编辑订单、删除草稿、补单、取消订单和提交生产请在电脑端操作',
+    'formatQuantity(row.demandQuantity, row.unit)',
+    'sourceImportFileId',
+    'sourceImportFileUrl',
+    'sourceImportSheetName'
+  ];
+  for (const snippet of frontendSnippets) {
+    if (
+      !ordersViewSource.includes(snippet) &&
+      !orderDetailSource.includes(snippet) &&
+      !apiSource.includes(snippet) &&
+      !typesSource.includes(snippet) &&
+      !lineEditorSource.includes(snippet)
+    ) {
+      addFailure(`Frontend must keep Excel import UI/API snippet: ${snippet}`);
+    }
+  }
+  const forbiddenFrontendSnippets = [
+    '可导入订单较多，请直接使用“创建全部可导入草稿”',
+    'selectableOrderCount || 0) > 1000'
+  ];
+  for (const snippet of forbiddenFrontendSnippets) {
+    if (ordersViewSource.includes(snippet)) {
+      addFailure(`Frontend must not add business quantity limits to Excel import selection: ${snippet}`);
+    }
+  }
+
+  const readmeSnippets = [
+    'Excel 订单导入',
+    '正式导入只读取 `ERP上传净表` 工作表',
+    '台账页只用于录入和复核，不能直接上传',
+    '不会自动提交生产',
+    '同一个导入会话可以一次多选或连续上传多个 `.xlsx` 文件',
+    '同一订单拆成多个文件连续上传',
+    'allSelectable + excludedOrderNos',
+    '下载“问题明细”Excel',
+    '实际生成的订单号',
+    '当前仍存在的订单',
+    '全部可导入排除提交',
+    '旧预览拦截',
+    '上传文件级预览',
+    '文件名和 Excel 单元格中文必须保持不乱码',
+    '分页只影响界面显示，不限制实际上传、解析和创建草稿的数据量',
+    '订单导入字段不设置业务字数上限',
+    '手机端订单界面只保留查看入口',
+    '预览来源Excel',
+    '删除导入记忆后只保留文字追溯',
+    '物料基础库同步',
+    '预计同步物料',
+    '前 5 个物料号示例',
+    '草稿编辑删除',
+    '导入记忆删除',
+    'API_BODY_LIMIT',
+    'ORDER_IMPORT_UPLOAD_MAX_MB',
+    'npm run verify:order-import-api',
+    'npm run verify:upload-filenames-api',
+    'npm run verify:file-name-normalizers',
+    'npm run verify:order-import-workbooks'
+  ];
+  for (const snippet of readmeSnippets) {
+    if (!readmeSource.includes(snippet)) {
+      addFailure(`README.md must document Excel import rule: ${snippet}`);
+    }
+  }
+
+  if (!packageSource.includes('"verify:order-import-api": "node scripts/verify-order-import-api.cjs"')) {
+    addFailure('package.json must expose verify:order-import-api for Excel import regression testing.');
+  }
+  if (!packageSource.includes('"verify:upload-filenames-api": "node scripts/verify-upload-filenames-api.cjs"')) {
+    addFailure('package.json must expose verify:upload-filenames-api for upload filename regression testing.');
+  }
+  if (!packageSource.includes('"verify:file-name-normalizers": "node scripts/verify-file-name-normalizers.cjs"')) {
+    addFailure('package.json must expose verify:file-name-normalizers for frontend/backend filename normalizer regression testing.');
+  }
+  if (!packageSource.includes('"verify:order-import-workbooks": "node scripts/verify-order-import-workbooks.cjs"')) {
+    addFailure('package.json must expose verify:order-import-workbooks for Excel workbook artifact validation.');
+  }
+  if (!packageSource.includes('npm run verify:file-name-normalizers && npm run verify:order-import-workbooks && npm run backend:verify:first-stage')) {
+    addFailure('verify:first-stage must run workbook artifact validation before backend/frontend builds.');
+  }
+
+  const regressionSnippets = [
+    "workbook.addWorksheet('ERP上传净表')",
+    '/orders/import-sessions',
+    'downloadTemplate',
+    'assertTemplateWorkbook',
+    "optionsSheet.getCell('E10000').text === 'C9999'",
+    "dataValidation?.errorStyle === 'warning'",
+    'assertIssueReportWorkbook',
+    'toOrderUpdateLine',
+    '/selectable-order-nos',
+    '/error-report',
+    'allSelectable: true',
+    "createdOrder.status === 'DRAFT'",
+    'sourceImportSessionId === sessionId',
+    'sourceImportFileId: line.sourceImportFileId ||',
+    'sourceImportFileId: \'00000000-0000-0000-0000-000000000000\'',
+    '导入来源文件 ID 失效时，草稿编辑不能因为外键错误失败',
+    '订单详情应通过来源会话和 Excel 行号重新找回正确文件',
+    '导入草稿订单应允许编辑订单号',
+    'await assertImportSourcePreview(updatedOrder)',
+    '导入错误的草稿订单应允许删除',
+    "line.lineType === 'COMPONENT'",
+    "line.parentComponentNo === 'C001'",
+    "line.componentNo === 'ASM-X1'",
+    "line.parentComponentNo === 'ASM-X1'",
+    "issue.code === 'PART_COMPONENT_NO_NOT_ALLOWED'",
+    "invalidOrder?.orderDate === ''",
+    '-SPLIT',
+    'verifyBundledWorkbookUploadPreviews',
+    'assertRejectedAndDuplicateUploadsStayClean',
+    'assertNoStoredImportFilesMatching',
+    'buildWorkbookWithoutUploadSheetBuffer',
+    'buildWorkbookWithBlankRowInMiddleBuffer',
+    'buildWorkbookWithOrderHeadRowBuffer',
+    'buildWorkbookWithMissingRequiredHeaderBuffer',
+    'buildWorkbookWithEmptyUploadSheetBuffer',
+    'missingHeaderFileName',
+    'emptyUploadSheetFileName',
+    'duplicatePreview.summary.fileCount === 1',
+    'duplicateRejectedFileName',
+    'assertImportFileDeletionRemovesStoredFile',
+    'afterDelete.deletedFileCount === 1',
+    'discardResult.deletedFileCount === 1',
+    '删除导入记忆后订单明细必须保留来源 Excel 文件名文字追溯',
+    '删除导入记忆后订单明细不能继续保留可预览的来源文件 ID',
+    'historySession.selectableOrderCount === 4',
+    'historySession.materialSyncCount === 10',
+    'historySession.materialSyncPreview?.includes',
+    'assertSelectedCommitSupportsUnloadedOrders',
+    'assertAllSelectableCommitSupportsExcludedOrders',
+    'excludedOrderNos',
+    'commit.excludedOrderCount === 1',
+    'commit.skippedSelectableCount === 1',
+    '只有全部可导入模式',
+    '排除的订单编号存在空值或重复',
+    '排除的订单不存在或已不可导入',
+    'allSelectable + excludedOrderNos',
+    '可选订单号接口必须返回每个可导入订单的警告数量',
+    'assertImportSourcePreview',
+    'assertImportSessionFilePreview',
+    'assertNoMojibake',
+    '上传文件预览必须保留中文文件名',
+    '上传文件预览产品名称',
+    '/import-source-files/',
+    'sourceImportFileId',
+    '来源 Excel 预览必须保留中文文件名',
+    '来源 Excel 预览必须按 limit 分页返回',
+    '来源 Excel 预览产品名称',
+    'Material ${material.partCode} 产品名称',
+    'assertStaleImportPreviewTokenRejectsCommit',
+    'commitImportSessionExpectFailure',
+    'firstPreview.previewToken',
+    "{ allSelectable: true },",
+    '导入预览已变化',
+    'orderLimit=1&orderOffset=0',
+    'committedRejectedFileName',
+    'committed import session rejected upload',
+    'outputs/component-order-template',
+    'readFileSync(join(workbookDir, fileName))',
+    "upload.files?.[0]?.sheetName",
+    "upload.files?.[0]?.fileName === fileName",
+    "sourceFileName === fileName",
+    'upload.summary.materialSyncCount === 10',
+    'upload.summary.materialSyncPreview?.includes',
+    'commit.skippedBlockedCount === 1',
+    'commit.committedOrderNos',
+    'materialSyncCount',
+    'materialSyncPreview',
+    'commit.materialSyncCount === 10',
+    'commit.materialSyncPreview?.includes',
+    'committedImportSession.summary.committedOrderCount === 4',
+    'assertImportedMaterialsUpserted',
+    'Imported order lines must be upserted into Material library',
+    'Blocked import rows must not be upserted into Material library',
+    "material.status === 'ENABLED'",
+    'renamedImportSession.currentCommittedOrderNos.includes(editableOrderNo)',
+    'afterDeleteImportSession.summary.currentCommittedOrderCount === 3',
+    'assertSubmitRejectsUnconfirmedMaterialIdentityConflict',
+    'materialIdentityConfirmed: true',
+    '发现同编码多套历史资料零件，提交生产前必须确认已核对',
+    'assertSubmitRejectsInvalidPersistedComponentStructure',
+    '所属组件 MISSING-COMPONENT 在当前订单内不存在',
+    'await cleanup()',
+    'new PrismaClient()',
+    'prisma.material.deleteMany',
+    'partCode: { startsWith: materialPrefix }'
+  ];
+  for (const snippet of regressionSnippets) {
+    if (!regressionScriptSource.includes(snippet)) {
+      addFailure(`verify-order-import-api.cjs must keep regression coverage snippet: ${snippet}`);
+    }
+  }
+
+  const uploadFileNameRegressionSnippets = [
+    '/orders/drawings/upload',
+    '/orders/import-sessions',
+    '/files',
+    '/inventory/adjustments/upload',
+    '订单导入-乱码修复验证.xlsx',
+    '订单导入-percent编码验证.xlsx',
+    '订单导入-路径清理验证.xlsx',
+    '订单图纸-中文验证.png',
+    '订单图纸-乱码修复验证.png',
+    '订单图纸-percent编码验证.png',
+    '订单图纸-路径清理验证.png',
+    '库存盘点照片-中文验证.png',
+    '库存盘点工单-乱码修复验证.png',
+    '库存盘点-percent编码验证.png',
+    '库存盘点-路径清理验证.png',
+    'mojibakeLatin1',
+    'utf8PercentFileName',
+    'windowsFakePath',
+    'posixPathName',
+    'assertNoMojibake',
+    '订单导入 mojibake 文件名必须修复为中文',
+    '订单导入 percent-encoded 文件名必须修复为中文',
+    '订单导入路径文件名必须只保留 basename',
+    '订单图纸 mojibake 文件名必须修复为中文',
+    '订单图纸 percent-encoded 文件名必须修复为中文',
+    '订单图纸路径文件名必须只保留 basename',
+    '库存附件 mojibake 文件名必须修复为中文',
+    '库存附件 percent-encoded 文件名必须修复为中文',
+    '库存附件路径文件名必须只保留 basename',
+    "join(uploadRoot, 'drawings', fileName)",
+    "join(uploadRoot, 'inventory-adjustments', fileName)"
+  ];
+  for (const snippet of uploadFileNameRegressionSnippets) {
+    if (!uploadFileNameRegressionScriptSource.includes(snippet)) {
+      addFailure(`verify-upload-filenames-api.cjs must keep upload filename regression snippet: ${snippet}`);
+    }
+  }
+
+  const fileNameNormalizerRegressionSnippets = [
+    "loadTsExports('frontend/src/utils/fileNames.ts')",
+    "loadTsExports('backend/src/common/upload-filenames.ts')",
+    'normalizeDisplayFileName',
+    'normalizeMultipartFileName',
+    '订单导入-乱码修复验证.xlsx',
+    '示例订单来源 ERP净表.xlsx',
+    'mojibakeLatin1',
+    '百分号编码文件名',
+    '带路径中文文件名',
+    'assertNoMojibake'
+  ];
+  for (const snippet of fileNameNormalizerRegressionSnippets) {
+    if (!fileNameNormalizerRegressionScriptSource.includes(snippet)) {
+      addFailure(`verify-file-name-normalizers.cjs must keep frontend/backend filename normalizer regression snippet: ${snippet}`);
+    }
+  }
+
+  const workbookRegressionSnippets = [
+    'outputs',
+    'component-order-template',
+    '组件零件清单下单台账模板-最终版.xlsx',
+    'ERP上传净表',
+    'ERP导入清单',
+    'veryHidden',
+    '订单编号',
+    '需求数量(自动)',
+    'erpordertest.xlsx',
+    'erpordertest-',
+    '#REF',
+    '可见工作表仍在说明旧中间表'
+  ];
+  for (const snippet of workbookRegressionSnippets) {
+    if (!workbookRegressionScriptSource.includes(snippet)) {
+      addFailure(`verify-order-import-workbooks.cjs must keep workbook artifact validation snippet: ${snippet}`);
+    }
+  }
+}
+
 function verifySeedStockReservationCoverage() {
   const seedPath = 'database/prisma/seed.ts';
   if (!fileExists(seedPath)) {
@@ -3729,6 +5032,7 @@ function verifySeedStockReservationCoverage() {
 }
 
 verifyRequiredFiles();
+verifyNoMojibakeInUserFacingSources();
 verifyNavigation();
 verifyResponsiveMobileBaseline();
 verifyNoNativeBrowserDialogs();
@@ -3742,7 +5046,9 @@ verifyProductionOrderSummaryWorkflow();
 verifyProductionOperatorSearchWorkflow();
 verifyPlannerProcessAndSubmitGuard();
 verifyProcessPinyinSearchWorkflow();
+verifyMaterialSuggestionSearchWorkflow();
 verifyProcessEditDisabledReasonWorkflow();
+verifyProcessStepDragSortWorkflow();
 verifyMobileCompactOrderCards();
 verifyProductionProcessCompletionSequenceWorkflow();
 verifyProductionReplenishmentAndWithdrawWorkflow();
@@ -3771,6 +5077,7 @@ verifyRepairDraftReservationPriority();
 verifyDataVerifierStockSourceReviewStatus();
 verifyRepairScriptEntrypoint();
 verifyReadmeRepairSafetyDocs();
+verifyOrderExcelImportWorkflow();
 verifySeedStockReservationCoverage();
 
 if (failures.length > 0) {

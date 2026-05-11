@@ -18,6 +18,7 @@ import {
 } from '../../common/serializers';
 import { buildPinyinSearchText, normalizeSearchKeyword } from '../../common/pinyin-search';
 import { runSerializableTransaction } from '../../common/transactions';
+import { normalizeMultipartFileName } from '../../common/upload-filenames';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProcessDefinitionsService } from '../process-definitions/process-definitions.service';
 import {
@@ -34,9 +35,18 @@ import {
   SubmitOrderDto,
   UpdateLineProcessDto,
   UpdateLineQuantityDto,
-  UpdateOrderDto
+  UpdateOrderDto,
+  CreateOrderImportSessionDto,
+  GetOrderImportSessionQueryDto,
+  GetOrderImportFilePreviewQueryDto,
+  ListOrderImportSessionQueryDto,
+  CommitOrderImportSessionDto
 } from './dto';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile, unlink } from 'node:fs/promises';
+import { basename, resolve, sep } from 'node:path';
+import { orderImportUploadPath } from '../../storage/upload-paths';
+import * as ExcelJS from 'exceljs';
 
 type NormalizedCancelHandlingPlanItem = {
   orderLineId: string;
@@ -73,6 +83,101 @@ type StockReservationPriorityOrder = {
   status: OrderStatus;
   createdAt: Date;
 };
+
+type OrderImportIssue = {
+  severity: 'ERROR' | 'WARNING';
+  code: string;
+  message: string;
+};
+
+type ParsedOrderImportRow = {
+  sourceRowNo: number;
+  rowHash: string;
+  orderBlock?: string;
+  orderNo: string;
+  orderDate: Date | null;
+  customerName: string;
+  projectModel?: string;
+  lineType: 'PART' | 'COMPONENT';
+  importSequence?: string;
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  partCode: string;
+  drawingNo?: string;
+  partName: string;
+  partSpecification?: string;
+  partThickness: number;
+  orderQuantity?: number;
+  unitUsage?: number;
+  demandQuantity?: number;
+  unit: string;
+  processRoute?: string;
+  processRemark?: string;
+  drawingDate?: Date | null;
+  drawingStatus?: string;
+  raw: Record<string, unknown>;
+  issues: OrderImportIssue[];
+};
+
+type OrderLineMaterialIdentityInfo = {
+  identityKeys: Set<string>;
+  identityFieldValues: Map<string, Set<string>>;
+  variantCount: number;
+  conflictFields: string[];
+};
+
+type ImportPreviewPageOptions = {
+  allOrders?: boolean;
+  includeRows?: boolean;
+  orderLimit?: number;
+  orderOffset?: number;
+};
+
+const orderLineMaterialIdentityFieldLabels: Record<string, string> = {
+  partName: '名称',
+  partSpecification: '规格',
+  drawingNo: '图号',
+  drawingVersion: '版本',
+  drawingDate: '图纸日期',
+  drawingStatus: '图纸状态',
+  partThickness: '厚度',
+  projectModel: '项目型号'
+};
+
+const orderImportRowPreviewSelect = {
+  id: true,
+  sessionId: true,
+  fileId: true,
+  sourceRowNo: true,
+  orderBlock: true,
+  orderNo: true,
+  orderDate: true,
+  customerName: true,
+  projectModel: true,
+  lineType: true,
+  importSequence: true,
+  partCategory: true,
+  componentNo: true,
+  parentComponentNo: true,
+  partCode: true,
+  drawingNo: true,
+  partName: true,
+  partSpecification: true,
+  partThickness: true,
+  orderQuantity: true,
+  unitUsage: true,
+  demandQuantity: true,
+  unit: true,
+  processRoute: true,
+  processRemark: true,
+  drawingDate: true,
+  drawingStatus: true,
+  issues: true,
+  errorCount: true,
+  warningCount: true,
+  file: { select: { id: true, createdAt: true } }
+} satisfies Prisma.OrderImportRowSelect;
 
 const fallbackSubmitPlanOperators: SubmitPlanOperator[] = [
   {
@@ -114,6 +219,8 @@ type OrderProductionFilterStatus = (typeof orderProductionFilterStatuses)[number
 
 @Injectable()
 export class OrdersService {
+  private readonly importCommitCreatedOrdersPreviewLimit = 50;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly processDefinitionsService: ProcessDefinitionsService
@@ -260,7 +367,160 @@ export class OrdersService {
       this.jsonToStockSourceSelections(line.stockSourceSelections).map((source) => source.batchId)
     );
     const stockSourceInfoByBatchId = await this.getStockSourceInfoByBatchId(selectedStockBatchIds, order.id);
-    return this.toDetail(order, stockQuantityByTaskNo, stockSourceInfoByBatchId);
+    const importSourceFileByLineId = await this.getImportSourceFileInfoByLineId(order);
+    const materialIdentityInfoByPartCode = await this.getOrderLineMaterialIdentityInfoByPartCode(
+      order.lines.map((line) => line.partCode)
+    );
+    return this.toDetail(
+      order,
+      stockQuantityByTaskNo,
+      stockSourceInfoByBatchId,
+      importSourceFileByLineId,
+      materialIdentityInfoByPartCode
+    );
+  }
+
+  async importSourceFilePreview(orderNo: string, fileId: string, query: GetOrderImportFilePreviewQueryDto = {}) {
+    const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    const { limit, offset } = this.importRowPageOptions(query);
+    const order = await this.prisma.customerOrder.findFirst({
+      where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
+      include: { lines: true }
+    });
+    if (!order) {
+      throw new NotFoundException('订单不存在');
+    }
+
+    const file = await this.prisma.orderImportFile.findUnique({
+      where: { id: fileId },
+      select: {
+        id: true,
+        sessionId: true,
+        fileName: true,
+        storedFileName: true,
+        sheetName: true,
+        rowCount: true,
+        acceptedRowCount: true,
+        duplicateRowCount: true,
+        createdAt: true
+      }
+    });
+    if (!file) {
+      throw new NotFoundException('来源 Excel 文件记录不存在，可能已删除导入记忆');
+    }
+
+    const fileDisplayName = this.importDisplayFileName(file.fileName);
+    const sourceRowNos = [
+      ...new Set(
+        order.lines
+          .filter((line) => {
+            if (!line.sourceImportRowNo) {
+              return false;
+            }
+            if (line.sourceImportFileId) {
+              return line.sourceImportFileId === file.id;
+            }
+            if (line.sourceImportSessionId !== file.sessionId) {
+              return false;
+            }
+            const lineFileName = this.importDisplayFileName(line.sourceImportFileName);
+            return !lineFileName || lineFileName === fileDisplayName;
+          })
+          .map((line) => Number(line.sourceImportRowNo))
+      )
+    ];
+    if (sourceRowNos.length === 0) {
+      throw new BadRequestException('该来源 Excel 文件不属于当前订单');
+    }
+
+    const where = {
+      fileId,
+      sourceRowNo: { in: sourceRowNos }
+    };
+    const [totalCount, rows] = await Promise.all([
+      this.prisma.orderImportRow.count({ where }),
+      this.prisma.orderImportRow.findMany({
+        where,
+        orderBy: { sourceRowNo: 'asc' },
+        skip: offset,
+        take: limit,
+        select: {
+          id: true,
+          sourceRowNo: true,
+          orderBlock: true,
+          orderNo: true,
+          orderDate: true,
+          customerName: true,
+          projectModel: true,
+          lineType: true,
+          importSequence: true,
+          partCategory: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCode: true,
+          drawingNo: true,
+          partName: true,
+          partSpecification: true,
+          partThickness: true,
+          orderQuantity: true,
+          unitUsage: true,
+          demandQuantity: true,
+          unit: true,
+          processRoute: true,
+          processRemark: true,
+          drawingDate: true,
+          drawingStatus: true,
+          issues: true,
+          errorCount: true,
+          warningCount: true
+        }
+      })
+    ]);
+    if (totalCount === 0) {
+      throw new NotFoundException('当前订单在该来源 Excel 文件中没有可预览的明细');
+    }
+
+    return {
+      orderNo: order.orderNo,
+      file: this.toImportSourceFileInfo(file),
+      rowPage: {
+        offset,
+        limit,
+        loadedCount: rows.length,
+        totalCount,
+        hasMore: offset + rows.length < totalCount
+      },
+      rows: rows.map((row) => ({
+        id: row.id,
+        sourceRowNo: row.sourceRowNo,
+        orderBlock: row.orderBlock,
+        orderNo: row.orderNo,
+        orderDate: this.formatImportDateOnly(row.orderDate),
+        customerName: row.customerName,
+        projectModel: row.projectModel,
+        lineType: row.lineType,
+        importSequence: row.importSequence,
+        partCategory: row.partCategory,
+        componentNo: row.componentNo,
+        parentComponentNo: row.parentComponentNo,
+        partCode: row.partCode,
+        drawingNo: row.drawingNo,
+        partName: row.partName,
+        partSpecification: row.partSpecification,
+        partThickness: decimalToNumber(row.partThickness),
+        orderQuantity: row.orderQuantity === null || row.orderQuantity === undefined ? undefined : decimalToNumber(row.orderQuantity),
+        unitUsage: row.unitUsage === null || row.unitUsage === undefined ? undefined : decimalToNumber(row.unitUsage),
+        demandQuantity: decimalToNumber(row.demandQuantity),
+        unit: row.unit,
+        processRoute: row.processRoute,
+        processRemark: row.processRemark,
+        drawingDate: row.drawingDate ? this.formatDateOnly(row.drawingDate) : undefined,
+        drawingStatus: row.drawingStatus,
+        issues: this.importIssueArray(row.issues),
+        errorCount: row.errorCount,
+        warningCount: row.warningCount
+      }))
+    };
   }
 
   async nextOrderNo(query: NextOrderNoQueryDto) {
@@ -286,9 +546,1549 @@ export class OrdersService {
     return this.findDuplicateOrderLines('drawingFileName', value, excludeOrderNo);
   }
 
+  async createImportSession(dto: CreateOrderImportSessionDto) {
+    const session = await this.prisma.orderImportSession.create({
+      data: {
+        createdBy: dto.createdBy?.trim() || null,
+        status: 'DRAFT'
+      }
+    });
+    return this.buildImportSessionPreview(session.id);
+  }
+
+  async getImportSession(sessionId: string, query: GetOrderImportSessionQueryDto = {}) {
+    return this.buildImportSessionPreview(sessionId, this.importPreviewPageOptions(query));
+  }
+
+  async importSessionFilePreview(sessionId: string, fileId: string, query: GetOrderImportFilePreviewQueryDto = {}) {
+    const { limit, offset } = this.importRowPageOptions(query);
+
+    const session = await this.prisma.orderImportSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        files: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }
+      }
+    });
+    if (!session) {
+      throw new NotFoundException('导入会话不存在');
+    }
+    const file = session.files.find((item) => item.id === fileId);
+    if (!file) {
+      throw new NotFoundException('上传文件不存在或不属于当前导入会话');
+    }
+
+    const sessionRows = await this.prisma.orderImportRow.findMany({
+      where: { sessionId },
+      select: orderImportRowPreviewSelect,
+      orderBy: [{ orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+    });
+    const fileOrder = new Map(session.files.map((item, index) => [item.id, index]));
+    const fileNameById = new Map(session.files.map((item) => [item.id, this.importDisplayFileName(item.fileName)]));
+    const sortedRows = [...(sessionRows as any[])].sort((left, right) => {
+      const orderCompare = String(left.orderNo || '').localeCompare(String(right.orderNo || ''));
+      if (orderCompare !== 0) {
+        return orderCompare;
+      }
+      const fileCompare = (fileOrder.get(left.fileId) ?? 0) - (fileOrder.get(right.fileId) ?? 0);
+      if (fileCompare !== 0) {
+        return fileCompare;
+      }
+      return left.sourceRowNo - right.sourceRowNo;
+    });
+    const normalizedRows = this.normalizeImportRowsForSessionPreview(sortedRows);
+    const orderGroups = new Map<string, any[]>();
+    const targetOrderKeys = new Set<string>();
+    for (const row of normalizedRows) {
+      const key = row.orderNo || `ROW-${row.id}`;
+      const group = orderGroups.get(key) || [];
+      group.push(row);
+      orderGroups.set(key, group);
+      if (row.fileId === fileId) {
+        targetOrderKeys.add(key);
+      }
+    }
+
+    const targetOrderEntries = [...orderGroups.entries()].filter(([orderKey]) => targetOrderKeys.has(orderKey));
+    const targetRows = targetOrderEntries.flatMap(([, rows]) => rows);
+    const customerLookup = await this.findEnabledCustomersForImport(targetRows.map((row) => row.customerName));
+    const existingOrderNos =
+      session.status === 'DRAFT' ? await this.findExistingOrderNosForImport(targetRows.map((row) => row.orderNo)) : new Set<string>();
+    const activeProcessKeys = await this.activeProcessNameKeys();
+
+    const targetPreviewRows = targetOrderEntries.flatMap(([orderNo, rows]) =>
+      this.buildImportOrderPreview(orderNo, rows, customerLookup, existingOrderNos, activeProcessKeys, {
+        includeRows: true,
+        fileNameById
+      }).rows
+    );
+    const fileRows = targetPreviewRows
+      .filter((row: any) => row.sourceImportFileId === fileId)
+      .sort((left: any, right: any) => left.sourceRowNo - right.sourceRowNo);
+    const visibleRows = fileRows.slice(offset, offset + limit);
+
+    return {
+      sessionId: session.id,
+      status: session.status,
+      file: this.toImportSourceFileInfo(file),
+      rowPage: {
+        offset,
+        limit,
+        loadedCount: visibleRows.length,
+        totalCount: fileRows.length,
+        hasMore: offset + visibleRows.length < fileRows.length
+      },
+      rows: visibleRows
+    };
+  }
+
+  async listImportSelectableOrderNos(sessionId: string) {
+    const preview = await this.buildImportSessionPreview(sessionId, { allOrders: true, includeRows: false });
+    if (preview.status !== 'DRAFT') {
+      throw new BadRequestException('只有未提交的导入会话可以批量勾选订单');
+    }
+    const selectableOrders = preview.orders.filter((order) => order.errorCount === 0);
+    return {
+      sessionId,
+      status: preview.status,
+      totalOrderCount: preview.summary.orderCount,
+      selectableCount: selectableOrders.length,
+      blockedCount: preview.summary.orderCount - selectableOrders.length,
+      errorCount: preview.summary.errorCount,
+      warningCount: preview.summary.warningCount,
+      orders: selectableOrders.map((order) => ({
+        orderNo: order.orderNo,
+        warningCount: order.warningCount
+      })),
+      orderNos: selectableOrders.map((order) => order.orderNo)
+    };
+  }
+
+  async listImportSessions(query: ListOrderImportSessionQueryDto = {}) {
+    const requestedLimit = Number(query.limit ?? 20);
+    const requestedOffset = Number(query.offset ?? 0);
+    const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 20, 1), 100);
+    const offset = Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0);
+    const [totalCount, sessions] = await Promise.all([
+      this.prisma.orderImportSession.count(),
+      this.prisma.orderImportSession.findMany({
+        orderBy: { createdAt: 'desc' },
+        skip: offset,
+        take: limit,
+        select: {
+          id: true,
+          status: true,
+          createdBy: true,
+          createdAt: true,
+          updatedAt: true,
+          committedAt: true,
+          _count: { select: { rows: true, files: true } }
+        }
+      })
+    ]);
+
+    const sessionIds = sessions.map((session) => session.id);
+    const [rowStats, fileStats, fileNamePreviewRows, orderNoGroups, blankOrderNoStats, committedOrderCountRows] =
+      sessionIds.length > 0
+        ? await Promise.all([
+            this.prisma.orderImportRow.groupBy({
+              by: ['sessionId'],
+              where: { sessionId: { in: sessionIds } },
+              _count: { _all: true },
+              _sum: { errorCount: true, warningCount: true }
+            }),
+            this.prisma.orderImportFile.groupBy({
+              by: ['sessionId'],
+              where: { sessionId: { in: sessionIds } },
+              _count: { _all: true },
+              _sum: { duplicateRowCount: true }
+            }),
+            this.prisma.$queryRaw<Array<{ sessionId: string; fileName: string }>>(Prisma.sql`
+              SELECT "sessionId", "fileName"
+              FROM (
+                SELECT
+                  "sessionId",
+                  "fileName",
+                  row_number() OVER (PARTITION BY "sessionId" ORDER BY "createdAt" ASC, "id" ASC) AS "rowNo"
+                FROM "OrderImportFile"
+                WHERE "sessionId" IN (${Prisma.join(sessionIds)})
+              ) AS "rankedFiles"
+              WHERE "rowNo" <= 5
+              ORDER BY "sessionId" ASC, "rowNo" ASC
+            `),
+            this.prisma.orderImportRow.groupBy({
+              by: ['sessionId', 'orderNo'],
+              where: { sessionId: { in: sessionIds }, orderNo: { not: '' } },
+              _count: { _all: true }
+            }),
+            this.prisma.orderImportRow.groupBy({
+              by: ['sessionId'],
+              where: { sessionId: { in: sessionIds }, orderNo: '' },
+              _count: { _all: true }
+            }),
+            this.prisma.$queryRaw<Array<{ sessionId: string; committedOrderCount: number | bigint }>>(Prisma.sql`
+              SELECT
+                "id" AS "sessionId",
+                CASE
+                  WHEN jsonb_typeof("committedOrderNos") = 'array' THEN jsonb_array_length("committedOrderNos")
+                  ELSE 0
+                END AS "committedOrderCount"
+              FROM "OrderImportSession"
+              WHERE "id" IN (${Prisma.join(sessionIds)})
+            `)
+          ])
+        : [[], [], [], [], [], []];
+    const rowStatsBySessionId = new Map(rowStats.map((row) => [row.sessionId, row]));
+    const fileStatsBySessionId = new Map(fileStats.map((row) => [row.sessionId, row]));
+    const committedOrderCountBySessionId = new Map(
+      committedOrderCountRows.map((row) => [row.sessionId, Number(row.committedOrderCount || 0)])
+    );
+    const sessionStatusById = new Map(sessions.map((session) => [session.id, session.status]));
+    const orderPreviewStatsBySessionId = await this.buildImportSessionOrderStats(sessionIds, sessionStatusById);
+    const currentCommittedOrderNoSummariesBySessionId = await this.findCurrentImportCommittedOrderNoSummariesBySessionIds(sessionIds);
+    const fileNamesBySessionId = new Map<string, string[]>();
+    for (const row of fileNamePreviewRows) {
+      const fileNames = fileNamesBySessionId.get(row.sessionId) || [];
+      fileNames.push(this.importDisplayFileName(row.fileName));
+      fileNamesBySessionId.set(row.sessionId, fileNames);
+    }
+    const blankOrderNoCountBySessionId = new Map(blankOrderNoStats.map((row) => [row.sessionId, row._count._all]));
+    const orderNosBySessionId = new Map<string, string[]>();
+    const orderNoCountBySessionId = new Map<string, number>();
+    [...orderNoGroups]
+      .sort((left, right) => `${left.sessionId}:${left.orderNo}`.localeCompare(`${right.sessionId}:${right.orderNo}`))
+      .forEach((group) => {
+        const orderNos = orderNosBySessionId.get(group.sessionId) || [];
+        orderNoCountBySessionId.set(group.sessionId, (orderNoCountBySessionId.get(group.sessionId) || 0) + 1);
+        if (orderNos.length < 5) {
+          orderNos.push(group.orderNo);
+          orderNosBySessionId.set(group.sessionId, orderNos);
+        }
+      });
+
+    const items = sessions.map((session) => {
+      const rowStat = rowStatsBySessionId.get(session.id);
+      const fileStat = fileStatsBySessionId.get(session.id);
+      const orderPreviewStat = orderPreviewStatsBySessionId.get(session.id);
+      const fileNamesPreview = fileNamesBySessionId.get(session.id) || [];
+      const orderNosPreview = orderNosBySessionId.get(session.id) || [];
+      const committedOrderCount = committedOrderCountBySessionId.get(session.id) || 0;
+      const committedOrderNosPreview: string[] = [];
+      const currentCommittedOrderNoSummary = currentCommittedOrderNoSummariesBySessionId.get(session.id);
+      const currentCommittedOrderNosPreview = currentCommittedOrderNoSummary?.preview || [];
+      const blankOrderNoCount = blankOrderNoCountBySessionId.get(session.id) || 0;
+      const orderNoCount = orderPreviewStat?.orderCount ?? (orderNoCountBySessionId.get(session.id) || 0) + blankOrderNoCount;
+      if (blankOrderNoCount > 0 && orderNosPreview.length < 5) {
+        orderNosPreview.push(`未填写订单号 ${blankOrderNoCount} 行`);
+      }
+      return {
+        id: session.id,
+        status: session.status,
+        createdBy: session.createdBy,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        committedAt: session.committedAt,
+        fileCount: fileStat?._count._all || session._count.files,
+        rowCount: rowStat?._count._all || session._count.rows,
+        orderCount: orderNoCount,
+        orderNoCount,
+        orderNos: orderNosPreview,
+        orderNosPreview,
+        committedOrderCount,
+        committedOrderNos: committedOrderNosPreview,
+        committedOrderNosPreview,
+        currentCommittedOrderCount: currentCommittedOrderNoSummary?.count || 0,
+        currentCommittedOrderNos: currentCommittedOrderNosPreview,
+        currentCommittedOrderNosPreview,
+        fileNames: fileNamesPreview,
+        fileNamesPreview,
+        duplicateRowCount: fileStat?._sum.duplicateRowCount || 0,
+        selectableOrderCount: orderPreviewStat?.selectableOrderCount ?? Math.max(orderNoCount - (rowStat?._sum.errorCount || 0), 0),
+        blockedOrderCount: orderPreviewStat?.blockedOrderCount ?? (rowStat?._sum.errorCount ? orderNoCount : 0),
+        errorCount: orderPreviewStat?.errorCount ?? rowStat?._sum.errorCount ?? 0,
+        warningCount: orderPreviewStat?.warningCount ?? rowStat?._sum.warningCount ?? 0,
+        materialSyncCount: orderPreviewStat?.materialSyncCount ?? 0,
+        materialSyncPreview: orderPreviewStat?.materialSyncPreview ?? []
+      };
+    });
+
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async discardImportSession(sessionId: string) {
+    const session = await this.prisma.orderImportSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        files: {
+          select: {
+            storedFileName: true
+          }
+        }
+      }
+    });
+    if (!session) {
+      throw new NotFoundException('导入会话不存在');
+    }
+
+    await this.prisma.orderImportSession.delete({ where: { id: sessionId } });
+    const deletedFiles = await Promise.all(
+      session.files.map((file) => this.removeOrderImportStoredFile(file.storedFileName))
+    );
+
+    return {
+      sessionId,
+      discarded: session.status === 'DRAFT',
+      deletedMemory: session.status !== 'DRAFT',
+      previousStatus: session.status,
+      deletedFileCount: deletedFiles.filter(Boolean).length
+    };
+  }
+
+  async deleteImportFile(sessionId: string, fileId: string) {
+    const session = await this.prisma.orderImportSession.findUnique({
+      where: { id: sessionId },
+      select: { id: true, status: true }
+    });
+    if (!session) {
+      throw new NotFoundException('导入会话不存在');
+    }
+    if (session.status !== 'DRAFT') {
+      throw new BadRequestException('已提交的导入会话不能删除上传文件');
+    }
+
+    const importFile = await this.prisma.orderImportFile.findFirst({
+      where: { id: fileId, sessionId },
+      select: { id: true, storedFileName: true }
+    });
+    if (!importFile) {
+      throw new NotFoundException('导入文件不存在');
+    }
+
+    await this.prisma.orderImportFile.delete({ where: { id: importFile.id } });
+    const deletedFile = await this.removeOrderImportStoredFile(importFile.storedFileName);
+    return {
+      ...(await this.buildImportSessionPreview(sessionId)),
+      deletedFileId: importFile.id,
+      deletedFileCount: deletedFile ? 1 : 0
+    };
+  }
+
+  async buildOrderImportTemplate(): Promise<Uint8Array> {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+
+    const headers = [
+      '订单块(自动)',
+      '订单编号',
+      '制单日期',
+      '客户名称',
+      '项目型号',
+      '行类型',
+      '自动序号',
+      '零件类型',
+      '组件编号(自动)',
+      '所属组件编号(自动/可改)',
+      '物料号',
+      '图号',
+      '产品名称',
+      '展开尺寸',
+      '厚度',
+      '订单数',
+      '单套用量',
+      '需求数量(自动)',
+      '单位',
+      '工艺路线',
+      '工艺备注',
+      '图纸日期',
+      '图纸状态'
+    ];
+    const widths = [12, 22, 14, 28, 14, 10, 10, 12, 16, 22, 20, 26, 24, 14, 10, 10, 10, 16, 8, 24, 42, 14, 12];
+    const lineTypes = ['零件', '组件'];
+    const partCategories = ['通用件', '定制件', '数控件', '外协件'];
+    const units = ['件', '套', '张', '个', '根', '米'];
+    const drawingStatuses = ['旧图', '新图', '图纸变更', '待确认'];
+
+    const setRowValues = (worksheet: ExcelJS.Worksheet, rowNo: number, values: unknown[]) => {
+      values.forEach((value, index) => {
+        worksheet.getCell(rowNo, index + 1).value = value as ExcelJS.CellValue;
+      });
+    };
+
+    const styleHeaderRow = (worksheet: ExcelJS.Worksheet, rowNo: number) => {
+      const row = worksheet.getRow(rowNo);
+      row.height = 28;
+      row.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF24435F' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF8EA9C1' } },
+          bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } },
+          left: { style: 'thin', color: { argb: 'FF8EA9C1' } },
+          right: { style: 'thin', color: { argb: 'FF8EA9C1' } }
+        };
+      });
+    };
+
+    const styleDataArea = (worksheet: ExcelJS.Worksheet, startRow: number, endRow: number) => {
+      for (let rowNo = startRow; rowNo <= endRow; rowNo += 1) {
+        const row = worksheet.getRow(rowNo);
+        row.height = 24;
+        headers.forEach((_, index) => {
+          const cell = row.getCell(index + 1);
+          cell.alignment = { vertical: 'middle', wrapText: true };
+          cell.border = {
+            bottom: { style: 'thin', color: { argb: 'FFE4EEF6' } },
+            left: { style: 'thin', color: { argb: 'FFE4EEF6' } },
+            right: { style: 'thin', color: { argb: 'FFE4EEF6' } }
+          };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowNo % 2 === 0 ? 'FFEAF8FC' : 'FFFFFFFF' } };
+        });
+      }
+    };
+
+    const addValidations = (worksheet: ExcelJS.Worksheet, startRow: number, endRow: number) => {
+      for (let rowNo = startRow; rowNo <= endRow; rowNo += 1) {
+        worksheet.getCell(rowNo, 1).value = {
+          formula:
+            rowNo === startRow
+              ? `IF(B${rowNo}="","",1)`
+              : `IF(B${rowNo}="","",IF(B${rowNo}=B${rowNo - 1},A${rowNo - 1},A${rowNo - 1}+1))`
+        };
+        worksheet.getCell(rowNo, 7).value = {
+          formula: `IF($B${rowNo}="","",IF($J${rowNo}<>"",IFERROR(LOOKUP(2,1/(($B$${startRow}:$B$${endRow}=$B${rowNo})*($F$${startRow}:$F$${endRow}="组件")*($I$${startRow}:$I$${endRow}=$J${rowNo})),$G$${startRow}:$G$${endRow})&"."&COUNTIFS($B$${startRow}:$B${rowNo},$B${rowNo},$J$${startRow}:$J${rowNo},$J${rowNo}),""),COUNTIFS($B$${startRow}:$B${rowNo},$B${rowNo},$J$${startRow}:$J${rowNo},"")))`
+        };
+        worksheet.getCell(rowNo, 9).value = {
+          formula: `IF($F${rowNo}="组件","C"&TEXT(COUNTIFS($B$${startRow}:$B${rowNo},$B${rowNo},$F$${startRow}:$F${rowNo},"组件"),"000"),"")`
+        };
+        worksheet.getCell(rowNo, 10).value = {
+          formula: `IF($B${rowNo}="","",IF($F${rowNo}="组件","",IF($Q${rowNo}<>"",IF(AND($B${rowNo}=$B${rowNo - 1},$F${rowNo - 1}="组件"),$I${rowNo - 1},IF(AND($B${rowNo}=$B${rowNo - 1},$J${rowNo - 1}<>""),$J${rowNo - 1},"")),"")))`
+        };
+        worksheet.getCell(rowNo, 18).value = {
+          formula: `IF($B${rowNo}="","",IF($J${rowNo}<>"",IFERROR(LOOKUP(2,1/(($B$${startRow}:$B$${endRow}=$B${rowNo})*($F$${startRow}:$F$${endRow}="组件")*($I$${startRow}:$I$${endRow}=$J${rowNo})),$R$${startRow}:$R$${endRow})*IF($Q${rowNo}="",1,$Q${rowNo}),""),IF($P${rowNo}="","",IF($Q${rowNo}="",$P${rowNo},$P${rowNo}*$Q${rowNo}))))`
+        };
+        worksheet.getCell(rowNo, 6).dataValidation = {
+          type: 'list',
+          allowBlank: false,
+          formulae: [`"${lineTypes.join(',')}"`]
+        };
+        worksheet.getCell(rowNo, 8).dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: [`"${partCategories.join(',')}"`]
+        };
+        worksheet.getCell(rowNo, 9).dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: ["'选项'!$E$2:$E$10000"],
+          showErrorMessage: true,
+          errorStyle: 'warning',
+          errorTitle: '组件编号可自定义',
+          error: '下拉只是辅助选择；如果需要其他组件编号，可以继续输入，但必须保证同一订单内唯一。'
+        };
+        worksheet.getCell(rowNo, 10).dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: ["'选项'!$E$2:$E$10000"],
+          showErrorMessage: true,
+          errorStyle: 'warning',
+          errorTitle: '所属组件编号可自定义',
+          error: '下拉只是辅助选择；如果需要其他所属组件编号，可以继续输入，但必须能在同一订单内找到对应组件。'
+        };
+        worksheet.getCell(rowNo, 19).dataValidation = {
+          type: 'list',
+          allowBlank: false,
+          formulae: [`"${units.join(',')}"`]
+        };
+        worksheet.getCell(rowNo, 23).dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: [`"${drawingStatuses.join(',')}"`]
+        };
+      }
+    };
+
+    const uploadSheet = workbook.addWorksheet('ERP上传净表');
+    uploadSheet.views = [{ state: 'frozen', ySplit: 4 }];
+    uploadSheet.mergeCells(1, 1, 1, headers.length);
+    uploadSheet.getCell(1, 1).value = 'ERP 组件/零件清单上传模板';
+    uploadSheet.getCell(1, 1).font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 16 };
+    uploadSheet.getCell(1, 1).alignment = { horizontal: 'center', vertical: 'middle' };
+    uploadSheet.getCell(1, 1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
+    uploadSheet.mergeCells(2, 1, 2, headers.length);
+    uploadSheet.getCell(2, 1).value =
+      '只上传本工作表；明细从第 5 行开始连续填写，中间不得留空行，只允许尾部空白行。导入只创建草稿订单，不会自动提交生产、占用库存或生成生产任务。';
+    uploadSheet.getCell(2, 1).font = { italic: true, color: { argb: 'FF37516B' } };
+    uploadSheet.getCell(2, 1).alignment = { wrapText: true, vertical: 'middle' };
+    uploadSheet.getRow(2).height = 32;
+    setRowValues(uploadSheet, 4, headers);
+    styleHeaderRow(uploadSheet, 4);
+    headers.forEach((_, index) => {
+      uploadSheet.getColumn(index + 1).width = widths[index];
+    });
+    uploadSheet.autoFilter = { from: 'A4', to: 'W4' };
+    styleDataArea(uploadSheet, 5, 104);
+    addValidations(uploadSheet, 5, 20000);
+
+    const descriptionSheet = workbook.addWorksheet('字段说明');
+    descriptionSheet.columns = [{ width: 24 }, { width: 64 }, { width: 34 }];
+    [
+      ['字段', '填写规则', '备注'],
+      ['明细连续性', 'ERP上传净表从第 5 行开始连续填写，数据中间不能留空行。', '台账表可用空行分隔订单块；正式上传净表不允许中间空行，只允许尾部空白行。'],
+      ['订单编号', '同一订单的所有明细行填写同一个订单编号。', '支持一个文件多订单，也支持连续上传多个文件。'],
+      ['制单日期', '填写订单日期，格式建议 yyyy/m/d。', '例如 2026/6/1。'],
+      ['行类型', '只能填写“零件”或“组件”。', '正式上传页没有订单头行。'],
+      ['自动序号', '表格会按订单和所属组件自动生成 1、2、2.1、2.2。', '后端导入时也会重新计算缺失的自动序号。'],
+      ['组件编号(自动)', '组件行会自动生成 C001-C9999，也可手工改成同订单内唯一编号。', '下拉只是辅助选择；每个订单内部独立编号，新的订单可以重新从 C001 开始。'],
+      ['所属组件编号(自动/可改)', '组件子零件填写单套用量后，会优先沿用同订单上方组件编号；普通零件请保持为空。', '下拉只是辅助选择；必须能在同一个订单内找到对应组件。'],
+      ['物料号', '每行必填真实物料号。', '不能用空白物料号创建正式订单。'],
+      ['订单数', '普通零件填订单数；组件行填组件本体订单数。', '组件子零件可以留空。'],
+      ['单套用量', '组件子零件必须填写。', '需求数量=所属组件需求数量×单套用量。'],
+      ['需求数量(自动)', '普通零件=订单数×单套用量；组件子零件=父组件需求数量×单套用量。', '后端导入时会重新计算缺失值；不要填写库存、备库、手工计划等 ERP 内部决策字段。'],
+      ['工艺路线', '可填可不填。', '复杂工序建议导入后在 ERP 零件工序编辑中完善。']
+    ].forEach((row, index) => setRowValues(descriptionSheet, index + 1, row));
+    styleHeaderRow(descriptionSheet, 1);
+    descriptionSheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        cell.alignment = { vertical: 'top', wrapText: true };
+      });
+    });
+
+    const exampleSheet = workbook.addWorksheet('示例数据');
+    setRowValues(exampleSheet, 1, headers);
+    styleHeaderRow(exampleSheet, 1);
+    const exampleRows = [
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', 1, '通用件', '', '', 'RS1001', 'B5-10-50-01', '顶盖', '', '1mm', 16, '', 16, '件', '', '普通零件', '', '旧图'],
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '组件', 2, '定制件', 'C001', '', 'RS2001', 'B5-10-30', '风机支架组件', '', '2mm', 90, 2, 180, '套', '装配', '组件本体 90 套，每套用量 2', '', '旧图'],
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', '2.1', '定制件', '', 'C001', 'RS2001-A', 'B5-10-30-A', '支架主板', '', '2mm', '', 2, 360, '件', '激光切割>折弯', '按父组件需求数量×2', '', '旧图'],
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', '2.2', '定制件', '', 'C001', 'RS2001-B', 'B5-10-30-B', '支架加强片', '', '1.5mm', '', 1, 180, '件', '激光切割', '按父组件需求数量×1', '', '旧图']
+    ];
+    exampleRows.forEach((row, index) => setRowValues(exampleSheet, index + 2, row));
+    headers.forEach((_, index) => {
+      exampleSheet.getColumn(index + 1).width = widths[index];
+    });
+
+    const optionsSheet = workbook.addWorksheet('选项');
+    optionsSheet.columns = [{ width: 16 }, { width: 16 }, { width: 12 }, { width: 14 }, { width: 18 }];
+    setRowValues(optionsSheet, 1, ['行类型', '零件类型', '单位', '图纸状态', '组件编号']);
+    for (let index = 0; index < 9999; index += 1) {
+      setRowValues(optionsSheet, index + 2, [
+        lineTypes[index] || '',
+        partCategories[index] || '',
+        units[index] || '',
+        drawingStatuses[index] || '',
+        `C${String(index + 1).padStart(3, '0')}`
+      ]);
+    }
+    optionsSheet.state = 'hidden';
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  async buildOrderImportIssueReport(sessionId: string): Promise<Uint8Array> {
+    const preview = await this.buildImportSessionPreview(sessionId, { allOrders: true });
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const headerFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF24435F' } };
+    const headerFont = { bold: true, color: { argb: 'FFFFFFFF' } };
+    const border = {
+      top: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      bottom: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      left: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      right: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } }
+    };
+    const setValues = (worksheet: ExcelJS.Worksheet, rowNo: number, values: Array<string | number | null | undefined>) => {
+      values.forEach((value, index) => {
+        worksheet.getCell(rowNo, index + 1).value = value ?? '';
+      });
+    };
+    const styleHeader = (worksheet: ExcelJS.Worksheet, rowNo: number) => {
+      worksheet.getRow(rowNo).eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = headerFont;
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = border;
+      });
+      worksheet.getRow(rowNo).height = 26;
+    };
+    const styleBody = (worksheet: ExcelJS.Worksheet, startRow: number) => {
+      for (let rowNo = startRow; rowNo <= worksheet.rowCount; rowNo += 1) {
+        worksheet.getRow(rowNo).eachCell((cell) => {
+          cell.alignment = { vertical: 'top', wrapText: true };
+          cell.border = border;
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowNo % 2 === 0 ? 'FFF4FBFD' : 'FFFFFFFF' } };
+        });
+      }
+    };
+
+    const overviewSheet = workbook.addWorksheet('导入概览');
+    overviewSheet.columns = [{ width: 24 }, { width: 28 }, { width: 28 }, { width: 28 }];
+    setValues(overviewSheet, 1, ['项目', '数值', '项目', '数值']);
+    styleHeader(overviewSheet, 1);
+    const overviewRows = [
+      ['导入会话', preview.id, '状态', preview.status === 'DRAFT' ? '未提交' : '已创建草稿'],
+      ['上传文件数', preview.summary.fileCount, '明细行数', preview.summary.rowCount],
+      ['订单数', preview.summary.orderCount, '可导入订单', preview.summary.selectableOrderCount],
+      ['不可导入订单', preview.summary.blockedOrderCount, '重复行', preview.summary.duplicateRowCount],
+      ['错误数', preview.summary.errorCount, '警告数', preview.summary.warningCount],
+      ['预计同步物料', preview.summary.materialSyncCount, '物料示例', (preview.summary.materialSyncPreview || []).join('、')],
+      ['生成时间', this.formatDateTime(new Date()), '说明', '仅用于修正 Excel；创建草稿前后端仍会重新校验']
+    ];
+    overviewRows.forEach((row, index) => setValues(overviewSheet, index + 2, row));
+    styleBody(overviewSheet, 2);
+
+    const fileSheet = workbook.addWorksheet('上传文件');
+    fileSheet.columns = [{ width: 40 }, { width: 18 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 20 }];
+    setValues(fileSheet, 1, ['文件名', '工作表', '明细行', '已读取', '重复行', '上传时间']);
+    styleHeader(fileSheet, 1);
+    preview.files.forEach((file, index) => {
+      setValues(fileSheet, index + 2, [
+        file.fileName,
+        file.sheetName,
+        file.rowCount,
+        file.acceptedRowCount,
+        file.duplicateRowCount,
+        this.formatDateTime(file.createdAt)
+      ]);
+    });
+    styleBody(fileSheet, 2);
+
+    const issueSheet = workbook.addWorksheet('问题明细');
+    issueSheet.views = [{ state: 'frozen', ySplit: 1 }];
+    issueSheet.columns = [
+      { width: 20 },
+      { width: 12 },
+      { width: 34 },
+      { width: 12 },
+      { width: 12 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 16 },
+      { width: 18 },
+      { width: 26 },
+      { width: 12 },
+      { width: 24 },
+      { width: 62 },
+      { width: 36 },
+      { width: 12 }
+    ];
+    setValues(issueSheet, 1, [
+      '订单编号',
+      '订单状态',
+      '来源文件',
+      '来源行',
+      '自动序号',
+      '行类型',
+      '组件编号',
+      '所属组件',
+      '物料号',
+      '图号',
+      '产品名称',
+      '严重程度',
+      '问题代码',
+      '问题说明',
+      '工艺备注',
+      '图纸状态'
+    ]);
+    styleHeader(issueSheet, 1);
+
+    let issueRowNo = 2;
+    for (const order of preview.orders) {
+      const orderStatus = order.errorCount > 0 ? '不可导入' : '可导入';
+      for (const issue of order.issues) {
+        setValues(issueSheet, issueRowNo, [
+          order.orderNo,
+          orderStatus,
+          '',
+          '',
+          '',
+          '订单',
+          '',
+          '',
+          '',
+          '',
+          '',
+          issue.severity === 'ERROR' ? '错误' : '警告',
+          issue.code,
+          issue.message,
+          '',
+          ''
+        ]);
+        issueRowNo += 1;
+      }
+      for (const row of order.rows) {
+        for (const issue of row.issues) {
+          setValues(issueSheet, issueRowNo, [
+            order.orderNo,
+            orderStatus,
+            row.sourceFileName,
+            row.sourceRowNo,
+            row.importSequence,
+            row.lineType === 'COMPONENT' ? '组件' : '零件',
+            row.componentNo,
+            row.parentComponentNo,
+            row.partCode,
+            row.drawingNo,
+            row.partName,
+            issue.severity === 'ERROR' ? '错误' : '警告',
+            issue.code,
+            issue.message,
+            row.processRemark,
+            row.drawingStatus
+          ]);
+          issueRowNo += 1;
+        }
+      }
+    }
+    if (issueRowNo === 2) {
+      setValues(issueSheet, issueRowNo, ['', '通过', '', '', '', '', '', '', '', '', '', '', '', '当前导入预览没有错误或警告', '', '']);
+    }
+    issueSheet.autoFilter = { from: 'A1', to: 'P1' };
+    styleBody(issueSheet, 2);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  async uploadImportFile(sessionId: string, file?: Express.Multer.File) {
+    if (!file) {
+      throw new BadRequestException('必须上传 Excel 文件');
+    }
+    const originalFileName = this.importDisplayFileName(file.originalname) || 'order-import.xlsx';
+
+    const session = await this.prisma.orderImportSession.findUnique({ where: { id: sessionId } });
+    if (!session) {
+      await this.removeOrderImportStoredFile(file.filename);
+      throw new NotFoundException('导入会话不存在');
+    }
+    if (session.status !== 'DRAFT') {
+      await this.removeOrderImportStoredFile(file.filename);
+      throw new BadRequestException('已提交的导入会话不能继续上传文件');
+    }
+
+    const fileBuffer = await readFile(file.path);
+    const fileHash = createHash('sha256').update(fileBuffer).digest('hex');
+    const duplicatedFile = await this.prisma.orderImportFile.findUnique({
+      where: { sessionId_fileHash: { sessionId, fileHash } }
+    });
+    if (duplicatedFile) {
+      await this.removeOrderImportStoredFile(file.filename);
+      throw new BadRequestException('该 Excel 文件已上传到当前导入会话，请勿重复上传');
+    }
+
+    let parsed: Awaited<ReturnType<typeof this.parseOrderImportWorkbook>>;
+    try {
+      parsed = await this.parseOrderImportWorkbook(file.path);
+    } catch (error) {
+      await this.removeOrderImportStoredFile(file.filename);
+      throw error;
+    }
+
+    let uploadResult: { acceptedRowCount: number; duplicateRowCount: number };
+    try {
+      uploadResult = await runSerializableTransaction(
+        this.prisma,
+        async (tx) => {
+          const freshSession = await tx.orderImportSession.findUnique({
+            where: { id: sessionId },
+            select: { status: true }
+          });
+          if (!freshSession) {
+            throw new NotFoundException('导入会话不存在');
+          }
+          if (freshSession.status !== 'DRAFT') {
+            throw new BadRequestException('已提交的导入会话不能继续上传文件');
+          }
+
+          const freshDuplicatedFile = await tx.orderImportFile.findUnique({
+            where: { sessionId_fileHash: { sessionId, fileHash } }
+          });
+          if (freshDuplicatedFile) {
+            throw new BadRequestException('该 Excel 文件已上传到当前导入会话，请勿重复上传');
+          }
+
+          const importFile = await tx.orderImportFile.create({
+            data: {
+              sessionId,
+              fileName: originalFileName,
+              storedFileName: file.filename,
+              fileHash,
+              sheetName: parsed.sheetName,
+              rowCount: parsed.rows.length,
+              acceptedRowCount: 0,
+              duplicateRowCount: 0
+            }
+          });
+
+          const importRows = parsed.rows.map((row) => {
+            const issueCounts = this.countImportIssues(row.issues);
+            return {
+              sessionId,
+              fileId: importFile.id,
+              sourceRowNo: row.sourceRowNo,
+              rowHash: row.rowHash,
+              orderBlock: row.orderBlock || null,
+              orderNo: row.orderNo,
+              orderDate: row.orderDate || new Date(0),
+              customerName: row.customerName,
+              projectModel: row.projectModel || null,
+              lineType: row.lineType,
+              importSequence: row.importSequence || null,
+              partCategory: row.partCategory || null,
+              componentNo: row.componentNo || null,
+              parentComponentNo: row.parentComponentNo || null,
+              partCode: row.partCode,
+              drawingNo: row.drawingNo || null,
+              partName: row.partName,
+              partSpecification: row.partSpecification || null,
+              partThickness: row.partThickness || 1,
+              orderQuantity: row.orderQuantity ?? null,
+              unitUsage: row.unitUsage ?? null,
+              demandQuantity: row.demandQuantity || 0,
+              unit: row.unit || '件',
+              processRoute: row.processRoute || null,
+              processRemark: row.processRemark || null,
+              drawingDate: row.drawingDate || null,
+              drawingStatus: row.drawingStatus || null,
+              raw: row.raw as Prisma.InputJsonValue,
+              issues: row.issues as Prisma.InputJsonValue,
+              errorCount: issueCounts.errorCount,
+              warningCount: issueCounts.warningCount
+            };
+          });
+
+          let acceptedRowCount = 0;
+          for (const importRowsChunk of this.chunkValues(importRows, 500)) {
+            const createRowsResult = await tx.orderImportRow.createMany({
+              data: importRowsChunk,
+              skipDuplicates: true
+            });
+            acceptedRowCount += createRowsResult.count;
+          }
+          const duplicateRowCount = parsed.rows.length - acceptedRowCount;
+
+          await tx.orderImportFile.update({
+            where: { id: importFile.id },
+            data: { acceptedRowCount, duplicateRowCount }
+          });
+
+          return { acceptedRowCount, duplicateRowCount };
+        },
+        '导入文件正在被其他操作修改，请刷新后重新上传'
+      );
+    } catch (error) {
+      await this.removeOrderImportStoredFile(file.filename);
+      throw error;
+    }
+
+    const preview = await this.buildImportSessionPreview(sessionId, this.importPreviewPageOptions());
+    return {
+      ...preview,
+      uploadResult: {
+        fileName: originalFileName,
+        sheetName: parsed.sheetName,
+        rowCount: parsed.rows.length,
+        acceptedRowCount: uploadResult.acceptedRowCount,
+        duplicateRowCount: uploadResult.duplicateRowCount
+      }
+    };
+  }
+
+  async commitImportSession(sessionId: string, dto: CommitOrderImportSessionDto) {
+    const preview = await this.buildImportSessionPreview(sessionId, { allOrders: true });
+    if (preview.status !== 'DRAFT') {
+      throw new BadRequestException('该导入会话已经提交，不能重复创建订单');
+    }
+    if (!dto.previewToken) {
+      throw new BadRequestException('导入提交必须携带 previewToken，请刷新预览后重新提交');
+    }
+    if (dto.previewToken !== preview.previewToken) {
+      throw new BadRequestException('导入预览已变化，请刷新预览后重新提交');
+    }
+    const useAllSelectableOrders = dto.allSelectable === true;
+    const requestedOrderNos = dto.orderNos || [];
+    const requestedExcludedOrderNos = dto.excludedOrderNos || [];
+    if (useAllSelectableOrders && requestedOrderNos.length > 0) {
+      throw new BadRequestException('批量创建全部可导入订单时，不需要同时传入订单编号列表');
+    }
+    if (!useAllSelectableOrders && requestedExcludedOrderNos.length > 0) {
+      throw new BadRequestException('只有全部可导入模式才允许传入排除订单编号');
+    }
+    if (!useAllSelectableOrders && requestedOrderNos.length === 0) {
+      throw new BadRequestException('必须明确选择要创建草稿的订单，不能空选后提交整批导入');
+    }
+    const normalizedRequestedOrderNos = requestedOrderNos.map((orderNo) => this.normalizeOrderNo(orderNo)).filter(Boolean);
+    const selectedOrderNos = new Set(normalizedRequestedOrderNos);
+    if (!useAllSelectableOrders && selectedOrderNos.size !== requestedOrderNos.length) {
+      throw new BadRequestException('选择的订单编号存在空值或重复，请刷新导入预览后重新勾选');
+    }
+    const normalizedExcludedOrderNos = requestedExcludedOrderNos.map((orderNo) => this.normalizeOrderNo(orderNo)).filter(Boolean);
+    const excludedOrderNos = new Set(normalizedExcludedOrderNos);
+    if (useAllSelectableOrders && excludedOrderNos.size !== requestedExcludedOrderNos.length) {
+      throw new BadRequestException('排除的订单编号存在空值或重复，请刷新导入预览后重新勾选');
+    }
+    const selectablePreviewOrders = preview.orders.filter((order) => order.errorCount === 0);
+    if (useAllSelectableOrders && excludedOrderNos.size > 0) {
+      const selectableOrderNos = new Set(selectablePreviewOrders.map((order) => this.normalizeOrderNo(order.orderNo)));
+      const invalidExcludedOrderNos = [...excludedOrderNos].filter((orderNo) => !selectableOrderNos.has(orderNo));
+      if (invalidExcludedOrderNos.length > 0) {
+        throw new BadRequestException(`排除的订单不存在或已不可导入：${this.formatLimitedList(invalidExcludedOrderNos)}`);
+      }
+    }
+    const targetOrders = useAllSelectableOrders
+      ? selectablePreviewOrders.filter((order) => !excludedOrderNos.has(this.normalizeOrderNo(order.orderNo)))
+      : preview.orders.filter((order) => selectedOrderNos.has(this.normalizeOrderNo(order.orderNo)));
+    const skippedBlockedCount = useAllSelectableOrders ? preview.summary.blockedOrderCount : 0;
+    const skippedSelectableCount = Math.max(selectablePreviewOrders.length - targetOrders.length, 0);
+    if (targetOrders.length === 0) {
+      throw new BadRequestException('没有可导入的订单');
+    }
+    if (!useAllSelectableOrders && targetOrders.length !== selectedOrderNos.size) {
+      const matchedOrderNos = new Set(targetOrders.map((order) => this.normalizeOrderNo(order.orderNo)));
+      const missingOrderNos = [...selectedOrderNos].filter((orderNo) => !matchedOrderNos.has(orderNo));
+      throw new BadRequestException(`选择的订单不存在或已被过滤：${this.formatLimitedList(missingOrderNos)}`);
+    }
+    const occupiedPreviewOrderNos = targetOrders
+      .filter((order) => order.issues.some((issue) => issue.code === 'ORDER_NO_EXISTS'))
+      .map((order) => order.orderNo);
+    if (occupiedPreviewOrderNos.length > 0) {
+      throw new BadRequestException(`订单号已存在或已被占用：${this.formatLimitedList(occupiedPreviewOrderNos)}`);
+    }
+    const targetErrorCount = targetOrders.reduce((total, order) => total + order.errorCount, 0);
+    if (targetErrorCount > 0) {
+      throw new BadRequestException('选中的订单仍存在错误，请修正 Excel 后重新上传');
+    }
+
+    const activeProcessKeys = await this.activeProcessNameKeys();
+    const importOrders: Array<{
+      order: (typeof targetOrders)[number];
+      orderNo: string;
+      customerId: string;
+      orderDate: Date;
+      lines: CreateOrderDto['lines'];
+      preparedLinePlans: PreparedOrderLinePlan[];
+      normalizedLineSteps: ProcessStepSnapshot[][];
+    }> = [];
+    for (const order of targetOrders) {
+      if (!order.customerId) {
+        throw new BadRequestException(`订单 ${order.orderNo} 未匹配到客户，不能导入`);
+      }
+      const lines = order.rows.map((row) => this.importRowToOrderLinePayload(row, activeProcessKeys));
+      this.validateOrderLines(lines, { requireStockSources: false });
+      importOrders.push({
+        order,
+        orderNo: this.normalizeOrderNo(order.orderNo),
+        customerId: order.customerId,
+        orderDate: order.orderDate ? new Date(order.orderDate) : new Date(),
+        lines,
+        preparedLinePlans: await this.prepareOrderLinePlans(lines),
+        normalizedLineSteps: await Promise.all(lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)))
+      });
+    }
+
+    const materialSyncSummary = this.materialSyncSummaryFromPartCodes(
+      importOrders.flatMap((item) => item.lines.map((line) => line.partCode))
+    );
+
+    const createdOrders = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const freshSession = await tx.orderImportSession.findUnique({
+          where: { id: sessionId },
+          select: { status: true }
+        });
+        if (!freshSession) {
+          throw new NotFoundException('导入会话不存在');
+        }
+        if (freshSession.status !== 'DRAFT') {
+          throw new BadRequestException('该导入会话已经提交，不能重复创建订单');
+        }
+
+        const freshFiles = await tx.orderImportFile.findMany({
+          where: { sessionId },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            fileHash: true,
+            rowCount: true,
+            acceptedRowCount: true,
+            duplicateRowCount: true,
+            createdAt: true
+          }
+        });
+        const freshPreviewToken = this.buildImportPreviewToken({
+          sessionId,
+          status: freshSession.status,
+          files: freshFiles
+        });
+        if (freshPreviewToken !== preview.previewToken) {
+          throw new BadRequestException('导入预览已变化，请刷新预览后重新提交');
+        }
+
+        const occupiedOrderNos = await this.findExistingOrderNosForImport(
+          importOrders.map((item) => item.orderNo),
+          tx
+        );
+        if (occupiedOrderNos.size > 0) {
+          throw new BadRequestException(`订单号已存在或已被占用：${this.formatLimitedList([...occupiedOrderNos])}`);
+        }
+
+        const customers = [];
+        const customerIds = [...new Set(importOrders.map((item) => item.customerId))];
+        for (const customerIdChunk of this.chunkValues(customerIds, 1000)) {
+          customers.push(
+            ...(await tx.customer.findMany({
+              where: {
+                id: { in: customerIdChunk },
+                status: CommonStatus.ENABLED
+              }
+            }))
+          );
+        }
+        const customerById = new Map(customers.map((customer) => [customer.id, customer]));
+        const created = [];
+
+        for (const item of importOrders) {
+          const customer = customerById.get(item.customerId);
+          if (!customer) {
+            throw new BadRequestException(`订单 ${item.orderNo} 未匹配到启用客户，不能导入`);
+          }
+
+          // Excel 导入只保存 DRAFT 草稿，不触发 submit，也不生成生产任务或库存扣减。
+          await this.validateOrderStockSourceSelections(item.lines, undefined, tx);
+          await this.reserveOrderNo(tx, item.orderNo, undefined, 'ORDER_IMPORTED');
+          await this.upsertMaterials(tx, item.lines);
+          const createdOrder = await tx.customerOrder.create({
+            data: {
+              orderNo: item.orderNo,
+              customerId: customer.id,
+              customerCode: customer.customerCode,
+              customerName: customer.customerName,
+              customerSnapshot: {
+                customerCode: customer.customerCode,
+                customerName: customer.customerName,
+                contactName: customer.contactName,
+                contactPhone: customer.contactPhone
+              },
+              orderDate: item.orderDate,
+              deliveryDate: null,
+              remark: `Excel导入会话：${sessionId}`,
+              status: OrderStatus.DRAFT,
+              lines: {
+                create: item.lines.map((line, index) => ({
+                  lineNo: index + 1,
+                  partCode: line.partCode.trim(),
+                  partName: line.partName.trim(),
+                  drawingNo: line.drawingNo?.trim(),
+                  drawingVersion: line.drawingVersion?.trim(),
+                  drawingFileName: line.drawingFileName?.trim(),
+                  drawingFileUrl: line.drawingFileUrl?.trim(),
+                  partThickness: line.partThickness,
+                  partSpecification: line.partSpecification?.trim(),
+                  quantity: line.quantity,
+                  ...this.orderLinePlanData(item.preparedLinePlans[index]),
+                  fulfillmentMode: this.normalizeFulfillmentMode(line.fulfillmentMode),
+                  unit: line.unit.trim(),
+                  deliveryDate: line.deliveryDate ? new Date(line.deliveryDate) : null,
+                  remark: line.remark,
+                  processSnapshot: this.processStepsToJson(item.normalizedLineSteps[index]),
+                  stockSourceSelections: this.stockSourceSelectionsToJson(line.selectedStockSources),
+                  ...this.orderLineImportData(line),
+                  processSteps: {
+                    create: item.normalizedLineSteps[index].map((processStep, stepIndex) => ({
+                      stepNo: stepIndex + 1,
+                      processName: processStep.processName,
+                      processRemark: processStep.processRemark
+                    }))
+                  }
+                }))
+              }
+            },
+            include: {
+              lines: true
+            }
+          });
+          await this.linkOrderNoReservation(tx, item.orderNo, createdOrder.id, 'ORDER_IMPORTED');
+          await this.syncOrderInventoryReservations(tx, createdOrder.id);
+          created.push({
+            id: createdOrder.id,
+            orderNo: createdOrder.orderNo,
+            customerName: createdOrder.customerName,
+            status: createdOrder.status
+          });
+        }
+
+        await tx.orderImportSession.update({
+          where: { id: sessionId },
+          data: {
+            status: 'COMMITTED',
+            committedAt: new Date(),
+            committedOrderNos: created.map((order) => order.orderNo)
+          }
+        });
+
+        return created;
+      },
+      '导入订单正在被其他操作修改，请刷新后重新提交导入'
+    );
+
+    return {
+      sessionId,
+      requestedMode: useAllSelectableOrders ? 'ALL_SELECTABLE' : 'SELECTED',
+      createdCount: createdOrders.length,
+      skippedBlockedCount,
+      skippedSelectableCount,
+      excludedOrderCount: useAllSelectableOrders ? excludedOrderNos.size : 0,
+      materialSyncCount: materialSyncSummary.materialSyncCount,
+      materialSyncPreview: materialSyncSummary.materialSyncPreview,
+      committedOrderNos: createdOrders.map((order) => order.orderNo),
+      createdOrders: createdOrders.slice(0, this.importCommitCreatedOrdersPreviewLimit),
+      createdOrdersPreviewCount: Math.min(createdOrders.length, this.importCommitCreatedOrdersPreviewLimit),
+      createdOrdersTruncated: createdOrders.length > this.importCommitCreatedOrdersPreviewLimit
+    };
+  }
+
+  private async removeOrderImportStoredFile(storedFileName?: string | null) {
+    const cleanFileName = basename(storedFileName?.trim() || '');
+    if (!cleanFileName) {
+      return false;
+    }
+
+    const uploadDir = resolve(orderImportUploadPath());
+    const filePath = resolve(uploadDir, cleanFileName);
+    const safeUploadDir = uploadDir.endsWith(sep) ? uploadDir : `${uploadDir}${sep}`;
+    if (!filePath.startsWith(safeUploadDir)) {
+      return false;
+    }
+
+    try {
+      await unlink(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private importDisplayFileName(fileName?: string | null) {
+    return normalizeMultipartFileName(fileName) || String(fileName || '').trim();
+  }
+
+  private importSourceFileUrl(storedFileName?: string | null) {
+    const cleanFileName = basename(storedFileName?.trim() || '');
+    return cleanFileName ? `/uploads/order-imports/${encodeURIComponent(cleanFileName)}` : undefined;
+  }
+
+  private toImportSourceFileInfo(file: {
+    id: string;
+    fileName: string | null;
+    storedFileName?: string | null;
+    sheetName?: string | null;
+    rowCount?: number | null;
+    acceptedRowCount?: number | null;
+    duplicateRowCount?: number | null;
+    createdAt?: Date | string | null;
+  }) {
+    return {
+      id: file.id,
+      fileName: this.importDisplayFileName(file.fileName),
+      storedFileName: file.storedFileName || undefined,
+      fileUrl: this.importSourceFileUrl(file.storedFileName),
+      sheetName: file.sheetName || undefined,
+      rowCount: file.rowCount || 0,
+      acceptedRowCount: file.acceptedRowCount || 0,
+      duplicateRowCount: file.duplicateRowCount || 0,
+      createdAt: file.createdAt
+    };
+  }
+
+  private importSourceLineKey(line: {
+    sourceImportSessionId?: string | null;
+    sourceImportRowNo?: number | null;
+    partCode?: string | null;
+    drawingNo?: string | null;
+    partName?: string | null;
+  }) {
+    return [
+      line.sourceImportSessionId || '',
+      line.sourceImportRowNo || '',
+      String(line.partCode || '').trim().toLocaleUpperCase(),
+      String(line.drawingNo || '').trim().toLocaleUpperCase(),
+      String(line.partName || '').trim()
+    ].join('|');
+  }
+
+  private async getImportSourceFileInfoByLineId(order: { lines: any[] }) {
+    const sourceLines = order.lines.filter(
+      (line) => line.sourceImportFileId || (line.sourceImportSessionId && line.sourceImportRowNo)
+    );
+    if (sourceLines.length === 0) {
+      return new Map<string, ReturnType<OrdersService['toImportSourceFileInfo']>>();
+    }
+    const sourceFileIds = [...new Set(sourceLines.map((line) => line.sourceImportFileId).filter(Boolean))];
+    const sourceFiles = sourceFileIds.length
+      ? await this.prisma.orderImportFile.findMany({
+          where: { id: { in: sourceFileIds } },
+          select: {
+            id: true,
+            fileName: true,
+            storedFileName: true,
+            sheetName: true,
+            rowCount: true,
+            acceptedRowCount: true,
+            duplicateRowCount: true,
+            createdAt: true
+          }
+        })
+      : [];
+    const filesById = new Map(sourceFiles.map((file) => [file.id, this.toImportSourceFileInfo(file)]));
+
+    const fallbackLines = sourceLines.filter(
+      (line) => line.sourceImportSessionId && line.sourceImportRowNo && (!line.sourceImportFileId || !filesById.has(line.sourceImportFileId))
+    );
+    const sessionIds = [...new Set(fallbackLines.map((line) => line.sourceImportSessionId).filter(Boolean))];
+    const sourceRowNos = [...new Set(fallbackLines.map((line) => line.sourceImportRowNo).filter(Boolean))];
+    const importRows =
+      sessionIds.length && sourceRowNos.length
+        ? await this.prisma.orderImportRow.findMany({
+            where: {
+              sessionId: { in: sessionIds },
+              sourceRowNo: { in: sourceRowNos }
+            },
+            select: {
+              sessionId: true,
+              sourceRowNo: true,
+              partCode: true,
+              drawingNo: true,
+              partName: true,
+              file: {
+                select: {
+                  id: true,
+                  fileName: true,
+                  storedFileName: true,
+                  sheetName: true,
+                  rowCount: true,
+                  acceptedRowCount: true,
+                  duplicateRowCount: true,
+                  createdAt: true
+                }
+              }
+            }
+          })
+        : [];
+
+    const rowsByKey = new Map<string, typeof importRows>();
+    for (const row of importRows) {
+      const key = this.importSourceLineKey({
+        sourceImportSessionId: row.sessionId,
+        sourceImportRowNo: row.sourceRowNo,
+        partCode: row.partCode,
+        drawingNo: row.drawingNo,
+        partName: row.partName
+      });
+      const rows = rowsByKey.get(key) || [];
+      rows.push(row);
+      rowsByKey.set(key, rows);
+    }
+
+    const result = new Map<string, ReturnType<OrdersService['toImportSourceFileInfo']>>();
+    for (const line of sourceLines) {
+      if (line.sourceImportFileId) {
+        const directFile = filesById.get(line.sourceImportFileId);
+        if (directFile) {
+          result.set(line.id, directFile);
+          continue;
+        }
+      }
+      const candidates = rowsByKey.get(this.importSourceLineKey(line)) || [];
+      const decodedLineFileName = this.importDisplayFileName(line.sourceImportFileName);
+      const matched =
+        candidates.find((row) => this.importDisplayFileName(row.file.fileName) === decodedLineFileName) || candidates[0];
+      if (matched?.file) {
+        result.set(line.id, this.toImportSourceFileInfo(matched.file));
+      }
+    }
+    return result;
+  }
+
+  private async normalizeOrderLineImportReferences<T extends CreateOrderLineDto>(lines: T[]): Promise<T[]> {
+    const sourceFileIds = [
+      ...new Set(lines.map((line) => line.sourceImportFileId?.trim()).filter((value): value is string => Boolean(value)))
+    ];
+    if (sourceFileIds.length === 0) {
+      return lines;
+    }
+    const existingFiles = await this.prisma.orderImportFile.findMany({
+      where: { id: { in: sourceFileIds } },
+      select: { id: true, sessionId: true, fileName: true }
+    });
+    const filesById = new Map(existingFiles.map((file) => [file.id, file]));
+    return lines.map((line) => {
+      const sourceImportFileId = line.sourceImportFileId?.trim();
+      if (!sourceImportFileId) {
+        return line;
+      }
+      const file = filesById.get(sourceImportFileId);
+      const sourceImportSessionId = line.sourceImportSessionId?.trim();
+      const sourceImportRowNo = line.sourceImportRowNo;
+      if (!file || !sourceImportSessionId || !sourceImportRowNo || file.sessionId !== sourceImportSessionId) {
+        return { ...line, sourceImportFileId: undefined };
+      }
+      const sourceImportFileName = this.importDisplayFileName(line.sourceImportFileName);
+      const fileDisplayName = this.importDisplayFileName(file.fileName);
+      if (sourceImportFileName && sourceImportFileName !== fileDisplayName) {
+        return { ...line, sourceImportFileId: undefined };
+      }
+      return {
+        ...line,
+        sourceImportSessionId,
+        sourceImportFileId,
+        sourceImportFileName: sourceImportFileName || fileDisplayName,
+        sourceImportRowNo
+      };
+    });
+  }
+
+  private formatLimitedList(values: string[], limit = 20) {
+    const cleanedValues = values.map((value) => String(value || '').trim()).filter(Boolean);
+    const visibleValues = cleanedValues.slice(0, limit);
+    const suffix = cleanedValues.length > visibleValues.length ? ` 等 ${cleanedValues.length} 项` : '';
+    return `${visibleValues.join('、')}${suffix}`;
+  }
+
+  private firstValues(values: string[], limit: number) {
+    const result: string[] = [];
+    for (const value of values) {
+      if (result.length >= limit) {
+        break;
+      }
+      result.push(value);
+    }
+    return result;
+  }
+
+  private materialSyncSummaryFromPartCodes(partCodes: Array<string | null | undefined>, previewLimit = 5) {
+    const seen = new Set<string>();
+    const materialSyncPreview: string[] = [];
+    for (const partCode of partCodes) {
+      const cleanPartCode = String(partCode || '').trim();
+      if (!cleanPartCode) {
+        continue;
+      }
+      const key = cleanPartCode.toLocaleLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      if (materialSyncPreview.length < previewLimit) {
+        materialSyncPreview.push(cleanPartCode);
+      }
+    }
+    return {
+      materialSyncCount: seen.size,
+      materialSyncPreview
+    };
+  }
+
+  private chunkValues<T>(values: T[], size = 500) {
+    const chunks: T[][] = [];
+    for (let index = 0; index < values.length; index += size) {
+      chunks.push(values.slice(index, index + size));
+    }
+    return chunks;
+  }
+
+  private normalizedPartCodeKey(value?: string | null) {
+    return value?.trim().toLocaleLowerCase() || '';
+  }
+
+  private async getOrderLineMaterialIdentityInfoByPartCode(
+    partCodes: Array<string | null | undefined>,
+    client: Pick<Prisma.TransactionClient, 'orderLine'> = this.prisma
+  ) {
+    const normalizedPartCodes = [
+      ...new Set(partCodes.map((partCode) => this.normalizedPartCodeKey(partCode)).filter(Boolean))
+    ];
+    const infoByPartCode = new Map<string, OrderLineMaterialIdentityInfo>();
+    if (normalizedPartCodes.length === 0) {
+      return infoByPartCode;
+    }
+
+    for (const partCodeChunk of this.chunkValues(normalizedPartCodes, 100)) {
+      const historyLines = await client.orderLine.findMany({
+        where: {
+          OR: partCodeChunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' as const } }))
+        },
+        select: {
+          partCode: true,
+          partName: true,
+          partSpecification: true,
+          drawingNo: true,
+          drawingVersion: true,
+          drawingDate: true,
+          drawingStatus: true,
+          partThickness: true,
+          projectModel: true
+        }
+      });
+
+      for (const line of historyLines) {
+        const key = this.normalizedPartCodeKey(line.partCode);
+        if (!key) {
+          continue;
+        }
+        const existing =
+          infoByPartCode.get(key) ||
+          ({
+            identityKeys: new Set<string>(),
+            identityFieldValues: new Map<string, Set<string>>(),
+            variantCount: 1,
+            conflictFields: []
+          } satisfies OrderLineMaterialIdentityInfo);
+        this.recordOrderLineMaterialIdentity(existing, line);
+        infoByPartCode.set(key, existing);
+      }
+    }
+
+    return infoByPartCode;
+  }
+
+  private recordOrderLineMaterialIdentity(
+    existing: OrderLineMaterialIdentityInfo,
+    value: {
+      partName?: string | null;
+      partSpecification?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      drawingDate?: Date | null;
+      drawingStatus?: string | null;
+      partThickness?: Prisma.Decimal | number | string | null;
+      projectModel?: string | null;
+    }
+  ) {
+    const identityValues = this.orderLineMaterialIdentityValues(value);
+    const identityKey = identityValues.map((item) => `${item.field}:${item.value}`).join('|');
+    if (identityKey) {
+      existing.identityKeys.add(identityKey);
+    }
+    for (const item of identityValues) {
+      const values = existing.identityFieldValues.get(item.field) || new Set<string>();
+      values.add(item.value);
+      existing.identityFieldValues.set(item.field, values);
+    }
+    let maxDistinctValues = 0;
+    const conflictFields: string[] = [];
+    for (const [field, values] of existing.identityFieldValues) {
+      maxDistinctValues = Math.max(maxDistinctValues, values.size);
+      if (values.size > 1) {
+        conflictFields.push(orderLineMaterialIdentityFieldLabels[field] || field);
+      }
+    }
+    existing.conflictFields = conflictFields;
+    existing.variantCount = Math.max(maxDistinctValues, maxDistinctValues > 1 ? existing.identityKeys.size : 1);
+  }
+
+  private orderLineMaterialIdentityValues(value: {
+    partName?: string | null;
+    partSpecification?: string | null;
+    drawingNo?: string | null;
+    drawingVersion?: string | null;
+    drawingDate?: Date | null;
+    drawingStatus?: string | null;
+    partThickness?: Prisma.Decimal | number | string | null;
+    projectModel?: string | null;
+  }): Array<{ field: string; value: string }> {
+    return [
+      { field: 'partName', value: normalizeSearchKeyword(value.partName) },
+      { field: 'partSpecification', value: normalizeSearchKeyword(value.partSpecification) },
+      { field: 'drawingNo', value: normalizeSearchKeyword(value.drawingNo) },
+      { field: 'drawingVersion', value: normalizeSearchKeyword(value.drawingVersion) },
+      { field: 'drawingDate', value: value.drawingDate ? this.formatDateOnly(value.drawingDate) || '' : '' },
+      { field: 'drawingStatus', value: normalizeSearchKeyword(value.drawingStatus) },
+      { field: 'partThickness', value: value.partThickness ? String(decimalToNumber(value.partThickness)) : '' },
+      { field: 'projectModel', value: normalizeSearchKeyword(value.projectModel) }
+    ].filter((item) => item.value);
+  }
+
+  private assertSubmitMaterialIdentityConfirmed(
+    lines: Array<{ lineNo: number; partCode: string; partName: string }>,
+    infoByPartCode: Map<string, OrderLineMaterialIdentityInfo>,
+    confirmed?: boolean
+  ) {
+    const conflictLines = this.submitMaterialIdentityConflictLines(lines, infoByPartCode);
+    if (conflictLines.length === 0 || confirmed) {
+      return;
+    }
+
+    throw new BadRequestException(
+      `发现同编码多套历史资料零件，提交生产前必须确认已核对：${this.formatSubmitMaterialIdentityConflictPreview(conflictLines, infoByPartCode)}`
+    );
+  }
+
+  private submitMaterialIdentityConflictLines(
+    lines: Array<{ lineNo: number; partCode: string; partName: string }>,
+    infoByPartCode: Map<string, OrderLineMaterialIdentityInfo>
+  ) {
+    return lines.filter((line) => {
+      const info = infoByPartCode.get(this.normalizedPartCodeKey(line.partCode));
+      return Boolean(info && info.conflictFields.length > 0);
+    });
+  }
+
+  private formatSubmitMaterialIdentityConflictPreview(
+    conflictLines: Array<{ lineNo: number; partCode: string; partName: string }>,
+    infoByPartCode: Map<string, OrderLineMaterialIdentityInfo>
+  ) {
+    const previewRows: string[] = [];
+    for (const line of conflictLines) {
+      if (previewRows.length >= 5) {
+        break;
+      }
+      const info = infoByPartCode.get(this.normalizedPartCodeKey(line.partCode));
+      const fields = info?.conflictFields.length ? info.conflictFields.join('、') : '图号、规格、厚度';
+      previewRows.push(`第 ${line.lineNo} 行 ${line.partCode} / ${line.partName}（核对${fields}）`);
+    }
+    const preview = previewRows.join('；');
+    const moreText = conflictLines.length > 5 ? `；另 ${conflictLines.length - 5} 个零件` : '';
+    return `${preview}${moreText}`;
+  }
+
+  private submitMaterialIdentityConfirmationRemark(
+    lines: Array<{ lineNo: number; partCode: string; partName: string }>,
+    infoByPartCode: Map<string, OrderLineMaterialIdentityInfo>,
+    submitOperator: SubmitPlanOperator,
+    confirmed?: boolean
+  ) {
+    if (!confirmed) {
+      return '';
+    }
+    const conflictLines = this.submitMaterialIdentityConflictLines(lines, infoByPartCode);
+    if (conflictLines.length === 0) {
+      return '';
+    }
+    return `同编码多套历史资料已核对：${submitOperator.name}（${submitOperator.accountId} / ${submitOperator.role}）；${this.formatSubmitMaterialIdentityConflictPreview(conflictLines, infoByPartCode)}`;
+  }
+
   async create(dto: CreateOrderDto) {
-    this.validateOrderLines(dto.lines, { requireStockSources: false });
-    const preparedLinePlans = await this.prepareOrderLinePlans(dto.lines);
+    const lines = this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences(dto.lines));
+    this.validateOrderLines(lines, { requireStockSources: false });
+    const preparedLinePlans = await this.prepareOrderLinePlans(lines);
 
     const customer = await this.prisma.customer.findUnique({ where: { id: dto.customerId } });
     if (!customer) {
@@ -301,14 +2101,14 @@ export class OrdersService {
     const orderDate = dto.orderDate ? new Date(dto.orderDate) : new Date();
     const orderNo = dto.orderNo?.trim() ? this.normalizeOrderNo(dto.orderNo) : await this.generateOrderNo(orderDate);
     await this.ensureOrderNoAvailable(orderNo);
-    const normalizedLineSteps = await Promise.all(dto.lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)));
+    const normalizedLineSteps = await Promise.all(lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)));
 
     try {
       const created = await runSerializableTransaction(this.prisma, async (tx) => {
         // 草稿保存也会形成库存预占，库存来源必须在同一个 Serializable 事务内按最新库存复核。
-        await this.validateOrderStockSourceSelections(dto.lines, undefined, tx);
+        await this.validateOrderStockSourceSelections(lines, undefined, tx);
         await this.reserveOrderNo(tx, orderNo, undefined, 'ORDER_CREATED');
-        await this.upsertMaterials(tx, dto.lines);
+        await this.upsertMaterials(tx, lines);
         const createdOrder = await tx.customerOrder.create({
           data: {
             orderNo,
@@ -326,7 +2126,7 @@ export class OrdersService {
             remark: dto.remark,
             status: OrderStatus.DRAFT,
             lines: {
-              create: dto.lines.map((line, index) => ({
+              create: lines.map((line, index) => ({
                 lineNo: index + 1,
                 partCode: line.partCode.trim(),
                 partName: line.partName.trim(),
@@ -344,6 +2144,7 @@ export class OrdersService {
                 remark: line.remark,
                 processSnapshot: this.processStepsToJson(normalizedLineSteps[index]),
                 stockSourceSelections: this.stockSourceSelectionsToJson(line.selectedStockSources),
+                ...this.orderLineImportData(line),
                 processSteps: {
                   create: normalizedLineSteps[index].map((processStep, stepIndex) => ({
                     stepNo: stepIndex + 1,
@@ -404,26 +2205,33 @@ export class OrdersService {
       throw new BadRequestException('只有待提交生产订单可以编辑');
     }
 
-    this.validateOrderLines(dto.lines, { requireStockSources: false });
-    const preparedLinePlans = await this.prepareOrderLinePlans(dto.lines);
+    const lines = this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences(dto.lines));
+    this.validateOrderLines(lines, { requireStockSources: false });
+    const preparedLinePlans = await this.prepareOrderLinePlans(lines);
     const nextOrderNo = dto.orderNo?.trim() ? this.normalizeOrderNo(dto.orderNo) : order.orderNo;
     if (nextOrderNo !== order.orderNo) {
       await this.ensureOrderNoAvailable(nextOrderNo, order.orderNo);
     }
-    const normalizedLineSteps = await Promise.all(dto.lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)));
+    const normalizedLineSteps = await Promise.all(lines.map((line) => this.normalizeProcessSteps(line.processSteps, false)));
 
     // DRAFT 订单还没有进入生产，允许修改订单号和整体替换订单零件，保持订单总表和明细表边界清晰。
     try {
       const updated = await runSerializableTransaction(this.prisma, async (tx) => {
         // 编辑草稿时先在事务内复核库存来源，再替换订单零件和同步 ACTIVE 预占。
-        await this.validateOrderStockSourceSelections(dto.lines, order, tx);
+        await this.validateOrderStockSourceSelections(lines, order, tx);
         if (nextOrderNo !== order.orderNo) {
           await this.reserveOrderNo(tx, nextOrderNo, order.id, 'DRAFT_ORDER_RENUMBERED');
+          await tx.orderNoReservation.deleteMany({
+            where: {
+              orderNoNormalized: this.normalizeOrderNo(order.orderNo),
+              sourceOrderId: order.id
+            }
+          });
         } else {
           await this.linkOrderNoReservation(tx, nextOrderNo, order.id, 'ORDER_CREATED');
         }
         const reservationCarryovers = await this.findOrderReservationCarryovers(tx, order.id);
-        await this.upsertMaterials(tx, dto.lines);
+        await this.upsertMaterials(tx, lines);
         await tx.orderLine.deleteMany({ where: { orderId: order.id } });
         const updatedOrder = await tx.customerOrder.update({
           where: { id: order.id },
@@ -432,7 +2240,7 @@ export class OrdersService {
             deliveryDate: dto.deliveryDate ? new Date(dto.deliveryDate) : null,
             remark: dto.remark,
             lines: {
-              create: dto.lines.map((line, index) => ({
+              create: lines.map((line, index) => ({
                 lineNo: index + 1,
                 partCode: line.partCode.trim(),
                 partName: line.partName.trim(),
@@ -450,6 +2258,7 @@ export class OrdersService {
                 remark: line.remark,
                 processSnapshot: this.processStepsToJson(normalizedLineSteps[index]),
                 stockSourceSelections: this.stockSourceSelectionsToJson(line.selectedStockSources),
+                ...this.orderLineImportData(line),
                 processSteps: {
                   create: normalizedLineSteps[index].map((processStep, stepIndex) => ({
                     stepNo: stepIndex + 1,
@@ -494,6 +2303,56 @@ export class OrdersService {
       }
       throw error;
     }
+  }
+
+  async deleteDraft(orderNo: string) {
+    const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    const order = await this.prisma.customerOrder.findFirst({
+      where: { orderNo: { equals: normalizedOrderNo, mode: 'insensitive' } },
+      include: {
+        productionTasks: { select: { id: true } },
+        inventoryBatches: { select: { id: true } },
+        lines: {
+          select: {
+            id: true,
+            inventoryTransactions: { select: { id: true } },
+            productionTasks: { select: { id: true } },
+            inventoryBatches: { select: { id: true } }
+          }
+        }
+      }
+    });
+    if (!order) {
+      throw new NotFoundException('订单不存在');
+    }
+    if (order.status !== OrderStatus.DRAFT) {
+      throw new BadRequestException('只有待提交生产草稿订单可以删除');
+    }
+    const hasProductionOrInventory =
+      order.productionTasks.length > 0 ||
+      order.inventoryBatches.length > 0 ||
+      order.lines.some(
+        (line) => line.productionTasks.length > 0 || line.inventoryBatches.length > 0 || line.inventoryTransactions.length > 0
+      );
+    if (hasProductionOrInventory) {
+      throw new BadRequestException('该草稿订单已经存在生产或库存记录，不能删除，只能走取消订单流程');
+    }
+
+    await runSerializableTransaction(this.prisma, async (tx) => {
+      // 删除导入错误的草稿订单时必须同步释放订单号占用，允许修正 Excel 后重新导入同一订单号。
+      await tx.orderNoReservation.deleteMany({
+        where: {
+          orderNoNormalized: normalizedOrderNo,
+          sourceOrderId: order.id
+        }
+      });
+      await tx.customerOrder.delete({ where: { id: order.id } });
+    }, '草稿订单正在被其他操作使用，请刷新后重试');
+
+    return {
+      orderNo: normalizedOrderNo,
+      deleted: true
+    };
   }
 
   async updateLineProcess(orderNo: string, lineId: string, dto: UpdateLineProcessDto) {
@@ -729,6 +2588,7 @@ export class OrdersService {
 
   async createAdditionalMaterial(orderNo: string, dto: CreateAdditionalMaterialDto) {
     const normalizedOrderNo = this.normalizeOrderNo(orderNo);
+    dto = this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences([dto]))[0];
     await runSerializableTransaction(
       this.prisma,
       async (tx) => {
@@ -764,6 +2624,7 @@ export class OrdersService {
       }
       const steps = await this.normalizeProcessSteps(dto.processSteps, true);
       this.validateSingleOrderLine(dto);
+      this.validateAdditionalMaterialComponentStructure(order.lines, dto);
       const linePlan = await this.prepareOrderLinePlan(dto, '新增补单物料');
       if (linePlan.productionPlanQuantity <= 0) {
         throw new BadRequestException('新增补单物料生产计划数量必须大于 0');
@@ -790,6 +2651,7 @@ export class OrdersService {
           unit: dto.unit.trim(),
           deliveryDate: dto.deliveryDate ? new Date(dto.deliveryDate) : order.deliveryDate,
           remark: dto.remark,
+          ...this.orderLineImportData(dto),
           processSnapshot: this.processStepsToJson(steps),
           processSteps: {
             create: steps.map((processStep, stepIndex) => ({
@@ -840,6 +2702,41 @@ export class OrdersService {
     );
 
     return this.findOne(normalizedOrderNo);
+  }
+
+  private validateAdditionalMaterialComponentStructure(
+    existingLines: Array<{ lineType?: string | null; componentNo?: string | null }>,
+    line: CreateAdditionalMaterialDto
+  ) {
+    const lineType = line.lineType || 'PART';
+    const componentNo = this.normalizeEditableComponentNo(line.componentNo);
+    const parentComponentNo = this.normalizeEditableComponentNo(line.parentComponentNo);
+    const existingComponentNos = new Set(
+      existingLines
+        .filter((item) => (item.lineType || 'PART') === 'COMPONENT')
+        .map((item) => this.normalizeEditableComponentNo(item.componentNo))
+        .filter(Boolean)
+    );
+
+    if (lineType === 'COMPONENT') {
+      if (!componentNo) {
+        throw new BadRequestException('新增补单物料是组件行时，必须填写组件编号');
+      }
+      if (parentComponentNo) {
+        throw new BadRequestException('新增补单物料是组件行时，不能填写所属组件');
+      }
+      if (existingComponentNos.has(componentNo)) {
+        throw new BadRequestException(`新增补单物料组件编号 ${componentNo} 已在当前订单中存在`);
+      }
+      return;
+    }
+
+    if (componentNo) {
+      throw new BadRequestException('新增补单物料是零件行时，不能填写组件编号；如属于组件，请填写所属组件');
+    }
+    if (parentComponentNo && !existingComponentNos.has(parentComponentNo)) {
+      throw new BadRequestException(`新增补单物料所属组件 ${parentComponentNo} 在当前订单内不存在`);
+    }
   }
 
   async updateLineQuantityAfterProductionStarted(orderNo: string, lineId: string, dto: UpdateLineQuantityDto) {
@@ -1156,9 +3053,22 @@ export class OrdersService {
           throw new BadRequestException('只有待提交生产订单可以提交生产');
         }
         const submitOperator = await this.resolveSubmitPlanOperatorFromClient(tx, dto.submittedByCode, '下单/计划操作员');
-        order.lines.forEach((line, index) => {
-          this.validateSingleOrderLine(this.persistedOrderLineToValidationDto(line), `第 ${index + 1} 个零件`, true);
+        const submitValidationLines = order.lines.map((line) => this.persistedOrderLineToValidationDto(line));
+        this.validateOrderLineComponentStructure(submitValidationLines);
+        submitValidationLines.forEach((line, index) => {
+          this.validateSingleOrderLine(line, `第 ${index + 1} 个零件`, true);
         });
+        const materialIdentityInfoByPartCode = await this.getOrderLineMaterialIdentityInfoByPartCode(
+          order.lines.map((line) => line.partCode),
+          tx
+        );
+        this.assertSubmitMaterialIdentityConfirmed(order.lines, materialIdentityInfoByPartCode, dto.materialIdentityConfirmed);
+        const materialIdentityConfirmationRemark = this.submitMaterialIdentityConfirmationRemark(
+          order.lines,
+          materialIdentityInfoByPartCode,
+          submitOperator,
+          dto.materialIdentityConfirmed
+        );
         await this.syncOrderInventoryReservations(tx, order.id);
         const missingStockSourceLine = order.lines.find(
           (line) =>
@@ -1210,14 +3120,17 @@ export class OrdersService {
         }
 
         // 订单提交会占用备货库存或生成生产任务，所有判断必须在事务内基于最新订单状态执行。
+        const submitOrderRemark = this.appendOrderRemark(
+          order.remark,
+          `提交生产：${submitOperator.name}（${submitOperator.accountId} / ${submitOperator.role}）`
+        );
         await tx.customerOrder.update({
           where: { id: order.id },
           data: {
             status: OrderStatus.SUBMITTED,
-            remark: this.appendOrderRemark(
-              order.remark,
-              `提交生产：${submitOperator.name}（${submitOperator.accountId} / ${submitOperator.role}）`
-            )
+            remark: materialIdentityConfirmationRemark
+              ? this.appendOrderRemark(submitOrderRemark, materialIdentityConfirmationRemark)
+              : submitOrderRemark
           }
         });
 
@@ -2465,6 +4378,1302 @@ export class OrdersService {
       .toUpperCase()}`;
   }
 
+  private async parseOrderImportWorkbook(filePath: string): Promise<{ sheetName: string; rows: ParsedOrderImportRow[] }> {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    const worksheet = workbook.getWorksheet('ERP上传净表');
+    if (!worksheet) {
+      throw new BadRequestException('Excel 文件必须包含名为 ERP上传净表 的工作表，请不要上传台账表或其他格式文件');
+    }
+
+    const header = this.findOrderImportHeaderRow(worksheet);
+    const columns = {
+      orderBlock: this.importColumn(header.columns, '订单块(自动)', '订单块'),
+      orderNo: this.importColumn(header.columns, '订单编号'),
+      orderDate: this.importColumn(header.columns, '制单日期'),
+      customerName: this.importColumn(header.columns, '客户名称'),
+      projectModel: this.importColumn(header.columns, '项目型号'),
+      lineType: this.importColumn(header.columns, '行类型'),
+      importSequence: this.importColumn(header.columns, '自动序号'),
+      partCategory: this.importColumn(header.columns, '零件类型'),
+      componentNo: this.importColumn(header.columns, '组件编号(自动)', '组件编号'),
+      parentComponentNo: this.importColumn(header.columns, '所属组件编号(自动/可改)', '所属组件编号'),
+      partCode: this.importColumn(header.columns, '物料号'),
+      drawingNo: this.importColumn(header.columns, '图号'),
+      partName: this.importColumn(header.columns, '产品名称'),
+      partSpecification: this.importColumn(header.columns, '展开尺寸'),
+      partThickness: this.importColumn(header.columns, '厚度'),
+      orderQuantity: this.importColumn(header.columns, '订单数'),
+      unitUsage: this.importColumn(header.columns, '单套用量'),
+      demandQuantity: this.importColumn(header.columns, '需求数量(自动)', '需求数量'),
+      unit: this.importColumn(header.columns, '单位'),
+      processRoute: this.importColumn(header.columns, '工艺路线'),
+      processRemark: this.importColumn(header.columns, '工艺备注'),
+      drawingDate: this.importColumn(header.columns, '图纸日期'),
+      drawingStatus: this.importColumn(header.columns, '图纸状态')
+    };
+
+    const requiredHeaders = [
+      ['订单编号', columns.orderNo],
+      ['制单日期', columns.orderDate],
+      ['客户名称', columns.customerName],
+      ['行类型', columns.lineType],
+      ['物料号', columns.partCode],
+      ['图号', columns.drawingNo],
+      ['产品名称', columns.partName],
+      ['需求数量(自动)', columns.demandQuantity],
+      ['单位', columns.unit]
+    ];
+    const missingHeaders = requiredHeaders.filter(([, column]) => !column).map(([name]) => name);
+    if (missingHeaders.length > 0) {
+      throw new BadRequestException(`ERP上传净表缺少表头：${missingHeaders.join('、')}`);
+    }
+
+    const rows: ParsedOrderImportRow[] = [];
+    const rowInputStates: Array<{ row: ParsedOrderImportRow; rawLineType: string; hasThickness: boolean; hasUnit: boolean }> = [];
+    let firstBlankRowAfterData: number | null = null;
+
+    for (let rowNo = header.rowNo + 1; rowNo <= worksheet.rowCount; rowNo += 1) {
+      const row = worksheet.getRow(rowNo);
+      const rawLineType = this.cellText(row, columns.lineType);
+      const raw = this.rawImportRow(row, columns);
+      if (this.isBlankImportRow(raw)) {
+        if (rows.length > 0 && firstBlankRowAfterData === null) {
+          firstBlankRowAfterData = rowNo;
+        }
+        continue;
+      }
+      if (firstBlankRowAfterData !== null) {
+        throw new BadRequestException(
+          `ERP上传净表必须连续填写，不能在第 ${firstBlankRowAfterData} 行留空后又从第 ${rowNo} 行继续填写`
+        );
+      }
+
+      if (rawLineType.includes('订单头')) {
+        throw new BadRequestException(`ERP上传净表不允许包含订单头行，请删除第 ${rowNo} 行订单头并让每条明细行填写订单编号、制单日期和客户名称`);
+      }
+
+      const parsedLineType = this.parseImportLineType(rawLineType);
+      const orderDate = this.cellDate(row, columns.orderDate) || null;
+      const orderNo = this.cellText(row, columns.orderNo);
+      const customerName = this.cellText(row, columns.customerName);
+      const projectModel = this.cellText(row, columns.projectModel);
+      const partThickness = this.cellNumber(row, columns.partThickness);
+      const demandQuantity = this.cellNumber(row, columns.demandQuantity);
+      const unit = this.cellText(row, columns.unit);
+      const parsedRow: ParsedOrderImportRow = {
+        sourceRowNo: rowNo,
+        rowHash: '',
+        orderBlock: this.cellText(row, columns.orderBlock),
+        orderNo: orderNo ? orderNo.trim().toUpperCase() : '',
+        orderDate,
+        customerName,
+        projectModel,
+        lineType: parsedLineType || 'PART',
+        importSequence: this.cellText(row, columns.importSequence),
+        partCategory: this.cellText(row, columns.partCategory),
+        componentNo: this.cellText(row, columns.componentNo),
+        parentComponentNo: this.cellText(row, columns.parentComponentNo),
+        partCode: this.cellText(row, columns.partCode),
+        drawingNo: this.cellText(row, columns.drawingNo),
+        partName: this.cellText(row, columns.partName),
+        partSpecification: this.cellText(row, columns.partSpecification),
+        partThickness: partThickness && partThickness > 0 ? partThickness : 1,
+        orderQuantity: this.cellNumber(row, columns.orderQuantity) ?? undefined,
+        unitUsage: this.cellNumber(row, columns.unitUsage) ?? undefined,
+        demandQuantity: demandQuantity ?? undefined,
+        unit: unit || '件',
+        processRoute: this.cellText(row, columns.processRoute),
+        processRemark: this.cellText(row, columns.processRemark),
+        drawingDate: this.cellDate(row, columns.drawingDate),
+        drawingStatus: this.cellText(row, columns.drawingStatus),
+        raw,
+        issues: []
+      };
+      rows.push(parsedRow);
+      rowInputStates.push({
+        row: parsedRow,
+        rawLineType,
+        hasThickness: Boolean(partThickness),
+        hasUnit: Boolean(unit)
+      });
+    }
+
+    if (rows.length === 0) {
+      throw new BadRequestException('ERP上传净表没有可导入的零件或组件明细');
+    }
+
+    this.applyOrderImportAutomaticFields(rows);
+    rowInputStates.forEach(({ row, rawLineType, hasThickness, hasUnit }) => {
+      row.issues = this.buildParseImportIssues(row, rawLineType, hasThickness, hasUnit);
+      row.rowHash = this.hashImportRow(row);
+    });
+
+    return { sheetName: worksheet.name, rows };
+  }
+
+  private findOrderImportHeaderRow(worksheet: ExcelJS.Worksheet) {
+    for (let rowNo = 1; rowNo <= Math.min(20, worksheet.rowCount); rowNo += 1) {
+      const row = worksheet.getRow(rowNo);
+      const columns = new Map<string, number>();
+      row.eachCell({ includeEmpty: false }, (cell, columnNo) => {
+        const text = this.normalizeImportHeader(this.valueToText(this.normalizeExcelCellValue(cell.value)));
+        if (text) {
+          columns.set(text, columnNo);
+        }
+      });
+      if (columns.has(this.normalizeImportHeader('订单编号')) && columns.has(this.normalizeImportHeader('产品名称'))) {
+        return { rowNo, columns };
+      }
+    }
+    throw new BadRequestException('ERP上传净表没有找到有效表头');
+  }
+
+  private applyOrderImportAutomaticFields(rows: ParsedOrderImportRow[]) {
+    const rowsByOrder = new Map<string, ParsedOrderImportRow[]>();
+    for (const row of rows) {
+      const key = row.orderNo || `ROW-${row.sourceRowNo}`;
+      const group = rowsByOrder.get(key) || [];
+      group.push(row);
+      rowsByOrder.set(key, group);
+    }
+
+    for (const group of rowsByOrder.values()) {
+      let mainSequence = 0;
+      let componentIndex = 0;
+      let currentComponentNo = '';
+      const componentSequence = new Map<string, string>();
+      const componentDemand = new Map<string, number>();
+      const childCounts = new Map<string, number>();
+
+      for (const row of group) {
+        row.componentNo = this.normalizeImportComponentNo(row.componentNo);
+        row.parentComponentNo = this.normalizeImportComponentNo(row.parentComponentNo);
+
+        if (row.lineType === 'COMPONENT') {
+          mainSequence += 1;
+          componentIndex += 1;
+          if (!row.componentNo) {
+            row.componentNo = `C${String(componentIndex).padStart(3, '0')}`;
+          }
+          if (!row.importSequence) {
+            row.importSequence = String(mainSequence);
+          }
+          if (!row.demandQuantity || row.demandQuantity <= 0) {
+            row.demandQuantity = this.calculateImportDemand(row.orderQuantity, row.unitUsage);
+          }
+          if (row.componentNo) {
+            currentComponentNo = row.componentNo;
+            componentSequence.set(row.componentNo, row.importSequence);
+            if (row.demandQuantity && row.demandQuantity > 0) {
+              componentDemand.set(row.componentNo, row.demandQuantity);
+            }
+          }
+          continue;
+        }
+
+        if (this.shouldAutoBindImportParent(row, currentComponentNo)) {
+          row.parentComponentNo = currentComponentNo;
+        }
+
+        if (row.parentComponentNo) {
+          const childCount = (childCounts.get(row.parentComponentNo) || 0) + 1;
+          childCounts.set(row.parentComponentNo, childCount);
+          const parentSequence = componentSequence.get(row.parentComponentNo);
+          if (!row.importSequence && parentSequence) {
+            row.importSequence = `${parentSequence}.${childCount}`;
+          }
+          if ((!row.demandQuantity || row.demandQuantity <= 0) && row.unitUsage && componentDemand.has(row.parentComponentNo)) {
+            row.demandQuantity = this.roundQuantity((componentDemand.get(row.parentComponentNo) || 0) * row.unitUsage);
+          }
+          continue;
+        }
+
+        currentComponentNo = '';
+        mainSequence += 1;
+        if (!row.importSequence) {
+          row.importSequence = String(mainSequence);
+        }
+        if (!row.demandQuantity || row.demandQuantity <= 0) {
+          row.demandQuantity = this.calculateImportDemand(row.orderQuantity, row.unitUsage);
+        }
+      }
+    }
+  }
+
+  private normalizeImportComponentNo(value?: string) {
+    return value?.trim().toUpperCase() || '';
+  }
+
+  private shouldAutoBindImportParent(
+    row: { lineType?: string; parentComponentNo?: string | null; unitUsage?: unknown; orderQuantity?: unknown },
+    currentComponentNo: string
+  ) {
+    const unitUsage = decimalToNumber(row.unitUsage as any);
+    const orderQuantity = decimalToNumber(row.orderQuantity as any);
+    return Boolean(
+      currentComponentNo &&
+        row.lineType === 'PART' &&
+        !row.parentComponentNo &&
+        unitUsage > 0 &&
+        orderQuantity <= 0
+    );
+  }
+
+  private calculateImportDemand(orderQuantity?: number, unitUsage?: number) {
+    if (!orderQuantity || orderQuantity <= 0) {
+      return undefined;
+    }
+    return this.roundQuantity(orderQuantity * (unitUsage && unitUsage > 0 ? unitUsage : 1));
+  }
+
+  private importColumn(columns: Map<string, number>, ...names: string[]) {
+    for (const name of names) {
+      const column = columns.get(this.normalizeImportHeader(name));
+      if (column) {
+        return column;
+      }
+    }
+    return 0;
+  }
+
+  private normalizeImportHeader(value: string) {
+    return value.replace(/\s+/g, '').replace(/（/g, '(').replace(/）/g, ')').trim();
+  }
+
+  private rawImportRow(row: ExcelJS.Row, columns: Record<string, number>) {
+    const raw: Record<string, unknown> = {};
+    for (const [key, column] of Object.entries(columns)) {
+      if (!column) {
+        raw[key] = '';
+        continue;
+      }
+      const value = this.normalizeExcelCellValue(row.getCell(column).value);
+      raw[key] = value instanceof Date ? this.formatDateOnly(value) : value ?? '';
+    }
+    return raw;
+  }
+
+  private isBlankImportRow(raw: Record<string, unknown>) {
+    return Object.values(raw).every((value) => String(value ?? '').trim() === '');
+  }
+
+  private normalizeExcelCellValue(value: unknown): unknown {
+    if (value && typeof value === 'object' && !(value instanceof Date)) {
+      const cellValue = value as {
+        result?: unknown;
+        formula?: string;
+        sharedFormula?: string;
+        text?: string;
+        richText?: Array<{ text?: string }>;
+        hyperlink?: string;
+      };
+      if (cellValue.result !== undefined) {
+        return this.normalizeExcelCellValue(cellValue.result);
+      }
+      if (cellValue.richText) {
+        return cellValue.richText.map((item) => item.text || '').join('');
+      }
+      if (cellValue.text !== undefined) {
+        return cellValue.text;
+      }
+      if (cellValue.hyperlink !== undefined) {
+        return cellValue.hyperlink;
+      }
+      if (cellValue.formula !== undefined || cellValue.sharedFormula !== undefined) {
+        return '';
+      }
+      return '';
+    }
+    return value;
+  }
+
+  private cellText(row: ExcelJS.Row, column: number) {
+    if (!column) {
+      return '';
+    }
+    return this.valueToText(this.normalizeExcelCellValue(row.getCell(column).value));
+  }
+
+  private valueToText(value: unknown) {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    if (value instanceof Date) {
+      return this.formatDateOnly(value);
+    }
+    return String(value).replace(/\u00A0/g, ' ').trim();
+  }
+
+  private cellNumber(row: ExcelJS.Row, column: number) {
+    const text = this.cellText(row, column)
+      .replace(/,/g, '')
+      .replace(/，/g, '')
+      .replace(/mm$/i, '')
+      .trim();
+    if (!text) {
+      return null;
+    }
+    const value = this.parseImportNumberText(text);
+    return Number.isFinite(value) ? this.roundQuantity(value) : null;
+  }
+
+  private parseImportNumberText(text: string) {
+    const normalized = text.replace(/\s+/g, '');
+    const directValue = Number(normalized);
+    if (Number.isFinite(directValue)) {
+      return directValue;
+    }
+    if (!/^[+-]?\d+(?:\.\d+)?(?:[xX×*][+-]?\d+(?:\.\d+)?)+$/.test(normalized)) {
+      return Number.NaN;
+    }
+    return normalized
+      .split(/[xX×*]/)
+      .map((part) => Number(part))
+      .reduce((product, value) => (Number.isFinite(product) && Number.isFinite(value) ? product * value : Number.NaN), 1);
+  }
+
+  private cellDate(row: ExcelJS.Row, column: number) {
+    if (!column) {
+      return null;
+    }
+    const value = this.normalizeExcelCellValue(row.getCell(column).value);
+    return this.parseExcelDate(value);
+  }
+
+  private parseExcelDate(value: unknown) {
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      if (value.getFullYear() <= 1900) {
+        return null;
+      }
+      return value;
+    }
+    if (typeof value === 'number' && value > 20000) {
+      return new Date(Date.UTC(1899, 11, 30) + value * 86_400_000);
+    }
+    const text = this.valueToText(value);
+    if (!text) {
+      return null;
+    }
+    const match = text.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+    if (!match) {
+      const parsed = new Date(text);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  private parseImportLineType(value: string): 'PART' | 'COMPONENT' | null {
+    if (value.includes('组件')) {
+      return 'COMPONENT';
+    }
+    if (value.includes('零件')) {
+      return 'PART';
+    }
+    return null;
+  }
+
+  private buildParseImportIssues(row: ParsedOrderImportRow, rawLineType: string, hasThickness: boolean, hasUnit: boolean) {
+    const issues: OrderImportIssue[] = [];
+    if (!rawLineType || !this.parseImportLineType(rawLineType)) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_LINE_TYPE', message: '行类型必须是“零件”或“组件”' });
+    }
+    if (!row.orderNo) {
+      issues.push({ severity: 'ERROR', code: 'ORDER_NO_REQUIRED', message: '订单编号不能为空' });
+    }
+    if (!row.orderDate) {
+      issues.push({ severity: 'ERROR', code: 'ORDER_DATE_REQUIRED', message: '制单日期不能为空或格式无效' });
+    }
+    if (!row.customerName.trim()) {
+      issues.push({ severity: 'ERROR', code: 'CUSTOMER_REQUIRED', message: '客户名称不能为空' });
+    }
+    if (!row.partCode.trim()) {
+      issues.push({ severity: 'ERROR', code: 'PART_CODE_REQUIRED', message: '物料号不能为空' });
+    }
+    if (!row.partName.trim()) {
+      issues.push({ severity: 'ERROR', code: 'PART_NAME_REQUIRED', message: '产品名称不能为空' });
+    }
+    if (!row.demandQuantity || row.demandQuantity <= 0) {
+      issues.push({ severity: 'ERROR', code: 'DEMAND_QUANTITY_REQUIRED', message: '需求数量必须大于 0' });
+    }
+    const isOutsourcedPart = row.partCategory?.includes('外协') ?? false;
+    if (!hasThickness && !isOutsourcedPart) {
+      issues.push({ severity: 'WARNING', code: 'THICKNESS_DEFAULTED', message: '厚度为空，导入草稿暂按 1 处理，请在 ERP 中复核' });
+    }
+    if (!hasUnit) {
+      issues.push({ severity: 'WARNING', code: 'UNIT_DEFAULTED', message: '单位为空，导入草稿暂按“件”处理，请在 ERP 中复核' });
+    }
+    return issues;
+  }
+
+  private hashImportRow(row: ParsedOrderImportRow) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          orderNo: row.orderNo,
+          orderDate: row.orderDate ? this.formatDateOnly(row.orderDate) : '',
+          customerName: row.customerName,
+          projectModel: row.projectModel,
+          lineType: row.lineType,
+          importSequence: row.importSequence,
+          partCategory: row.partCategory,
+          componentNo: row.componentNo,
+          parentComponentNo: row.parentComponentNo,
+          partCode: row.partCode,
+          drawingNo: row.drawingNo,
+          partName: row.partName,
+          partSpecification: row.partSpecification,
+          partThickness: row.partThickness,
+          orderQuantity: row.orderQuantity,
+          unitUsage: row.unitUsage,
+          demandQuantity: row.demandQuantity,
+          unit: row.unit,
+          processRoute: row.processRoute,
+          processRemark: row.processRemark,
+          drawingDate: row.drawingDate ? this.formatDateOnly(row.drawingDate) : '',
+          drawingStatus: row.drawingStatus
+        })
+      )
+      .digest('hex');
+  }
+
+  private importPreviewPageOptions(query: GetOrderImportSessionQueryDto = {}): ImportPreviewPageOptions {
+    const requestedLimit = Number(query.orderLimit ?? 50);
+    const requestedOffset = Number(query.orderOffset ?? 0);
+    return {
+      orderLimit: Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 50, 1), 100),
+      orderOffset: Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0)
+    };
+  }
+
+  private importRowPageOptions(query: GetOrderImportFilePreviewQueryDto = {}) {
+    const requestedLimit = Number(query.limit ?? 200);
+    const requestedOffset = Number(query.offset ?? 0);
+    return {
+      limit: Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 200, 1), 500),
+      offset: Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0)
+    };
+  }
+
+  private async buildImportSessionOrderStats(sessionIds: string[], sessionStatusById: Map<string, string>) {
+    if (sessionIds.length === 0) {
+      return new Map<
+        string,
+        {
+          orderCount: number;
+          selectableOrderCount: number;
+          blockedOrderCount: number;
+          errorCount: number;
+          warningCount: number;
+          materialSyncCount: number;
+          materialSyncPreview: string[];
+        }
+      >();
+    }
+
+    const rows = await this.prisma.orderImportRow.findMany({
+      where: { sessionId: { in: sessionIds } },
+      select: orderImportRowPreviewSelect
+    });
+    if (rows.length === 0) {
+      return new Map();
+    }
+
+    const sortedRows = [...rows].sort((left, right) => {
+      const sessionCompare = String(left.sessionId || '').localeCompare(String(right.sessionId || ''));
+      if (sessionCompare !== 0) {
+        return sessionCompare;
+      }
+      const orderCompare = String(left.orderNo || '').localeCompare(String(right.orderNo || ''));
+      if (orderCompare !== 0) {
+        return orderCompare;
+      }
+      const fileCompare = (left.file?.createdAt?.getTime() || 0) - (right.file?.createdAt?.getTime() || 0);
+      if (fileCompare !== 0) {
+        return fileCompare;
+      }
+      const fileIdCompare = String(left.file?.id || left.fileId || '').localeCompare(String(right.file?.id || right.fileId || ''));
+      if (fileIdCompare !== 0) {
+        return fileIdCompare;
+      }
+      return left.sourceRowNo - right.sourceRowNo;
+    });
+    const normalizedRows = this.normalizeImportRowsForSessionPreview(sortedRows);
+    const customerLookup = await this.findEnabledCustomersForImport(normalizedRows.map((row) => row.customerName));
+    const draftRows = normalizedRows.filter((row) => sessionStatusById.get(row.sessionId) === 'DRAFT');
+    const existingOrderNos =
+      draftRows.length > 0 ? await this.findExistingOrderNosForImport(draftRows.map((row) => row.orderNo)) : new Set<string>();
+    const activeProcessKeys = await this.activeProcessNameKeys();
+    const rowsBySessionId = new Map<string, typeof rows>();
+    for (const row of normalizedRows) {
+      const sessionRows = rowsBySessionId.get(row.sessionId) || [];
+      sessionRows.push(row);
+      rowsBySessionId.set(row.sessionId, sessionRows);
+    }
+
+    const statsBySessionId = new Map<
+      string,
+      {
+        orderCount: number;
+        selectableOrderCount: number;
+        blockedOrderCount: number;
+        errorCount: number;
+        warningCount: number;
+        materialSyncCount: number;
+        materialSyncPreview: string[];
+      }
+    >();
+    for (const [sessionId, sessionRows] of rowsBySessionId.entries()) {
+      const orderGroups = new Map<string, typeof sessionRows>();
+      for (const row of sessionRows) {
+        const key = row.orderNo || `ROW-${row.id}`;
+        const group = orderGroups.get(key) || [];
+        group.push(row);
+        orderGroups.set(key, group);
+      }
+      const sessionExistingOrderNos = sessionStatusById.get(sessionId) === 'DRAFT' ? existingOrderNos : new Set<string>();
+      const orders = [...orderGroups.entries()].map(([orderNo, orderRows]) =>
+        this.buildImportOrderPreview(orderNo, orderRows, customerLookup, sessionExistingOrderNos, activeProcessKeys, {
+          includeRows: false
+        })
+      );
+      const orderCount = orders.length;
+      const selectableOrderCount = orders.filter((order) => order.errorCount === 0).length;
+      const selectableOrderNos = new Set(
+        orders.filter((order) => order.errorCount === 0).map((order) => this.normalizeOrderNo(order.orderNo))
+      );
+      const materialSyncSummary = this.materialSyncSummaryFromPartCodes(
+        sessionRows
+          .filter((row) => selectableOrderNos.has(this.normalizeOrderNo(row.orderNo)))
+          .map((row) => row.partCode)
+      );
+      statsBySessionId.set(sessionId, {
+        orderCount,
+        selectableOrderCount,
+        blockedOrderCount: orderCount - selectableOrderCount,
+        errorCount: orders.reduce((sum, order) => sum + order.errorCount, 0),
+        warningCount: orders.reduce((sum, order) => sum + order.warningCount, 0),
+        materialSyncCount: materialSyncSummary.materialSyncCount,
+        materialSyncPreview: materialSyncSummary.materialSyncPreview
+      });
+    }
+
+    return statsBySessionId;
+  }
+
+  private async findCurrentImportCommittedOrderNosBySessionIds(sessionIds: string[]) {
+    const result = new Map<string, string[]>();
+    const uniqueSessionIds = [...new Set(sessionIds.map((sessionId) => sessionId.trim()).filter(Boolean))];
+    if (uniqueSessionIds.length === 0) {
+      return result;
+    }
+
+    const rows = await this.prisma.$queryRaw<Array<{ sourceImportSessionId: string; orderNo: string }>>(Prisma.sql`
+      SELECT DISTINCT
+        line."sourceImportSessionId",
+        customer_order."orderNo"
+      FROM "OrderLine" AS line
+      INNER JOIN "CustomerOrder" AS customer_order ON customer_order."id" = line."orderId"
+      WHERE line."sourceImportSessionId" IN (${Prisma.join(uniqueSessionIds)})
+      ORDER BY line."sourceImportSessionId" ASC, customer_order."orderNo" ASC
+    `);
+
+    for (const row of rows) {
+      const orderNos = result.get(row.sourceImportSessionId) || [];
+      orderNos.push(row.orderNo);
+      result.set(row.sourceImportSessionId, orderNos);
+    }
+    return result;
+  }
+
+  private async findCurrentImportCommittedOrderNoSummariesBySessionIds(sessionIds: string[], previewLimit = 5) {
+    const result = new Map<string, { count: number; preview: string[] }>();
+    const uniqueSessionIds = [...new Set(sessionIds.map((sessionId) => sessionId.trim()).filter(Boolean))];
+    if (uniqueSessionIds.length === 0) {
+      return result;
+    }
+    const safePreviewLimit = Math.max(1, Math.min(Math.floor(previewLimit), 20));
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{ sourceImportSessionId: string; orderNo: string; orderCount: number | bigint }>
+    >(Prisma.sql`
+      WITH "distinctOrders" AS (
+        SELECT DISTINCT
+          order_line."sourceImportSessionId",
+          customer_order."orderNo"
+        FROM "OrderLine" AS order_line
+        INNER JOIN "CustomerOrder" AS customer_order ON customer_order."id" = order_line."orderId"
+        WHERE order_line."sourceImportSessionId" IN (${Prisma.join(uniqueSessionIds)})
+      ),
+      "rankedOrders" AS (
+        SELECT
+          "sourceImportSessionId",
+          "orderNo",
+          COUNT(*) OVER (PARTITION BY "sourceImportSessionId") AS "orderCount",
+          ROW_NUMBER() OVER (PARTITION BY "sourceImportSessionId" ORDER BY "orderNo" ASC) AS "rowNo"
+        FROM "distinctOrders"
+      )
+      SELECT "sourceImportSessionId", "orderNo", "orderCount"
+      FROM "rankedOrders"
+      WHERE "rowNo" <= ${safePreviewLimit}
+      ORDER BY "sourceImportSessionId" ASC, "rowNo" ASC
+    `);
+
+    for (const row of rows) {
+      const summary = result.get(row.sourceImportSessionId) || { count: Number(row.orderCount || 0), preview: [] };
+      summary.count = Number(row.orderCount || summary.count || 0);
+      summary.preview.push(row.orderNo);
+      result.set(row.sourceImportSessionId, summary);
+    }
+    return result;
+  }
+
+  private async buildImportSessionPreview(sessionId: string, options: ImportPreviewPageOptions = {}) {
+    const session = await this.prisma.orderImportSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        files: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }
+      }
+    });
+    if (!session) {
+      throw new NotFoundException('导入会话不存在');
+    }
+    const committedOrderNos = this.importStringArray(session.committedOrderNos as Prisma.JsonValue | null);
+    const currentCommittedOrderNosBySessionId =
+      session.status === 'COMMITTED'
+        ? await this.findCurrentImportCommittedOrderNosBySessionIds([sessionId])
+        : new Map<string, string[]>();
+    const currentCommittedOrderNos = currentCommittedOrderNosBySessionId.get(sessionId) || [];
+    const previewToken = this.buildImportPreviewToken({
+      sessionId: session.id,
+      status: session.status,
+      files: session.files
+    });
+
+    const sessionRows = await this.prisma.orderImportRow.findMany({
+      where: { sessionId },
+      select: orderImportRowPreviewSelect,
+      orderBy: [{ orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+    });
+    const fileOrder = new Map(session.files.map((file, index) => [file.id, index]));
+    const fileNameById = new Map(session.files.map((file) => [file.id, this.importDisplayFileName(file.fileName)]));
+    const sortedRows = [...(sessionRows as any[])].sort((left, right) => {
+      const orderCompare = String(left.orderNo || '').localeCompare(String(right.orderNo || ''));
+      if (orderCompare !== 0) {
+        return orderCompare;
+      }
+      const fileCompare = (fileOrder.get(left.fileId) ?? 0) - (fileOrder.get(right.fileId) ?? 0);
+      if (fileCompare !== 0) {
+        return fileCompare;
+      }
+      return left.sourceRowNo - right.sourceRowNo;
+    });
+
+    const normalizedRows = this.normalizeImportRowsForSessionPreview(sortedRows);
+    const customerLookup = await this.findEnabledCustomersForImport(normalizedRows.map((row) => row.customerName));
+    const existingOrderNos =
+      session.status === 'DRAFT' ? await this.findExistingOrderNosForImport(normalizedRows.map((row) => row.orderNo)) : new Set<string>();
+    const activeProcessKeys = await this.activeProcessNameKeys();
+    const orderGroups = new Map<string, any[]>();
+    for (const row of normalizedRows) {
+      const key = row.orderNo || `ROW-${row.id}`;
+      const group = orderGroups.get(key) || [];
+      group.push(row);
+      orderGroups.set(key, group);
+    }
+
+    const orderEntries = Array.from(orderGroups.entries());
+    const includeRows = options.includeRows !== false;
+    const orderOffset = options.allOrders ? 0 : Math.min(options.orderOffset ?? 0, orderEntries.length);
+    const orderLimit = options.allOrders ? orderEntries.length : options.orderLimit ?? 50;
+    const visibleOrderEntries = options.allOrders ? orderEntries : orderEntries.slice(orderOffset, orderOffset + orderLimit);
+    const orders = visibleOrderEntries.map(([orderNo, rows]) =>
+      this.buildImportOrderPreview(orderNo, rows, customerLookup, existingOrderNos, activeProcessKeys, {
+        includeRows,
+        fileNameById
+      })
+    );
+    const orderSummaries = options.allOrders
+      ? orders
+      : orderEntries.map(([orderNo, rows]) =>
+          this.buildImportOrderPreview(orderNo, rows, customerLookup, existingOrderNos, activeProcessKeys, {
+            includeRows: false
+          })
+        );
+    const errorCount = orderSummaries.reduce((sum, order) => sum + order.errorCount, 0);
+    const warningCount = orderSummaries.reduce((sum, order) => sum + order.warningCount, 0);
+    const totalOrderCount = orderSummaries.length;
+    const selectableOrderCount = orderSummaries.filter((order) => order.errorCount === 0).length;
+    const selectableOrderNos = new Set(
+      orderSummaries.filter((order) => order.errorCount === 0).map((order) => this.normalizeOrderNo(order.orderNo))
+    );
+    const materialSyncSummary = this.materialSyncSummaryFromPartCodes(
+      normalizedRows
+        .filter((row) => selectableOrderNos.has(this.normalizeOrderNo(row.orderNo)))
+        .map((row) => row.partCode)
+    );
+
+    return {
+      id: session.id,
+      status: session.status,
+      createdBy: session.createdBy,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      committedAt: session.committedAt,
+      previewToken,
+      committedOrderNos,
+      currentCommittedOrderNos,
+      files: session.files.map((file) => ({
+        id: file.id,
+        fileName: this.importDisplayFileName(file.fileName),
+        sheetName: file.sheetName,
+        rowCount: file.rowCount,
+        acceptedRowCount: file.acceptedRowCount,
+        duplicateRowCount: file.duplicateRowCount,
+        createdAt: file.createdAt
+      })),
+      summary: {
+        fileCount: session.files.length,
+        rowCount: sessionRows.length,
+        orderCount: totalOrderCount,
+        selectableOrderCount,
+        blockedOrderCount: totalOrderCount - selectableOrderCount,
+        errorCount,
+        warningCount,
+        committedOrderCount: committedOrderNos.length,
+        currentCommittedOrderCount: currentCommittedOrderNos.length,
+        materialSyncCount: materialSyncSummary.materialSyncCount,
+        materialSyncPreview: materialSyncSummary.materialSyncPreview,
+        duplicateRowCount: session.files.reduce((sum, file) => sum + file.duplicateRowCount, 0)
+      },
+      orderPage: {
+        offset: orderOffset,
+        limit: orderLimit,
+        loadedCount: orders.length,
+        totalCount: totalOrderCount,
+        hasMore: orderOffset + orders.length < totalOrderCount
+      },
+      orders
+    };
+  }
+
+  private buildImportPreviewToken(input: {
+    sessionId: string;
+    status: string;
+    files: Array<{
+      id: string;
+      fileHash: string;
+      rowCount: number;
+      acceptedRowCount: number;
+      duplicateRowCount: number;
+      createdAt: Date;
+    }>;
+  }) {
+    const payload = {
+      sessionId: input.sessionId,
+      status: input.status,
+      files: input.files.map((file) => ({
+        id: file.id,
+        fileHash: file.fileHash,
+        rowCount: file.rowCount,
+        acceptedRowCount: file.acceptedRowCount,
+        duplicateRowCount: file.duplicateRowCount,
+        createdAt: file.createdAt.toISOString()
+      }))
+    };
+    return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  }
+
+  private normalizeImportRowsForSessionPreview(rows: any[]) {
+    const rowsByOrder = new Map<string, any[]>();
+    const normalizedRows = rows.map((row) => ({
+      ...row,
+      componentNo: this.normalizeImportComponentNo(row.componentNo || undefined),
+      parentComponentNo: this.normalizeImportComponentNo(row.parentComponentNo || undefined)
+    }));
+    for (const row of normalizedRows) {
+      const key = row.orderNo || `ROW-${row.id || row.sourceRowNo}`;
+      const group = rowsByOrder.get(key) || [];
+      group.push(row);
+      rowsByOrder.set(key, group);
+    }
+
+    for (const group of rowsByOrder.values()) {
+      let mainSequence = 0;
+      let componentIndex = 0;
+      let currentComponentNo = '';
+      const componentSequence = new Map<string, string>();
+      const componentDemand = new Map<string, number>();
+      const childCounts = new Map<string, number>();
+
+      for (const row of group) {
+        const lineType = row.lineType === 'COMPONENT' ? 'COMPONENT' : 'PART';
+        const orderQuantity = decimalToNumber(row.orderQuantity);
+        const unitUsage = decimalToNumber(row.unitUsage);
+        let demandQuantity = decimalToNumber(row.demandQuantity);
+
+        if (lineType === 'COMPONENT') {
+          mainSequence += 1;
+          componentIndex += 1;
+          if (!row.componentNo) {
+            row.componentNo = `C${String(componentIndex).padStart(3, '0')}`;
+          }
+          if (!row.importSequence) {
+            row.importSequence = String(mainSequence);
+          }
+          if (demandQuantity <= 0) {
+            const calculatedDemand = this.calculateImportDemand(orderQuantity, unitUsage);
+            if (calculatedDemand) {
+              demandQuantity = calculatedDemand;
+              row.demandQuantity = calculatedDemand;
+            }
+          }
+          currentComponentNo = row.componentNo;
+          componentSequence.set(row.componentNo, String(row.importSequence || mainSequence));
+          if (demandQuantity > 0) {
+            componentDemand.set(row.componentNo, demandQuantity);
+            row.issues = this.removeResolvedImportDemandIssue(row.issues);
+          }
+          continue;
+        }
+
+        if (this.shouldAutoBindImportParent(row, currentComponentNo)) {
+          row.parentComponentNo = currentComponentNo;
+        }
+
+        if (row.parentComponentNo) {
+          const childCount = (childCounts.get(row.parentComponentNo) || 0) + 1;
+          childCounts.set(row.parentComponentNo, childCount);
+          const parentSequence = componentSequence.get(row.parentComponentNo);
+          if (!row.importSequence && parentSequence) {
+            row.importSequence = `${parentSequence}.${childCount}`;
+          }
+          if (demandQuantity <= 0 && unitUsage > 0 && componentDemand.has(row.parentComponentNo)) {
+            demandQuantity = this.roundQuantity((componentDemand.get(row.parentComponentNo) || 0) * unitUsage);
+            row.demandQuantity = demandQuantity;
+          }
+          if (demandQuantity > 0) {
+            row.issues = this.removeResolvedImportDemandIssue(row.issues);
+          }
+          continue;
+        }
+
+        currentComponentNo = '';
+        mainSequence += 1;
+        if (!row.importSequence) {
+          row.importSequence = String(mainSequence);
+        }
+        if (demandQuantity <= 0) {
+          const calculatedDemand = this.calculateImportDemand(orderQuantity, unitUsage);
+          if (calculatedDemand) {
+            demandQuantity = calculatedDemand;
+            row.demandQuantity = calculatedDemand;
+            row.issues = this.removeResolvedImportDemandIssue(row.issues);
+          }
+        }
+      }
+    }
+
+    return normalizedRows;
+  }
+
+  private removeResolvedImportDemandIssue(value: Prisma.JsonValue | OrderImportIssue[] | null | undefined) {
+    return this.importIssueArray((value ?? null) as Prisma.JsonValue | null).filter((issue) => issue.code !== 'DEMAND_QUANTITY_REQUIRED');
+  }
+
+  private buildImportOrderPreview(
+    orderNo: string,
+    rows: any[],
+    customerLookup: Map<string, any[]>,
+    existingOrderNos: Set<string>,
+    activeProcessKeys: Set<string>,
+    options: { includeRows?: boolean; fileNameById?: Map<string, string> } = {}
+  ) {
+    const includeRows = options.includeRows !== false;
+    const first = rows[0];
+    const orderIssues: OrderImportIssue[] = [];
+    const customerRows = customerLookup.get(this.importCustomerKey(first.customerName)) || [];
+    if (customerRows.length === 0) {
+      orderIssues.push({ severity: 'ERROR', code: 'CUSTOMER_NOT_FOUND', message: `客户“${first.customerName}”不存在或未启用` });
+    } else if (customerRows.length > 1) {
+      orderIssues.push({ severity: 'ERROR', code: 'CUSTOMER_NOT_UNIQUE', message: `客户“${first.customerName}”匹配到多条资料` });
+    }
+    if (existingOrderNos.has(orderNo)) {
+      orderIssues.push({ severity: 'ERROR', code: 'ORDER_NO_EXISTS', message: `订单号 ${orderNo} 已存在或已被占用` });
+    }
+    const normalizedOrderDate = this.formatImportDateOnly(first.orderDate);
+    if (
+      rows.some(
+        (row) =>
+          row.customerName !== first.customerName ||
+          this.formatImportDateOnly(row.orderDate) !== normalizedOrderDate ||
+          (row.projectModel || '') !== (first.projectModel || '')
+      )
+    ) {
+      orderIssues.push({ severity: 'ERROR', code: 'ORDER_META_CONFLICT', message: '同一订单编号内客户、制单日期或项目型号不一致' });
+    }
+
+    const componentRows = rows.filter((row) => row.lineType === 'COMPONENT' && row.componentNo);
+    const componentNos = new Set<string>();
+    const duplicateComponentNos = new Set<string>();
+    const componentDemand = new Map<string, number>();
+    const importSequenceCounts = new Map<string, number>();
+    const importLineKeyCounts = new Map<string, number>();
+    for (const row of componentRows) {
+      if (componentNos.has(row.componentNo)) {
+        duplicateComponentNos.add(row.componentNo);
+      }
+      componentNos.add(row.componentNo);
+      componentDemand.set(row.componentNo, decimalToNumber(row.demandQuantity));
+    }
+    for (const row of rows) {
+      const importSequence = String(row.importSequence || '').trim();
+      if (!importSequence) {
+        continue;
+      }
+      importSequenceCounts.set(importSequence, (importSequenceCounts.get(importSequence) || 0) + 1);
+      const importLineKey = this.importLineDuplicateKey(row, importSequence);
+      importLineKeyCounts.set(importLineKey, (importLineKeyCounts.get(importLineKey) || 0) + 1);
+    }
+    const duplicateImportSequences = new Set(
+      [...importSequenceCounts.entries()].filter(([, count]) => count > 1).map(([importSequence]) => importSequence)
+    );
+    const duplicateImportLineKeys = new Set(
+      [...importLineKeyCounts.entries()].filter(([, count]) => count > 1).map(([importLineKey]) => importLineKey)
+    );
+
+    let errorCount = 0;
+    let warningCount = 0;
+    const previewRows = [];
+    for (const row of rows) {
+      const issues = [...this.importIssueArray(row.issues), ...orderIssues];
+      const importSequence = String(row.importSequence || '').trim();
+      const importLineKey = importSequence ? this.importLineDuplicateKey(row, importSequence) : '';
+      if (row.lineType === 'COMPONENT' && !row.componentNo) {
+        issues.push({ severity: 'ERROR', code: 'COMPONENT_NO_REQUIRED', message: '组件行必须填写组件编号' });
+      }
+      if (row.lineType === 'COMPONENT' && row.parentComponentNo) {
+        issues.push({
+          severity: 'ERROR',
+          code: 'COMPONENT_PARENT_NOT_ALLOWED',
+          message: '组件行不能填写所属组件编号；所属组件编号只用于组件下面的零件'
+        });
+      }
+      if (row.lineType === 'PART' && row.componentNo) {
+        issues.push({
+          severity: 'ERROR',
+          code: 'PART_COMPONENT_NO_NOT_ALLOWED',
+          message: '零件行不能填写组件编号；如属于组件，请填写所属组件编号'
+        });
+      }
+      if (row.componentNo && duplicateComponentNos.has(row.componentNo)) {
+        issues.push({ severity: 'ERROR', code: 'DUPLICATE_COMPONENT_NO', message: `同一订单内组件编号 ${row.componentNo} 重复` });
+      }
+      if (importLineKey && duplicateImportLineKeys.has(importLineKey)) {
+        issues.push({
+          severity: 'ERROR',
+          code: 'DUPLICATE_IMPORT_LINE',
+          message: `同一订单内自动序号 ${importSequence} 和物料 ${row.partCode} 重复，请删除重复文件或调整清单后重新导入`
+        });
+      } else if (importSequence && duplicateImportSequences.has(importSequence)) {
+        issues.push({
+          severity: 'WARNING',
+          code: 'DUPLICATE_IMPORT_SEQUENCE',
+          message: `同一订单内自动序号 ${importSequence} 重复，请确认是否为分批上传后未重新编号`
+        });
+      }
+      if (row.lineType === 'PART' && row.parentComponentNo && !componentNos.has(row.parentComponentNo)) {
+        issues.push({ severity: 'ERROR', code: 'PARENT_COMPONENT_NOT_FOUND', message: `所属组件编号 ${row.parentComponentNo} 在当前订单内不存在` });
+      }
+      this.pushImportQuantityIssue(row, componentDemand, issues);
+      const processNames = this.splitProcessRoute(row.processRoute);
+      const missingProcessNames = processNames.filter((name) => !activeProcessKeys.has(normalizeSearchKeyword(name)));
+      if (missingProcessNames.length > 0) {
+        issues.push({
+          severity: 'WARNING',
+          code: 'PROCESS_DEFINITION_MISSING',
+          message: `工序未维护：${missingProcessNames.join('、')}；导入草稿会保留备注，正式工序需在 ERP 中确认`
+        });
+      }
+      const counts = this.countImportIssues(issues);
+      errorCount += counts.errorCount;
+      warningCount += counts.warningCount;
+      if (includeRows) {
+        previewRows.push({
+          id: row.id,
+          sourceImportSessionId: row.sessionId,
+          sourceImportFileId: row.fileId,
+          sourceFileName: this.importDisplayFileName(row.file?.fileName || options.fileNameById?.get(row.fileId)),
+          sourceRowNo: row.sourceRowNo,
+          orderBlock: row.orderBlock,
+          orderNo: row.orderNo,
+          lineType: row.lineType,
+          importSequence: row.importSequence,
+          partCategory: row.partCategory,
+          componentNo: row.componentNo,
+          parentComponentNo: row.parentComponentNo,
+          partCode: row.partCode,
+          drawingNo: row.drawingNo,
+          partName: row.partName,
+          partSpecification: row.partSpecification,
+          partThickness: decimalToNumber(row.partThickness),
+          orderQuantity: row.orderQuantity === null || row.orderQuantity === undefined ? undefined : decimalToNumber(row.orderQuantity),
+          unitUsage: row.unitUsage === null || row.unitUsage === undefined ? undefined : decimalToNumber(row.unitUsage),
+          demandQuantity: decimalToNumber(row.demandQuantity),
+          unit: row.unit,
+          processRoute: row.processRoute,
+          processRemark: row.processRemark,
+          projectModel: row.projectModel,
+          drawingDate: row.drawingDate ? this.formatDateOnly(row.drawingDate) : undefined,
+          drawingStatus: row.drawingStatus,
+          issues
+        });
+      }
+    }
+
+    return {
+      orderNo,
+      orderDate: this.formatImportDateOnly(first.orderDate),
+      customerName: first.customerName,
+      customerId: customerRows.length === 1 ? customerRows[0].id : undefined,
+      projectModel: first.projectModel,
+      rowCount: rows.length,
+      errorCount,
+      warningCount,
+      issues: orderIssues,
+      rows: previewRows
+    };
+  }
+
+  private importLineDuplicateKey(row: any, importSequence: string) {
+    return [
+      importSequence,
+      row.lineType || '',
+      String(row.partCode || '').trim().toLocaleUpperCase(),
+      String(row.drawingNo || '').trim().toLocaleUpperCase(),
+      String(row.partName || '').trim()
+    ].join('|');
+  }
+
+  private pushImportQuantityIssue(row: any, componentDemand: Map<string, number>, issues: OrderImportIssue[]) {
+    const demandQuantity = decimalToNumber(row.demandQuantity);
+    const orderQuantity = row.orderQuantity === null || row.orderQuantity === undefined ? null : decimalToNumber(row.orderQuantity);
+    const unitUsage = row.unitUsage === null || row.unitUsage === undefined ? null : decimalToNumber(row.unitUsage);
+    let expected: number | null = null;
+    if (row.parentComponentNo && unitUsage && componentDemand.has(row.parentComponentNo)) {
+      expected = this.roundQuantity((componentDemand.get(row.parentComponentNo) || 0) * unitUsage);
+    } else if (orderQuantity && unitUsage) {
+      expected = this.roundQuantity(orderQuantity * unitUsage);
+    } else if (orderQuantity && !row.parentComponentNo) {
+      expected = this.roundQuantity(orderQuantity);
+    }
+    if (expected !== null && Math.abs(expected - demandQuantity) > 0.001) {
+      issues.push({
+        severity: 'ERROR',
+        code: 'DEMAND_QUANTITY_MISMATCH',
+        message: `需求数量应为 ${expected}，当前为 ${demandQuantity}`
+      });
+    }
+  }
+
+  private importIssueArray(value: Prisma.JsonValue | null): OrderImportIssue[] {
+    return Array.isArray(value) ? (value as OrderImportIssue[]) : [];
+  }
+
+  private importStringArray(value: Prisma.JsonValue | null) {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const result: string[] = [];
+    for (const item of value) {
+      const normalized = String(item || '').trim();
+      if (normalized) {
+        result.push(normalized);
+      }
+    }
+    return result;
+  }
+
+  private countImportIssues(issues: OrderImportIssue[]) {
+    let errorCount = 0;
+    let warningCount = 0;
+    for (const issue of issues) {
+      if (issue.severity === 'ERROR') {
+        errorCount += 1;
+      } else if (issue.severity === 'WARNING') {
+        warningCount += 1;
+      }
+    }
+    return { errorCount, warningCount };
+  }
+
+  private async findEnabledCustomersForImport(customerNames: string[]) {
+    const nameByKey = new Map<string, string>();
+    for (const rawName of customerNames) {
+      const name = rawName.trim();
+      if (!name) {
+        continue;
+      }
+      const key = this.importCustomerKey(name);
+      if (!nameByKey.has(key)) {
+        nameByKey.set(key, name);
+      }
+    }
+
+    const customerLookup = new Map<
+      string,
+      Array<{
+        id: string;
+        customerName: string;
+        customerCode: string;
+      }>
+    >([...nameByKey.keys()].map((key) => [key, []]));
+
+    for (const names of this.chunkValues([...nameByKey.values()], 200)) {
+      const customers = await this.prisma.customer.findMany({
+        where: {
+          status: CommonStatus.ENABLED,
+          OR: names.map((name) => ({ customerName: { equals: name, mode: 'insensitive' as const } }))
+        },
+        select: { id: true, customerName: true, customerCode: true }
+      });
+      for (const customer of customers) {
+        const key = this.importCustomerKey(customer.customerName);
+        customerLookup.get(key)?.push(customer);
+      }
+    }
+
+    return customerLookup;
+  }
+
+  private importCustomerKey(name: string) {
+    return name.trim().toLocaleLowerCase();
+  }
+
+  private async findExistingOrderNosForImport(orderNos: string[], client: Prisma.TransactionClient = this.prisma) {
+    const normalizedOrderNos = [...new Set(orderNos.map((orderNo) => orderNo.trim().toUpperCase()).filter(Boolean))];
+    if (normalizedOrderNos.length === 0) {
+      return new Set<string>();
+    }
+    const existingOrderNos = new Set<string>();
+    for (const chunk of this.chunkValues(normalizedOrderNos, 200)) {
+      const [reservations, orders] = await Promise.all([
+        client.orderNoReservation.findMany({
+          where: { orderNoNormalized: { in: chunk } },
+          select: { orderNoNormalized: true }
+        }),
+        client.customerOrder.findMany({
+          where: {
+            OR: chunk.map((orderNo) => ({
+              orderNo: { equals: orderNo, mode: 'insensitive' as const }
+            }))
+          },
+          select: { orderNo: true }
+        })
+      ]);
+      reservations.forEach((row) => existingOrderNos.add(row.orderNoNormalized));
+      orders.forEach((row) => existingOrderNos.add(row.orderNo.trim().toUpperCase()));
+    }
+    return existingOrderNos;
+  }
+
+  private async activeProcessNameKeys() {
+    const rows = await this.prisma.processDefinition.findMany({
+      where: { status: CommonStatus.ENABLED },
+      select: { processName: true }
+    });
+    return new Set(rows.map((row) => normalizeSearchKeyword(row.processName)));
+  }
+
+  private importRowToOrderLinePayload(row: any, activeProcessKeys: Set<string>): CreateOrderLineDto {
+    const processNames = this.splitProcessRoute(row.processRoute);
+    const processNamesAreActive = processNames.length > 0 && processNames.every((name) => activeProcessKeys.has(normalizeSearchKeyword(name)));
+    const processSteps = processNamesAreActive
+      ? processNames.map((processName, index) => ({
+          processName,
+          processRemark: index === processNames.length - 1 ? row.processRemark || undefined : undefined
+        }))
+      : [];
+    const remarkParts = [];
+    if (!processNamesAreActive && row.processRoute) {
+      remarkParts.push(`Excel工艺路线：${row.processRoute}`);
+    }
+    if (!processNamesAreActive && row.processRemark) {
+      remarkParts.push(`Excel工艺备注：${row.processRemark}`);
+    }
+
+    return {
+      lineType: row.lineType,
+      partCategory: row.partCategory || undefined,
+      componentNo: row.componentNo || undefined,
+      parentComponentNo: row.parentComponentNo || undefined,
+      importSequence: row.importSequence || undefined,
+      sourceImportSessionId: row.sourceImportSessionId || row.sessionId,
+      sourceImportFileId: row.sourceImportFileId || row.fileId,
+      sourceImportFileName: row.sourceFileName || undefined,
+      sourceImportRowNo: row.sourceRowNo,
+      projectModel: row.projectModel || undefined,
+      drawingDate: row.drawingDate || undefined,
+      drawingStatus: row.drawingStatus || undefined,
+      partCode: row.partCode,
+      partName: row.partName,
+      drawingNo: row.drawingNo || undefined,
+      partThickness: row.partThickness || 1,
+      partSpecification: row.partSpecification || undefined,
+      quantity: row.demandQuantity,
+      productionPlanQuantity: row.demandQuantity,
+      fulfillmentMode: OrderLineFulfillmentMode.PRODUCTION,
+      unit: row.unit || '件',
+      remark: remarkParts.join('；') || undefined,
+      processSteps
+    };
+  }
+
+  private splitProcessRoute(route?: string | null) {
+    return String(route || '')
+      .split(/[>＞/、,，;；\r\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  private formatDateOnly(value?: Date | string | null) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '';
+    }
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private formatImportDateOnly(value?: Date | string | null) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime()) || date.getFullYear() <= 1970) {
+      return '';
+    }
+    return this.formatDateOnly(date);
+  }
+
+  private formatDateTime(value?: Date | string | null) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '';
+    }
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${this.formatDateOnly(date)} ${hours}:${minutes}`;
+  }
+
   private async upsertMaterials(tx: Prisma.TransactionClient, lines: CreateOrderDto['lines']) {
     const materialMap = new Map<
       string,
@@ -2491,12 +5700,25 @@ export class OrdersService {
       });
     }
 
-    for (const material of materialMap.values()) {
-      const existing = await tx.material.findFirst({
-        where: { partCode: { equals: material.partCode, mode: 'insensitive' } },
-        select: { id: true, partSpecification: true }
+    const materials = [...materialMap.values()];
+    const existingMaterialByCode = new Map<string, { id: string; partSpecification: string | null }>();
+    for (const chunk of this.chunkValues(materials, 200)) {
+      const existingMaterials = await tx.material.findMany({
+        where: {
+          OR: chunk.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }))
+        },
+        select: { id: true, partCode: true, partSpecification: true }
       });
+      for (const material of existingMaterials) {
+        existingMaterialByCode.set(material.partCode.trim().toLocaleLowerCase(), {
+          id: material.id,
+          partSpecification: material.partSpecification
+        });
+      }
+    }
 
+    for (const material of materials) {
+      const existing = existingMaterialByCode.get(material.partCode.trim().toLocaleLowerCase());
       if (existing) {
         await tx.material.update({
           where: { id: existing.id },
@@ -2666,6 +5888,61 @@ export class OrdersService {
     lines.forEach((line, index) => {
       this.validateSingleOrderLine(line, `第 ${index + 1} 个零件`, Boolean(options.requireStockSources));
     });
+    this.validateOrderLineComponentStructure(lines);
+  }
+
+  private validateOrderLineComponentStructure(lines: CreateOrderDto['lines']) {
+    const componentNos = new Map<string, number>();
+    const duplicateNos = new Set<string>();
+
+    lines.forEach((line, index) => {
+      const label = `第 ${index + 1} 个零件`;
+      const lineType = line.lineType || 'PART';
+      const componentNo = this.normalizeEditableComponentNo(line.componentNo);
+      const parentComponentNo = this.normalizeEditableComponentNo(line.parentComponentNo);
+
+      if (lineType === 'COMPONENT') {
+        if (!componentNo) {
+          throw new BadRequestException(`${label}是组件行，必须填写组件编号`);
+        }
+        if (parentComponentNo) {
+          throw new BadRequestException(`${label}是组件行，不能填写所属组件`);
+        }
+        if (componentNos.has(componentNo)) {
+          duplicateNos.add(componentNo);
+        }
+        componentNos.set(componentNo, index + 1);
+        return;
+      }
+
+      if (componentNo) {
+        throw new BadRequestException(`${label}是零件行，不能填写组件编号；如属于组件，请填写所属组件`);
+      }
+    });
+
+    if (duplicateNos.size > 0) {
+      throw new BadRequestException(`同一订单内组件编号重复：${Array.from(duplicateNos).join('、')}`);
+    }
+
+    lines.forEach((line, index) => {
+      const lineType = line.lineType || 'PART';
+      const parentComponentNo = this.normalizeEditableComponentNo(line.parentComponentNo);
+      if (lineType === 'PART' && parentComponentNo && !componentNos.has(parentComponentNo)) {
+        throw new BadRequestException(`第 ${index + 1} 个零件所属组件 ${parentComponentNo} 在当前订单内不存在`);
+      }
+    });
+  }
+
+  private normalizeEditableComponentNo(value?: string | null) {
+    return value?.trim().toUpperCase() || '';
+  }
+
+  private normalizeEditableOrderLineComponentFields<T extends CreateOrderLineDto>(lines: T[]): T[] {
+    return lines.map((line) => ({
+      ...line,
+      componentNo: this.normalizeEditableComponentNo(line.componentNo) || undefined,
+      parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || undefined
+    }));
   }
 
   private validateSingleOrderLine(line: CreateOrderLineDto, label = 'Order line', requireStockSources = true) {
@@ -2713,6 +5990,18 @@ export class OrdersService {
       unit: line.unit,
       deliveryDate: line.deliveryDate ? new Date(line.deliveryDate).toISOString().slice(0, 10) : undefined,
       remark: line.remark || undefined,
+      lineType: line.lineType || 'PART',
+      partCategory: line.partCategory || undefined,
+      componentNo: this.normalizeEditableComponentNo(line.componentNo) || undefined,
+      parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || undefined,
+      importSequence: line.importSequence || undefined,
+      sourceImportSessionId: line.sourceImportSessionId || undefined,
+      sourceImportFileId: line.sourceImportFileId || undefined,
+      sourceImportFileName: line.sourceImportFileName || undefined,
+      sourceImportRowNo: line.sourceImportRowNo || undefined,
+      projectModel: line.projectModel || undefined,
+      drawingDate: line.drawingDate ? new Date(line.drawingDate).toISOString().slice(0, 10) : undefined,
+      drawingStatus: line.drawingStatus || undefined,
       processSteps: this.processRowsToSnapshots(line.processSteps || []),
       selectedStockSources: this.jsonToStockSourceSelections(line.stockSourceSelections)
     };
@@ -3263,6 +6552,23 @@ export class OrdersService {
     };
   }
 
+  private orderLineImportData(line: CreateOrderLineDto) {
+    return {
+      lineType: line.lineType || 'PART',
+      partCategory: line.partCategory?.trim() || null,
+      componentNo: this.normalizeEditableComponentNo(line.componentNo) || null,
+      parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || null,
+      importSequence: line.importSequence?.trim() || null,
+      sourceImportSessionId: line.sourceImportSessionId?.trim() || null,
+      sourceImportFileId: line.sourceImportFileId?.trim() || null,
+      sourceImportFileName: this.importDisplayFileName(line.sourceImportFileName) || null,
+      sourceImportRowNo: line.sourceImportRowNo || null,
+      projectModel: line.projectModel?.trim() || null,
+      drawingDate: line.drawingDate ? new Date(line.drawingDate) : null,
+      drawingStatus: line.drawingStatus?.trim() || null
+    };
+  }
+
   private hasProductionPlanOverrideRecord(line: {
     productionPlanOverrideByCode?: string | null;
     productionPlanOverrideByName?: string | null;
@@ -3611,16 +6917,24 @@ export class OrdersService {
   private toDetail(
     order: any,
     stockQuantityByTaskNo = new Map<string, number>(),
-    stockSourceInfoByBatchId = new Map<string, ReturnType<OrdersService['toStockSourceSelectionInfo']>>()
+    stockSourceInfoByBatchId = new Map<string, ReturnType<OrdersService['toStockSourceSelectionInfo']>>(),
+    importSourceFileByLineId = new Map<string, ReturnType<OrdersService['toImportSourceFileInfo']>>(),
+    materialIdentityInfoByPartCode = new Map<string, OrderLineMaterialIdentityInfo>()
   ) {
     return {
       ...this.toSummary(order),
       customer: order.customer,
-      lines: order.lines.map((line: any) => ({
+      lines: order.lines.map((line: any) => {
+        const importSourceFile = importSourceFileByLineId.get(line.id);
+        const materialIdentityInfo = materialIdentityInfoByPartCode.get(this.normalizedPartCodeKey(line.partCode));
+        return {
         id: line.id,
         lineNo: line.lineNo,
         partCode: line.partCode,
         partName: line.partName,
+        materialIdentityVariantCount: materialIdentityInfo?.variantCount || 1,
+        materialHasIdentityConflict: Boolean(materialIdentityInfo && materialIdentityInfo.conflictFields.length > 0),
+        materialIdentityConflictFields: materialIdentityInfo?.conflictFields || [],
         drawingNo: line.drawingNo,
         drawingVersion: line.drawingVersion,
         drawingFileName: line.drawingFileName,
@@ -3639,6 +6953,21 @@ export class OrdersService {
         productionPlanOverrideAt: line.productionPlanOverrideAt,
         productionPlanOverrideReason: line.productionPlanOverrideReason,
         fulfillmentMode: line.fulfillmentMode,
+        lineType: line.lineType,
+        partCategory: line.partCategory,
+        componentNo: line.componentNo,
+        parentComponentNo: line.parentComponentNo,
+        importSequence: line.importSequence,
+        sourceImportSessionId: line.sourceImportSessionId,
+        sourceImportFileId: line.sourceImportFileId || importSourceFile?.id,
+        sourceImportFileName: importSourceFile?.fileName || this.importDisplayFileName(line.sourceImportFileName),
+        sourceImportFileUrl: importSourceFile?.fileUrl,
+        sourceImportSheetName: importSourceFile?.sheetName,
+        sourceImportFileAvailable: Boolean(importSourceFile?.fileUrl),
+        sourceImportRowNo: line.sourceImportRowNo,
+        projectModel: line.projectModel,
+        drawingDate: line.drawingDate,
+        drawingStatus: line.drawingStatus,
         unit: line.unit,
         deliveryDate: line.deliveryDate,
         remark: line.remark,
@@ -3650,7 +6979,8 @@ export class OrdersService {
         processStepDetails: this.processRowsToSnapshots(line.processSteps),
         productionTasks: this.toLineProductionTasks(line.productionTasks || [], stockQuantityByTaskNo),
         ...this.toLineWarehouseInfo(line, stockQuantityByTaskNo, order.orderNo)
-      }))
+        };
+      })
     };
   }
 

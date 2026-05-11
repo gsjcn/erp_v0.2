@@ -100,13 +100,15 @@ export class ProcessDefinitionsService {
     const existing = await this.ensureExists(id);
     const references = await this.findProcessDefinitionReferences(existing.processNameNormalized);
     if (references.total > 0) {
-      throw this.referencedProcessDefinitionError(existing.processName, references, '停用');
+      // 已被历史订单或流程记忆引用的标准工序只能停用，不能物理删除；历史记录仍保留原工序名称。
+      const disabled = await this.prisma.processDefinition.update({
+        where: { id },
+        data: { status: CommonStatus.DISABLED }
+      });
+      return this.mapDefinition(disabled);
     }
-    const updated = await this.prisma.processDefinition.update({
-      where: { id },
-      data: { status: CommonStatus.DISABLED }
-    });
-    return this.mapDefinition(updated);
+    await this.prisma.processDefinition.delete({ where: { id } });
+    return this.mapDefinition({ ...existing, status: CommonStatus.DISABLED });
   }
 
   async ensureActiveNames(processNames: string[]) {

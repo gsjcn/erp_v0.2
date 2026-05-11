@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsDateString, IsEnum, IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNotEmpty, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
 import { OrderLineFulfillmentMode, OrderStatus } from '@prisma/client';
 
 export class OrderQueryDto {
@@ -123,6 +123,55 @@ export class StockSourceSelectionDto {
 }
 
 export class CreateOrderLineDto {
+  @IsOptional()
+  @IsIn(['PART', 'COMPONENT'])
+  lineType?: 'PART' | 'COMPONENT';
+
+  @IsOptional()
+  @IsString()
+  partCategory?: string;
+
+  @IsOptional()
+  @IsString()
+  componentNo?: string;
+
+  @IsOptional()
+  @IsString()
+  parentComponentNo?: string;
+
+  @IsOptional()
+  @IsString()
+  importSequence?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceImportSessionId?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceImportFileId?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceImportFileName?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  sourceImportRowNo?: number;
+
+  @IsOptional()
+  @IsString()
+  projectModel?: string;
+
+  @IsOptional()
+  @IsDateString()
+  drawingDate?: string;
+
+  @IsOptional()
+  @IsString()
+  drawingStatus?: string;
+
   @IsString()
   partCode!: string;
 
@@ -224,6 +273,74 @@ export class CreateOrderDto {
   lines!: CreateOrderLineDto[];
 }
 
+export class CreateOrderImportSessionDto {
+  @IsOptional()
+  @IsString()
+  createdBy?: string;
+}
+
+export class ListOrderImportSessionQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+}
+
+export class GetOrderImportSessionQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  orderLimit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  orderOffset?: number;
+}
+
+export class GetOrderImportFilePreviewQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+}
+
+export class CommitOrderImportSessionDto {
+  @IsOptional()
+  @IsBoolean()
+  allSelectable?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  orderNos?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  excludedOrderNos?: string[];
+
+  @IsOptional()
+  @IsString()
+  previewToken?: string;
+}
+
 export class UpdateOrderDto {
   @IsOptional()
   @IsString()
@@ -258,6 +375,10 @@ export class SubmitOrderDto {
   @IsString()
   @IsNotEmpty()
   submittedByCode!: string;
+
+  @IsOptional()
+  @IsBoolean()
+  materialIdentityConfirmed?: boolean;
 }
 
 export class CreateLineReplenishmentDto {

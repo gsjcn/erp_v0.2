@@ -5,6 +5,7 @@ import type {
   InventoryBatch,
   InventoryAdjustment,
   InventoryMaterialSuggestion,
+  MaterialMemory,
   InventoryReservationAudit,
   InventorySourceDetailResponse,
   InventorySummaryRow,
@@ -37,6 +38,18 @@ import type {
 } from '../types/erp';
 
 export interface CreateOrderLinePayload {
+  lineType?: 'PART' | 'COMPONENT';
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  importSequence?: string;
+  sourceImportSessionId?: string;
+  sourceImportFileId?: string;
+  sourceImportFileName?: string;
+  sourceImportRowNo?: number;
+  projectModel?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   partCode: string;
   partName: string;
   drawingNo?: string;
@@ -104,6 +117,19 @@ export interface SaveProcessDefinitionPayload {
   status?: CommonStatus;
 }
 
+export interface MaterialMemoryFilters {
+  keyword?: string;
+  status?: CommonStatus;
+}
+
+export interface UpdateMaterialMemoryPayload {
+  partCode?: string;
+  partName?: string;
+  unit?: string;
+  partSpecification?: string;
+  status?: CommonStatus;
+}
+
 export interface DrawingUploadResponse {
   fileName: string;
   storedFileName: string;
@@ -122,6 +148,268 @@ export interface DrawingDuplicateMatch {
   drawingVersion?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
+}
+
+export interface OrderImportIssue {
+  severity: 'ERROR' | 'WARNING';
+  code: string;
+  message: string;
+}
+
+export interface OrderImportPreviewRow {
+  id: string;
+  sourceImportSessionId?: string;
+  sourceImportFileId?: string;
+  sourceFileName?: string;
+  sourceRowNo: number;
+  orderBlock?: string;
+  orderNo?: string;
+  lineType: 'PART' | 'COMPONENT';
+  importSequence?: string;
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  partCode: string;
+  drawingNo?: string;
+  partName: string;
+  partSpecification?: string;
+  partThickness: number;
+  orderQuantity?: number;
+  unitUsage?: number;
+  demandQuantity: number;
+  unit: string;
+  processRoute?: string;
+  processRemark?: string;
+  projectModel?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
+  issues: OrderImportIssue[];
+}
+
+export interface OrderImportPreviewOrder {
+  orderNo: string;
+  orderDate: string;
+  customerName: string;
+  customerId?: string;
+  projectModel?: string;
+  rowCount: number;
+  errorCount: number;
+  warningCount: number;
+  issues: OrderImportIssue[];
+  rows: OrderImportPreviewRow[];
+}
+
+export interface OrderImportSessionPreview {
+  id: string;
+  status: 'DRAFT' | 'COMMITTED' | string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  committedAt?: string;
+  previewToken?: string;
+  committedOrderNos?: string[];
+  currentCommittedOrderNos?: string[];
+  files: Array<{
+    id: string;
+    fileName: string;
+    sheetName: string;
+    rowCount: number;
+    acceptedRowCount: number;
+    duplicateRowCount: number;
+    createdAt: string;
+  }>;
+  summary: {
+    fileCount: number;
+    rowCount: number;
+    orderCount: number;
+    selectableOrderCount: number;
+    blockedOrderCount: number;
+    errorCount: number;
+    warningCount: number;
+    committedOrderCount?: number;
+    currentCommittedOrderCount?: number;
+    materialSyncCount: number;
+    materialSyncPreview: string[];
+    duplicateRowCount: number;
+  };
+  orderPage?: {
+    offset: number;
+    limit: number;
+    loadedCount: number;
+    totalCount: number;
+    hasMore: boolean;
+  };
+  orders: OrderImportPreviewOrder[];
+  uploadResult?: {
+    fileName: string;
+    sheetName: string;
+    rowCount: number;
+    acceptedRowCount: number;
+    duplicateRowCount: number;
+  };
+}
+
+export interface OrderImportFilePreview {
+  sessionId: string;
+  status: 'DRAFT' | 'COMMITTED' | string;
+  file: {
+    id: string;
+    fileName: string;
+    storedFileName?: string;
+    fileUrl?: string;
+    sheetName?: string;
+    rowCount: number;
+    acceptedRowCount: number;
+    duplicateRowCount: number;
+    createdAt?: string;
+  };
+  rowPage: {
+    offset: number;
+    limit: number;
+    loadedCount: number;
+    totalCount: number;
+    hasMore: boolean;
+  };
+  rows: OrderImportPreviewRow[];
+}
+
+export interface OrderImportSessionSummary {
+  id: string;
+  status: 'DRAFT' | 'COMMITTED' | string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  committedAt?: string;
+  fileCount: number;
+  rowCount: number;
+  orderCount: number;
+  orderNoCount?: number;
+  orderNos: string[];
+  orderNosPreview?: string[];
+  committedOrderCount?: number;
+  committedOrderNos?: string[];
+  committedOrderNosPreview?: string[];
+  currentCommittedOrderCount?: number;
+  currentCommittedOrderNos?: string[];
+  currentCommittedOrderNosPreview?: string[];
+  fileNames: string[];
+  fileNamesPreview?: string[];
+  duplicateRowCount: number;
+  selectableOrderCount?: number;
+  blockedOrderCount?: number;
+  errorCount: number;
+  warningCount: number;
+  materialSyncCount?: number;
+  materialSyncPreview?: string[];
+}
+
+export interface OrderImportSessionListResponse {
+  items: OrderImportSessionSummary[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface OrderImportConfigResponse {
+  uploadMaxBytes: number;
+  uploadMaxMb: number;
+  allowedExtensions: string[];
+}
+
+export interface OrderImportSelectableOrderNosResponse {
+  sessionId: string;
+  status: 'DRAFT' | string;
+  totalOrderCount: number;
+  selectableCount: number;
+  blockedCount: number;
+  errorCount: number;
+  warningCount: number;
+  orders?: Array<{
+    orderNo: string;
+    warningCount: number;
+  }>;
+  orderNos: string[];
+}
+
+export interface CommitOrderImportSessionResponse {
+  sessionId: string;
+  requestedMode: 'SELECTED' | 'ALL_SELECTABLE';
+  createdCount: number;
+  skippedBlockedCount: number;
+  skippedSelectableCount: number;
+  excludedOrderCount: number;
+  materialSyncCount: number;
+  materialSyncPreview: string[];
+  committedOrderNos?: string[];
+  createdOrdersPreviewCount: number;
+  createdOrdersTruncated: boolean;
+  createdOrders: Array<{
+    id: string;
+    orderNo: string;
+    customerName: string;
+    status: OrderStatus;
+  }>;
+}
+
+export interface DiscardOrderImportSessionResponse {
+  sessionId: string;
+  discarded: boolean;
+  deletedMemory?: boolean;
+  previousStatus?: string;
+  deletedFileCount: number;
+}
+
+export interface OrderImportSourceFilePreview {
+  orderNo: string;
+  file: {
+    id: string;
+    fileName: string;
+    storedFileName?: string;
+    fileUrl?: string;
+    sheetName?: string;
+    rowCount: number;
+    acceptedRowCount: number;
+    duplicateRowCount: number;
+    createdAt?: string;
+  };
+  rowPage: {
+    offset: number;
+    limit: number;
+    loadedCount: number;
+    totalCount: number;
+    hasMore: boolean;
+  };
+  rows: Array<{
+    id: string;
+    sourceRowNo: number;
+    orderBlock?: string;
+    orderNo: string;
+    orderDate?: string;
+    customerName: string;
+    projectModel?: string;
+    lineType: 'PART' | 'COMPONENT' | string;
+    importSequence?: string;
+    partCategory?: string;
+    componentNo?: string;
+    parentComponentNo?: string;
+    partCode: string;
+    drawingNo?: string;
+    partName: string;
+    partSpecification?: string;
+    partThickness: number;
+    orderQuantity?: number;
+    unitUsage?: number;
+    demandQuantity: number;
+    unit: string;
+    processRoute?: string;
+    processRemark?: string;
+    drawingDate?: string;
+    drawingStatus?: string;
+    issues?: OrderImportIssue[];
+    errorCount: number;
+    warningCount: number;
+  }>;
 }
 
 export interface OrderFilters {
@@ -231,6 +519,7 @@ export interface CompleteProcessStepPayload {
 
 export interface SubmitOrderPayload {
   submittedByCode: string;
+  materialIdentityConfirmed?: boolean;
 }
 
 export interface UpdateLineProcessPayload {
@@ -380,6 +669,16 @@ function toQuery(params: Record<string, string | undefined>) {
   return query ? `?${query}` : '';
 }
 
+async function uploadErrorMessage(response: Response, fallback: string) {
+  const text = await response.text();
+  try {
+    const parsed = JSON.parse(text) as { message?: string | string[]; error?: string };
+    return Array.isArray(parsed.message) ? parsed.message.join('; ') : parsed.message || parsed.error || fallback;
+  } catch {
+    return text || fallback;
+  }
+}
+
 export const erpApi = {
   customers(keyword?: string, status?: CommonStatus) {
     return request<Customer[]>(`/customers${toQuery({ keyword, status })}`);
@@ -421,6 +720,14 @@ export const erpApi = {
   order(orderNo: string) {
     return request<OrderDetail>(`/orders/${orderNo}`);
   },
+  orderImportSourceFilePreview(orderNo: string, fileId: string, limit = 200, offset = 0) {
+    return request<OrderImportSourceFilePreview>(
+      `/orders/${encodeURIComponent(orderNo)}/import-source-files/${encodeURIComponent(fileId)}/preview${toQuery({
+        limit: String(limit),
+        offset: String(offset)
+      })}`
+    );
+  },
   nextOrderNo(orderDate?: string) {
     return request<{ orderNo: string }>(`/orders/next-no${toQuery({ orderDate })}`);
   },
@@ -435,6 +742,100 @@ export const erpApi = {
   duplicateDrawingFiles(value: string, excludeOrderNo?: string) {
     return request<DrawingDuplicateMatch[]>(`/orders/drawings/duplicate-files${toQuery({ value, excludeOrderNo })}`);
   },
+  createOrderImportSession(createdBy?: string) {
+    return request<OrderImportSessionPreview>('/orders/import-sessions', {
+      method: 'POST',
+      body: JSON.stringify({ createdBy })
+    });
+  },
+  orderImportSessions(limit = 20, offset = 0) {
+    return request<OrderImportSessionListResponse>(
+      `/orders/import-sessions${toQuery({ limit: String(limit), offset: String(offset) })}`
+    );
+  },
+  orderImportConfig() {
+    return request<OrderImportConfigResponse>('/orders/import-config');
+  },
+  orderImportSession(sessionId: string, orderLimit = 50, orderOffset = 0) {
+    return request<OrderImportSessionPreview>(
+      `/orders/import-sessions/${sessionId}${toQuery({ orderLimit: String(orderLimit), orderOffset: String(orderOffset) })}`
+    );
+  },
+  orderImportFilePreview(sessionId: string, fileId: string, limit = 200, offset = 0) {
+    return request<OrderImportFilePreview>(
+      `/orders/import-sessions/${sessionId}/files/${fileId}/preview${toQuery({
+        limit: String(limit),
+        offset: String(offset)
+      })}`
+    );
+  },
+  orderImportSelectableOrderNos(sessionId: string) {
+    return request<OrderImportSelectableOrderNosResponse>(`/orders/import-sessions/${sessionId}/selectable-order-nos`);
+  },
+  async downloadOrderImportTemplate() {
+    const response = await fetch(`${apiBaseUrl}/orders/import-template`);
+    if (!response.ok) {
+      throw new Error(await uploadErrorMessage(response, '订单导入模板下载失败'));
+    }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = '组件零件清单ERP上传模板.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+  },
+  async downloadOrderImportIssueReport(sessionId: string) {
+    const response = await fetch(`${apiBaseUrl}/orders/import-sessions/${sessionId}/error-report`);
+    if (!response.ok) {
+      throw new Error(await uploadErrorMessage(response, '订单导入问题明细下载失败'));
+    }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = '订单导入问题明细.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+  },
+  async uploadOrderImportFile(sessionId: string, file: File) {
+    const formData = new FormData();
+    formData.set('file', file);
+    const response = await fetch(`${apiBaseUrl}/orders/import-sessions/${sessionId}/files`, {
+      method: 'POST',
+      body: formData
+    });
+    if (!response.ok) {
+      throw new Error(await uploadErrorMessage(response, '订单导入文件上传失败'));
+    }
+    return response.json() as Promise<OrderImportSessionPreview>;
+  },
+  commitOrderImportSession(
+    sessionId: string,
+    orderNos: string[],
+    previewToken: string,
+    allSelectable = false,
+    excludedOrderNos: string[] = []
+  ) {
+    return request<CommitOrderImportSessionResponse>(`/orders/import-sessions/${sessionId}/commit`, {
+      method: 'POST',
+      body: JSON.stringify(
+        allSelectable
+          ? { allSelectable: true, excludedOrderNos, previewToken }
+          : { orderNos, previewToken }
+      )
+    });
+  },
+  deleteOrderImportFile(sessionId: string, fileId: string) {
+    return request<OrderImportSessionPreview>(`/orders/import-sessions/${sessionId}/files/${fileId}`, {
+      method: 'DELETE'
+    });
+  },
+  discardOrderImportSession(sessionId: string) {
+    return request<DiscardOrderImportSessionResponse>(`/orders/import-sessions/${sessionId}`, { method: 'DELETE' });
+  },
   async uploadDrawing(file: File) {
     const formData = new FormData();
     formData.set('file', file);
@@ -443,7 +844,7 @@ export const erpApi = {
       body: formData
     });
     if (!response.ok) {
-      throw new Error((await response.text()) || '图纸上传失败');
+      throw new Error(await uploadErrorMessage(response, '图纸上传失败'));
     }
     return response.json() as Promise<DrawingUploadResponse>;
   },
@@ -452,6 +853,9 @@ export const erpApi = {
   },
   updateOrder(orderNo: string, payload: Omit<CreateOrderPayload, 'customerId' | 'orderDate'>) {
     return request<OrderDetail>(`/orders/${orderNo}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  },
+  deleteDraftOrder(orderNo: string) {
+    return request<{ orderNo: string; deleted: boolean }>(`/orders/${orderNo}`, { method: 'DELETE' });
   },
   submitOrder(orderNo: string, payload: SubmitOrderPayload) {
     return request<OrderDetail>(`/orders/${orderNo}/submit`, { method: 'POST', body: JSON.stringify(payload) });
@@ -753,17 +1157,38 @@ export const erpApi = {
     warehouseId?: string,
     sourceType?: 'ALL' | 'ORDER' | 'STOCK',
     excludeOrderNo?: string,
-    excludeOrderId?: string
+    excludeOrderId?: string,
+    customerId?: string
   ) {
     return request<InventoryMaterialSuggestion[]>(
       `/inventory/materials/suggestions${toQuery({
         keyword,
+        customerId,
         warehouseId,
         sourceType,
         excludeOrderNo,
         excludeOrderId
       })}`
     );
+  },
+  inventoryMaterials(filters: MaterialMemoryFilters = {}) {
+    return request<MaterialMemory[]>(
+      `/inventory/materials${toQuery({
+        keyword: filters.keyword,
+        status: filters.status
+      })}`
+    );
+  },
+  updateInventoryMaterial(materialId: string, payload: UpdateMaterialMemoryPayload) {
+    return request<MaterialMemory>(`/inventory/materials/${materialId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  disableInventoryMaterial(materialId: string) {
+    return request<MaterialMemory>(`/inventory/materials/${materialId}`, {
+      method: 'DELETE'
+    });
   },
   inventoryMaterialSourceDetails(partCode: string, filters: InventorySourceDetailFilters = {}) {
     return request<InventorySourceDetailResponse>(

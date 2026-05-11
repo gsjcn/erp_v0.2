@@ -1,7 +1,7 @@
 <template>
   <span v-if="fileUrl" class="drawing-preview-link">
     <el-button link type="primary" class="drawing-preview-button" @click="visible = true">
-      {{ linkText || fileName || '查看图纸' }}
+      {{ linkText || displayFileName || '查看图纸' }}
     </el-button>
 
     <el-dialog
@@ -13,11 +13,11 @@
     >
       <div class="drawing-preview-dialog">
         <div class="drawing-preview-toolbar">
-          <strong>{{ fileName || '未记录文件名' }}</strong>
+          <strong>{{ displayFileName || '未记录文件名' }}</strong>
           <a :href="drawingHref" target="_blank" rel="noreferrer">打开图纸</a>
         </div>
 
-        <img v-if="isImageDrawing" class="drawing-preview-media" :src="drawingHref" :alt="fileName || '产品图纸'" />
+        <img v-if="isImageDrawing" class="drawing-preview-media" :src="drawingHref" :alt="displayFileName || '产品图纸'" />
         <iframe v-else-if="isPdfDrawing" class="drawing-preview-media" :src="drawingHref" title="产品图纸预览" />
         <div v-else class="drawing-preview-empty">
           <strong>当前格式无法直接预览</strong>
@@ -31,6 +31,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { normalizeDisplayFileName } from '../utils/fileNames';
 
 const props = defineProps<{
   fileName?: string;
@@ -41,8 +42,17 @@ const props = defineProps<{
 
 const visible = ref(false);
 const drawingHref = computed(() => props.fileUrl || '');
-const isImageDrawing = computed(() => /\.(png|jpe?g|webp)$/i.test(props.fileUrl || props.fileName || ''));
-const isPdfDrawing = computed(() => /\.pdf$/i.test(props.fileUrl || props.fileName || ''));
+
+function fileNameFromUrl(fileUrl?: string) {
+  const cleanUrl = String(fileUrl || '').split(/[?#]/)[0];
+  const parts = cleanUrl.split(/[\\/]+/);
+  return parts[parts.length - 1] || '';
+}
+
+const displayFileName = computed(() => normalizeDisplayFileName(props.fileName || fileNameFromUrl(props.fileUrl)));
+const drawingFileIdentity = computed(() => displayFileName.value || props.fileUrl || '');
+const isImageDrawing = computed(() => /\.(png|jpe?g|webp)$/i.test(drawingFileIdentity.value));
+const isPdfDrawing = computed(() => /\.pdf$/i.test(drawingFileIdentity.value));
 </script>
 
 <style scoped>

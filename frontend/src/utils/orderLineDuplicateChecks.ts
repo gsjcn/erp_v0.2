@@ -2,6 +2,7 @@ import { createApp, defineComponent, h, ref } from 'vue';
 import { ElButton, ElDialog } from 'element-plus';
 import { erpApi } from '../api/erp';
 import type { CreateOrderLinePayload, DrawingDuplicateMatch } from '../api/erp';
+import { normalizeDisplayFileName } from './fileNames';
 
 type DuplicatePair = {
   first: { line: CreateOrderLinePayload; index: number };
@@ -10,7 +11,11 @@ type DuplicatePair = {
 };
 
 function normalize(value?: string) {
-  return value?.trim().toLowerCase() || '';
+  return normalizeDisplayFileName(value).trim().toLowerCase();
+}
+
+function displayDrawingFileName(fileName?: string | null, fallback = '未记录文件名') {
+  return normalizeDisplayFileName(fileName) || fallback;
 }
 
 function describeLine(line: CreateOrderLinePayload, index: number) {
@@ -46,7 +51,7 @@ function renderDrawingNoConflictHtml(lines: string[], extraText?: string) {
 function findDuplicatePair(lines: CreateOrderLinePayload[], getter: (line: CreateOrderLinePayload) => string | undefined) {
   const seen = new Map<string, { line: CreateOrderLinePayload; index: number; value: string }>();
   for (const [index, line] of lines.entries()) {
-    const rawValue = getter(line)?.trim();
+    const rawValue = normalizeDisplayFileName(getter(line)).trim();
     const key = normalize(rawValue);
     if (!key || !rawValue) {
       continue;
@@ -75,7 +80,7 @@ function escapeHtml(value: string) {
 }
 
 function renderDrawingPreview(line: CreateOrderLinePayload, index: number) {
-  const fileName = escapeHtml(line.drawingFileName || '未记录文件名');
+  const fileName = escapeHtml(displayDrawingFileName(line.drawingFileName));
   const fileUrl = line.drawingFileUrl || '';
   const safeUrl = escapeHtml(fileUrl);
   const title = escapeHtml(describeLine(line, index));
@@ -96,7 +101,7 @@ function renderDrawingPreview(line: CreateOrderLinePayload, index: number) {
 }
 
 function renderExistingDrawingPreview(match: DrawingDuplicateMatch) {
-  const fileName = escapeHtml(match.drawingFileName || match.drawingNo || '未记录图纸');
+  const fileName = escapeHtml(displayDrawingFileName(match.drawingFileName || match.drawingNo, '未记录图纸'));
   const fileUrl = match.drawingFileUrl || '';
   const safeUrl = escapeHtml(fileUrl);
   const title = escapeHtml(`${match.partName}（${match.partCode} / ${match.orderNo}）`);
@@ -117,9 +122,10 @@ function renderExistingDrawingPreview(match: DrawingDuplicateMatch) {
 }
 
 function renderSelectedDrawingPreview(file: File, fileUrl: string) {
-  const fileName = escapeHtml(file.name);
+  const displayName = displayDrawingFileName(file.name);
+  const fileName = escapeHtml(displayName);
   const safeUrl = escapeHtml(fileUrl);
-  const isImage = /\.(png|jpe?g|webp)$/i.test(file.name);
+  const isImage = /\.(png|jpe?g|webp)$/i.test(displayName || file.name);
   const preview = isImage
     ? `<img src="${safeUrl}" alt="${fileName}" style="width:100%;max-height:150px;object-fit:contain;border:1px solid #d9e2ec;border-radius:6px;background:#fff;" />`
     : `<a href="${safeUrl}" target="_blank" rel="noreferrer" style="color:#2563eb;">打开当前选择图纸</a>`;
@@ -304,7 +310,7 @@ export async function confirmExistingDrawingNos(lines: CreateOrderLinePayload[],
 export async function confirmExistingDrawingFiles(lines: CreateOrderLinePayload[], excludeOrderNo?: string) {
   const checkedFileNames = new Set<string>();
   for (const [index, line] of lines.entries()) {
-    const fileName = line.drawingFileName?.trim();
+    const fileName = normalizeDisplayFileName(line.drawingFileName).trim();
     if (!fileName) {
       continue;
     }
@@ -347,7 +353,7 @@ export async function confirmUploadDrawingFileName(
   currentLine: CreateOrderLinePayload,
   excludeOrderNo?: string
 ) {
-  const fileName = file.name.trim();
+  const fileName = normalizeDisplayFileName(file.name).trim();
   if (!fileName) {
     return true;
   }

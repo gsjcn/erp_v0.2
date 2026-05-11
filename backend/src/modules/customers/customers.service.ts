@@ -34,7 +34,9 @@ export class CustomersService {
       return customers;
     }
 
-    return customers.filter((customer) => this.customerMatchesKeyword(customer, keyword));
+    return customers
+      .filter((customer) => this.customerMatchesKeyword(customer, keyword))
+      .sort((left, right) => this.compareCustomerSearchResults(left, right, keyword));
   }
 
   async checkName(query: CheckCustomerNameQueryDto) {
@@ -336,6 +338,57 @@ export class CustomersService {
       ...contactParts
     ];
     return pinyinSearchMatches(searchParts, keyword);
+  }
+
+  private compareCustomerSearchResults(left: any, right: any, keyword: string) {
+    const rankDiff = this.customerSearchRank(right, keyword) - this.customerSearchRank(left, keyword);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    return String(left.customerName || '').localeCompare(String(right.customerName || ''), 'zh-Hans-CN');
+  }
+
+  private customerSearchRank(customer: any, keyword: string) {
+    const customerCode = normalizeSearchKeyword(customer.customerCode);
+    const customerName = normalizeSearchKeyword(customer.customerName);
+    if (customerCode === keyword) {
+      return 1000;
+    }
+    if (customerName === keyword) {
+      return 960;
+    }
+    if (customerCode.startsWith(keyword)) {
+      return 920;
+    }
+    if (customerName.startsWith(keyword)) {
+      return 900;
+    }
+    if (customerCode.includes(keyword)) {
+      return 860;
+    }
+    if (customerName.includes(keyword)) {
+      return 840;
+    }
+    if (pinyinSearchMatches([customer.customerName], keyword)) {
+      return 820;
+    }
+    if (pinyinSearchMatches([customer.contactName, customer.contactPhone, customer.remark], keyword)) {
+      return 760;
+    }
+    if (
+      pinyinSearchMatches(
+        (customer.contacts || []).flatMap((contact: any) => [
+          contact.contactName,
+          contact.contactPhone,
+          contact.title,
+          contact.remark
+        ]),
+        keyword
+      )
+    ) {
+      return 720;
+    }
+    return 0;
   }
 
   private async customerNameExists(customerName: string, excludeId?: string) {

@@ -1008,7 +1008,7 @@
           <div class="drawing-preview-title">产品图纸在线预览</div>
           <div v-if="activeTask.drawingFileUrl" class="drawing-file-preview">
             <div class="drawing-file-toolbar">
-              <span>{{ activeTask.drawingFileName || activeTask.drawingFileUrl }}</span>
+              <span>{{ displayFileName(activeTask.drawingFileName || activeTask.drawingFileUrl) }}</span>
               <DrawingPreviewLink
                 :file-name="activeTask.drawingFileName"
                 :file-url="activeTask.drawingFileUrl"
@@ -1739,6 +1739,7 @@ import type {
   ProductionShortageMode,
   ProductionTask
 } from '../types/erp';
+import { normalizeDisplayFileName } from '../utils/fileNames';
 import { formatDate, formatQuantity } from '../utils/format';
 import { downloadHtmlAsExcel, escapeHtml, formatFileDateTime, openPrintHtml } from '../utils/tableExport';
 
@@ -4079,13 +4080,30 @@ async function saveReplenishmentReject() {
 }
 
 function taskRelationText(row: ProductionTask) {
+  const texts: string[] = [];
   if (row.isReplenishment && row.sourceProductionTaskNo) {
     const sourceRequest = row.replenishmentSourceRequestNo ? ` / 来源单 ${row.replenishmentSourceRequestNo}` : '';
-    return `${replenishmentTaskTypeText(row)}：源任务 ${row.sourceProductionTaskNo}${sourceRequest}`;
-  }
-  if (row.isReplenishment) {
+    texts.push(`${replenishmentTaskTypeText(row)}：源任务 ${row.sourceProductionTaskNo}${sourceRequest}`);
+  } else if (row.isReplenishment) {
     const sourceRequest = row.replenishmentSourceRequestNo ? `：来源单 ${row.replenishmentSourceRequestNo}` : '';
-    return `${replenishmentTaskTypeText(row)}${sourceRequest}`;
+    texts.push(`${replenishmentTaskTypeText(row)}${sourceRequest}`);
+  }
+  const componentText = productionComponentText(row);
+  if (componentText) {
+    texts.push(componentText);
+  }
+  if (row.importSequence) {
+    texts.push(`Excel 序号 ${row.importSequence}`);
+  }
+  return texts.join('；');
+}
+
+function productionComponentText(row: ProductionTask | { lineType?: string; componentNo?: string; parentComponentNo?: string }) {
+  if (row.lineType === 'COMPONENT' && row.componentNo) {
+    return `组件 ${row.componentNo}`;
+  }
+  if (row.parentComponentNo) {
+    return `属于组件 ${row.parentComponentNo}`;
   }
   return '';
 }
@@ -4124,6 +4142,10 @@ function shortageSummary(row: ProductionTask) {
 
 function drawingHref(url?: string) {
   return url || '';
+}
+
+function displayFileName(fileName?: string | null) {
+  return normalizeDisplayFileName(fileName);
 }
 
 function isImageDrawing(url?: string) {

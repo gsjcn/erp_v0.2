@@ -17,32 +17,27 @@
     <div v-if="reviewMode" class="source-search-panel">
       <div>
         <strong>库存查询</strong>
-        <small>可按零件编码、名称、拼音或首字母搜索数据库库存；允许选择可替代产品，但必须逐批确认数量。</small>
+        <small>可按编码、名称、拼音、图号、客户历史或库存来源搜索；允许选择可替代产品，但必须逐批确认数量。</small>
       </div>
       <div class="source-search-controls">
         <el-autocomplete
           v-model="sourceSearchKeyword"
           :fetch-suggestions="queryInventorySuggestions"
           value-key="partCode"
-          placeholder="搜索库存或可替代物料"
+          placeholder="编码/名称/拼音/图号/客户/库存来源"
           clearable
           popper-class="material-suggestion-popper"
           @select="handleInventorySuggestionSelect"
         >
           <template #default="{ item }">
-            <div class="material-suggestion">
-              <strong>{{ item.partCode }}</strong>
-              <span>{{ item.partName }}</span>
-              <small>备货库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
-              <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
-            </div>
+            <MaterialSuggestionOption :item="item" />
           </template>
         </el-autocomplete>
         <el-button @click="searchInventoryKeyword">查询库存</el-button>
         <el-button v-if="expected?.partCode" @click="searchExpectedPart">返回订单零件</el-button>
       </div>
-      <div v-if="lastInventorySuggestions.length > 1" class="source-search-results">
-        <strong>匹配到多个物料，请选择具体零件</strong>
+      <div v-if="sourceSearchManualPickRequired && lastInventorySuggestions.length" class="source-search-results">
+        <strong>{{ sourceSearchResultHint }}</strong>
         <button
           v-for="item in lastInventorySuggestions"
           :key="`${item.partCode}-${item.matchedBatchNo || 'all'}`"
@@ -50,9 +45,7 @@
           class="source-search-result"
           @click="handleInventorySuggestionSelect(item)"
         >
-          <span>{{ item.partCode }} / {{ item.partName }}</span>
-          <small>备货库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
-          <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
+          <MaterialSuggestionOption :item="item" />
         </button>
       </div>
     </div>
@@ -169,10 +162,41 @@
             <el-button size="small" @click="clearSelectedSources">清空选择</el-button>
           </div>
         </div>
-        <div class="selected-source-list">
-          <article v-for="(source, index) in selectedSourceRows" :key="source.batchId" class="selected-source-item">
+        <div
+          class="selected-source-list"
+          @dragover.self.prevent="handleSelectedSourceListDragOverEnd"
+          @dragleave="handleSelectedSourceListDragLeave"
+          @drop.self.prevent="dropSelectedSourceAtEnd"
+        >
+          <article
+            v-for="(source, index) in selectedSourceRows"
+            :key="source.batchId"
+            class="selected-source-item"
+            :class="{
+              'is-dragging': draggedSelectedSourceIndex === index,
+              'is-drop-before': selectedSourceDragOverIndex === index && !selectedSourceDragInsertAfter,
+              'is-drop-after': selectedSourceDragOverIndex === index && selectedSourceDragInsertAfter
+            }"
+            @dragenter.prevent="handleSelectedSourceDragOver($event, index)"
+            @dragover.prevent="handleSelectedSourceDragOver($event, index)"
+            @drop.prevent="dropSelectedSource($event, index)"
+          >
+            <div class="selected-source-order-cell">
+              <button
+                type="button"
+                class="selected-source-drag-handle"
+                draggable="true"
+                title="拖拽调整使用顺序"
+                aria-label="拖拽调整使用顺序"
+                @dragstart.stop="startSelectedSourceDrag($event, index)"
+                @dragend="endSelectedSourceDrag"
+              >
+                <el-icon><Rank /></el-icon>
+              </button>
+              <span>{{ index + 1 }}</span>
+            </div>
             <div>
-              <strong>{{ index + 1 }}. {{ source.batchNo || source.batchId }}</strong>
+              <strong>{{ source.batchNo || source.batchId }}</strong>
               <span>{{ source.partCode || '-' }} / {{ source.partName || '-' }}</span>
               <small>{{ formatQuantity(source.quantity, source.unit || expected?.unit || detail?.unit || '件') }}</small>
               <small class="selected-source-availability-note">
@@ -580,7 +604,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
+import { Rank } from '@element-plus/icons-vue';
 import DrawingPreviewLink from './DrawingPreviewLink.vue';
+import MaterialSuggestionOption from './MaterialSuggestionOption.vue';
 import StatusTag from './StatusTag.vue';
 import { erpApi, type StockSourceSelectionPayload } from '../api/erp';
 import type {
@@ -607,6 +633,7 @@ const props = defineProps<{
   draftReservedSources?: StockSourceSelectionPayload[];
   excludeOrderNo?: string;
   excludeOrderId?: string;
+  customerId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -635,13 +662,23 @@ const sourceSearchKeyword = ref('');
 const activeSearchFocusBatchNo = ref('');
 const inventorySuggestionRequestSeq = ref(0);
 const lastInventorySuggestions = ref<InventoryMaterialSuggestion[]>([]);
+const sourceSearchManualPickRequired = ref(false);
 const reviewConfirmChecked = ref(false);
 const bulkEachQuantity = ref(1);
 const manualConfirmForms = ref<Record<string, ManualConfirmForm>>({});
 const expandedMobileSourceBatchKeys = ref<string[]>([]);
+const draggedSelectedSourceIndex = ref<number | null>(null);
+const selectedSourceDragOverIndex = ref<number | null>(null);
+const selectedSourceDragInsertAfter = ref(false);
 const orderPreviewVisible = ref(false);
 const orderPreviewLoading = ref(false);
 const orderPreview = ref<OrderDetail | null>(null);
+const sourceSearchResultHint = computed(() => {
+  if (lastInventorySuggestions.value.some((item) => item.hasIdentityConflict)) {
+    return '同编码存在多套历史资料，请点击候选项确认';
+  }
+  return lastInventorySuggestions.value.length > 1 ? '匹配到多个物料，请选择具体零件' : '匹配到相似物料，请选择确认';
+});
 const draftReservedQuantityByBatchId = computed(() => {
   const rows = new Map<string, number>();
   for (const source of props.draftReservedSources || []) {
@@ -934,13 +971,15 @@ const hasExpectedInfo = computed(() => {
 
 async function queryInventorySuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
   const requestId = ++inventorySuggestionRequestSeq.value;
+  sourceSearchManualPickRequired.value = false;
   try {
     const result = await erpApi.inventoryMaterialSuggestions(
       keyword.trim(),
       undefined,
       'STOCK',
       props.excludeOrderNo,
-      props.excludeOrderId
+      props.excludeOrderId,
+      props.customerId
     );
     if (requestId === inventorySuggestionRequestSeq.value) {
       lastInventorySuggestions.value = result;
@@ -956,19 +995,35 @@ async function queryInventorySuggestions(keyword: string, callback: (items: Inve
 
 function handleInventorySuggestionSelect(item: InventoryMaterialSuggestion) {
   resetReviewConfirmation();
+  if (item.hasIdentityConflict) {
+    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，已按当前候选切换库存来源，请核对${materialIdentityConflictFieldsText(item)}`);
+  }
+  sourceSearchManualPickRequired.value = false;
   lastInventorySuggestions.value = [item];
   activeSearchFocusBatchNo.value = item.matchedBatchNo || '';
   sourceSearchKeyword.value = item.partName ? `${item.partCode} ${item.partName}` : item.partCode;
   emit('sourceSearch', item.partCode);
 }
 
-function materialSuggestionMatchText(item: InventoryMaterialSuggestion) {
-  const parts = [
-    item.matchedBatchNo ? `命中批次 ${item.matchedBatchNo}` : '',
-    item.matchedSourceOrderNo ? `订单 ${item.matchedSourceOrderNo}` : '',
-    item.matchedProductionTaskNo ? `任务 ${item.matchedProductionTaskNo}` : ''
-  ].filter(Boolean);
-  return parts.join(' / ');
+function canAutoSwitchInventorySuggestion(item: InventoryMaterialSuggestion) {
+  return !item.hasIdentityConflict;
+}
+
+function warnInventorySuggestionNeedsManualPick(item: InventoryMaterialSuggestion) {
+  if (item.hasIdentityConflict) {
+    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，请核对${materialIdentityConflictFieldsText(item)}，并点击候选项人工确认后再切换库存来源`);
+  }
+}
+
+function materialIdentityConflictFieldsText(item: InventoryMaterialSuggestion) {
+  return item.identityConflictFields?.length ? item.identityConflictFields.join('、') : '图号、规格、厚度和项目型号';
+}
+
+function keepInventorySuggestionManualPick(item: InventoryMaterialSuggestion) {
+  activeSearchFocusBatchNo.value = '';
+  sourceSearchManualPickRequired.value = true;
+  lastInventorySuggestions.value = [item];
+  warnInventorySuggestionNeedsManualPick(item);
 }
 
 async function searchInventoryKeyword() {
@@ -976,6 +1031,7 @@ async function searchInventoryKeyword() {
   resetReviewConfirmation();
   if (!keyword) {
     activeSearchFocusBatchNo.value = '';
+    sourceSearchManualPickRequired.value = false;
     lastInventorySuggestions.value = [];
     if (expected.value?.partCode) {
       emit('sourceSearch', expected.value.partCode);
@@ -983,13 +1039,26 @@ async function searchInventoryKeyword() {
     return;
   }
 
-  const exact = lastInventorySuggestions.value.find(
-    (item) => item.partCode.toLocaleLowerCase() === keyword.toLocaleLowerCase() || item.partName === keyword
+  const exactMatches = lastInventorySuggestions.value.filter(
+    (item) => normalizeValue(item.partCode) === normalizeValue(keyword) || normalizeValue(item.partName) === normalizeValue(keyword)
   );
-  if (exact) {
+  if (exactMatches.length === 1) {
+    const exact = exactMatches[0];
+    if (!canAutoSwitchInventorySuggestion(exact)) {
+      keepInventorySuggestionManualPick(exact);
+      return;
+    }
+    sourceSearchManualPickRequired.value = false;
     lastInventorySuggestions.value = [exact];
     activeSearchFocusBatchNo.value = exact.matchedBatchNo || '';
     emit('sourceSearch', exact.partCode);
+    return;
+  }
+  if (exactMatches.length > 1) {
+    activeSearchFocusBatchNo.value = '';
+    sourceSearchManualPickRequired.value = true;
+    lastInventorySuggestions.value = exactMatches;
+    ElMessage.warning('匹配到多个精确物料，请从下拉列表中选择具体零件');
     return;
   }
 
@@ -999,25 +1068,47 @@ async function searchInventoryKeyword() {
       undefined,
       'STOCK',
       props.excludeOrderNo,
-      props.excludeOrderId
+      props.excludeOrderId,
+      props.customerId
     );
     lastInventorySuggestions.value = suggestions;
-    const first = suggestions[0];
-    if (!first) {
+    if (!suggestions.length) {
       activeSearchFocusBatchNo.value = '';
+      sourceSearchManualPickRequired.value = false;
       ElMessage.warning('没有找到匹配物料');
       return;
     }
-    if (suggestions.length > 1) {
-      activeSearchFocusBatchNo.value = '';
-      ElMessage.warning(`找到 ${suggestions.length} 个匹配物料，请从下拉列表中选择具体零件`);
+    const exactSuggestions = suggestions.filter(
+      (item) => normalizeValue(item.partCode) === normalizeValue(keyword) || normalizeValue(item.partName) === normalizeValue(keyword)
+    );
+    if (exactSuggestions.length === 1) {
+      const exact = exactSuggestions[0];
+      if (!canAutoSwitchInventorySuggestion(exact)) {
+        keepInventorySuggestionManualPick(exact);
+        return;
+      }
+      sourceSearchManualPickRequired.value = false;
+      activeSearchFocusBatchNo.value = exact.matchedBatchNo || '';
+      sourceSearchKeyword.value = exact.partName ? `${exact.partCode} ${exact.partName}` : exact.partCode;
+      emit('sourceSearch', exact.partCode);
       return;
     }
-    activeSearchFocusBatchNo.value = first.matchedBatchNo || '';
-    sourceSearchKeyword.value = first.partName ? `${first.partCode} ${first.partName}` : first.partCode;
-    emit('sourceSearch', first.partCode);
+    sourceSearchManualPickRequired.value = true;
+    if (exactSuggestions.length > 1) {
+      activeSearchFocusBatchNo.value = '';
+      lastInventorySuggestions.value = exactSuggestions;
+      ElMessage.warning('匹配到多个精确物料，请从下拉列表中选择具体零件');
+      return;
+    }
+    activeSearchFocusBatchNo.value = '';
+    ElMessage.warning(
+      suggestions.length > 1
+        ? `找到 ${suggestions.length} 个匹配物料，请从下拉列表中选择具体零件`
+        : '找到 1 个相似物料，请点击结果确认后再切换库存来源'
+    );
   } catch (error) {
     activeSearchFocusBatchNo.value = '';
+    sourceSearchManualPickRequired.value = false;
     ElMessage.error(error instanceof Error ? error.message : '库存查询失败');
   }
 }
@@ -1025,6 +1116,7 @@ async function searchInventoryKeyword() {
 function searchExpectedPart() {
   if (expected.value?.partCode) {
     resetReviewConfirmation();
+    sourceSearchManualPickRequired.value = false;
     activeSearchFocusBatchNo.value = '';
     lastInventorySuggestions.value = [];
     sourceSearchKeyword.value = expected.value.partName ? `${expected.value.partCode} ${expected.value.partName}` : expected.value.partCode;
@@ -1413,13 +1505,103 @@ function handleSelectedSourceQuantityChange(source: StockSourceSelectionPayload,
 }
 
 function moveSelectedSource(index: number, direction: -1 | 1) {
-  const nextIndex = index + direction;
-  if (nextIndex < 0 || nextIndex >= selectedSourceRows.value.length) {
+  const insertionIndex = index + direction + (direction > 0 ? 1 : 0);
+  reorderSelectedSource(index, insertionIndex);
+}
+
+function startSelectedSourceDrag(event: DragEvent, index: number) {
+  draggedSelectedSourceIndex.value = index;
+  selectedSourceDragOverIndex.value = index;
+  selectedSourceDragInsertAfter.value = false;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
+}
+
+function handleSelectedSourceDragOver(event: DragEvent, index: number) {
+  if (draggedSelectedSourceIndex.value === null) {
+    return;
+  }
+  selectedSourceDragOverIndex.value = index;
+  selectedSourceDragInsertAfter.value = isSelectedSourceDragAfterRowMiddle(event);
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleSelectedSourceListDragLeave(event: DragEvent) {
+  if (draggedSelectedSourceIndex.value === null) {
+    return;
+  }
+  const listElement = event.currentTarget;
+  const nextElement = event.relatedTarget;
+  if (listElement instanceof HTMLElement && nextElement instanceof Node && listElement.contains(nextElement)) {
+    return;
+  }
+  selectedSourceDragOverIndex.value = null;
+  selectedSourceDragInsertAfter.value = false;
+}
+
+function handleSelectedSourceListDragOverEnd(event: DragEvent) {
+  if (draggedSelectedSourceIndex.value === null || selectedSourceRows.value.length === 0) {
+    return;
+  }
+  selectedSourceDragOverIndex.value = selectedSourceRows.value.length - 1;
+  selectedSourceDragInsertAfter.value = true;
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function dropSelectedSource(event: DragEvent, index: number) {
+  if (draggedSelectedSourceIndex.value === null) {
+    endSelectedSourceDrag();
+    return;
+  }
+  const insertionIndex = index + (isSelectedSourceDragAfterRowMiddle(event) ? 1 : 0);
+  reorderSelectedSource(draggedSelectedSourceIndex.value, insertionIndex);
+  endSelectedSourceDrag();
+}
+
+function dropSelectedSourceAtEnd() {
+  if (draggedSelectedSourceIndex.value === null) {
+    endSelectedSourceDrag();
+    return;
+  }
+  reorderSelectedSource(draggedSelectedSourceIndex.value, selectedSourceRows.value.length);
+  endSelectedSourceDrag();
+}
+
+function endSelectedSourceDrag() {
+  draggedSelectedSourceIndex.value = null;
+  selectedSourceDragOverIndex.value = null;
+  selectedSourceDragInsertAfter.value = false;
+}
+
+function isSelectedSourceDragAfterRowMiddle(event: DragEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2;
+}
+
+function reorderSelectedSource(index: number, insertionIndex: number) {
+  if (index < 0 || index >= selectedSourceRows.value.length) {
+    return;
+  }
+  let target = Math.max(0, Math.min(insertionIndex, selectedSourceRows.value.length));
+  if (index < target) {
+    target -= 1;
+  }
+  if (index === target) {
     return;
   }
   const rows = [...selectedSourceRows.value];
   const [current] = rows.splice(index, 1);
-  rows.splice(nextIndex, 0, current);
+  rows.splice(target, 0, current);
   resetReviewConfirmation();
   emit(
     'selectionChange',
@@ -1920,10 +2102,7 @@ watch(
 }
 
 .source-search-result {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto minmax(160px, auto);
-  gap: 8px;
-  align-items: center;
+  display: block;
   width: 100%;
   padding: 8px 10px;
   border: 1px solid #bfdbfe;
@@ -1938,11 +2117,6 @@ watch(
 .source-search-result:focus {
   border-color: #409eff;
   outline: none;
-}
-
-.source-search-result span {
-  color: #0f172a;
-  font-weight: 600;
 }
 
 .source-detail-body {
@@ -2212,8 +2386,9 @@ watch(
 }
 
 .selected-source-item {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(120px, 160px) auto auto auto;
+  grid-template-columns: 46px minmax(220px, 1fr) minmax(120px, 160px) auto auto auto;
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -2222,9 +2397,69 @@ watch(
   background: #ffffff;
 }
 
+.selected-source-item.is-dragging {
+  opacity: 0.55;
+}
+
+.selected-source-item.is-drop-before,
+.selected-source-item.is-drop-after {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.selected-source-item.is-drop-before::before,
+.selected-source-item.is-drop-after::after {
+  position: absolute;
+  right: 10px;
+  left: 10px;
+  height: 2px;
+  background: #2563eb;
+  content: '';
+}
+
+.selected-source-item.is-drop-before::before {
+  top: -6px;
+}
+
+.selected-source-item.is-drop-after::after {
+  bottom: -6px;
+}
+
 .selected-source-item > div {
   display: grid;
   gap: 3px;
+}
+
+.selected-source-item > .selected-source-order-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.selected-source-order-cell span {
+  color: #2563eb;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.selected-source-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  color: #64748b;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.selected-source-drag-handle:active {
+  cursor: grabbing;
 }
 
 .selected-source-item strong {

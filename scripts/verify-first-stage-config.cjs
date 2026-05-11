@@ -65,7 +65,8 @@ function verifyEnvExample() {
     'POSTGRES_DATA_DIR',
     'POSTGRES_BACKUP_DIR',
     'UPLOAD_DIR',
-    'EXPORT_DIR'
+    'EXPORT_DIR',
+    'API_BODY_LIMIT'
   ];
 
   for (const key of requiredEnvKeys) {
@@ -111,6 +112,7 @@ function verifyDockerCompose() {
   assertIncludes(backend, 'DATABASE_URL:', 'backend service environment');
   assertIncludes(backend, 'UPLOAD_DIR: /app/storage/uploads', 'backend service environment');
   assertIncludes(backend, 'EXPORT_DIR: /app/storage/exports', 'backend service environment');
+  assertIncludes(backend, 'API_BODY_LIMIT: ${API_BODY_LIMIT:-10mb}', 'backend service environment');
   assertIncludes(backend, '${UPLOAD_DIR:-./storage/uploads}:/app/storage/uploads', 'backend service volumes');
   assertIncludes(backend, '${EXPORT_DIR:-./storage/exports}:/app/storage/exports', 'backend service volumes');
   assertIncludes(backend, 'condition: service_healthy', 'backend service depends_on');

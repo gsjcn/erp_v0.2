@@ -130,8 +130,26 @@ export interface OrderSummary {
 export interface OrderLine {
   id: string;
   lineNo: number;
+  lineType?: 'PART' | 'COMPONENT';
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  importSequence?: string;
+  sourceImportSessionId?: string;
+  sourceImportFileId?: string;
+  sourceImportFileName?: string;
+  sourceImportFileUrl?: string;
+  sourceImportSheetName?: string;
+  sourceImportFileAvailable?: boolean;
+  sourceImportRowNo?: number;
+  projectModel?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   partCode: string;
   partName: string;
+  materialIdentityVariantCount?: number;
+  materialHasIdentityConflict?: boolean;
+  materialIdentityConflictFields?: string[];
   drawingNo?: string;
   drawingVersion?: string;
   drawingFileName?: string;
@@ -240,6 +258,12 @@ export interface ProductionTask {
   deliveryDate?: string;
   partCode: string;
   partName: string;
+  lineType?: 'PART' | 'COMPONENT';
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  importSequence?: string;
+  projectModel?: string;
   drawingNo?: string;
   drawingVersion?: string;
   drawingFileName?: string;
@@ -274,6 +298,12 @@ export interface ProductionOrderSummaryTask {
   productionTaskNo: string;
   partCode: string;
   partName: string;
+  lineType?: 'PART' | 'COMPONENT';
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  importSequence?: string;
+  projectModel?: string;
   plannedQuantity: number;
   unit: string;
   processSteps: string[];
@@ -690,12 +720,52 @@ export interface InventoryMaterialSuggestion {
   partName: string;
   unit: string;
   partSpecification?: string;
+  drawingNo?: string;
+  drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
+  partThickness?: number | null;
+  projectModel?: string;
   matchedBatchNo?: string;
   matchedSourceOrderNo?: string;
   matchedProductionTaskNo?: string;
+  searchMatchRank?: number;
+  searchMatchText?: string;
+  customerUsageCount?: number;
+  historyUsageCount?: number;
+  hasCurrentCustomerHistory?: boolean;
+  identityVariantCount?: number;
+  hasIdentityConflict?: boolean;
+  identityConflictFields?: string[];
+  lastCustomerCode?: string;
+  lastCustomerName?: string;
+  lastCustomerOrderNo?: string;
+  lastCustomerOrderDate?: string;
+  matchedCustomerCode?: string;
+  matchedCustomerName?: string;
+  matchedHistoryOrderNo?: string;
+  historyCustomerNames?: string[];
   availableQuantity: number;
   orderInventoryQuantity: number;
   stockInventoryQuantity: number;
+}
+
+export interface MaterialMemory {
+  id: string;
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  status: CommonStatus;
+  availableQuantity: number;
+  orderInventoryQuantity: number;
+  stockInventoryQuantity: number;
+  orderLineUsageCount: number;
+  lastOrderNo?: string;
+  lastCustomerName?: string;
+  lastOrderDate?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface InventorySourceBatchDetail {

@@ -91,7 +91,14 @@ export function buildPinyinSearchEntries(parts: Array<string | null | undefined>
 }
 
 function pinyinEntryMatchesKeyword(entry: PinyinSearchEntry, keyword: string) {
-  if (entry.type === 'raw' || entry.type === 'initials') {
+  if (entry.type === 'raw') {
+    if (entry.value.includes(keyword)) {
+      return true;
+    }
+    return isCodeLikeKeyword(keyword) && isSubsequenceSearchMatch(entry.value, keyword);
+  }
+
+  if (entry.type === 'initials') {
     return entry.value.includes(keyword);
   }
 
@@ -104,7 +111,28 @@ function pinyinEntryMatchesKeyword(entry: PinyinSearchEntry, keyword: string) {
     return entry.value.startsWith(keyword);
   }
 
+  if (entry.type === 'fullPinyin' && isCodeLikeKeyword(keyword) && isSubsequenceSearchMatch(entry.value, keyword)) {
+    return true;
+  }
+
   return entry.value.includes(keyword);
+}
+
+function isCodeLikeKeyword(keyword: string) {
+  return keyword.length >= 3 && /^[a-z0-9]+$/.test(keyword) && /\d/.test(keyword);
+}
+
+function isSubsequenceSearchMatch(value: string, keyword: string) {
+  let keywordIndex = 0;
+  for (const character of value) {
+    if (character === keyword[keywordIndex]) {
+      keywordIndex += 1;
+      if (keywordIndex === keyword.length) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function pinyinSearchMatches(parts: Array<string | null | undefined>, keyword?: string | null) {

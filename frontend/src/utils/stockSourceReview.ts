@@ -655,6 +655,18 @@ export function sanitizeOrderLinePayload(line: CreateOrderLinePayload, fallbackD
   const productionPlanQuantity = Math.max(Number(line.productionPlanQuantity ?? suggestedQuantity), 0);
   const planOverrideRequired = Math.abs(productionPlanQuantity - suggestedQuantity) > 0.0001;
   return {
+    lineType: line.lineType || 'PART',
+    partCategory: line.partCategory,
+    componentNo: line.componentNo,
+    parentComponentNo: line.parentComponentNo,
+    importSequence: line.importSequence,
+    sourceImportSessionId: line.sourceImportSessionId,
+    sourceImportFileId: line.sourceImportFileId,
+    sourceImportFileName: line.sourceImportFileName,
+    sourceImportRowNo: line.sourceImportRowNo,
+    projectModel: line.projectModel,
+    drawingDate: line.drawingDate,
+    drawingStatus: line.drawingStatus,
     partCode: line.partCode,
     partName: line.partName,
     drawingNo: line.drawingNo,

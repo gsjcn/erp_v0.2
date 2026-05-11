@@ -2,7 +2,7 @@
   <section class="page" v-loading="loading">
     <div class="page-header">
       <h2 class="page-title">订单明细</h2>
-      <div class="page-actions">
+      <div v-if="!isMobileLayout" class="page-actions order-detail-page-actions">
         <el-button :disabled="!order || order.status !== 'DRAFT'" @click="openEdit">编辑订单</el-button>
         <el-tooltip :content="additionalMaterialDisabledReason" :disabled="canAddAdditionalMaterial" placement="bottom">
           <span class="action-tooltip-wrap">
@@ -14,6 +14,7 @@
             <el-button type="danger" plain :disabled="!canCancelOrder" @click="openCancelOrder">取消订单</el-button>
           </span>
         </el-tooltip>
+        <el-button type="danger" plain :disabled="!order || order.status !== 'DRAFT'" @click="openDeleteDraftOrder">删除草稿</el-button>
         <el-button @click="goProcess">{{ processActionText }}</el-button>
         <el-button type="primary" :disabled="!order || order.status !== 'DRAFT'" :loading="saving" @click="openSubmitOrderDialog">提交生产</el-button>
       </div>
@@ -91,6 +92,13 @@
           <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">查看短缺零件</el-button>
         </template>
       </el-alert>
+      <el-alert
+        v-if="isMobileLayout"
+        title="手机端仅用于查看订单明细。编辑订单、删除草稿、补单、取消订单和提交生产请在电脑端操作，避免误操作。"
+        type="info"
+        :closable="false"
+        class="mt-16"
+      />
 
       <section v-if="orderNeedsReplenishmentAction" class="pending-shortage-panel mt-16">
         <div class="pending-shortage-header">
@@ -109,7 +117,13 @@
             <p>{{ formatLineShortageText(line) }}</p>
             <div class="pending-shortage-actions">
               <el-button size="small" plain @click="scrollToShortageLine(line)">定位</el-button>
-              <el-button v-if="lineNeedsReplenishmentAction(line)" size="small" type="warning" plain @click="openShortageResolution(line)">
+              <el-button
+                v-if="!isMobileLayout && lineNeedsReplenishmentAction(line)"
+                size="small"
+                type="warning"
+                plain
+                @click="openShortageResolution(line)"
+              >
                 处理补单
               </el-button>
             </div>
@@ -161,6 +175,19 @@
             <div class="line-title-main">
               <strong>{{ line.partName }}</strong>
               <span class="muted">{{ line.partCode }}</span>
+              <div class="import-line-tags">
+                <el-tag size="small" :type="line.lineType === 'COMPONENT' ? 'warning' : 'info'" effect="plain">
+                  {{ lineTypeLabel(line.lineType) }}
+                </el-tag>
+                <el-tag v-if="line.partCategory" size="small" effect="plain">{{ line.partCategory }}</el-tag>
+                <el-tag v-if="componentTraceText(line)" size="small" type="success" effect="plain">
+                  {{ componentTraceText(line) }}
+                </el-tag>
+                <el-tag v-if="materialIdentityConflictText(line)" size="small" type="warning" effect="plain">
+                  {{ materialIdentityConflictText(line) }}
+                </el-tag>
+                <el-tag v-if="line.importSequence" size="small" effect="plain">序号 {{ line.importSequence }}</el-tag>
+              </div>
             </div>
             <div class="line-title-actions">
               <span class="muted">订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
@@ -177,6 +204,7 @@
           </div>
           <div v-if="isMobileLayout" class="line-compact-summary">
             <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}</span>
+            <span v-if="componentTraceText(line)">{{ componentTraceText(line) }}</span>
             <span>计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
             <StatusTag :value="line.warehouseStage" compact />
           </div>
@@ -189,7 +217,7 @@
           </div>
           <div v-if="lineNeedsReplenishmentAction(line)" :id="`shortage-line-${line.id}`" class="line-replenishment-warning">
               <strong>{{ formatLineReplenishmentActionText(line) }}</strong>
-            <el-button size="small" type="warning" plain @click="openShortageResolution(line)">处理补单</el-button>
+            <el-button v-if="!isMobileLayout" size="small" type="warning" plain @click="openShortageResolution(line)">处理补单</el-button>
           </div>
           <div v-show="showOrderDetailLineDetails(line.id)" class="order-detail-line-body">
             <div class="muted">来源 {{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</div>
@@ -202,6 +230,18 @@
             <div class="muted">交期 {{ formatDate(line.deliveryDate || order.deliveryDate) }}</div>
             <div class="muted">{{ line.partCode }} / {{ line.drawingNo || '-' }} / 版本 {{ line.drawingVersion || '-' }}</div>
             <div class="muted">厚度 {{ line.partThickness }} mm / 成品规格 {{ line.partSpecification || '-' }}</div>
+            <div v-if="importTraceText(line)" class="import-source-trace">
+              <span>{{ importTraceText(line) }}</span>
+              <el-button v-if="line.sourceImportFileId" link type="primary" @click="openImportSourcePreview(line)">
+                预览来源Excel
+              </el-button>
+              <el-button v-if="line.sourceImportFileUrl" link type="primary" @click="openImportSourceFile(line.sourceImportFileUrl)">
+                打开原文件
+              </el-button>
+              <span v-else-if="line.sourceImportFileName && !line.sourceImportFileId" class="muted">
+                导入记忆已删除，不能预览原文件
+              </span>
+            </div>
             <div class="line-progress">{{ formatLineProductionProgressText(line) }}</div>
             <DrawingPreviewLink :file-name="line.drawingFileName" :file-url="line.drawingFileUrl" :title="`${line.partName} 图纸预览`" />
             <div class="process-chain mt-16">
@@ -210,7 +250,7 @@
                 {{ lineRequiresProductionProcess(line) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
               </span>
             </div>
-            <div class="line-actions">
+            <div v-if="!isMobileLayout" class="line-actions">
               <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
                 <span class="action-tooltip-wrap">
                   <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openReplenishment(line)">订单补单</el-button>
@@ -248,8 +288,31 @@
       <div class="table-card mt-24 desktop-table">
         <el-table :data="order.lines" max-height="max(260px, calc(100vh - 520px))">
           <el-table-column prop="lineNo" label="序号" width="80" />
+          <el-table-column label="组件结构" min-width="185">
+            <template #default="{ row }">
+              <div class="table-component-cell">
+                <div class="import-line-tags">
+                  <el-tag size="small" :type="row.lineType === 'COMPONENT' ? 'warning' : 'info'" effect="plain">
+                    {{ lineTypeLabel(row.lineType) }}
+                  </el-tag>
+                  <el-tag v-if="row.partCategory" size="small" effect="plain">{{ row.partCategory }}</el-tag>
+                </div>
+                <span v-if="componentTraceText(row)" class="component-trace-text">{{ componentTraceText(row) }}</span>
+                <span v-if="row.importSequence" class="muted">Excel 序号 {{ row.importSequence }}</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="partCode" label="零件编码" width="140" />
-          <el-table-column prop="partName" label="零件名称" min-width="180" />
+          <el-table-column label="零件名称" min-width="210">
+            <template #default="{ row }">
+              <div class="table-material-cell">
+                <span>{{ row.partName }}</span>
+                <small v-if="materialIdentityConflictText(row)" class="material-identity-warning">
+                  {{ materialIdentityConflictText(row) }}
+                </small>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="drawingNo" label="图号" width="150" />
           <el-table-column prop="drawingVersion" label="图纸版本" width="100" />
           <el-table-column label="厚度(mm)" width="110">
@@ -267,6 +330,22 @@
                 :title="`${row.partName} 图纸预览`"
               />
               <span v-else class="muted">未上传</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="导入来源" min-width="260">
+            <template #default="{ row }">
+              <div v-if="importTraceText(row)" class="import-source-trace compact">
+                <span>{{ importTraceText(row) }}</span>
+                <div class="import-source-actions">
+                  <el-button v-if="row.sourceImportFileId" link type="primary" @click="openImportSourcePreview(row)">
+                    预览Excel
+                  </el-button>
+                  <el-button v-if="row.sourceImportFileUrl" link type="primary" @click="openImportSourceFile(row.sourceImportFileUrl)">
+                    原文件
+                  </el-button>
+                </div>
+              </div>
+              <span v-else class="muted">-</span>
             </template>
           </el-table-column>
           <el-table-column label="零件交期" width="120">
@@ -415,6 +494,7 @@
         <OrderLineEditor
           :lines="editForm.lines"
           :default-delivery-date="editForm.deliveryDate"
+          :customer-id="order?.customerId || ''"
           :exclude-order-no="order?.orderNo || ''"
           :exclude-order-id="order?.id || ''"
           :inventory-summary="inventorySummary"
@@ -425,6 +505,24 @@
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="saveEdit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="deleteDraftVisible" title="删除草稿订单" width="min(560px, calc(100vw - 32px))" class="responsive-dialog">
+      <el-alert
+        title="只允许删除未提交生产、未产生生产和库存记录的草稿订单。删除后会释放该草稿订单的订单号，可修正 Excel 后重新导入。"
+        type="warning"
+        :closable="false"
+        class="mb-16"
+      />
+      <div v-if="order" class="delete-draft-summary">
+        <div><span>订单号</span><strong>{{ order.orderNo }}</strong></div>
+        <div><span>客户</span><strong>{{ order.customerName }}</strong></div>
+        <div><span>零件数</span><strong>{{ order.partCount }} 个</strong></div>
+      </div>
+      <template #footer>
+        <el-button @click="deleteDraftVisible = false">取消</el-button>
+        <el-button type="danger" :loading="saving" @click="deleteDraftOrder">确认删除草稿</el-button>
       </template>
     </el-dialog>
 
@@ -447,8 +545,10 @@
 
         <OrderLineEditor
           :lines="additionalMaterialLines"
+          :component-source-lines="existingOrderComponentLines"
           :min-lines="1"
           :default-delivery-date="order?.deliveryDate?.slice(0, 10) || ''"
+          :customer-id="order?.customerId || ''"
           :exclude-order-no="order?.orderNo || ''"
           :exclude-order-id="order?.id || ''"
           :inventory-summary="inventorySummary"
@@ -478,13 +578,39 @@
                 <el-button :loading="creatingProcess" @click="createAdditionalProcessDefinition">新建工序</el-button>
                 <el-button @click="processDefinitionManagerVisible = true">管理工序</el-button>
               </div>
-              <div class="additional-process-steps">
+              <div
+                class="additional-process-steps"
+                @dragover.self.prevent="handleAdditionalProcessListDragOverEnd"
+                @dragleave="handleAdditionalProcessListDragLeave"
+                @drop.self.prevent="dropAdditionalMaterialProcessAtEnd"
+              >
                 <div
                   v-for="(step, index) in additionalMaterialProcessSteps"
-                  :key="`${index}-${step.processName}`"
+                  :key="additionalMaterialProcessStepKey(step)"
                   class="additional-process-row"
+                  :class="{
+                    'is-dragging': draggedAdditionalProcessIndex === index,
+                    'is-drop-before': additionalProcessDragOverIndex === index && !additionalProcessDragInsertAfter,
+                    'is-drop-after': additionalProcessDragOverIndex === index && additionalProcessDragInsertAfter
+                  }"
+                  @dragenter.prevent="handleAdditionalProcessDragOver($event, index)"
+                  @dragover.prevent="handleAdditionalProcessDragOver($event, index)"
+                  @drop.prevent="dropAdditionalMaterialProcess($event, index)"
                 >
-                  <span class="step-index">{{ index + 1 }}</span>
+                  <div class="additional-process-sort-cell">
+                    <button
+                      type="button"
+                      class="additional-process-drag-handle"
+                      draggable="true"
+                      title="拖拽调整顺序"
+                      aria-label="拖拽调整顺序"
+                      @dragstart.stop="startAdditionalProcessDrag($event, index)"
+                      @dragend="endAdditionalProcessDrag"
+                    >
+                      <el-icon><Rank /></el-icon>
+                    </button>
+                    <span class="step-index">{{ index + 1 }}</span>
+                  </div>
                   <el-select
                     v-model="step.processName"
                     filterable
@@ -561,6 +687,21 @@
           type="warning"
           :closable="false"
         />
+        <el-alert
+          v-if="submitOrderMaterialIdentityWarnings.length"
+          :title="`发现 ${submitOrderMaterialIdentityWarnings.length} 个同编码多套历史资料零件，提交前必须核对图号、规格和厚度。`"
+          type="warning"
+          :closable="false"
+          class="mt-12"
+        >
+          <template #default>
+            <ul class="submit-order-warning-list">
+              <li v-for="warning in submitOrderMaterialIdentityWarnings" :key="warning">
+                {{ warning }}
+              </li>
+            </ul>
+          </template>
+        </el-alert>
         <el-form label-width="108px" class="submit-plan-form">
           <el-form-item label="下单/计划操作员" required>
             <el-select
@@ -588,6 +729,11 @@
               </el-option>
             </el-select>
             <div class="form-help-text">提交生产属于下单/计划动作；车间主任只在生产页开始生产、确认生产。</div>
+          </el-form-item>
+          <el-form-item v-if="submitOrderMaterialIdentityWarnings.length" label="资料核对" required>
+            <el-checkbox v-model="submitMaterialIdentityConfirmed">
+              已核对同编码多套历史资料零件的图号、规格、厚度和项目型号
+            </el-checkbox>
           </el-form-item>
         </el-form>
         <div class="submit-order-summary">
@@ -623,7 +769,14 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="closeSubmitOrderDialog">返回</el-button>
-        <el-button type="primary" :disabled="!submitPlanOperatorCode || submitOrderBlockingWarnings.length > 0" :loading="saving" @click="confirmSubmitOrder">确认提交生产</el-button>
+        <el-button
+          type="primary"
+          :disabled="!submitPlanOperatorCode || submitOrderBlockingWarnings.length > 0 || submitOrderMaterialIdentityConfirmRequired"
+          :loading="saving"
+          @click="confirmSubmitOrder"
+        >
+          确认提交生产
+        </el-button>
       </template>
     </el-dialog>
 
@@ -870,14 +1023,91 @@
         <el-button type="danger" :loading="saving" @click="saveCancelOrder">确认取消订单</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="importSourcePreviewVisible"
+      title="来源 Excel 预览"
+      width="min(1180px, calc(100vw - 32px))"
+      class="responsive-dialog"
+    >
+      <div v-loading="importSourcePreviewLoading" class="import-source-preview">
+        <template v-if="importSourcePreview">
+          <div class="import-source-preview-header">
+            <div>
+              <strong>{{ displayImportSourceFileName(importSourcePreview.file.fileName) }}</strong>
+              <span>
+                {{ importSourcePreview.file.sheetName || 'ERP上传净表' }} /
+                当前订单已加载 {{ importSourcePreview.rows.length }} / {{ importSourcePreview.rowPage.totalCount }} 行 /
+                原文件 {{ importSourcePreview.file.rowCount }} 行
+              </span>
+            </div>
+            <el-button v-if="importSourcePreview.file.fileUrl" @click="openImportSourceFile(importSourcePreview.file.fileUrl)">
+              打开原 Excel
+            </el-button>
+          </div>
+          <el-table :data="importSourcePreview.rows" max-height="520" size="small">
+            <el-table-column prop="sourceRowNo" label="Excel行" width="82" />
+            <el-table-column prop="importSequence" label="序号" width="82" />
+            <el-table-column label="结构" min-width="150">
+              <template #default="{ row }">
+                <div class="import-line-tags">
+                  <el-tag size="small" :type="row.lineType === 'COMPONENT' ? 'warning' : 'info'" effect="plain">
+                    {{ importSourcePreviewLineTypeLabel(row.lineType) }}
+                  </el-tag>
+                  <el-tag v-if="row.componentNo" size="small" type="success" effect="plain">组件 {{ row.componentNo }}</el-tag>
+                  <el-tag v-if="row.parentComponentNo" size="small" type="success" effect="plain">
+                    属于 {{ row.parentComponentNo }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="partCategory" label="零件类型" width="100" />
+            <el-table-column prop="partCode" label="物料号" min-width="150" />
+            <el-table-column prop="drawingNo" label="图号" min-width="150" />
+            <el-table-column prop="partName" label="产品名称" min-width="170" />
+            <el-table-column prop="partThickness" label="厚度" width="90" />
+            <el-table-column label="数量" min-width="170">
+              <template #default="{ row }">
+                订单 {{ row.orderQuantity ?? '-' }} / 单套 {{ row.unitUsage ?? '-' }} / 需求
+                {{ formatQuantity(row.demandQuantity, row.unit) }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="processRoute" label="工艺路线" min-width="180" />
+            <el-table-column prop="processRemark" label="工艺备注" min-width="220" />
+            <el-table-column label="图纸状态" min-width="150">
+              <template #default="{ row }">
+                {{ row.drawingDate || '-' }} / {{ row.drawingStatus || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="校验" min-width="220">
+              <template #default="{ row }">
+                <span v-if="formatImportSourcePreviewIssues(row)">{{ formatImportSourcePreviewIssues(row) }}</span>
+                <span v-else class="muted">无错误</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="import-source-preview-footer">
+            <span>已加载 {{ importSourcePreview.rows.length }} / {{ importSourcePreview.rowPage.totalCount }} 行</span>
+            <el-button
+              v-if="importSourcePreview.rowPage.hasMore"
+              size="small"
+              :loading="importSourcePreviewLoading"
+              @click="loadMoreImportSourcePreviewRows"
+            >
+              加载更多行
+            </el-button>
+          </div>
+        </template>
+      </div>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import type { CreateOrderLinePayload } from '../api/erp';
+import type { CreateOrderLinePayload, OrderImportSourceFilePreview } from '../api/erp';
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { WarningFilled } from '@element-plus/icons-vue';
+import { Rank, WarningFilled } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
@@ -912,6 +1142,7 @@ import {
   validateDraftStockSourceLines
 } from '../utils/stockSourceReview';
 import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
+import { normalizeDisplayFileName } from '../utils/fileNames';
 
 const route = useRoute();
 const router = useRouter();
@@ -921,6 +1152,7 @@ const inventorySummary = ref<InventorySummaryRow[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 const editVisible = ref(false);
+const deleteDraftVisible = ref(false);
 const additionalMaterialVisible = ref(false);
 const replenishmentVisible = ref(false);
 const shortageResolutionVisible = ref(false);
@@ -929,6 +1161,11 @@ const quantityChangeVisible = ref(false);
 const cancelOrderVisible = ref(false);
 const processDefinitionManagerVisible = ref(false);
 const submitOrderVisible = ref(false);
+const importSourcePreviewVisible = ref(false);
+const importSourcePreviewLoading = ref(false);
+const importSourcePreview = ref<OrderImportSourceFilePreview>();
+const importSourcePreviewRowPageSize = 200;
+const submitMaterialIdentityConfirmed = ref(false);
 const submitPlanOperatorCode = ref('');
 const submitPlanOperators = ref<ProductionOperator[]>([]);
 const submitPlanOperatorLoading = ref(false);
@@ -952,6 +1189,11 @@ const editForm = ref<{
 });
 const additionalMaterialLines = ref<CreateOrderLinePayload[]>([newLine(0)]);
 const additionalMaterialProcessSteps = ref<ProcessStepDetail[]>([]);
+const additionalMaterialProcessStepKeys = new WeakMap<ProcessStepDetail, string>();
+let additionalMaterialProcessStepKeySeq = 0;
+const draggedAdditionalProcessIndex = ref<number | null>(null);
+const additionalProcessDragOverIndex = ref<number | null>(null);
+const additionalProcessDragInsertAfter = ref(false);
 const additionalMaterialForm = ref({
   managerName: '',
   reason: ''
@@ -1005,6 +1247,23 @@ type CancelHandlingPlanRow = {
 const cancelHandlingPlanRows = ref<CancelHandlingPlanRow[]>([]);
 const submitPlanOperatorOptionRows = computed(() => operatorRowsWithSelected(submitPlanOperators.value, submitPlanOperatorCode.value));
 const submitOrderBlockingWarnings = computed(() => (order.value?.lines || []).map((line) => submitOrderLineWarning(line)).filter(Boolean));
+const submitOrderMaterialIdentityWarnings = computed(() =>
+  (order.value?.lines || [])
+    .filter((line) => Boolean(materialIdentityConflictText(line)))
+    .map((line) => `${line.importSequence ? `序号 ${line.importSequence} / ` : ''}${line.partCode} / ${line.partName}：${materialIdentityConflictText(line)}`)
+);
+const submitOrderMaterialIdentityConfirmRequired = computed(
+  () => submitOrderMaterialIdentityWarnings.value.length > 0 && !submitMaterialIdentityConfirmed.value
+);
+const existingOrderComponentLines = computed(
+  () =>
+    order.value?.lines.map((line) => ({
+      lineType: line.lineType || 'PART',
+      componentNo: line.componentNo || '',
+      partName: line.partName,
+      partCode: line.partCode
+    })) || []
+);
 const canAddAdditionalMaterial = computed(() =>
   Boolean(
     order.value &&
@@ -1159,6 +1418,9 @@ async function loadOrder() {
 
 function goProcess() {
   if (order.value) {
+    if (!requireDesktopOrderMutation(order.value.status === 'DRAFT' ? '提交生产' : '查看生产流程')) {
+      return;
+    }
     if (order.value.status !== 'DRAFT') {
       if (orderWarehouseActionText(order.value)) {
         void router.push({
@@ -1190,14 +1452,37 @@ function goProcess() {
   }
 }
 
+function requireDesktopOrderMutation(actionName: string) {
+  if (!isMobileLayout.value) {
+    return true;
+  }
+  ElMessage.warning(`${actionName}请在电脑端操作；手机端仅用于查看订单明细，避免误操作。`);
+  return false;
+}
+
 async function openEdit() {
   if (!order.value || order.value.status !== 'DRAFT') {
+    return;
+  }
+  if (!requireDesktopOrderMutation('编辑订单')) {
     return;
   }
   if (!(await loadInventorySummary())) {
     return;
   }
   const lines = order.value.lines.map((line) => ({
+    lineType: line.lineType || 'PART',
+    partCategory: line.partCategory || '',
+    componentNo: line.componentNo || '',
+    parentComponentNo: line.parentComponentNo || '',
+    importSequence: line.importSequence || '',
+    sourceImportSessionId: line.sourceImportSessionId || '',
+    sourceImportFileId: line.sourceImportFileId || '',
+    sourceImportFileName: line.sourceImportFileName || '',
+    sourceImportRowNo: line.sourceImportRowNo,
+    projectModel: line.projectModel || '',
+    drawingDate: line.drawingDate ? line.drawingDate.substring(0, 10) : undefined,
+    drawingStatus: line.drawingStatus || '',
     partCode: line.partCode,
     partName: line.partName,
     drawingNo: line.drawingNo,
@@ -1292,6 +1577,9 @@ function processStepDisplay(line: OrderLine, processName: string) {
 
 async function openAdditionalMaterial() {
   if (!order.value) {
+    return;
+  }
+  if (!requireDesktopOrderMutation('新增补单物料')) {
     return;
   }
   if (!canAddAdditionalMaterial.value) {
@@ -1411,8 +1699,109 @@ function addAdditionalMaterialProcess(processName: string) {
 }
 
 function moveAdditionalMaterialProcess(index: number, offset: number) {
-  const target = index + offset;
-  if (target < 0 || target >= additionalMaterialProcessSteps.value.length) {
+  const target = index + offset + (offset > 0 ? 1 : 0);
+  reorderAdditionalMaterialProcess(index, target);
+}
+
+function additionalMaterialProcessStepKey(step: ProcessStepDetail) {
+  const existingKey = additionalMaterialProcessStepKeys.get(step);
+  if (existingKey) {
+    return existingKey;
+  }
+  const key = `additional-process-step-${++additionalMaterialProcessStepKeySeq}`;
+  additionalMaterialProcessStepKeys.set(step, key);
+  return key;
+}
+
+function startAdditionalProcessDrag(event: DragEvent, index: number) {
+  draggedAdditionalProcessIndex.value = index;
+  additionalProcessDragOverIndex.value = index;
+  additionalProcessDragInsertAfter.value = false;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
+}
+
+function handleAdditionalProcessDragOver(event: DragEvent, index: number) {
+  if (draggedAdditionalProcessIndex.value === null) {
+    return;
+  }
+  additionalProcessDragOverIndex.value = index;
+  additionalProcessDragInsertAfter.value = isAdditionalProcessDragAfterRowMiddle(event);
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleAdditionalProcessListDragLeave(event: DragEvent) {
+  if (draggedAdditionalProcessIndex.value === null) {
+    return;
+  }
+  const listElement = event.currentTarget;
+  const nextElement = event.relatedTarget;
+  if (listElement instanceof HTMLElement && nextElement instanceof Node && listElement.contains(nextElement)) {
+    return;
+  }
+  additionalProcessDragOverIndex.value = null;
+  additionalProcessDragInsertAfter.value = false;
+}
+
+function handleAdditionalProcessListDragOverEnd(event: DragEvent) {
+  if (draggedAdditionalProcessIndex.value === null || additionalMaterialProcessSteps.value.length === 0) {
+    return;
+  }
+  additionalProcessDragOverIndex.value = additionalMaterialProcessSteps.value.length - 1;
+  additionalProcessDragInsertAfter.value = true;
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function dropAdditionalMaterialProcess(event: DragEvent, index: number) {
+  if (draggedAdditionalProcessIndex.value === null) {
+    endAdditionalProcessDrag();
+    return;
+  }
+  const insertionIndex = index + (isAdditionalProcessDragAfterRowMiddle(event) ? 1 : 0);
+  reorderAdditionalMaterialProcess(draggedAdditionalProcessIndex.value, insertionIndex);
+  endAdditionalProcessDrag();
+}
+
+function dropAdditionalMaterialProcessAtEnd() {
+  if (draggedAdditionalProcessIndex.value === null) {
+    endAdditionalProcessDrag();
+    return;
+  }
+  reorderAdditionalMaterialProcess(draggedAdditionalProcessIndex.value, additionalMaterialProcessSteps.value.length);
+  endAdditionalProcessDrag();
+}
+
+function endAdditionalProcessDrag() {
+  draggedAdditionalProcessIndex.value = null;
+  additionalProcessDragOverIndex.value = null;
+  additionalProcessDragInsertAfter.value = false;
+  additionalProcessFilterKeyword.value = '';
+}
+
+function isAdditionalProcessDragAfterRowMiddle(event: DragEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2;
+}
+
+function reorderAdditionalMaterialProcess(index: number, insertionIndex: number) {
+  if (index < 0 || index >= additionalMaterialProcessSteps.value.length) {
+    return;
+  }
+  let target = Math.max(0, Math.min(insertionIndex, additionalMaterialProcessSteps.value.length));
+  if (index < target) {
+    target -= 1;
+  }
+  if (index === target) {
     return;
   }
   const steps = [...additionalMaterialProcessSteps.value];
@@ -1447,6 +1836,9 @@ function normalizeProcessNameKey(processName: string) {
 }
 
 function openReplenishment(line: OrderLine) {
+  if (!requireDesktopOrderMutation('订单补单')) {
+    return;
+  }
   if (!canCreateProductionChange(line)) {
     ElMessage.warning('该物料还没有开始生产，请修改订单，不要创建补单');
     return;
@@ -1461,6 +1853,9 @@ function openReplenishment(line: OrderLine) {
 }
 
 function openQuantityChange(line: OrderLine) {
+  if (!requireDesktopOrderMutation('生产数量变更')) {
+    return;
+  }
   if (!canCreateProductionChange(line)) {
     ElMessage.warning('该物料还没有开始生产，请修改订单，不要走生产数量变更');
     return;
@@ -1513,6 +1908,9 @@ function cancelReplenishmentDisabledReason(task: OrderLineProductionTask) {
 }
 
 function openCancelReplenishment(line: OrderLine, task: OrderLineProductionTask) {
+  if (!requireDesktopOrderMutation('取消补单')) {
+    return;
+  }
   if (!task.canCancelReplenishment) {
     ElMessage.warning(cancelReplenishmentDisabledReason(task));
     return;
@@ -1530,6 +1928,9 @@ function openCancelOrder() {
   if (!order.value) {
     return;
   }
+  if (!requireDesktopOrderMutation('取消订单')) {
+    return;
+  }
   if (!canCancelOrder.value) {
     ElMessage.warning(cancelOrderDisabledReason.value || '当前订单不能取消');
     return;
@@ -1542,6 +1943,34 @@ function openCancelOrder() {
   };
   cancelHandlingPlanRows.value = buildCancelHandlingPlanRows(order.value);
   cancelOrderVisible.value = true;
+}
+
+function openDeleteDraftOrder() {
+  if (!requireDesktopOrderMutation('删除草稿')) {
+    return;
+  }
+  if (!order.value || order.value.status !== 'DRAFT') {
+    ElMessage.warning('只有待提交生产草稿订单可以删除');
+    return;
+  }
+  deleteDraftVisible.value = true;
+}
+
+async function deleteDraftOrder() {
+  if (!order.value) {
+    return;
+  }
+  saving.value = true;
+  try {
+    await erpApi.deleteDraftOrder(order.value.orderNo);
+    ElMessage.success('草稿订单已删除');
+    deleteDraftVisible.value = false;
+    await router.push('/orders');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '草稿订单删除失败');
+  } finally {
+    saving.value = false;
+  }
 }
 
 function taskHasProductionProgress(task: OrderLineProductionTask) {
@@ -1610,6 +2039,11 @@ function collectCancelHandlingPlan() {
 
 function newLine(index: number): CreateOrderLinePayload {
   return {
+    lineType: 'PART',
+    partCategory: '',
+    componentNo: '',
+    parentComponentNo: '',
+    importSequence: '',
     partCode: `P-${Date.now().toString().slice(-4)}-${index + 1}`,
     partName: '',
     drawingNo: '',
@@ -1628,8 +2062,21 @@ function newLine(index: number): CreateOrderLinePayload {
   };
 }
 
+function inheritedParentComponentNo(lines: CreateOrderLinePayload[]) {
+  const previousLine = lines[lines.length - 1];
+  if (!previousLine) {
+    return '';
+  }
+  if (previousLine.lineType === 'COMPONENT') {
+    return previousLine.componentNo?.trim().toUpperCase() || '';
+  }
+  return previousLine.parentComponentNo?.trim().toUpperCase() || '';
+}
+
 function addLine() {
-  editForm.value.lines.push(newLine(editForm.value.lines.length));
+  const line = newLine(editForm.value.lines.length);
+  line.parentComponentNo = inheritedParentComponentNo(editForm.value.lines);
+  editForm.value.lines.push(line);
 }
 
 function removeLine(index: number) {
@@ -1947,6 +2394,117 @@ function fulfillmentModeLabel(mode?: string) {
   return '重新生产';
 }
 
+function lineTypeLabel(lineType?: string) {
+  return lineType === 'COMPONENT' ? '组件' : '零件';
+}
+
+function componentTraceText(line: OrderLine | CreateOrderLinePayload) {
+  if (line.lineType === 'COMPONENT' && line.componentNo) {
+    return `组件 ${line.componentNo}`;
+  }
+  if (line.parentComponentNo) {
+    return `属于 ${line.parentComponentNo}`;
+  }
+  return '';
+}
+
+function materialIdentityConflictText(line: OrderLine | CreateOrderLinePayload) {
+  const detailLine = line as OrderLine;
+  if (!detailLine.materialHasIdentityConflict) {
+    return '';
+  }
+  const fields = detailLine.materialIdentityConflictFields?.length
+    ? detailLine.materialIdentityConflictFields.join('、')
+    : '图号/规格/厚度';
+  return `同编码 ${detailLine.materialIdentityVariantCount || '多'} 套历史资料，核对${fields}`;
+}
+
+function importSourcePreviewLineTypeLabel(lineType?: string) {
+  return lineType === 'COMPONENT' ? '组件' : '零件';
+}
+
+function formatImportSourcePreviewIssues(row: OrderImportSourceFilePreview['rows'][number]) {
+  return row.issues?.map((issue) => issue.message).filter(Boolean).join('；') || '';
+}
+
+function displayImportSourceFileName(fileName?: string | null) {
+  return normalizeDisplayFileName(fileName);
+}
+
+function importTraceText(line: OrderLine | CreateOrderLinePayload) {
+  const parts = [];
+  if (line.projectModel) {
+    parts.push(`项目型号 ${line.projectModel}`);
+  }
+  if (line.sourceImportFileName) {
+    parts.push(`来源文件 ${displayImportSourceFileName(line.sourceImportFileName)}`);
+  }
+  const sheetName = 'sourceImportSheetName' in line ? line.sourceImportSheetName : undefined;
+  if (sheetName) {
+    parts.push(`工作表 ${sheetName}`);
+  }
+  if (line.sourceImportRowNo) {
+    parts.push(`Excel 第 ${line.sourceImportRowNo} 行`);
+  }
+  return parts.length ? `导入追溯：${parts.join(' / ')}` : '';
+}
+
+async function openImportSourcePreview(line: OrderLine) {
+  if (!order.value) {
+    return;
+  }
+  if (!line.sourceImportFileId) {
+    ElMessage.warning(line.sourceImportFileName ? '导入记忆已删除，无法预览来源 Excel' : '该零件没有来源 Excel 记录');
+    return;
+  }
+  importSourcePreviewVisible.value = true;
+  importSourcePreviewLoading.value = true;
+  try {
+    importSourcePreview.value = await erpApi.orderImportSourceFilePreview(
+      order.value.orderNo,
+      line.sourceImportFileId,
+      importSourcePreviewRowPageSize,
+      0
+    );
+  } catch (error) {
+    importSourcePreviewVisible.value = false;
+    ElMessage.error(error instanceof Error ? error.message : '来源 Excel 预览失败');
+  } finally {
+    importSourcePreviewLoading.value = false;
+  }
+}
+
+async function loadMoreImportSourcePreviewRows() {
+  if (!order.value || !importSourcePreview.value?.file.id || !importSourcePreview.value.rowPage.hasMore) {
+    return;
+  }
+  importSourcePreviewLoading.value = true;
+  try {
+    const nextPreview = await erpApi.orderImportSourceFilePreview(
+      order.value.orderNo,
+      importSourcePreview.value.file.id,
+      importSourcePreviewRowPageSize,
+      importSourcePreview.value.rows.length
+    );
+    importSourcePreview.value = {
+      ...nextPreview,
+      rows: [...importSourcePreview.value.rows, ...nextPreview.rows]
+    };
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '来源 Excel 预览加载失败');
+  } finally {
+    importSourcePreviewLoading.value = false;
+  }
+}
+
+function openImportSourceFile(fileUrl?: string) {
+  if (!fileUrl) {
+    ElMessage.warning('来源 Excel 原文件已删除，无法打开');
+    return;
+  }
+  window.open(fileUrl, '_blank', 'noopener,noreferrer');
+}
+
 function formatOrderQuantity(row: OrderDetail, field: 'totalQuantity' | 'totalProductionPlanQuantity') {
   if (row.quantityByUnit?.length) {
     return row.quantityByUnit.map((item) => formatQuantity(item[field], item.unit)).join(' / ');
@@ -2159,6 +2717,9 @@ function scrollToShortageLine(line: OrderLine) {
 }
 
 function openShortageResolution(line: OrderLine) {
+  if (!requireDesktopOrderMutation('处理补单')) {
+    return;
+  }
   activeLine.value = line;
   shortageResolutionForm.value = {
     managerName: '',
@@ -2169,6 +2730,9 @@ function openShortageResolution(line: OrderLine) {
 
 function createReplenishmentFromShortage() {
   if (!activeLine.value) {
+    return;
+  }
+  if (!requireDesktopOrderMutation('创建订单补单')) {
     return;
   }
   const line = activeLine.value;
@@ -2183,6 +2747,9 @@ function createReplenishmentFromShortage() {
 
 function openQuantityChangeFromShortage() {
   if (!activeLine.value) {
+    return;
+  }
+  if (!requireDesktopOrderMutation('客户确认减少数量')) {
     return;
   }
   const line = activeLine.value;
@@ -2378,11 +2945,15 @@ async function openSubmitOrderDialog() {
   if (!order.value) {
     return;
   }
+  if (!requireDesktopOrderMutation('提交生产')) {
+    return;
+  }
   if (order.value.status !== 'DRAFT') {
     ElMessage.warning('只有待提交生产订单允许提交生产');
     return;
   }
   submitPlanOperatorCode.value = '';
+  submitMaterialIdentityConfirmed.value = submitOrderMaterialIdentityWarnings.value.length === 0;
   await loadSubmitPlanOperators('');
   submitOrderVisible.value = true;
 }
@@ -2396,6 +2967,7 @@ function closeSubmitOrderDialog() {
 
 function resetSubmitOrderDialog() {
   submitPlanOperatorCode.value = '';
+  submitMaterialIdentityConfirmed.value = false;
 }
 
 async function confirmSubmitOrder() {
@@ -2408,6 +2980,10 @@ async function confirmSubmitOrder() {
   }
   if (submitOrderBlockingWarnings.value.length > 0) {
     ElMessage.warning(submitOrderBlockingWarnings.value[0]);
+    return;
+  }
+  if (submitOrderMaterialIdentityConfirmRequired.value) {
+    ElMessage.warning('请先确认已核对同编码多套历史资料零件');
     return;
   }
   saving.value = true;
@@ -2426,7 +3002,10 @@ async function confirmSubmitOrder() {
       return;
     }
     const submittedOrderNo = order.value.orderNo;
-    order.value = await erpApi.submitOrder(submittedOrderNo, { submittedByCode: submitPlanOperatorCode.value });
+    order.value = await erpApi.submitOrder(submittedOrderNo, {
+      submittedByCode: submitPlanOperatorCode.value,
+      materialIdentityConfirmed: submitMaterialIdentityConfirmed.value || submitOrderMaterialIdentityWarnings.value.length === 0
+    });
     submitOrderVisible.value = false;
     if (submittedOrderShouldGoWarehouse(order.value)) {
       ElMessage.success('订单已提交生产，库存已进入仓库待发货');
@@ -2647,6 +3226,14 @@ onBeforeUnmount(() => {
   color: #b45309;
 }
 
+.submit-order-warning-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #92400e;
+  font-size: 13px;
+  line-height: 20px;
+}
+
 .order-edit-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -2727,6 +3314,98 @@ onBeforeUnmount(() => {
 .line-title-main strong,
 .line-title-main span {
   overflow-wrap: anywhere;
+}
+
+.import-line-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.import-source-trace {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.import-source-trace.compact {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.import-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.import-source-preview {
+  min-height: 180px;
+}
+
+.import-source-preview-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.import-source-preview-header > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.import-source-preview-header strong,
+.import-source-preview-header span {
+  overflow-wrap: anywhere;
+}
+
+.import-source-preview-header span {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.import-source-preview-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.table-component-cell {
+  display: grid;
+  gap: 5px;
+}
+
+.table-material-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.material-identity-warning {
+  color: #d97706;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.component-trace-text {
+  color: #166534;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .line-title-actions {
@@ -3000,14 +3679,70 @@ onBeforeUnmount(() => {
 }
 
 .additional-process-row {
+  position: relative;
   display: grid;
-  grid-template-columns: 32px minmax(140px, 180px) minmax(220px, 1fr) auto;
+  grid-template-columns: 74px minmax(140px, 180px) minmax(220px, 1fr) auto;
   gap: 8px;
   align-items: center;
   padding: 8px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
+}
+
+.additional-process-row.is-dragging {
+  opacity: 0.55;
+}
+
+.additional-process-row.is-drop-before,
+.additional-process-row.is-drop-after {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.additional-process-row.is-drop-before::before,
+.additional-process-row.is-drop-after::after {
+  position: absolute;
+  right: 8px;
+  left: 8px;
+  height: 2px;
+  background: #2563eb;
+  content: '';
+}
+
+.additional-process-row.is-drop-before::before {
+  top: -6px;
+}
+
+.additional-process-row.is-drop-after::after {
+  bottom: -6px;
+}
+
+.additional-process-sort-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.additional-process-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  color: #64748b;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.additional-process-drag-handle:active {
+  cursor: grabbing;
 }
 
 .step-index {
@@ -3095,11 +3830,34 @@ onBeforeUnmount(() => {
   width: 130px;
 }
 
+.delete-draft-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.delete-draft-summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.delete-draft-summary span {
+  color: #64748b;
+}
+
 .mb-16 {
   margin-bottom: 16px;
 }
 
 @media (max-width: 900px) {
+  .order-detail-page-actions {
+    display: none;
+  }
+
   .order-summary {
     grid-template-columns: 1fr;
     gap: 12px;
@@ -3156,6 +3914,11 @@ onBeforeUnmount(() => {
     display: flex;
     flex-shrink: 0;
     gap: 8px;
+  }
+
+  .import-source-preview-header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .line-title {
@@ -3219,7 +3982,7 @@ onBeforeUnmount(() => {
   }
 
   .additional-process-row {
-    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-columns: 74px minmax(0, 1fr);
   }
 
   .additional-process-row .el-input,

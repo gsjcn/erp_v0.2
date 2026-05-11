@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { InventoryReservationStatus, OrderStatus, Prisma } from '@prisma/client';
+import { CommonStatus, InventoryReservationStatus, OrderStatus, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
@@ -8,7 +8,7 @@ import { decimalToNumber } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
 import { inventoryAdjustmentUploadPath } from '../../storage/upload-paths';
-import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialSuggestionQueryDto } from './dto';
+import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialQueryDto, MaterialSuggestionQueryDto, UpdateMaterialDto } from './dto';
 
 type InventorySummaryAccumulator = {
   partCode: string;
@@ -38,6 +38,60 @@ type InventorySummaryAccumulator = {
   >;
 };
 
+type MaterialSuggestionBase = {
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  drawingNo?: string | null;
+  drawingVersion?: string | null;
+  drawingDate?: Date | null;
+  drawingStatus?: string | null;
+  partThickness?: number | null;
+  projectModel?: string | null;
+};
+
+type MaterialSuggestionHistory = {
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  drawingNo?: string | null;
+  drawingVersion?: string | null;
+  drawingDate?: Date | null;
+  drawingStatus?: string | null;
+  partThickness?: number | null;
+  projectModel?: string | null;
+  usageCount: number;
+  customerUsageCount: number;
+  lastCustomerCode?: string;
+  lastCustomerName?: string;
+  lastCustomerOrderNo?: string;
+  lastCustomerOrderDate?: Date | null;
+  matchedCustomerCode?: string;
+  matchedCustomerName?: string;
+  matchedHistoryOrderNo?: string;
+  hasQueryCustomerHistory?: boolean;
+  lastCustomerOrderBelongsToQueryCustomer?: boolean;
+  queryCustomerSnapshotOrderDate?: Date | null;
+  queryCustomerSnapshotCreatedAt?: Date | null;
+  identityKeys: Set<string>;
+  identityFieldValues: Map<string, Set<string>>;
+  identityVariantCount?: number;
+  historyCustomerNames: Set<string>;
+};
+
+const materialSuggestionIdentityFieldLabels: Record<string, string> = {
+  partName: '名称',
+  partSpecification: '规格',
+  drawingNo: '图号',
+  drawingVersion: '版本',
+  drawingDate: '图纸日期',
+  drawingStatus: '图纸状态',
+  partThickness: '厚度',
+  projectModel: '项目型号'
+};
+
 type InventoryCustomerScope = {
   customerId: string;
   customerName?: string;
@@ -50,6 +104,17 @@ type StockReservationPriorityOrder = {
   orderNo: string;
   status: OrderStatus;
   createdAt: Date;
+};
+
+type MaterialMemoryRow = {
+  id: string;
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  status: CommonStatus;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 const adjustmentAttachmentPrefix = '/uploads/inventory-adjustments/';
@@ -217,6 +282,198 @@ export class InventoryService {
 
   private materialMatchesKeyword(material: { partCode?: string | null; partName?: string | null; unit?: string | null; partSpecification?: string | null }, keyword: string) {
     return pinyinSearchMatches([material.partCode, material.partName, material.unit, material.partSpecification], keyword);
+  }
+
+  private normalizeMaterialRequired(value: string | undefined, fieldName: string) {
+    const normalized = String(value || '').trim();
+    if (!normalized) {
+      throw new BadRequestException(`${fieldName}不能为空`);
+    }
+    return normalized;
+  }
+
+  private async ensureMaterialCodeAvailable(partCode: string, excludeId?: string) {
+    const existing = await this.prisma.material.findFirst({
+      where: {
+        partCode: { equals: partCode, mode: 'insensitive' },
+        id: excludeId ? { not: excludeId } : undefined
+      },
+      select: { id: true }
+    });
+    if (existing) {
+      throw new BadRequestException(`物料编码 ${partCode} 已存在，请勿重复维护`);
+    }
+  }
+
+  private materialMemoryMatchesKeyword(material: MaterialMemoryRow, keyword?: string) {
+    const normalizedKeyword = normalizeSearchKeyword(keyword);
+    if (!normalizedKeyword) {
+      return true;
+    }
+    return pinyinSearchMatches([material.partCode, material.partName, material.unit, material.partSpecification], normalizedKeyword);
+  }
+
+  async materials(query: MaterialQueryDto) {
+    const status = query.status || 'ENABLED';
+    const normalizedKeyword = normalizeSearchKeyword(query.keyword);
+    const historyByCode = normalizedKeyword
+      ? await this.findMaterialSuggestionHistory({ keyword: query.keyword }, query.keyword)
+      : new Map<string, MaterialSuggestionHistory>();
+    const materialRows = await this.prisma.material.findMany({
+      where: { status },
+      orderBy: [{ updatedAt: 'desc' }, { partCode: 'asc' }]
+    });
+    const materials = materialRows.filter(
+      (material) =>
+        this.materialMemoryMatchesKeyword(material, query.keyword) || historyByCode.has(material.partCode.trim().toLocaleLowerCase())
+    );
+    if (materials.length === 0) {
+      return [];
+    }
+
+    const materialByCode = new Map(materials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+    const partCodeConditions = materials.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }));
+    const [batches, orderLines] = await Promise.all([
+      this.prisma.inventoryBatch.findMany({
+        where: {
+          status: 'AVAILABLE',
+          quantity: { gt: 0 },
+          OR: partCodeConditions
+        },
+        select: { id: true, partCode: true, quantity: true, sourceOrderId: true }
+      }),
+      this.prisma.orderLine.findMany({
+        where: { OR: partCodeConditions },
+        select: {
+          partCode: true,
+          createdAt: true,
+          order: {
+            select: {
+              orderNo: true,
+              customerName: true,
+              orderDate: true
+            }
+          }
+        },
+        orderBy: [{ createdAt: 'desc' }]
+      })
+    ]);
+    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(
+      batches.filter((batch) => !batch.sourceOrderId).map((batch) => batch.id),
+      {}
+    );
+    const quantityByCode = new Map<
+      string,
+      {
+        availableQuantity: number;
+        orderInventoryQuantity: number;
+        stockInventoryQuantity: number;
+      }
+    >();
+    for (const batch of batches) {
+      const key = batch.partCode.trim().toLocaleLowerCase();
+      if (!materialByCode.has(key)) {
+        continue;
+      }
+      const current = quantityByCode.get(key) || {
+        availableQuantity: 0,
+        orderInventoryQuantity: 0,
+        stockInventoryQuantity: 0
+      };
+      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const quantity = Math.max(decimalToNumber(batch.quantity) - reservedQuantity, 0);
+      current.availableQuantity += quantity;
+      if (batch.sourceOrderId) {
+        current.orderInventoryQuantity += quantity;
+      } else {
+        current.stockInventoryQuantity += quantity;
+      }
+      quantityByCode.set(key, current);
+    }
+
+    const usageByCode = new Map<
+      string,
+      {
+        orderLineUsageCount: number;
+        lastOrderNo?: string;
+        lastCustomerName?: string;
+        lastOrderDate?: Date | null;
+      }
+    >();
+    for (const line of orderLines) {
+      const key = line.partCode.trim().toLocaleLowerCase();
+      if (!materialByCode.has(key)) {
+        continue;
+      }
+      const current = usageByCode.get(key) || { orderLineUsageCount: 0 };
+      current.orderLineUsageCount += 1;
+      if (!current.lastOrderDate || (line.order.orderDate && line.order.orderDate.getTime() > current.lastOrderDate.getTime())) {
+        current.lastOrderNo = line.order.orderNo;
+        current.lastCustomerName = line.order.customerName;
+        current.lastOrderDate = line.order.orderDate;
+      }
+      usageByCode.set(key, current);
+    }
+
+    return materials.map((material) => {
+      const key = material.partCode.trim().toLocaleLowerCase();
+      const quantity = quantityByCode.get(key) || {
+        availableQuantity: 0,
+        orderInventoryQuantity: 0,
+        stockInventoryQuantity: 0
+      };
+      const usage = usageByCode.get(key) || { orderLineUsageCount: 0 };
+      return {
+        id: material.id,
+        partCode: material.partCode,
+        partName: material.partName,
+        unit: material.unit,
+        partSpecification: material.partSpecification,
+        status: material.status,
+        ...quantity,
+        orderLineUsageCount: usage.orderLineUsageCount,
+        lastOrderNo: usage.lastOrderNo,
+        lastCustomerName: usage.lastCustomerName,
+        lastOrderDate: this.formatDateOnly(usage.lastOrderDate),
+        createdAt: material.createdAt,
+        updatedAt: material.updatedAt
+      };
+    });
+  }
+
+  async updateMaterial(materialId: string, dto: UpdateMaterialDto) {
+    const existing = await this.prisma.material.findUnique({ where: { id: materialId } });
+    if (!existing) {
+      throw new NotFoundException('物料基础资料不存在');
+    }
+    const partCode = dto.partCode !== undefined ? this.normalizeMaterialRequired(dto.partCode, '物料编码') : existing.partCode;
+    const partName = dto.partName !== undefined ? this.normalizeMaterialRequired(dto.partName, '物料名称') : existing.partName;
+    const unit = dto.unit !== undefined ? this.normalizeMaterialRequired(dto.unit, '单位') : existing.unit;
+    if (partCode.toLocaleLowerCase() !== existing.partCode.toLocaleLowerCase()) {
+      await this.ensureMaterialCodeAvailable(partCode, materialId);
+    }
+    return this.prisma.material.update({
+      where: { id: materialId },
+      data: {
+        partCode,
+        partName,
+        unit,
+        partSpecification:
+          dto.partSpecification !== undefined ? String(dto.partSpecification || '').trim() || null : existing.partSpecification,
+        status: dto.status || existing.status
+      }
+    });
+  }
+
+  async disableMaterial(materialId: string) {
+    const existing = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('物料基础资料不存在');
+    }
+    return this.prisma.material.update({
+      where: { id: materialId },
+      data: { status: 'DISABLED' }
+    });
   }
 
   private inventoryBatchMatchesKeyword(
@@ -621,9 +878,20 @@ export class InventoryService {
 
   async materialSuggestions(query: MaterialSuggestionQueryDto) {
     const keyword = query.keyword?.trim();
+    const customerId = query.customerId?.trim();
+    if (!keyword && !customerId) {
+      return [];
+    }
     const sourceType = query.sourceType || 'ALL';
-    const materials = await this.findMaterialsByKeyword(keyword);
-    const materialRows = new Map<string, { partCode: string; partName: string; unit: string; partSpecification?: string | null }>();
+    const materialRows = new Map<string, MaterialSuggestionBase>();
+    const disabledMaterialCodes = new Set(
+      (
+        await this.prisma.material.findMany({
+          where: { status: 'DISABLED' },
+          select: { partCode: true }
+        })
+      ).map((material) => material.partCode.trim().toLocaleLowerCase())
+    );
     const matchHints = new Map<
       string,
       {
@@ -632,10 +900,33 @@ export class InventoryService {
         matchedProductionTaskNo?: string;
       }
     >();
+    const historyByCode = await this.findMaterialSuggestionHistory(query, keyword);
 
-    materials.forEach((material) => {
-      materialRows.set(material.partCode.toLocaleLowerCase(), material);
-    });
+    for (const [key, history] of historyByCode) {
+      if (disabledMaterialCodes.has(key)) {
+        continue;
+      }
+      materialRows.set(key, {
+        partCode: history.partCode,
+        partName: history.partName,
+        unit: history.unit,
+        partSpecification: history.partSpecification,
+        drawingNo: history.drawingNo,
+        drawingVersion: history.drawingVersion,
+        drawingDate: history.drawingDate,
+        drawingStatus: history.drawingStatus,
+        partThickness: history.partThickness,
+        projectModel: history.projectModel
+      });
+    }
+
+    const shouldSeedMaterialMaster = Boolean(keyword);
+    if (shouldSeedMaterialMaster) {
+      const materials = await this.findMaterialsByKeyword(keyword);
+      materials.forEach((material) => {
+        materialRows.set(material.partCode.toLocaleLowerCase(), material);
+      });
+    }
 
     if (keyword) {
       const [allMaterials, candidateBatches] = await Promise.all([
@@ -669,6 +960,9 @@ export class InventoryService {
       const sourceTaskMap = await this.findSourceTaskMap(candidateBatches.map((batch) => batch.sourceProductionTaskNo));
       for (const batch of candidateBatches.filter((item) => this.inventoryBatchMatchesKeyword(item, keyword, this.inventoryBatchSourceSearchValues(item, sourceTaskMap)))) {
         const key = batch.partCode.toLocaleLowerCase();
+        if (disabledMaterialCodes.has(key)) {
+          continue;
+        }
         materialRows.set(
           key,
           materialRows.get(key) ||
@@ -689,7 +983,7 @@ export class InventoryService {
       }
     }
 
-    const suggestionMaterials = [...materialRows.values()].sort((a, b) => a.partCode.localeCompare(b.partCode, 'zh-Hans-CN'));
+    const suggestionMaterials = [...materialRows.values()].filter((material) => !disabledMaterialCodes.has(material.partCode.trim().toLocaleLowerCase()));
     if (suggestionMaterials.length === 0) {
       return [];
     }
@@ -756,16 +1050,504 @@ export class InventoryService {
         stockInventoryQuantity: 0
       };
       const matchHint = matchHints.get(material.partCode.toLocaleLowerCase()) || {};
+      const history = historyByCode.get(material.partCode.toLocaleLowerCase());
+      const searchMatch = this.materialSuggestionSearchMatch(material, keyword, history, matchHint);
+      const useQueryCustomerSnapshot = Boolean(customerId && history?.hasQueryCustomerHistory);
+      const partName = useQueryCustomerSnapshot ? history?.partName || material.partName : material.partName;
+      const unit = useQueryCustomerSnapshot ? history?.unit || material.unit : material.unit;
+      const partSpecification = useQueryCustomerSnapshot
+        ? history?.partSpecification || material.partSpecification
+        : material.partSpecification;
+      const drawingNo = useQueryCustomerSnapshot
+        ? history?.drawingNo || material.drawingNo
+        : material.drawingNo || history?.drawingNo;
+      const drawingVersion = useQueryCustomerSnapshot
+        ? history?.drawingVersion || material.drawingVersion
+        : material.drawingVersion || history?.drawingVersion;
+      const drawingDate = useQueryCustomerSnapshot
+        ? history?.drawingDate || material.drawingDate
+        : material.drawingDate || history?.drawingDate;
+      const drawingStatus = useQueryCustomerSnapshot
+        ? history?.drawingStatus || material.drawingStatus
+        : material.drawingStatus || history?.drawingStatus;
+      const partThickness = useQueryCustomerSnapshot
+        ? history?.partThickness ?? material.partThickness
+        : material.partThickness ?? history?.partThickness;
+      const projectModel = useQueryCustomerSnapshot
+        ? history?.projectModel || material.projectModel
+        : material.projectModel || history?.projectModel;
       return {
-        value: `${material.partCode} ${material.partName}`,
+        value: `${material.partCode} ${partName}`,
         partCode: material.partCode,
-        partName: material.partName,
-        unit: material.unit,
-        partSpecification: material.partSpecification,
+        partName,
+        unit,
+        partSpecification,
+        drawingNo,
+        drawingVersion,
+        drawingDate: this.formatDateOnly(drawingDate),
+        drawingStatus,
+        partThickness,
+        projectModel,
+        customerUsageCount: history?.customerUsageCount || 0,
+        historyUsageCount: history?.usageCount || 0,
+        hasCurrentCustomerHistory: Boolean(history?.hasQueryCustomerHistory),
+        identityVariantCount: history?.identityVariantCount || 0,
+        hasIdentityConflict: Boolean((history?.identityVariantCount || 0) > 1),
+        identityConflictFields: this.materialSuggestionIdentityConflictFields(history),
+        lastCustomerCode: history?.lastCustomerCode,
+        lastCustomerName: history?.lastCustomerName,
+        lastCustomerOrderNo: history?.lastCustomerOrderNo,
+        lastCustomerOrderDate: this.formatDateOnly(history?.lastCustomerOrderDate),
+        matchedCustomerCode: history?.matchedCustomerCode,
+        matchedCustomerName: history?.matchedCustomerName,
+        matchedHistoryOrderNo: history?.matchedHistoryOrderNo,
+        historyCustomerNames: history ? [...history.historyCustomerNames] : [],
+        ...searchMatch,
         ...matchHint,
         ...quantity
       };
+    }).filter((item) => sourceType === 'ALL' || item.availableQuantity > 0)
+      .sort((a, b) => this.compareMaterialSuggestions(a, b, Boolean(customerId)));
+  }
+
+  private async findMaterialSuggestionHistory(query: MaterialSuggestionQueryDto, keyword?: string) {
+    const customerId = query.customerId?.trim();
+    const normalizedKeyword = normalizeSearchKeyword(keyword);
+    const historyByCode = new Map<string, MaterialSuggestionHistory>();
+    if (!customerId && !normalizedKeyword) {
+      return historyByCode;
+    }
+
+    const lines = await this.prisma.orderLine.findMany({
+      where: !normalizedKeyword && customerId ? { order: { customerId } } : {},
+      select: {
+        partCode: true,
+        partName: true,
+        unit: true,
+        partSpecification: true,
+        drawingNo: true,
+        drawingVersion: true,
+        drawingDate: true,
+        drawingStatus: true,
+        partThickness: true,
+        projectModel: true,
+        createdAt: true,
+        order: {
+          select: {
+            customerId: true,
+            customerCode: true,
+            customerName: true,
+            orderNo: true,
+            orderDate: true
+          }
+        }
+      },
+      orderBy: [{ createdAt: 'desc' }]
     });
+
+    for (const line of lines) {
+      if (normalizedKeyword && !this.materialHistoryLineMatchesKeyword(line, normalizedKeyword)) {
+        continue;
+      }
+
+      const partCode = line.partCode.trim();
+      if (!partCode) {
+        continue;
+      }
+
+      const key = partCode.toLocaleLowerCase();
+      const existing = historyByCode.get(key) ?? {
+        partCode,
+        partName: line.partName,
+        unit: line.unit,
+        partSpecification: line.partSpecification,
+        drawingNo: line.drawingNo,
+        drawingVersion: line.drawingVersion,
+        drawingDate: line.drawingDate,
+        drawingStatus: line.drawingStatus,
+        partThickness: line.partThickness ? decimalToNumber(line.partThickness) : null,
+        projectModel: line.projectModel,
+        usageCount: 0,
+        customerUsageCount: 0,
+        identityKeys: new Set<string>(),
+        identityFieldValues: new Map<string, Set<string>>(),
+        historyCustomerNames: new Set<string>()
+      };
+
+      const lineBelongsToQueryCustomer = Boolean(customerId && line.order.customerId === customerId);
+      existing.usageCount += 1;
+      existing.identityVariantCount = this.recordMaterialSuggestionIdentity(existing, line);
+      if (lineBelongsToQueryCustomer) {
+        if (
+          !existing.hasQueryCustomerHistory ||
+          this.isMaterialSuggestionHistorySnapshotNewer(
+            line,
+            existing.queryCustomerSnapshotOrderDate,
+            existing.queryCustomerSnapshotCreatedAt
+          )
+        ) {
+          this.applyMaterialSuggestionHistorySnapshot(existing, line);
+          existing.queryCustomerSnapshotOrderDate = line.order.orderDate;
+          existing.queryCustomerSnapshotCreatedAt = line.createdAt;
+        }
+        existing.customerUsageCount += 1;
+        existing.hasQueryCustomerHistory = true;
+      }
+      if (line.order.customerName) {
+        existing.historyCustomerNames.add(line.order.customerName);
+      }
+      const lineCanUpdateLastCustomerOrder =
+        !customerId || lineBelongsToQueryCustomer || !existing.hasQueryCustomerHistory;
+      if (
+        lineCanUpdateLastCustomerOrder &&
+        (!existing.lastCustomerOrderDate ||
+          (lineBelongsToQueryCustomer && !existing.lastCustomerOrderBelongsToQueryCustomer) ||
+          (line.order.orderDate && line.order.orderDate.getTime() > existing.lastCustomerOrderDate.getTime()))
+      ) {
+        existing.lastCustomerCode = line.order.customerCode;
+        existing.lastCustomerName = line.order.customerName;
+        existing.lastCustomerOrderNo = line.order.orderNo;
+        existing.lastCustomerOrderDate = line.order.orderDate;
+        existing.lastCustomerOrderBelongsToQueryCustomer = lineBelongsToQueryCustomer;
+      }
+      if (
+        !existing.matchedCustomerName &&
+        normalizedKeyword &&
+        pinyinSearchMatches([line.order.customerCode, line.order.customerName], normalizedKeyword)
+      ) {
+        existing.matchedCustomerCode = line.order.customerCode;
+        existing.matchedCustomerName = line.order.customerName;
+      }
+      if (
+        !existing.matchedHistoryOrderNo &&
+        normalizedKeyword &&
+        pinyinSearchMatches([line.order.orderNo], normalizedKeyword)
+      ) {
+        existing.matchedHistoryOrderNo = line.order.orderNo;
+      }
+
+      historyByCode.set(key, existing);
+    }
+
+    return historyByCode;
+  }
+
+  private recordMaterialSuggestionIdentity(
+    existing: MaterialSuggestionHistory,
+    value: {
+      partName?: string | null;
+      partSpecification?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      drawingDate?: Date | null;
+      drawingStatus?: string | null;
+      partThickness?: Prisma.Decimal | number | string | null;
+      projectModel?: string | null;
+    }
+  ) {
+    const identityValues = this.materialSuggestionIdentityValues(value);
+    const identityKey = identityValues.map((item) => `${item.field}:${item.value}`).join('|');
+    if (identityKey) {
+      existing.identityKeys.add(identityKey);
+    }
+    for (const item of identityValues) {
+      const values = existing.identityFieldValues.get(item.field) || new Set<string>();
+      values.add(item.value);
+      existing.identityFieldValues.set(item.field, values);
+    }
+    let maxDistinctValues = 0;
+    for (const values of existing.identityFieldValues.values()) {
+      maxDistinctValues = Math.max(maxDistinctValues, values.size);
+    }
+    return Math.max(maxDistinctValues, maxDistinctValues > 1 ? existing.identityKeys.size : 1);
+  }
+
+  private materialSuggestionIdentityConflictFields(history?: MaterialSuggestionHistory) {
+    if (!history) {
+      return [];
+    }
+    const fields: string[] = [];
+    for (const [field, values] of history.identityFieldValues) {
+      if (values.size > 1) {
+        fields.push(materialSuggestionIdentityFieldLabels[field] || field);
+      }
+    }
+    return fields;
+  }
+
+  private materialSuggestionIdentityValues(value: {
+    partName?: string | null;
+    partSpecification?: string | null;
+    drawingNo?: string | null;
+    drawingVersion?: string | null;
+    drawingDate?: Date | null;
+    drawingStatus?: string | null;
+    partThickness?: Prisma.Decimal | number | string | null;
+    projectModel?: string | null;
+  }): Array<{ field: string; value: string }> {
+    return [
+      { field: 'partName', value: normalizeSearchKeyword(value.partName) },
+      { field: 'partSpecification', value: normalizeSearchKeyword(value.partSpecification) },
+      { field: 'drawingNo', value: normalizeSearchKeyword(value.drawingNo) },
+      { field: 'drawingVersion', value: normalizeSearchKeyword(value.drawingVersion) },
+      { field: 'drawingDate', value: value.drawingDate ? this.formatDateOnly(value.drawingDate) || '' : '' },
+      { field: 'drawingStatus', value: normalizeSearchKeyword(value.drawingStatus) },
+      { field: 'partThickness', value: value.partThickness ? String(decimalToNumber(value.partThickness)) : '' },
+      { field: 'projectModel', value: normalizeSearchKeyword(value.projectModel) }
+    ].filter((item) => item.value);
+  }
+
+  private applyMaterialSuggestionHistorySnapshot(
+    existing: MaterialSuggestionHistory,
+    line: {
+      partName: string;
+      unit: string;
+      partSpecification?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      drawingDate?: Date | null;
+      drawingStatus?: string | null;
+      partThickness?: Prisma.Decimal | number | string | null;
+      projectModel?: string | null;
+    }
+  ) {
+    existing.partName = line.partName;
+    existing.unit = line.unit;
+    existing.partSpecification = line.partSpecification;
+    existing.drawingNo = line.drawingNo;
+    existing.drawingVersion = line.drawingVersion;
+    existing.drawingDate = line.drawingDate;
+    existing.drawingStatus = line.drawingStatus;
+    existing.partThickness = line.partThickness ? decimalToNumber(line.partThickness) : null;
+    existing.projectModel = line.projectModel;
+  }
+
+  private isMaterialSuggestionHistorySnapshotNewer(
+    line: { createdAt: Date; order: { orderDate?: Date | null } },
+    existingOrderDate?: Date | null,
+    existingCreatedAt?: Date | null
+  ) {
+    const lineOrderTime = line.order.orderDate?.getTime() ?? 0;
+    const existingOrderTime = existingOrderDate?.getTime() ?? 0;
+    if (lineOrderTime !== existingOrderTime) {
+      return lineOrderTime > existingOrderTime;
+    }
+    return line.createdAt.getTime() > (existingCreatedAt?.getTime() ?? 0);
+  }
+
+  private materialHistoryLineMatchesKeyword(
+    line: {
+      partCode?: string | null;
+      partName?: string | null;
+      unit?: string | null;
+      partSpecification?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      drawingDate?: Date | null;
+      drawingStatus?: string | null;
+      partThickness?: Prisma.Decimal | number | string | null;
+      projectModel?: string | null;
+      order: { customerCode?: string | null; customerName?: string | null; orderNo?: string | null };
+    },
+    keyword: string
+  ) {
+    return pinyinSearchMatches(
+      [
+        line.partCode,
+        line.partName,
+        line.unit,
+        line.partSpecification,
+        line.drawingNo,
+        line.drawingVersion,
+        ...this.materialDateSearchValues(line.drawingDate),
+        line.drawingStatus,
+        ...this.materialThicknessSearchValues(line.partThickness),
+        line.projectModel,
+        line.order.customerCode,
+        line.order.customerName,
+        line.order.orderNo
+      ],
+      keyword
+    );
+  }
+
+  private materialSuggestionSearchMatch(
+    material: MaterialSuggestionBase,
+    keyword?: string,
+    history?: MaterialSuggestionHistory,
+    matchHint?: {
+      matchedBatchNo?: string;
+      matchedSourceOrderNo?: string;
+      matchedProductionTaskNo?: string;
+    }
+  ) {
+    const normalizedKeyword = normalizeSearchKeyword(keyword);
+    if (!normalizedKeyword) {
+      return { searchMatchRank: 0 };
+    }
+
+    const partCode = normalizeSearchKeyword(material.partCode);
+    const partName = normalizeSearchKeyword(material.partName);
+    if (partCode === normalizedKeyword) {
+      return { searchMatchRank: 1000, searchMatchText: '编码精确匹配' };
+    }
+    if (partName === normalizedKeyword) {
+      return { searchMatchRank: 960, searchMatchText: '名称精确匹配' };
+    }
+    if (partCode.startsWith(normalizedKeyword)) {
+      return { searchMatchRank: 920, searchMatchText: '编码前缀匹配' };
+    }
+    if (partCode.includes(normalizedKeyword)) {
+      return { searchMatchRank: 880, searchMatchText: '编码包含匹配' };
+    }
+    if (pinyinSearchMatches([material.partCode], normalizedKeyword)) {
+      return { searchMatchRank: 840, searchMatchText: '编码缩写匹配' };
+    }
+    if (partName.startsWith(normalizedKeyword)) {
+      return { searchMatchRank: 830, searchMatchText: '名称前缀匹配' };
+    }
+    if (partName.includes(normalizedKeyword)) {
+      return { searchMatchRank: 820, searchMatchText: '名称包含匹配' };
+    }
+    if (pinyinSearchMatches([material.partName], normalizedKeyword)) {
+      return { searchMatchRank: 800, searchMatchText: '名称拼音匹配' };
+    }
+    if (
+      pinyinSearchMatches(
+        [
+          material.partSpecification,
+          material.drawingNo,
+          material.drawingVersion,
+          ...this.materialDateSearchValues(material.drawingDate),
+          material.drawingStatus,
+          ...this.materialThicknessSearchValues(material.partThickness),
+          material.projectModel
+        ],
+        normalizedKeyword
+      )
+    ) {
+      return { searchMatchRank: 760, searchMatchText: '图纸资料匹配' };
+    }
+    if (history?.matchedCustomerName) {
+      return { searchMatchRank: 720, searchMatchText: '客户历史匹配' };
+    }
+    if (history?.matchedHistoryOrderNo) {
+      return { searchMatchRank: 710, searchMatchText: '历史订单匹配' };
+    }
+    if (matchHint?.matchedBatchNo || matchHint?.matchedSourceOrderNo || matchHint?.matchedProductionTaskNo) {
+      return { searchMatchRank: 680, searchMatchText: '库存来源匹配' };
+    }
+    if (history?.usageCount) {
+      return { searchMatchRank: 640, searchMatchText: '历史订单匹配' };
+    }
+    return { searchMatchRank: 0 };
+  }
+
+  private materialThicknessSearchValues(value?: Prisma.Decimal | number | string | null) {
+    if (value === null || value === undefined || value === '') {
+      return [];
+    }
+    const numericValue = decimalToNumber(value);
+    if (!Number.isFinite(numericValue)) {
+      return [];
+    }
+    const normalizedValue = Number(numericValue.toFixed(4));
+    const values = new Set<string>();
+    const addThicknessValue = (text: string) => {
+      values.add(text);
+      values.add(`${text}mm`);
+    };
+    addThicknessValue(normalizedValue.toString());
+    for (const precision of [0, 1, 2, 3, 4]) {
+      const formatted = normalizedValue.toFixed(precision);
+      if (Math.abs(Number(formatted) - normalizedValue) <= 0.000001) {
+        addThicknessValue(formatted);
+      }
+    }
+    return [...values];
+  }
+
+  private materialDateSearchValues(value?: Date | string | null) {
+    const formatted = this.formatDateOnly(value);
+    if (!formatted) {
+      return [];
+    }
+    const [year, month, day] = formatted.split('-');
+    const compactDate = `${year}${month}${day}`;
+    const looseDate = `${year}-${Number(month)}-${Number(day)}`;
+    return [formatted, compactDate, looseDate];
+  }
+
+  private compareMaterialSuggestions(
+    left: {
+      partCode: string;
+      searchMatchRank?: number;
+      customerUsageCount?: number;
+      historyUsageCount?: number;
+      availableQuantity?: number;
+      lastCustomerOrderDate?: string;
+    },
+    right: {
+      partCode: string;
+      searchMatchRank?: number;
+      customerUsageCount?: number;
+      historyUsageCount?: number;
+      availableQuantity?: number;
+      lastCustomerOrderDate?: string;
+    },
+    preferCustomerHistory: boolean
+  ) {
+    const searchRankDiff = (right.searchMatchRank || 0) - (left.searchMatchRank || 0);
+    if (searchRankDiff !== 0) {
+      return searchRankDiff;
+    }
+
+    if (preferCustomerHistory) {
+      const customerUsageDiff = (right.customerUsageCount || 0) - (left.customerUsageCount || 0);
+      if (customerUsageDiff !== 0) {
+        return customerUsageDiff;
+      }
+
+      const lastCustomerOrderDateDiff =
+        this.sortableDateValue(right.lastCustomerOrderDate) - this.sortableDateValue(left.lastCustomerOrderDate);
+      if (lastCustomerOrderDateDiff !== 0) {
+        return lastCustomerOrderDateDiff;
+      }
+    }
+
+    const historyUsageDiff = (right.historyUsageCount || 0) - (left.historyUsageCount || 0);
+    if (historyUsageDiff !== 0) {
+      return historyUsageDiff;
+    }
+
+    const stockDiff = (right.availableQuantity || 0) - (left.availableQuantity || 0);
+    if (stockDiff !== 0) {
+      return stockDiff;
+    }
+
+    return left.partCode.localeCompare(right.partCode, 'zh-Hans-CN');
+  }
+
+  private sortableDateValue(value?: Date | string | null) {
+    if (!value) {
+      return 0;
+    }
+    const time = value instanceof Date ? value.getTime() : Date.parse(value);
+    return Number.isNaN(time) ? 0 : time;
+  }
+
+  private formatDateOnly(value?: Date | string | null) {
+    if (!value) {
+      return undefined;
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return undefined;
+    }
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 
   async materialSourceDetails(partCode: string, query: InventorySourceDetailQueryDto) {

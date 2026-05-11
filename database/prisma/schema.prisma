@@ -194,6 +194,90 @@ model CustomerOrder {
   @@index([status])
 }
 
+/// Excel 订单导入会话。一个会话可以连续上传多个文件，最终只创建 DRAFT 订单。
+model OrderImportSession {
+  id          String            @id @default(uuid())
+  status      String            @default("DRAFT")
+  createdBy   String?
+  committedAt DateTime?
+  committedOrderNos Json?
+  files       OrderImportFile[]
+  rows        OrderImportRow[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Excel 导入文件记录，用于识别同一会话内重复上传。
+model OrderImportFile {
+  id                String             @id @default(uuid())
+  sessionId         String
+  session           OrderImportSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  fileName          String
+  storedFileName    String?
+  fileHash          String
+  sheetName         String
+  rowCount          Int                @default(0)
+  acceptedRowCount  Int                @default(0)
+  duplicateRowCount Int                @default(0)
+  createdAt         DateTime           @default(now())
+  rows              OrderImportRow[]
+  orderLines        OrderLine[]        @relation("OrderLineSourceImportFile")
+
+  @@unique([sessionId, fileHash])
+  @@index([sessionId])
+  @@index([fileHash])
+}
+
+/// Excel 导入原始行快照。后端提交前重新校验，不直接信任 Excel 公式。
+model OrderImportRow {
+  id                String             @id @default(uuid())
+  sessionId         String
+  session           OrderImportSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  fileId            String
+  file              OrderImportFile    @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  sourceRowNo       Int
+  rowHash           String
+  orderBlock        String?
+  orderNo           String
+  orderDate         DateTime
+  customerName      String
+  projectModel      String?
+  lineType          String
+  importSequence    String?
+  partCategory      String?
+  componentNo       String?
+  parentComponentNo String?
+  partCode          String
+  drawingNo         String?
+  partName          String
+  partSpecification String?
+  partThickness     Decimal            @default(1) @db.Decimal(18, 3)
+  orderQuantity     Decimal?           @db.Decimal(18, 3)
+  unitUsage         Decimal?           @db.Decimal(18, 3)
+  demandQuantity    Decimal            @db.Decimal(18, 3)
+  unit              String
+  processRoute      String?
+  processRemark     String?
+  drawingDate       DateTime?
+  drawingStatus     String?
+  raw               Json
+  issues            Json?
+  errorCount        Int                @default(0)
+  warningCount      Int                @default(0)
+  createdAt         DateTime           @default(now())
+
+  @@unique([sessionId, rowHash])
+  @@index([sessionId])
+  @@index([sessionId, orderNo, sourceRowNo])
+  @@index([fileId])
+  @@index([orderNo])
+  @@index([componentNo])
+  @@index([parentComponentNo])
+}
+
 /// 订单零件明细表，一个订单可以包含多个零件。
 model OrderLine {
   id              String                 @id @default(uuid())
@@ -222,6 +306,19 @@ model OrderLine {
   remark          String?
   processSnapshot Json?
   stockSourceSelections Json?
+  lineType        String                 @default("PART")
+  partCategory    String?
+  componentNo     String?
+  parentComponentNo String?
+  importSequence  String?
+  sourceImportSessionId String?
+  sourceImportFileId String?
+  sourceImportFile OrderImportFile? @relation("OrderLineSourceImportFile", fields: [sourceImportFileId], references: [id], onDelete: SetNull)
+  sourceImportFileName String?
+  sourceImportRowNo Int?
+  projectModel    String?
+  drawingDate     DateTime?
+  drawingStatus   String?
   processSteps    OrderLineProcessStep[]
   productionTasks ProductionTask[]
   inventoryBatches InventoryBatch[]
@@ -233,6 +330,11 @@ model OrderLine {
   @@unique([orderId, lineNo])
   @@index([partCode])
   @@index([fulfillmentMode])
+  @@index([lineType])
+  @@index([componentNo])
+  @@index([parentComponentNo])
+  @@index([sourceImportSessionId])
+  @@index([sourceImportFileId])
 }
 
 /// 每个订单零件独立保存生产步骤，避免把流程压成一个长字符串。

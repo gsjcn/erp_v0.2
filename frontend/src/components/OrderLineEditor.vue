@@ -1,30 +1,94 @@
 <template>
   <el-table class="desktop-table order-line-table" :data="lines" border>
+    <el-table-column label="行类型" width="104">
+      <template #default="{ row }">
+        <el-select v-model="row.lineType" placeholder="行类型" @change="handleLineTypeChange(row)">
+          <el-option label="零件" value="PART" />
+          <el-option label="组件" value="COMPONENT" />
+        </el-select>
+      </template>
+    </el-table-column>
+    <el-table-column label="零件类型" width="120">
+      <template #default="{ row }">
+        <el-select v-model="row.partCategory" clearable filterable placeholder="类型">
+          <el-option label="通用件" value="通用件" />
+          <el-option label="定制件" value="定制件" />
+          <el-option label="数控件" value="数控件" />
+          <el-option label="外协件" value="外协件" />
+        </el-select>
+      </template>
+    </el-table-column>
+    <el-table-column label="组件编号" width="120">
+      <template #default="{ row }">
+        <el-input
+          v-model="row.componentNo"
+          placeholder="组件行填 C001"
+          :disabled="row.lineType !== 'COMPONENT'"
+          @focus="captureComponentNoBeforeEdit(row)"
+          @blur="normalizeComponentFields(row)"
+        />
+      </template>
+    </el-table-column>
+    <el-table-column label="所属组件" width="120">
+      <template #default="{ row }">
+        <el-select
+          v-model="row.parentComponentNo"
+          clearable
+          filterable
+          placeholder="选择组件"
+          :disabled="row.lineType === 'COMPONENT'"
+          @change="normalizeComponentFields(row)"
+        >
+          <el-option v-for="option in componentOptions" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+      </template>
+    </el-table-column>
     <el-table-column label="零件编码" width="130">
       <template #default="{ row }">
         <el-autocomplete
           v-model="row.partCode"
           :fetch-suggestions="queryMaterialSuggestions"
           value-key="partCode"
-          placeholder="搜索物料"
+          placeholder="编码/名称/拼音/图号/厚度/客户"
+          :debounce="250"
+          :trigger-on-focus="true"
           clearable
           popper-class="material-suggestion-popper"
           @input="handlePartCodeInput(row)"
+          @blur="() => fillExactMaterialFromInput(row, 'partCode')"
           @select="(item: InventoryMaterialSuggestion) => selectMaterialSuggestion(row, item)"
         >
           <template #default="{ item }">
-            <div class="material-suggestion">
-              <strong>{{ item.partCode }}</strong>
-              <span>{{ item.partName }}</span>
-              <small>库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
-              <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
-            </div>
+            <MaterialSuggestionOption :item="item" />
           </template>
         </el-autocomplete>
       </template>
     </el-table-column>
     <el-table-column label="零件名称" width="150">
-      <template #default="{ row }"><el-input v-model="row.partName" /></template>
+      <template #default="{ row }">
+        <div class="material-input-cell">
+          <el-autocomplete
+            v-model="row.partName"
+            :fetch-suggestions="queryMaterialSuggestions"
+            value-key="partName"
+            placeholder="名称/编码/拼音/图号/厚度/客户"
+            :debounce="250"
+            :trigger-on-focus="true"
+            clearable
+            popper-class="material-suggestion-popper"
+            @input="handlePartNameInput(row)"
+            @blur="() => fillExactMaterialFromInput(row, 'partName')"
+            @select="(item: InventoryMaterialSuggestion) => selectMaterialSuggestion(row, item)"
+          >
+            <template #default="{ item }">
+              <MaterialSuggestionOption :item="item" />
+            </template>
+          </el-autocomplete>
+          <small v-if="materialIdentityWarningText(row)" class="material-identity-warning">
+            {{ materialIdentityWarningText(row) }}
+          </small>
+        </div>
+      </template>
     </el-table-column>
     <el-table-column label="库存/生产方式" width="170">
       <template #default="{ row }">
@@ -80,7 +144,6 @@
           v-model="row.partSpecification"
           filterable
           allow-create
-          default-first-option
           placeholder="例如 120mm x 204mm x 10mm"
           @change="handleStockComparableChange(row)"
         >
@@ -211,30 +274,88 @@
 
       <div v-show="isMobileLineExpanded(index)" class="order-line-mobile-fields">
         <label>
+          <span>行类型</span>
+          <el-select v-model="line.lineType" placeholder="行类型" @change="handleLineTypeChange(line)">
+            <el-option label="零件" value="PART" />
+            <el-option label="组件" value="COMPONENT" />
+          </el-select>
+        </label>
+        <label>
+          <span>零件类型</span>
+          <el-select v-model="line.partCategory" clearable filterable placeholder="类型">
+            <el-option label="通用件" value="通用件" />
+            <el-option label="定制件" value="定制件" />
+            <el-option label="数控件" value="数控件" />
+            <el-option label="外协件" value="外协件" />
+          </el-select>
+        </label>
+        <label>
+          <span>组件编号</span>
+          <el-input
+            v-model="line.componentNo"
+            placeholder="组件行填 C001"
+            :disabled="line.lineType !== 'COMPONENT'"
+            @focus="captureComponentNoBeforeEdit(line)"
+            @blur="normalizeComponentFields(line)"
+          />
+        </label>
+        <label>
+          <span>所属组件</span>
+          <el-select
+            v-model="line.parentComponentNo"
+            clearable
+            filterable
+            placeholder="选择组件"
+            :disabled="line.lineType === 'COMPONENT'"
+            @change="normalizeComponentFields(line)"
+          >
+            <el-option v-for="option in componentOptions" :key="option.value" :label="option.label" :value="option.value" />
+          </el-select>
+        </label>
+        <label>
           <span>零件编码</span>
           <el-autocomplete
             v-model="line.partCode"
             :fetch-suggestions="queryMaterialSuggestions"
             value-key="partCode"
-            placeholder="搜索物料"
+            placeholder="编码/名称/拼音/图号/厚度/客户"
+            :debounce="250"
+            :trigger-on-focus="true"
             clearable
             popper-class="material-suggestion-popper"
             @input="handlePartCodeInput(line)"
+            @blur="() => fillExactMaterialFromInput(line, 'partCode')"
             @select="(item: InventoryMaterialSuggestion) => selectMaterialSuggestion(line, item)"
           >
             <template #default="{ item }">
-              <div class="material-suggestion">
-                <strong>{{ item.partCode }}</strong>
-                <span>{{ item.partName }}</span>
-                <small>库存 {{ formatQuantity(item.stockInventoryQuantity, item.unit) }}</small>
-                <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
-              </div>
+              <MaterialSuggestionOption :item="item" />
             </template>
           </el-autocomplete>
         </label>
         <label>
           <span>零件名称</span>
-          <el-input v-model="line.partName" />
+          <div class="material-input-cell">
+            <el-autocomplete
+              v-model="line.partName"
+              :fetch-suggestions="queryMaterialSuggestions"
+              value-key="partName"
+              placeholder="名称/编码/拼音/图号/厚度/客户"
+              :debounce="250"
+              :trigger-on-focus="true"
+              clearable
+              popper-class="material-suggestion-popper"
+              @input="handlePartNameInput(line)"
+              @blur="() => fillExactMaterialFromInput(line, 'partName')"
+              @select="(item: InventoryMaterialSuggestion) => selectMaterialSuggestion(line, item)"
+            >
+              <template #default="{ item }">
+                <MaterialSuggestionOption :item="item" />
+              </template>
+            </el-autocomplete>
+            <small v-if="materialIdentityWarningText(line)" class="material-identity-warning">
+              {{ materialIdentityWarningText(line) }}
+            </small>
+          </div>
         </label>
         <label>
           <span>库存/生产方式</span>
@@ -294,7 +415,6 @@
             v-model="line.partSpecification"
             filterable
             allow-create
-            default-first-option
             placeholder="例如 120mm x 204mm x 10mm"
             @change="handleStockComparableChange(line)"
           >
@@ -362,6 +482,7 @@
     :draft-reserved-sources="otherLineSelectedStockSources"
     :exclude-order-no="excludeOrderNo"
     :exclude-order-id="excludeOrderId"
+    :customer-id="customerId"
     review-mode
     :reviewed="Boolean(currentSourceLine && isStockSourceReviewed(currentSourceLine))"
     @source-search="loadStockDetailsForPart"
@@ -380,6 +501,7 @@ import type { CreateOrderLinePayload, StockSourceSelectionPayload } from '../api
 import type { InventoryMaterialSuggestion, InventorySourceDetailResponse, InventorySourceExpected, InventorySummaryRow } from '../types/erp';
 import DrawingPreviewLink from './DrawingPreviewLink.vue';
 import InventorySourceDetailsDialog from './InventorySourceDetailsDialog.vue';
+import MaterialSuggestionOption from './MaterialSuggestionOption.vue';
 import { confirmUploadDrawingFileName } from '../utils/orderLineDuplicateChecks';
 import { formatQuantity } from '../utils/format';
 import { availableStockQuantity as getAvailableStockQuantity, matchedStockSummary } from '../utils/orderLineStockChecks';
@@ -396,15 +518,19 @@ import {
 const props = withDefaults(
   defineProps<{
     lines: CreateOrderLinePayload[];
+    componentSourceLines?: Array<Pick<CreateOrderLinePayload, 'lineType' | 'componentNo' | 'partName' | 'partCode'>>;
     minLines?: number;
     defaultDeliveryDate?: string;
+    customerId?: string;
     excludeOrderNo?: string;
     excludeOrderId?: string;
     inventorySummary?: InventorySummaryRow[];
   }>(),
   {
+    componentSourceLines: () => [],
     minLines: 1,
     defaultDeliveryDate: '',
+    customerId: '',
     excludeOrderNo: '',
     excludeOrderId: '',
     inventorySummary: () => []
@@ -432,6 +558,26 @@ const otherLineSelectedStockSources = computed(() =>
         .flatMap((line) => line.selectedStockSources || [])
     : []
 );
+const componentOptions = computed(() => {
+  const seen = new Set<string>();
+  return [...props.componentSourceLines, ...props.lines]
+    .map((line) => ({
+      lineType: line.lineType,
+      value: normalizeComponentNo(line.componentNo),
+      labelText: line.partName || line.partCode || ''
+    }))
+    .filter((line) => {
+      if (line.lineType !== 'COMPONENT' || !line.value || seen.has(line.value)) {
+        return false;
+      }
+      seen.add(line.value);
+      return true;
+    })
+    .map((line) => ({
+      value: line.value,
+      label: line.labelText ? `${line.value} | ${line.labelText}` : line.value
+    }));
+});
 
 const emit = defineEmits<{
   remove: [index: number];
@@ -439,6 +585,31 @@ const emit = defineEmits<{
 }>();
 
 const specificationOptions = ['120mm x 204mm x 10mm', '200mm x 300mm x 2mm', '500mm x 800mm x 3mm'];
+type MaterialSuggestionInputField = 'partCode' | 'partName';
+type AutoMaterialField =
+  | 'partName'
+  | 'unit'
+  | 'partSpecification'
+  | 'drawingNo'
+  | 'drawingVersion'
+  | 'drawingDate'
+  | 'drawingStatus'
+  | 'projectModel'
+  | 'partThickness';
+type AutoMaterialSnapshot = {
+  partCode: string;
+  partName: string;
+  autoFields: Partial<Record<AutoMaterialField, string | number | null | undefined>>;
+};
+type MaterialIdentityWarning = {
+  partCode: string;
+  partName: string;
+  text: string;
+};
+const autoMaterialSnapshots = new WeakMap<CreateOrderLinePayload, AutoMaterialSnapshot>();
+const materialIdentityWarnings = new WeakMap<CreateOrderLinePayload, MaterialIdentityWarning>();
+const materialIdentityWarningVersion = ref(0);
+const componentNoEditSnapshots = new WeakMap<CreateOrderLinePayload, string>();
 
 watch(
   () => props.lines.length,
@@ -472,6 +643,155 @@ function expandAllMobileLineCards() {
 
 function collapseAllMobileLineCards() {
   expandedMobileLineIndexes.value = [];
+}
+
+function materialIdentityWarningText(line: CreateOrderLinePayload) {
+  materialIdentityWarningVersion.value;
+  return materialIdentityWarnings.get(line)?.text || '';
+}
+
+function materialIdentityConflictFieldsText(item: InventoryMaterialSuggestion, separator = '、') {
+  return item.identityConflictFields?.length ? item.identityConflictFields.join(separator) : `图号${separator}规格${separator}厚度${separator}项目型号`;
+}
+
+function setMaterialIdentityWarning(line: CreateOrderLinePayload, item: InventoryMaterialSuggestion) {
+  if (item.hasIdentityConflict) {
+    materialIdentityWarnings.set(line, {
+      partCode: item.partCode,
+      partName: item.partName,
+      text: `同编码 ${item.identityVariantCount || '多'} 套历史资料，核对${materialIdentityConflictFieldsText(item, '/')}`
+    });
+  } else {
+    materialIdentityWarnings.delete(line);
+  }
+  materialIdentityWarningVersion.value += 1;
+}
+
+function clearMaterialIdentityWarning(line: CreateOrderLinePayload) {
+  if (!materialIdentityWarnings.has(line)) {
+    return;
+  }
+  materialIdentityWarnings.delete(line);
+  materialIdentityWarningVersion.value += 1;
+}
+
+function clearMaterialIdentityWarningWhenMaterialIdentityChanges(line: CreateOrderLinePayload) {
+  const warning = materialIdentityWarnings.get(line);
+  if (!warning) {
+    return;
+  }
+  const partCodeMatches = normalizeMaterialSuggestionValue(line.partCode) === normalizeMaterialSuggestionValue(warning.partCode);
+  const partNameMatches = normalizeMaterialSuggestionValue(line.partName) === normalizeMaterialSuggestionValue(warning.partName);
+  if (partCodeMatches && partNameMatches) {
+    return;
+  }
+  clearMaterialIdentityWarning(line);
+}
+
+function normalizeComponentNo(value?: string) {
+  return value?.trim().toUpperCase() || '';
+}
+
+function captureComponentNoBeforeEdit(line: CreateOrderLinePayload) {
+  componentNoEditSnapshots.set(line, normalizeComponentNo(line.componentNo));
+}
+
+function normalizeComponentFields(line: CreateOrderLinePayload) {
+  const previousComponentNo = componentNoEditSnapshots.get(line) || normalizeComponentNo(line.componentNo);
+  line.componentNo = normalizeComponentNo(line.componentNo);
+  line.parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  syncChildParentComponentNo(line, previousComponentNo);
+  componentNoEditSnapshots.delete(line);
+}
+
+function syncChildParentComponentNo(componentLine: CreateOrderLinePayload, previousComponentNo: string) {
+  const nextComponentNoValue = normalizeComponentNo(componentLine.componentNo);
+  if (
+    componentLine.lineType !== 'COMPONENT' ||
+    !previousComponentNo ||
+    !nextComponentNoValue ||
+    previousComponentNo === nextComponentNoValue
+  ) {
+    return;
+  }
+  for (const line of props.lines) {
+    if (line === componentLine || line.lineType === 'COMPONENT') {
+      continue;
+    }
+    if (normalizeComponentNo(line.parentComponentNo) === previousComponentNo) {
+      line.parentComponentNo = nextComponentNoValue;
+    }
+  }
+}
+
+function clearChildParentComponentNo(componentNo: string) {
+  if (!componentNo) {
+    return;
+  }
+  const stillHasComponent = props.lines.some(
+    (line) => line.lineType === 'COMPONENT' && normalizeComponentNo(line.componentNo) === componentNo
+  );
+  if (stillHasComponent) {
+    return;
+  }
+  for (const line of props.lines) {
+    if (line.lineType !== 'COMPONENT' && normalizeComponentNo(line.parentComponentNo) === componentNo) {
+      line.parentComponentNo = '';
+    }
+  }
+}
+
+function handleLineTypeChange(line: CreateOrderLinePayload) {
+  const previousComponentNo = normalizeComponentNo(line.componentNo);
+  normalizeComponentFields(line);
+  if (line.lineType === 'COMPONENT') {
+    line.parentComponentNo = '';
+    if (!line.componentNo) {
+      line.componentNo = nextComponentNo();
+    }
+    return;
+  }
+  clearChildParentComponentNo(previousComponentNo);
+  line.componentNo = '';
+  applyDefaultParentComponent(line);
+}
+
+function applyDefaultParentComponent(line: CreateOrderLinePayload) {
+  if (line.lineType === 'COMPONENT' || normalizeComponentNo(line.parentComponentNo)) {
+    return;
+  }
+  line.parentComponentNo = inheritedParentComponentNoForLine(line);
+}
+
+function inheritedParentComponentNoForLine(line: CreateOrderLinePayload) {
+  const lineIndex = props.lines.indexOf(line);
+  if (lineIndex <= 0) {
+    return '';
+  }
+  for (let index = lineIndex - 1; index >= 0; index -= 1) {
+    const previousLine = props.lines[index];
+    if (previousLine.lineType === 'COMPONENT') {
+      return normalizeComponentNo(previousLine.componentNo);
+    }
+    const inheritedParentNo = normalizeComponentNo(previousLine.parentComponentNo);
+    if (inheritedParentNo) {
+      return inheritedParentNo;
+    }
+  }
+  return '';
+}
+
+function nextComponentNo() {
+  const usedNos = new Set(
+    [...props.componentSourceLines, ...props.lines].map((line) => normalizeComponentNo(line.componentNo)).filter(Boolean)
+  );
+  for (let index = 1; index <= 9999; index += 1) {
+    const candidate = `C${String(index).padStart(3, '0')}`;
+    if (!usedNos.has(candidate)) {
+      return candidate;
+    }
+  }
+  return '';
 }
 
 function fulfillmentModeText(line: CreateOrderLinePayload) {
@@ -866,14 +1186,11 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
   const normalizedKeyword = keyword.trim();
   const requestId = ++materialSuggestionRequestSeq.value;
   callback([]);
+  if (!normalizedKeyword && !props.customerId?.trim()) {
+    return;
+  }
   try {
-    const result = await erpApi.inventoryMaterialSuggestions(
-      normalizedKeyword,
-      undefined,
-      undefined,
-      props.excludeOrderNo,
-      props.excludeOrderId
-    );
+    const result = await loadMaterialSuggestions(normalizedKeyword);
     if (requestId === materialSuggestionRequestSeq.value) {
       callback(result);
     }
@@ -884,26 +1201,158 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
   }
 }
 
-function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryMaterialSuggestion) {
-  invalidateStockSourceReview(line, true);
-  line.partCode = item.partCode;
-  line.partName = item.partName;
-  line.unit = item.unit || line.unit || '件';
-  if (!line.partSpecification && item.partSpecification) {
-    line.partSpecification = item.partSpecification;
+function normalizeMaterialSuggestionValue(value?: string | null) {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+function materialSuggestionExactMatches(item: InventoryMaterialSuggestion, keyword: string) {
+  const normalizedKeyword = normalizeMaterialSuggestionValue(keyword);
+  return (
+    normalizeMaterialSuggestionValue(item.partCode) === normalizedKeyword ||
+    normalizeMaterialSuggestionValue(item.partName) === normalizedKeyword
+  );
+}
+
+function canAutoFillMaterialSuggestion(item: InventoryMaterialSuggestion) {
+  return !item.hasIdentityConflict;
+}
+
+function warnMaterialSuggestionNeedsManualPick(item: InventoryMaterialSuggestion) {
+  if (item.hasIdentityConflict) {
+    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，请核对${materialIdentityConflictFieldsText(item)}，并从下拉候选中人工确认后再套用`);
   }
 }
 
-function materialSuggestionMatchText(item: InventoryMaterialSuggestion) {
-  const parts = [
-    item.matchedBatchNo ? `命中批次 ${item.matchedBatchNo}` : '',
-    item.matchedSourceOrderNo ? `订单 ${item.matchedSourceOrderNo}` : '',
-    item.matchedProductionTaskNo ? `任务 ${item.matchedProductionTaskNo}` : ''
-  ].filter(Boolean);
-  return parts.join(' / ');
+function loadMaterialSuggestions(keyword: string) {
+  return erpApi.inventoryMaterialSuggestions(
+    keyword.trim(),
+    undefined,
+    undefined,
+    props.excludeOrderNo,
+    props.excludeOrderId,
+    props.customerId
+  );
+}
+
+async function fillExactMaterialFromInput(line: CreateOrderLinePayload, field: MaterialSuggestionInputField) {
+  const keyword = String(line[field] || '').trim();
+  if (!keyword) {
+    return;
+  }
+  try {
+    const suggestions = await loadMaterialSuggestions(keyword);
+    if (normalizeMaterialSuggestionValue(line[field]) !== normalizeMaterialSuggestionValue(keyword)) {
+      return;
+    }
+    const exactMatches = suggestions.filter((item) => materialSuggestionExactMatches(item, keyword));
+    if (exactMatches.length === 1) {
+      if (!canAutoFillMaterialSuggestion(exactMatches[0])) {
+        warnMaterialSuggestionNeedsManualPick(exactMatches[0]);
+        return;
+      }
+      selectMaterialSuggestion(line, exactMatches[0]);
+      return;
+    }
+    if (exactMatches.length > 1) {
+      const normalizedKeyword = normalizeMaterialSuggestionValue(keyword);
+      const exactFieldMatches = exactMatches.filter(
+        (item) => normalizeMaterialSuggestionValue(item[field]) === normalizedKeyword
+      );
+      if (exactFieldMatches.length === 1) {
+        if (!canAutoFillMaterialSuggestion(exactFieldMatches[0])) {
+          warnMaterialSuggestionNeedsManualPick(exactFieldMatches[0]);
+          return;
+        }
+        selectMaterialSuggestion(line, exactFieldMatches[0]);
+        return;
+      }
+      const exactPartCodeMatches = exactMatches.filter(
+        (item) => normalizeMaterialSuggestionValue(item.partCode) === normalizedKeyword
+      );
+      if (exactFieldMatches.length === 0 && exactPartCodeMatches.length === 1) {
+        if (!canAutoFillMaterialSuggestion(exactPartCodeMatches[0])) {
+          warnMaterialSuggestionNeedsManualPick(exactPartCodeMatches[0]);
+          return;
+        }
+        selectMaterialSuggestion(line, exactPartCodeMatches[0]);
+        return;
+      }
+      ElMessage.warning(`找到 ${exactMatches.length} 个精确匹配物料，请从下拉列表选择具体零件`);
+    }
+  } catch {
+    // 查询失败时保留手工输入值，避免阻断新物料下单。
+  }
+}
+
+function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryMaterialSuggestion) {
+  if (item.hasIdentityConflict) {
+    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，已按当前候选套用，请核对${materialIdentityConflictFieldsText(item)}`);
+  }
+  setMaterialIdentityWarning(line, item);
+  const lineHadDrawingInfo = Boolean(
+    line.drawingNo?.trim() ||
+      line.drawingVersion?.trim() ||
+      line.drawingDate ||
+      line.drawingStatus?.trim() ||
+      line.projectModel?.trim() ||
+      line.partSpecification?.trim()
+  );
+  invalidateStockSourceReview(line, true);
+  line.partCode = item.partCode;
+  line.partName = item.partName;
+  const autoFields: AutoMaterialSnapshot['autoFields'] = {
+    partName: item.partName
+  };
+  line.unit = item.unit || line.unit || '件';
+  if (item.unit) {
+    autoFields.unit = item.unit;
+  }
+  if (!line.partSpecification && item.partSpecification) {
+    line.partSpecification = item.partSpecification;
+    autoFields.partSpecification = item.partSpecification;
+  }
+  if (!line.drawingNo && item.drawingNo) {
+    line.drawingNo = item.drawingNo;
+    autoFields.drawingNo = item.drawingNo;
+  }
+  if (!line.drawingVersion && item.drawingVersion) {
+    line.drawingVersion = item.drawingVersion;
+    autoFields.drawingVersion = item.drawingVersion;
+  }
+  if (!line.drawingDate && item.drawingDate) {
+    line.drawingDate = item.drawingDate;
+    autoFields.drawingDate = item.drawingDate;
+  }
+  if (!line.drawingStatus && item.drawingStatus) {
+    line.drawingStatus = item.drawingStatus;
+    autoFields.drawingStatus = item.drawingStatus;
+  }
+  if (!line.projectModel && item.projectModel) {
+    line.projectModel = item.projectModel;
+    autoFields.projectModel = item.projectModel;
+  }
+  if (!lineHadDrawingInfo && item.partThickness && Number(item.partThickness) > 0) {
+    line.partThickness = item.partThickness;
+    autoFields.partThickness = item.partThickness;
+  }
+  autoMaterialSnapshots.set(line, {
+    partCode: item.partCode,
+    partName: item.partName,
+    autoFields
+  });
 }
 
 function handlePartCodeInput(line: CreateOrderLinePayload) {
+  clearAutoMaterialFieldsWhenMaterialIdentityChanges(line);
+  clearMaterialIdentityWarningWhenMaterialIdentityChanges(line);
+  if (line.selectedStockSources?.length || line.stockSourceReviewed) {
+    invalidateStockSourceReview(line, true);
+  }
+}
+
+function handlePartNameInput(line: CreateOrderLinePayload) {
+  clearAutoMaterialFieldsWhenMaterialIdentityChanges(line);
+  clearMaterialIdentityWarningWhenMaterialIdentityChanges(line);
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
     invalidateStockSourceReview(line, true);
   }
@@ -931,6 +1380,48 @@ function handleUnitInput(line: CreateOrderLinePayload) {
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
     invalidateStockSourceReview(line, true);
   }
+}
+
+function clearAutoMaterialFieldsWhenMaterialIdentityChanges(line: CreateOrderLinePayload) {
+  const snapshot = autoMaterialSnapshots.get(line);
+  if (!snapshot) {
+    return;
+  }
+  const partCodeMatches = normalizeMaterialSuggestionValue(line.partCode) === normalizeMaterialSuggestionValue(snapshot.partCode);
+  const partNameMatches = normalizeMaterialSuggestionValue(line.partName) === normalizeMaterialSuggestionValue(snapshot.partName);
+  if (partCodeMatches && partNameMatches) {
+    return;
+  }
+  const clearTextField = (
+    field: Exclude<AutoMaterialField, 'unit' | 'partThickness'>,
+    fallback: string | undefined = ''
+  ) => {
+    const snapshotValue = snapshot.autoFields[field];
+    if (snapshotValue !== undefined && normalizeMaterialSuggestionValue(String(line[field] || '')) === normalizeMaterialSuggestionValue(String(snapshotValue || ''))) {
+      line[field] = fallback as never;
+    }
+  };
+  clearTextField('partName');
+  clearTextField('partSpecification');
+  clearTextField('drawingNo');
+  clearTextField('drawingVersion');
+  clearTextField('drawingDate', undefined);
+  clearTextField('drawingStatus');
+  clearTextField('projectModel');
+  if (
+    snapshot.autoFields.unit !== undefined &&
+    normalizeMaterialSuggestionValue(line.unit) === normalizeMaterialSuggestionValue(String(snapshot.autoFields.unit || ''))
+  ) {
+    line.unit = '件';
+  }
+  if (
+    snapshot.autoFields.partThickness !== undefined &&
+    Math.abs(Number(line.partThickness || 0) - Number(snapshot.autoFields.partThickness || 0)) <= 0.0001
+  ) {
+    line.partThickness = 1;
+  }
+  autoMaterialSnapshots.delete(line);
+  clearMaterialIdentityWarning(line);
 }
 
 function createUploadRequest(line: CreateOrderLinePayload) {
@@ -1038,6 +1529,17 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   gap: 6px;
 }
 
+.material-input-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.material-identity-warning {
+  color: #d97706;
+  font-size: 12px;
+  line-height: 16px;
+}
+
 .stock-status-cell {
   display: grid;
   align-items: start;
@@ -1094,30 +1596,12 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   white-space: nowrap;
 }
 
-.material-suggestion {
-  display: grid;
-  gap: 2px;
-  padding: 4px 0;
-  line-height: 18px;
-}
-
-.material-suggestion strong {
-  color: #0f172a;
-  font-size: 13px;
-}
-
-.material-suggestion span {
-  color: #334155;
-  font-size: 13px;
-}
-
-.material-suggestion small {
-  color: #64748b;
-  font-size: 12px;
-}
-
 :global(.material-suggestion-popper .el-autocomplete-suggestion__wrap) {
   max-height: 340px;
+}
+
+:global(.material-suggestion-popper) {
+  width: min(560px, calc(100vw - 48px)) !important;
 }
 
 :global(.material-suggestion-popper .el-autocomplete-suggestion li) {

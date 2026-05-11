@@ -30,6 +30,8 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-}
       UPLOAD_DIR: /app/storage/uploads
       EXPORT_DIR: /app/storage/exports
+      API_BODY_LIMIT: ${API_BODY_LIMIT:-10mb}
+      ORDER_IMPORT_UPLOAD_MAX_MB: ${ORDER_IMPORT_UPLOAD_MAX_MB:-100}
     volumes:
       - ${UPLOAD_DIR:-./storage/uploads}:/app/storage/uploads
       - ${EXPORT_DIR:-./storage/exports}:/app/storage/exports

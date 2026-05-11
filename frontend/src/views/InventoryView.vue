@@ -37,17 +37,11 @@
           @select="selectMaterialSuggestion"
         >
           <template #default="{ item }">
-            <div class="material-suggestion">
-              <div class="material-suggestion-main">
-                <strong>{{ item.partCode }}</strong>
-                <span>{{ item.partName }}</span>
-              </div>
-              <small>
-                {{ selectedWarehouseName || '全部仓库' }}库存
-                {{ formatQuantity(item.availableQuantity, item.unit) }}
-              </small>
-              <small v-if="materialSuggestionMatchText(item)">{{ materialSuggestionMatchText(item) }}</small>
-            </div>
+            <MaterialSuggestionOption
+              :item="item"
+              show-available
+              :available-scope-label="selectedWarehouseName || '全部仓库'"
+            />
           </template>
         </el-autocomplete>
       </div>
@@ -82,6 +76,56 @@
         {{ row.partName }}（{{ row.partCode }}）在{{ selectedWarehouseName || '全部仓库' }}当前可用库存为
         {{ formatQuantity(row.availableQuantity, row.unit) }}
       </span>
+    </div>
+
+    <div class="table-card desktop-table material-memory-card">
+      <div class="section-heading material-memory-heading">
+        <div>
+          <strong>物料基础库</strong>
+          <span>下单和 Excel 导入同步的搜索记忆；删除只停用记忆，不删除订单、库存和生产追溯。</span>
+        </div>
+        <div class="material-memory-toolbar">
+          <el-input v-model="materialMemoryFilters.keyword" clearable placeholder="编码 / 名称 / 拼音 / 规格 / 客户 / 订单 / 图号" style="width: 320px" @keyup.enter="loadMaterialMemory" />
+          <el-select v-model="materialMemoryFilters.status" placeholder="状态" style="width: 120px" @change="loadMaterialMemory">
+            <el-option label="启用" value="ENABLED" />
+            <el-option label="停用" value="DISABLED" />
+          </el-select>
+          <el-button :loading="materialMemoryLoading" @click="loadMaterialMemory">查询</el-button>
+        </div>
+      </div>
+      <el-table v-loading="materialMemoryLoading" :data="materialMemory" max-height="260">
+        <el-table-column prop="partCode" label="物料编码" min-width="160" />
+        <el-table-column prop="partName" label="物料名称" min-width="180" />
+        <el-table-column prop="unit" label="单位" width="80" />
+        <el-table-column prop="partSpecification" label="规格" min-width="180">
+          <template #default="{ row }">{{ row.partSpecification || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag :type="row.status === 'ENABLED' ? 'success' : 'info'" effect="plain">
+              {{ row.status === 'ENABLED' ? '启用' : '停用' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="库存" width="130">
+          <template #default="{ row }">{{ formatQuantity(row.availableQuantity, row.unit) }}</template>
+        </el-table-column>
+        <el-table-column label="订单使用" min-width="220">
+          <template #default="{ row }">
+            <div>{{ row.orderLineUsageCount }} 次</div>
+            <div v-if="row.lastOrderNo" class="cell-subtext">
+              最近 {{ row.lastOrderNo }} / {{ row.lastCustomerName || '-' }} / {{ row.lastOrderDate || '-' }}
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openMaterialMemoryDialog(row)">编辑</el-button>
+            <el-button v-if="row.status === 'ENABLED'" link type="danger" @click="disableMaterialMemory(row)">删除记忆</el-button>
+            <el-button v-else link type="success" @click="enableMaterialMemory(row)">启用</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
     </div>
 
     <div class="table-card desktop-table summary-table-card">
@@ -519,6 +563,9 @@
             @change="onAdjustmentFileChange"
           />
           <div class="adjustment-hint">必须上传盘点工单、现场照片或 PDF；支持 PNG、JPG、WEBP、BMP、GIF、TIF 等格式。</div>
+          <div v-if="adjustmentFile" class="adjustment-selected-file">
+            已选择：{{ displayFileName(adjustmentFile.name) }}
+          </div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="adjustForm.remark" type="textarea" :rows="3" placeholder="库存差异原因，可选" />
@@ -542,9 +589,18 @@
           <el-table-column label="清点时间" min-width="155">
             <template #default="{ row }">{{ formatDateTime(row.countedAt) }}</template>
           </el-table-column>
-          <el-table-column label="附件" width="90">
+          <el-table-column label="附件" min-width="170">
             <template #default="{ row }">
-              <a v-if="row.attachmentFileUrl" :href="row.attachmentFileUrl" target="_blank" rel="noreferrer">查看</a>
+              <a
+                v-if="row.attachmentFileUrl"
+                class="adjustment-attachment-link"
+                :href="row.attachmentFileUrl"
+                :title="displayFileName(row.attachmentFileName) || '查看附件'"
+                target="_blank"
+                rel="noreferrer"
+              >
+                {{ displayFileName(row.attachmentFileName) || '查看附件' }}
+              </a>
               <span v-else class="muted">-</span>
             </template>
           </el-table-column>
@@ -555,19 +611,51 @@
         <el-button type="primary" :loading="adjustSaving" @click="submitAdjustment">保存盘点</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="materialMemoryDialogVisible" class="responsive-dialog" title="编辑物料基础资料" width="520px">
+      <el-form label-width="96px">
+        <el-form-item label="物料编码">
+          <el-input v-model="materialMemoryForm.partCode" />
+        </el-form-item>
+        <el-form-item label="物料名称">
+          <el-input v-model="materialMemoryForm.partName" />
+        </el-form-item>
+        <el-form-item label="单位">
+          <el-input v-model="materialMemoryForm.unit" />
+        </el-form-item>
+        <el-form-item label="规格">
+          <el-input v-model="materialMemoryForm.partSpecification" clearable />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="materialMemoryForm.status" style="width: 160px">
+            <el-option label="启用" value="ENABLED" />
+            <el-option label="停用" value="DISABLED" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <p class="material-memory-dialog-hint">
+        这里只维护下单搜索记忆；历史订单、库存批次和生产记录不会被批量改写。
+      </p>
+      <template #footer>
+        <el-button :disabled="materialMemorySaving" @click="materialMemoryDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="materialMemorySaving" @click="saveMaterialMemory">保存</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { computed, onMounted, reactive, ref } from 'vue';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import InventorySourceDetailsDialog from '../components/InventorySourceDetailsDialog.vue';
+import MaterialSuggestionOption from '../components/MaterialSuggestionOption.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
 import StatusTag from '../components/StatusTag.vue';
 import type {
+  CommonStatus,
   InventoryAdjustment,
   InventoryBatch,
   InventoryMaterialSuggestion,
@@ -576,8 +664,10 @@ import type {
   InventorySourceDetailResponse,
   InventoryStatus,
   InventorySummaryRow,
+  MaterialMemory,
   Warehouse
 } from '../types/erp';
+import { normalizeDisplayFileName } from '../utils/fileNames';
 import { formatDate, formatQuantity } from '../utils/format';
 
 const warehouses = ref<Warehouse[]>([]);
@@ -595,6 +685,10 @@ const reservationDialogVisible = ref(false);
 const reservationHistory = ref<InventoryReservationAudit[]>([]);
 const reservationHistoryLoading = ref(false);
 const materialSuggestionRequestSeq = ref(0);
+const materialMemory = ref<MaterialMemory[]>([]);
+const materialMemoryLoading = ref(false);
+const materialMemoryDialogVisible = ref(false);
+const materialMemorySaving = ref(false);
 const adjustmentFileInput = ref<HTMLInputElement>();
 const adjustmentFile = ref<File | null>(null);
 const adjustmentHistory = ref<InventoryAdjustment[]>([]);
@@ -625,6 +719,27 @@ const filters = reactive<{
   orderNo?: string;
   status?: InventoryStatus;
 }>({});
+const materialMemoryFilters = reactive<{
+  keyword?: string;
+  status: CommonStatus;
+}>({
+  status: 'ENABLED'
+});
+const materialMemoryForm = reactive<{
+  id: string;
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification: string;
+  status: CommonStatus;
+}>({
+  id: '',
+  partCode: '',
+  partName: '',
+  unit: '',
+  partSpecification: '',
+  status: 'ENABLED'
+});
 
 const availableQuantityText = computed(() => formatInventoryTotalByUnit('availableQuantity'));
 const stockedWarehouseCount = computed(
@@ -678,6 +793,83 @@ async function loadInventory() {
   }
 }
 
+async function loadMaterialMemory() {
+  materialMemoryLoading.value = true;
+  try {
+    materialMemory.value = await erpApi.inventoryMaterials(materialMemoryFilters);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '物料基础库加载失败');
+  } finally {
+    materialMemoryLoading.value = false;
+  }
+}
+
+function openMaterialMemoryDialog(row: MaterialMemory) {
+  materialMemoryForm.id = row.id;
+  materialMemoryForm.partCode = row.partCode;
+  materialMemoryForm.partName = row.partName;
+  materialMemoryForm.unit = row.unit;
+  materialMemoryForm.partSpecification = row.partSpecification || '';
+  materialMemoryForm.status = row.status;
+  materialMemoryDialogVisible.value = true;
+}
+
+async function saveMaterialMemory() {
+  if (!materialMemoryForm.id) {
+    return;
+  }
+  if (!materialMemoryForm.partCode.trim() || !materialMemoryForm.partName.trim() || !materialMemoryForm.unit.trim()) {
+    ElMessage.warning('物料编码、名称和单位不能为空');
+    return;
+  }
+  materialMemorySaving.value = true;
+  try {
+    await erpApi.updateInventoryMaterial(materialMemoryForm.id, {
+      partCode: materialMemoryForm.partCode.trim(),
+      partName: materialMemoryForm.partName.trim(),
+      unit: materialMemoryForm.unit.trim(),
+      partSpecification: materialMemoryForm.partSpecification.trim() || undefined,
+      status: materialMemoryForm.status
+    });
+    ElMessage.success('物料基础资料已保存');
+    materialMemoryDialogVisible.value = false;
+    await loadMaterialMemory();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '物料基础资料保存失败');
+  } finally {
+    materialMemorySaving.value = false;
+  }
+}
+
+async function disableMaterialMemory(row: MaterialMemory) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除物料记忆 ${row.partCode} / ${row.partName} 吗？系统只会停用物料基础库记录，不会删除历史订单、库存和生产记录。`,
+      '删除物料记忆',
+      { type: 'warning', confirmButtonText: '删除记忆', cancelButtonText: '取消' }
+    );
+  } catch {
+    return;
+  }
+  try {
+    await erpApi.disableInventoryMaterial(row.id);
+    ElMessage.success('物料记忆已停用');
+    await loadMaterialMemory();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '物料记忆删除失败');
+  }
+}
+
+async function enableMaterialMemory(row: MaterialMemory) {
+  try {
+    await erpApi.updateInventoryMaterial(row.id, { status: 'ENABLED' });
+    ElMessage.success('物料记忆已启用');
+    await loadMaterialMemory();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '物料记忆启用失败');
+  }
+}
+
 function reset() {
   filters.keyword = undefined;
   filters.customerId = undefined;
@@ -706,15 +898,6 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
 function selectMaterialSuggestion(item: InventoryMaterialSuggestion) {
   filters.keyword = item.partCode;
   void loadInventory();
-}
-
-function materialSuggestionMatchText(item: InventoryMaterialSuggestion) {
-  const parts = [
-    item.matchedBatchNo ? `命中批次 ${item.matchedBatchNo}` : '',
-    item.matchedSourceOrderNo ? `订单 ${item.matchedSourceOrderNo}` : '',
-    item.matchedProductionTaskNo ? `任务 ${item.matchedProductionTaskNo}` : ''
-  ].filter(Boolean);
-  return parts.join(' / ');
 }
 
 function inventorySourceLabel(row: InventoryBatch) {
@@ -939,12 +1122,16 @@ function onAdjustmentFileChange(event: Event) {
 }
 
 function isAllowedAdjustmentFile(file: File) {
-  const fileName = file.name.toLowerCase();
+  const fileName = displayFileName(file.name).toLowerCase();
   const extension = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '';
   return (
     allowedAdjustmentFileExtensions.includes(extension) &&
     (genericAdjustmentMimeTypes.includes(file.type) || allowedAdjustmentMimeTypes.includes(file.type))
   );
+}
+
+function displayFileName(fileName?: string | null) {
+  return normalizeDisplayFileName(fileName);
 }
 
 function formatSignedQuantity(value: number, unit: string) {
@@ -1024,7 +1211,7 @@ async function submitAdjustment() {
 
 onMounted(async () => {
   await loadWarehouses();
-  await loadInventory();
+  await Promise.all([loadInventory(), loadMaterialMemory()]);
 });
 </script>
 
@@ -1052,6 +1239,38 @@ onMounted(async () => {
 
 .summary-table-card {
   margin-bottom: 18px;
+}
+
+.material-memory-card {
+  margin-bottom: 18px;
+}
+
+.material-memory-heading {
+  align-items: flex-start;
+}
+
+.material-memory-heading > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.material-memory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.material-memory-dialog-hint {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #475569;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .inventory-query-notice {
@@ -1113,35 +1332,6 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.material-suggestion {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 4px 0;
-  line-height: 18px;
-}
-
-.material-suggestion-main {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.material-suggestion-main strong {
-  color: #0f172a;
-  font-size: 13px;
-}
-
-.material-suggestion-main span {
-  color: #334155;
-  font-size: 13px;
-}
-
-.material-suggestion small {
-  color: #64748b;
-  font-size: 12px;
 }
 
 .summary-mobile-list {
@@ -1216,6 +1406,26 @@ onMounted(async () => {
   line-height: 18px;
 }
 
+.adjustment-selected-file,
+.adjustment-attachment-link {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.adjustment-selected-file {
+  margin-top: 6px;
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.adjustment-attachment-link {
+  color: #2563eb;
+  text-decoration: none;
+}
+
 .adjustment-history {
   margin-top: 18px;
   border: 1px solid #e2e8f0;
@@ -1244,6 +1454,11 @@ onMounted(async () => {
   .section-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .material-memory-toolbar {
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .inventory-query-notice {

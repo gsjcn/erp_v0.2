@@ -328,10 +328,44 @@
           工序名称只允许选择标准工序；次数、参数和特殊要求请写入工序备注，避免后续统计混乱。
         </div>
 
-        <h4>已选流程</h4>
-        <div class="selected-steps">
-          <div v-for="(step, index) in draftSteps" :key="`${index}-${step.processName}`" class="selected-step">
-            <span class="step-index">{{ index + 1 }}</span>
+        <div class="selected-steps-title">
+          <h4>已选流程</h4>
+          <small>拖动“拖拽”手柄调整顺序；上移 / 下移可作为备用操作。</small>
+        </div>
+        <div
+          class="selected-steps"
+          @dragover.self.prevent="handleStepListDragOverEnd"
+          @dragleave="handleStepListDragLeave"
+          @drop.self.prevent="dropStepAtEnd"
+        >
+          <div
+            v-for="(step, index) in draftSteps"
+            :key="draftStepKey(step)"
+            class="selected-step"
+            :class="{
+              'is-dragging': draggedStepIndex === index,
+              'is-drop-before': dragOverStepIndex === index && !dragOverStepInsertAfter,
+              'is-drop-after': dragOverStepIndex === index && dragOverStepInsertAfter
+            }"
+            @dragenter.prevent="handleStepDragOver($event, index)"
+            @dragover.prevent="handleStepDragOver($event, index)"
+            @drop.prevent="dropStep($event, index)"
+          >
+            <div class="step-sort-cell">
+              <button
+                type="button"
+                class="step-drag-handle"
+                :disabled="!canEditProcess"
+                :draggable="canEditProcess"
+                title="拖拽调整顺序"
+                aria-label="拖拽调整顺序"
+                @dragstart.stop="startStepDrag($event, index)"
+                @dragend="endStepDrag"
+              >
+                <el-icon><Rank /></el-icon>
+              </button>
+              <span class="step-index">{{ index + 1 }}</span>
+            </div>
             <el-select
               v-model="step.processName"
               filterable
@@ -487,6 +521,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
+import { Rank } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
@@ -515,6 +550,11 @@ const selectedLineId = ref('');
 const orderDateRange = ref<string[]>([]);
 const lastDateRange = ref<string[]>([]);
 const draftSteps = ref<ProcessStepDetail[]>([]);
+const draftStepKeys = new WeakMap<ProcessStepDetail, string>();
+let draftStepKeySeq = 0;
+const draggedStepIndex = ref<number | null>(null);
+const dragOverStepIndex = ref<number | null>(null);
+const dragOverStepInsertAfter = ref(false);
 const loading = ref(false);
 const ordersLoading = ref(false);
 const ordersLoaded = ref(false);
@@ -1024,7 +1064,115 @@ function moveStep(index: number, offset: number) {
   if (!canEditProcess.value) {
     return;
   }
-  const target = index + offset;
+  const target = index + offset + (offset > 0 ? 1 : 0);
+  reorderDraftStep(index, target);
+}
+
+function draftStepKey(step: ProcessStepDetail) {
+  const existingKey = draftStepKeys.get(step);
+  if (existingKey) {
+    return existingKey;
+  }
+  const key = `draft-step-${++draftStepKeySeq}`;
+  draftStepKeys.set(step, key);
+  return key;
+}
+
+function startStepDrag(event: DragEvent, index: number) {
+  if (!canEditProcess.value) {
+    event.preventDefault();
+    return;
+  }
+  draggedStepIndex.value = index;
+  dragOverStepIndex.value = index;
+  dragOverStepInsertAfter.value = false;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
+}
+
+function handleStepDragOver(event: DragEvent, index: number) {
+  if (!canEditProcess.value || draggedStepIndex.value === null) {
+    return;
+  }
+  dragOverStepIndex.value = index;
+  dragOverStepInsertAfter.value = isDragAfterRowMiddle(event);
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleStepListDragLeave(event: DragEvent) {
+  if (!canEditProcess.value || draggedStepIndex.value === null) {
+    return;
+  }
+  const listElement = event.currentTarget;
+  const nextElement = event.relatedTarget;
+  if (listElement instanceof HTMLElement && nextElement instanceof Node && listElement.contains(nextElement)) {
+    return;
+  }
+  dragOverStepIndex.value = null;
+  dragOverStepInsertAfter.value = false;
+}
+
+function handleStepListDragOverEnd(event: DragEvent) {
+  if (!canEditProcess.value || draggedStepIndex.value === null || draftSteps.value.length === 0) {
+    return;
+  }
+  dragOverStepIndex.value = draftSteps.value.length - 1;
+  dragOverStepInsertAfter.value = true;
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function dropStep(event: DragEvent, index: number) {
+  if (!canEditProcess.value || draggedStepIndex.value === null) {
+    endStepDrag();
+    return;
+  }
+  const insertionIndex = index + (isDragAfterRowMiddle(event) ? 1 : 0);
+  reorderDraftStep(draggedStepIndex.value, insertionIndex);
+  endStepDrag();
+}
+
+function dropStepAtEnd() {
+  if (!canEditProcess.value || draggedStepIndex.value === null) {
+    endStepDrag();
+    return;
+  }
+  reorderDraftStep(draggedStepIndex.value, draftSteps.value.length);
+  endStepDrag();
+}
+
+function endStepDrag() {
+  draggedStepIndex.value = null;
+  dragOverStepIndex.value = null;
+  dragOverStepInsertAfter.value = false;
+  draftProcessFilterKeyword.value = '';
+}
+
+function isDragAfterRowMiddle(event: DragEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2;
+}
+
+function reorderDraftStep(index: number, insertionIndex: number) {
+  if (index < 0 || index >= draftSteps.value.length) {
+    return;
+  }
+  let target = Math.max(0, Math.min(insertionIndex, draftSteps.value.length));
+  if (index < target) {
+    target -= 1;
+  }
+  if (index === target) {
+    return;
+  }
   const next = [...draftSteps.value];
   const [item] = next.splice(index, 1);
   next.splice(target, 0, item);
@@ -1769,17 +1917,31 @@ onMounted(loadInitialState);
   line-height: 1.7;
 }
 
-.builder-panel h4 {
-  margin: 16px 20px;
-}
-
 .selected-steps {
   padding: 0 20px 24px;
 }
 
+.selected-steps-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 16px 20px;
+}
+
+.selected-steps-title h4 {
+  margin: 0;
+}
+
+.selected-steps-title small {
+  color: #64748b;
+  font-size: 12px;
+}
+
 .selected-step {
+  position: relative;
   display: grid;
-  grid-template-columns: 42px minmax(140px, 180px) minmax(180px, 1fr) 180px;
+  grid-template-columns: 74px minmax(140px, 180px) minmax(180px, 1fr) 180px;
   align-items: center;
   gap: 10px;
   min-height: 48px;
@@ -1788,6 +1950,66 @@ onMounted(loadInitialState);
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
+}
+
+.selected-step.is-dragging {
+  opacity: 0.55;
+}
+
+.selected-step.is-drop-before,
+.selected-step.is-drop-after {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.selected-step.is-drop-before::before,
+.selected-step.is-drop-after::after {
+  position: absolute;
+  right: 10px;
+  left: 10px;
+  height: 2px;
+  background: #2563eb;
+  content: '';
+}
+
+.selected-step.is-drop-before::before {
+  top: -6px;
+}
+
+.selected-step.is-drop-after::after {
+  bottom: -6px;
+}
+
+.step-sort-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.step-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  color: #64748b;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.step-drag-handle:active {
+  cursor: grabbing;
+}
+
+.step-drag-handle:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .step-index {
@@ -1823,7 +2045,7 @@ onMounted(loadInitialState);
   }
 
   .selected-step {
-    grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-columns: 74px minmax(0, 1fr);
     row-gap: 8px;
   }
 
@@ -1870,7 +2092,7 @@ onMounted(loadInitialState);
   }
 
   .selected-step {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 74px minmax(0, 1fr);
     padding: 8px;
   }
 

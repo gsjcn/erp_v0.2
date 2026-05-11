@@ -1,9 +1,10 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'node:path';
+import { normalizeMultipartFileName } from '../../common/upload-filenames';
 import { inventoryAdjustmentUploadPath } from '../../storage/upload-paths';
-import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialSuggestionQueryDto } from './dto';
+import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialQueryDto, MaterialSuggestionQueryDto, UpdateMaterialDto } from './dto';
 import { InventoryService } from './inventory.service';
 
 const allowedAdjustmentExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
@@ -23,8 +24,9 @@ function safeAdjustmentFileName(
   file: Express.Multer.File,
   callback: (error: Error | null, filename: string) => void
 ) {
-  const extension = extname(file.originalname).toLowerCase();
-  const baseName = file.originalname
+  const originalName = normalizeMultipartFileName(file.originalname);
+  const extension = extname(originalName).toLowerCase();
+  const baseName = originalName
     .replace(extension, '')
     .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
     .slice(0, 60);
@@ -45,6 +47,21 @@ export class InventoryController {
     return this.inventoryService.materialSuggestions(query);
   }
 
+  @Get('materials')
+  materials(@Query() query: MaterialQueryDto) {
+    return this.inventoryService.materials(query);
+  }
+
+  @Patch('materials/:materialId')
+  updateMaterial(@Param('materialId') materialId: string, @Body() dto: UpdateMaterialDto) {
+    return this.inventoryService.updateMaterial(materialId, dto);
+  }
+
+  @Delete('materials/:materialId')
+  disableMaterial(@Param('materialId') materialId: string) {
+    return this.inventoryService.disableMaterial(materialId);
+  }
+
   @Get('materials/:partCode/source-details')
   materialSourceDetails(@Param('partCode') partCode: string, @Query() query: InventorySourceDetailQueryDto) {
     return this.inventoryService.materialSourceDetails(partCode, query);
@@ -59,7 +76,7 @@ export class InventoryController {
       }),
       limits: { fileSize: 30 * 1024 * 1024 },
       fileFilter: (_request, file, callback) => {
-        const extension = extname(file.originalname).toLowerCase();
+        const extension = extname(normalizeMultipartFileName(file.originalname)).toLowerCase();
         const mimeType = file.mimetype || '';
         if (
           !allowedAdjustmentExtensions.has(extension) ||
@@ -78,7 +95,7 @@ export class InventoryController {
     }
 
     return {
-      fileName: file.originalname,
+      fileName: normalizeMultipartFileName(file.originalname),
       storedFileName: file.filename,
       fileUrl: `/uploads/inventory-adjustments/${file.filename}`,
       size: file.size,

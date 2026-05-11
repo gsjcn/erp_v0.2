@@ -9,7 +9,6 @@
     filterable
     remote
     reserve-keyword
-    default-first-option
     popper-class="customer-select-popper"
     @update:model-value="handleChange"
     @focus="handleFocus"

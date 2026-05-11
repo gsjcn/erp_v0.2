@@ -1,4 +1,4 @@
-import { InventoryStatus } from '@prisma/client';
+import { CommonStatus, InventoryStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsEnum, IsIn, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
@@ -39,6 +39,10 @@ export class MaterialSuggestionQueryDto {
 
   @IsOptional()
   @IsString()
+  customerId?: string;
+
+  @IsOptional()
+  @IsString()
   warehouseId?: string;
 
   @IsOptional()
@@ -52,6 +56,38 @@ export class MaterialSuggestionQueryDto {
   @IsOptional()
   @IsString()
   excludeOrderId?: string;
+}
+
+export class MaterialQueryDto {
+  @IsOptional()
+  @IsString()
+  keyword?: string;
+
+  @IsOptional()
+  @IsEnum(CommonStatus)
+  status?: CommonStatus;
+}
+
+export class UpdateMaterialDto {
+  @IsOptional()
+  @IsString()
+  partCode?: string;
+
+  @IsOptional()
+  @IsString()
+  partName?: string;
+
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @IsOptional()
+  @IsString()
+  partSpecification?: string;
+
+  @IsOptional()
+  @IsEnum(CommonStatus)
+  status?: CommonStatus;
 }
 
 export class InventorySourceDetailQueryDto {

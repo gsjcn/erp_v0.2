@@ -89,9 +89,40 @@
           />
         </el-form-item>
         <el-form-item label="流程步骤" required>
-          <div class="template-step-editor">
-            <div v-for="(step, index) in templateForm.steps" :key="`template-step-${index}`" class="template-step-row">
-              <span class="template-step-index">{{ index + 1 }}</span>
+          <small class="template-step-help">拖动“拖拽”手柄调整顺序；上移 / 下移可作为备用操作。</small>
+          <div
+            class="template-step-editor"
+            @dragover.self.prevent="handleTemplateStepListDragOverEnd"
+            @dragleave="handleTemplateStepListDragLeave"
+            @drop.self.prevent="dropTemplateStepAtEnd"
+          >
+            <div
+              v-for="(step, index) in templateForm.steps"
+              :key="templateStepKey(step)"
+              class="template-step-row"
+              :class="{
+                'is-dragging': draggedTemplateStepIndex === index,
+                'is-drop-before': templateStepDragOverIndex === index && !templateStepDragInsertAfter,
+                'is-drop-after': templateStepDragOverIndex === index && templateStepDragInsertAfter
+              }"
+              @dragenter.prevent="handleTemplateStepDragOver($event, index)"
+              @dragover.prevent="handleTemplateStepDragOver($event, index)"
+              @drop.prevent="dropTemplateStep($event, index)"
+            >
+              <div class="template-step-sort-cell">
+                <button
+                  type="button"
+                  class="template-step-drag-handle"
+                  draggable="true"
+                  title="拖拽调整顺序"
+                  aria-label="拖拽调整顺序"
+                  @dragstart.stop="startTemplateStepDrag($event, index)"
+                  @dragend="endTemplateStepDrag"
+                >
+                  <el-icon><Rank /></el-icon>
+                </button>
+                <span class="template-step-index">{{ index + 1 }}</span>
+              </div>
               <el-select
                 v-model="step.processName"
                 filterable
@@ -189,6 +220,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
+import { Rank } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import type { ProcessStepDetail, ProcessTemplate } from '../types/erp';
 import { filterPinyinSearchOptions } from '../utils/pinyinSearch';
@@ -242,6 +274,11 @@ const searchTimer = ref<number>();
 const creatingProcess = ref(false);
 const templateProcessFilterKeyword = ref('');
 const newStepProcessFilterKeyword = ref('');
+const templateStepKeys = new WeakMap<ProcessStepDetail, string>();
+let templateStepKeySeq = 0;
+const draggedTemplateStepIndex = ref<number | null>(null);
+const templateStepDragOverIndex = ref<number | null>(null);
+const templateStepDragInsertAfter = ref(false);
 const templateForm = reactive({
   templateName: '',
   remark: '',
@@ -458,7 +495,111 @@ function removeTemplateStep(index: number) {
 }
 
 function moveTemplateStep(index: number, offset: number) {
-  const target = index + offset;
+  const target = index + offset + (offset > 0 ? 1 : 0);
+  reorderTemplateStep(index, target);
+}
+
+function templateStepKey(step: ProcessStepDetail) {
+  const existingKey = templateStepKeys.get(step);
+  if (existingKey) {
+    return existingKey;
+  }
+  const key = `template-step-${++templateStepKeySeq}`;
+  templateStepKeys.set(step, key);
+  return key;
+}
+
+function startTemplateStepDrag(event: DragEvent, index: number) {
+  draggedTemplateStepIndex.value = index;
+  templateStepDragOverIndex.value = index;
+  templateStepDragInsertAfter.value = false;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
+}
+
+function handleTemplateStepDragOver(event: DragEvent, index: number) {
+  if (draggedTemplateStepIndex.value === null) {
+    return;
+  }
+  templateStepDragOverIndex.value = index;
+  templateStepDragInsertAfter.value = isTemplateStepDragAfterRowMiddle(event);
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleTemplateStepListDragLeave(event: DragEvent) {
+  if (draggedTemplateStepIndex.value === null) {
+    return;
+  }
+  const listElement = event.currentTarget;
+  const nextElement = event.relatedTarget;
+  if (listElement instanceof HTMLElement && nextElement instanceof Node && listElement.contains(nextElement)) {
+    return;
+  }
+  templateStepDragOverIndex.value = null;
+  templateStepDragInsertAfter.value = false;
+}
+
+function handleTemplateStepListDragOverEnd(event: DragEvent) {
+  if (draggedTemplateStepIndex.value === null || templateForm.steps.length === 0) {
+    return;
+  }
+  templateStepDragOverIndex.value = templateForm.steps.length - 1;
+  templateStepDragInsertAfter.value = true;
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function dropTemplateStep(event: DragEvent, index: number) {
+  if (draggedTemplateStepIndex.value === null) {
+    endTemplateStepDrag();
+    return;
+  }
+  const insertionIndex = index + (isTemplateStepDragAfterRowMiddle(event) ? 1 : 0);
+  reorderTemplateStep(draggedTemplateStepIndex.value, insertionIndex);
+  endTemplateStepDrag();
+}
+
+function dropTemplateStepAtEnd() {
+  if (draggedTemplateStepIndex.value === null) {
+    endTemplateStepDrag();
+    return;
+  }
+  reorderTemplateStep(draggedTemplateStepIndex.value, templateForm.steps.length);
+  endTemplateStepDrag();
+}
+
+function endTemplateStepDrag() {
+  draggedTemplateStepIndex.value = null;
+  templateStepDragOverIndex.value = null;
+  templateStepDragInsertAfter.value = false;
+  templateProcessFilterKeyword.value = '';
+}
+
+function isTemplateStepDragAfterRowMiddle(event: DragEvent) {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2;
+}
+
+function reorderTemplateStep(index: number, insertionIndex: number) {
+  if (index < 0 || index >= templateForm.steps.length) {
+    return;
+  }
+  let target = Math.max(0, Math.min(insertionIndex, templateForm.steps.length));
+  if (index < target) {
+    target -= 1;
+  }
+  if (index === target) {
+    return;
+  }
   const next = [...templateForm.steps];
   const [item] = next.splice(index, 1);
   next.splice(target, 0, item);
@@ -757,15 +898,79 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   width: 100%;
 }
 
+.template-step-help {
+  display: block;
+  margin-bottom: 8px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .template-step-row {
+  position: relative;
   display: grid;
-  grid-template-columns: 34px minmax(150px, 180px) minmax(180px, 1fr) 150px;
+  grid-template-columns: 74px minmax(150px, 180px) minmax(180px, 1fr) 150px;
   align-items: center;
   gap: 10px;
   padding: 8px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
+}
+
+.template-step-row.is-dragging {
+  opacity: 0.55;
+}
+
+.template-step-row.is-drop-before,
+.template-step-row.is-drop-after {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.template-step-row.is-drop-before::before,
+.template-step-row.is-drop-after::after {
+  position: absolute;
+  right: 8px;
+  left: 8px;
+  height: 2px;
+  background: #2563eb;
+  content: '';
+}
+
+.template-step-row.is-drop-before::before {
+  top: -6px;
+}
+
+.template-step-row.is-drop-after::after {
+  bottom: -6px;
+}
+
+.template-step-sort-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.template-step-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  color: #64748b;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.template-step-drag-handle:active {
+  cursor: grabbing;
 }
 
 .template-step-index {
@@ -960,7 +1165,7 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   }
 
   .template-step-row {
-    grid-template-columns: 30px minmax(0, 1fr);
+    grid-template-columns: 74px minmax(0, 1fr);
   }
 
   .template-step-row .el-select,
