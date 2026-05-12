@@ -1,14 +1,38 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CommonStatus, InventoryReservationStatus, OrderStatus, Prisma } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { readFile, unlink } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin-search';
+import { normalizeMultipartFileName } from '../../common/upload-filenames';
 import { decimalToNumber } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
-import { inventoryAdjustmentUploadPath } from '../../storage/upload-paths';
-import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialQueryDto, MaterialSuggestionQueryDto, UpdateMaterialDto } from './dto';
+import { inventoryAdjustmentUploadPath, materialImportUploadPath } from '../../storage/upload-paths';
+import { ProcessDefinitionsService } from '../process-definitions/process-definitions.service';
+import * as ExcelJS from 'exceljs';
+import {
+  AdjustInventoryBatchDto,
+  CommitMaterialImportSessionDto,
+  CopyModelBomDto,
+  CreateMaterialDto,
+  CreateMaterialImportSessionDto,
+  GetMaterialImportSessionQueryDto,
+  InventoryQueryDto,
+  InventorySourceDetailQueryDto,
+  MaterialQueryDto,
+  MaterialSuggestionQueryDto,
+  MaterialTransformRuleQueryDto,
+  ModelBomQueryDto,
+  ReorderModelBomLinesDto,
+  SaveMaterialDrawingRevisionDto,
+  SaveMaterialApplicabilityDto,
+  SaveMaterialTransformRuleDto,
+  SaveModelBomDto,
+  SaveModelBomLineDto,
+  UpdateMaterialDto
+} from './dto';
 
 type InventorySummaryAccumulator = {
   partCode: string;
@@ -117,6 +141,108 @@ type MaterialMemoryRow = {
   updatedAt: Date;
 };
 
+type MaterialImportIssue = {
+  severity: 'ERROR' | 'WARNING';
+  code: string;
+  message: string;
+};
+
+type ParsedMaterialImportRow = {
+  sourceRowNo: number;
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  drawingNo?: string | null;
+  drawingVersion?: string | null;
+  drawingDate?: Date | null;
+  drawingStatus?: string | null;
+  partThickness?: number | null;
+  projectModel?: string | null;
+  remark?: string | null;
+  raw: Record<string, string | number | null>;
+  rowHash: string;
+  issues: MaterialImportIssue[];
+  errorCount: number;
+  warningCount: number;
+};
+
+type ParsedMaterialImportIssueRow = {
+  issues: MaterialImportIssue[];
+  errorCount: number;
+  warningCount: number;
+};
+
+type ParsedMaterialApplicabilityImportRow = ParsedMaterialImportIssueRow & {
+  sourceRowNo: number;
+  partCode: string;
+  customerCode?: string | null;
+  customerName?: string | null;
+  projectModel?: string | null;
+  remark?: string | null;
+  status: CommonStatus;
+  raw: Record<string, string | number | null>;
+  rowHash: string;
+};
+
+type ParsedMaterialTransformImportRow = ParsedMaterialImportIssueRow & {
+  sourceRowNo: number;
+  sourcePartCode: string;
+  targetPartCode: string;
+  customerCode?: string | null;
+  customerName?: string | null;
+  projectModel?: string | null;
+  multiplier?: number | null;
+  lossRate?: number | null;
+  defaultProcessRoute?: string | null;
+  conversionDescription?: string | null;
+  remark?: string | null;
+  status: CommonStatus;
+  raw: Record<string, string | number | null>;
+  rowHash: string;
+};
+
+const materialImportSheetName = '零件基础库';
+const materialApplicabilityImportSheetName = '适用范围';
+const materialTransformImportSheetName = '来源加工关系';
+const materialImportRequiredHeaders = ['零件编码', '零件名称', '单位'];
+const materialImportHeaderAliases: Record<string, string[]> = {
+  partCode: ['零件编码', '物料号', '物料编码', 'partCode', '编码'],
+  partName: ['零件名称', '物料名称', 'partName', '名称'],
+  unit: ['单位', 'unit'],
+  partSpecification: ['成品规格', '规格', 'partSpecification'],
+  drawingNo: ['图号', 'drawingNo'],
+  drawingVersion: ['图纸版本', '版本', 'drawingVersion'],
+  drawingDate: ['图纸日期', 'drawingDate'],
+  drawingStatus: ['图纸状态', 'drawingStatus'],
+  partThickness: ['厚度', '厚度(mm)', 'partThickness'],
+  projectModel: ['项目型号', '机型', 'projectModel'],
+  remark: ['备注', 'remark']
+};
+const materialApplicabilityImportRequiredHeaders = ['零件编码'];
+const materialApplicabilityImportHeaderAliases: Record<string, string[]> = {
+  partCode: ['零件编码', '物料号', '物料编码', 'partCode', '编码'],
+  customerCode: ['客户编码', 'customerCode'],
+  customerName: ['客户名称', '客户', 'customerName'],
+  projectModel: ['项目型号', '机型', 'projectModel'],
+  status: ['状态', 'status'],
+  remark: ['备注', 'remark']
+};
+const materialTransformImportRequiredHeaders = ['来源零件编码', '目标零件编码'];
+const materialTransformImportHeaderAliases: Record<string, string[]> = {
+  sourcePartCode: ['来源零件编码', '来源物料编码', '来源编码', 'sourcePartCode'],
+  targetPartCode: ['目标零件编码', '目标物料编码', '目标编码', 'targetPartCode'],
+  customerCode: ['客户编码', 'customerCode'],
+  customerName: ['客户名称', '客户', 'customerName'],
+  projectModel: ['项目型号', '机型', 'projectModel'],
+  multiplier: ['倍率', '用量倍率', 'multiplier'],
+  lossRate: ['损耗率', 'lossRate'],
+  defaultProcessRoute: ['默认工艺', '建议工艺', 'defaultProcessRoute'],
+  conversionDescription: ['转换说明', '加工说明', 'conversionDescription'],
+  status: ['状态', 'status'],
+  remark: ['备注', 'remark']
+};
+
 const adjustmentAttachmentPrefix = '/uploads/inventory-adjustments/';
 const allowedAdjustmentExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
 const allowedAdjustmentMimeTypes = new Set([
@@ -132,7 +258,10 @@ const genericUploadMimeTypes = new Set(['', 'application/octet-stream']);
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly processDefinitionsService: ProcessDefinitionsService
+  ) {}
 
   private async resolveInventoryCustomerScope(customerId?: string): Promise<InventoryCustomerScope | null> {
     const normalizedCustomerId = customerId?.trim();
@@ -292,6 +421,34 @@ export class InventoryService {
     return normalized;
   }
 
+  private normalizeMaterialScopeKey(value?: string | null) {
+    const normalized = String(value || '').trim();
+    return normalized ? normalized.toLocaleUpperCase() : 'ALL';
+  }
+
+  private async resolveMaterialApplicabilityScope(dto: SaveMaterialApplicabilityDto) {
+    const customerId = String(dto.customerId || '').trim() || null;
+    const projectModel = String(dto.projectModel || '').trim() || null;
+    const customer = customerId
+      ? await this.prisma.customer.findUnique({
+          where: { id: customerId },
+          select: { id: true, customerName: true }
+        })
+      : null;
+    if (customerId && !customer) {
+      throw new BadRequestException('适用客户不存在');
+    }
+    return {
+      customerId: customer?.id || null,
+      customerNameSnapshot: customer?.customerName || null,
+      projectModel,
+      customerScopeKey: customer?.id || 'ALL',
+      projectModelScopeKey: this.normalizeMaterialScopeKey(projectModel),
+      remark: String(dto.remark || '').trim() || null,
+      status: dto.status || 'ENABLED'
+    };
+  }
+
   private async ensureMaterialCodeAvailable(partCode: string, excludeId?: string) {
     const existing = await this.prisma.material.findFirst({
       where: {
@@ -441,6 +598,24 @@ export class InventoryService {
     });
   }
 
+  async createMaterial(dto: CreateMaterialDto) {
+    const partCode = this.normalizeMaterialRequired(dto.partCode, '物料编码');
+    const partName = this.normalizeMaterialRequired(dto.partName, '物料名称');
+    const unit = this.normalizeMaterialRequired(dto.unit, '单位');
+    await this.ensureMaterialCodeAvailable(partCode);
+
+    // 零件基础库只维护搜索资料，不创建库存、订单或生产任务。
+    return this.prisma.material.create({
+      data: {
+        partCode,
+        partName,
+        unit,
+        partSpecification: String(dto.partSpecification || '').trim() || null,
+        status: dto.status || 'ENABLED'
+      }
+    });
+  }
+
   async updateMaterial(materialId: string, dto: UpdateMaterialDto) {
     const existing = await this.prisma.material.findUnique({ where: { id: materialId } });
     if (!existing) {
@@ -452,16 +627,28 @@ export class InventoryService {
     if (partCode.toLocaleLowerCase() !== existing.partCode.toLocaleLowerCase()) {
       await this.ensureMaterialCodeAvailable(partCode, materialId);
     }
-    return this.prisma.material.update({
-      where: { id: materialId },
-      data: {
-        partCode,
-        partName,
-        unit,
-        partSpecification:
-          dto.partSpecification !== undefined ? String(dto.partSpecification || '').trim() || null : existing.partSpecification,
-        status: dto.status || existing.status
-      }
+    const status = dto.status || existing.status;
+    const data = {
+      partCode,
+      partName,
+      unit,
+      partSpecification:
+        dto.partSpecification !== undefined ? String(dto.partSpecification || '').trim() || null : existing.partSpecification,
+      status
+    };
+    if (status !== 'DISABLED') {
+      return this.prisma.material.update({
+        where: { id: materialId },
+        data
+      });
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.material.update({
+        where: { id: materialId },
+        data
+      });
+      await this.disableMaterialRecommendationLinks(tx, materialId);
+      return row;
     });
   }
 
@@ -470,10 +657,2224 @@ export class InventoryService {
     if (!existing) {
       throw new NotFoundException('物料基础资料不存在');
     }
-    return this.prisma.material.update({
-      where: { id: materialId },
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.material.update({
+        where: { id: materialId },
+        data: { status: 'DISABLED' }
+      });
+      await this.disableMaterialRecommendationLinks(tx, materialId);
+      return row;
+    });
+  }
+
+  private async disableMaterialRecommendationLinks(tx: Prisma.TransactionClient, materialId: string) {
+    const componentLines = await tx.modelBomLine.findMany({
+      where: {
+        materialId,
+        lineType: 'COMPONENT',
+        status: 'ENABLED',
+        componentNo: { not: null }
+      },
+      select: { bomId: true, componentNo: true }
+    });
+
+    // 零件软停用只影响后续推荐：同步停用适用范围、BOM 行和来源加工关系，不删除历史订单或库存记录。
+    await tx.materialApplicability.updateMany({
+      where: { materialId, status: 'ENABLED' },
       data: { status: 'DISABLED' }
     });
+    await tx.modelBomLine.updateMany({
+      where: { materialId, status: 'ENABLED' },
+      data: { status: 'DISABLED' }
+    });
+    for (const line of componentLines) {
+      await tx.modelBomLine.updateMany({
+        where: { bomId: line.bomId, parentComponentNo: line.componentNo, status: 'ENABLED' },
+        data: { status: 'DISABLED' }
+      });
+    }
+    await tx.materialTransformRule.updateMany({
+      where: {
+        OR: [{ sourceMaterialId: materialId }, { targetMaterialId: materialId }],
+        status: 'ENABLED'
+      },
+      data: { status: 'DISABLED' }
+    });
+  }
+
+  private parseOptionalDrawingDate(value?: string) {
+    const normalized = String(value || '').trim();
+    if (!normalized) {
+      return null;
+    }
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException('图纸日期格式不正确');
+    }
+    return date;
+  }
+
+  private async ensureMaterialDrawingRevisionAvailable(materialId: string, drawingNo: string, drawingVersion: string, excludeId?: string) {
+    const existing = await this.prisma.materialDrawingRevision.findFirst({
+      where: {
+        materialId,
+        drawingNo: { equals: drawingNo, mode: 'insensitive' },
+        drawingVersion: { equals: drawingVersion, mode: 'insensitive' },
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      },
+      select: { id: true }
+    });
+    if (existing) {
+      throw new BadRequestException(`图纸 ${drawingNo} / ${drawingVersion} 已存在，请勿重复维护`);
+    }
+  }
+
+  private async ensureMaterialDrawingRevisionCanBeDisabled(revisionId: string) {
+    const referencingLines = await this.prisma.modelBomLine.findMany({
+      where: {
+        defaultDrawingRevisionId: revisionId,
+        status: 'ENABLED',
+        bom: { status: 'ENABLED' }
+      },
+      include: {
+        bom: {
+          select: {
+            bomName: true,
+            projectModel: true,
+            customerNameSnapshot: true,
+            customer: { select: { customerName: true } }
+          }
+        }
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+    });
+    if (referencingLines.length > 0) {
+      // 图纸停用不能让启用 BOM 行留下失效默认图纸，避免后续推荐带错下单图纸快照。
+      const references = referencingLines
+        .map((line) => `${line.bom.bomName} / ${line.bom.customer?.customerName || line.bom.customerNameSnapshot || '全部客户'} / ${line.bom.projectModel} / ${line.partCodeSnapshot}`)
+        .join('、');
+      throw new BadRequestException(`该图纸版本已被启用 BOM 行指定为默认图纸：${references}。请先调整 BOM 行默认图纸后再停用。`);
+    }
+  }
+
+  private resolveMaterialDrawingRevisionData(dto: SaveMaterialDrawingRevisionDto) {
+    const status = dto.status || 'ENABLED';
+    return {
+      drawingNo: this.normalizeMaterialRequired(dto.drawingNo, '图号'),
+      drawingVersion: this.normalizeMaterialRequired(dto.drawingVersion, '图纸版本'),
+      drawingDate: this.parseOptionalDrawingDate(dto.drawingDate),
+      drawingStatus: String(dto.drawingStatus || '').trim() || null,
+      drawingFileName: String(dto.drawingFileName || '').trim() || null,
+      drawingFileUrl: String(dto.drawingFileUrl || '').trim() || null,
+      isDefault: status === 'DISABLED' ? false : Boolean(dto.isDefault),
+      defaultChangedBy: String(dto.defaultChangedBy || '').trim() || null,
+      remark: String(dto.remark || '').trim() || null,
+      status
+    };
+  }
+
+  async materialDrawingRevisions(materialId: string) {
+    const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
+    if (!material) {
+      throw new NotFoundException('物料基础资料不存在');
+    }
+    const rows = await this.prisma.materialDrawingRevision.findMany({
+      where: { materialId },
+      orderBy: [{ status: 'asc' }, { isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
+    });
+    return { items: rows.map((row) => this.serializeMaterialDrawingRevision(row)) };
+  }
+
+  async saveMaterialDrawingRevision(materialId: string, dto: SaveMaterialDrawingRevisionDto) {
+    const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
+    if (!material) {
+      throw new NotFoundException('物料基础资料不存在');
+    }
+    const data = this.resolveMaterialDrawingRevisionData(dto);
+    await this.ensureMaterialDrawingRevisionAvailable(materialId, data.drawingNo, data.drawingVersion);
+
+    const row = await this.prisma.$transaction(async (tx) => {
+      if (data.isDefault) {
+        // 默认图纸修改必须保留操作时间和人员；这里只维护基础资料，不覆盖历史订单图纸快照。
+        await tx.materialDrawingRevision.updateMany({ where: { materialId, isDefault: true }, data: { isDefault: false } });
+      }
+      return tx.materialDrawingRevision.create({
+        data: {
+          materialId,
+          ...data,
+          defaultChangedBy: data.isDefault ? data.defaultChangedBy || '系统操作员' : null,
+          defaultChangedAt: data.isDefault ? new Date() : null
+        }
+      });
+    });
+    return this.serializeMaterialDrawingRevision(row);
+  }
+
+  async updateMaterialDrawingRevision(revisionId: string, dto: SaveMaterialDrawingRevisionDto) {
+    const existing = await this.prisma.materialDrawingRevision.findUnique({ where: { id: revisionId } });
+    if (!existing) {
+      throw new NotFoundException('图纸版本不存在');
+    }
+    const data = this.resolveMaterialDrawingRevisionData(dto);
+    await this.ensureMaterialDrawingRevisionAvailable(existing.materialId, data.drawingNo, data.drawingVersion, existing.id);
+    if (data.status === 'DISABLED') {
+      await this.ensureMaterialDrawingRevisionCanBeDisabled(existing.id);
+    }
+    const row = await this.prisma.$transaction(async (tx) => {
+      if (data.isDefault) {
+        // 同一个零件只允许一个启用默认图纸，BOM 行可另外指定自己的默认生产图纸。
+        await tx.materialDrawingRevision.updateMany({
+          where: { materialId: existing.materialId, isDefault: true, id: { not: existing.id } },
+          data: { isDefault: false }
+        });
+      }
+      return tx.materialDrawingRevision.update({
+        where: { id: existing.id },
+        data: {
+          ...data,
+          defaultChangedBy: data.isDefault ? data.defaultChangedBy || existing.defaultChangedBy || '系统操作员' : null,
+          defaultChangedAt: data.isDefault && !existing.isDefault ? new Date() : data.isDefault ? existing.defaultChangedAt || new Date() : null
+        }
+      });
+    });
+    return this.serializeMaterialDrawingRevision(row);
+  }
+
+  async disableMaterialDrawingRevision(revisionId: string) {
+    const existing = await this.prisma.materialDrawingRevision.findUnique({ where: { id: revisionId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('图纸版本不存在');
+    }
+    await this.ensureMaterialDrawingRevisionCanBeDisabled(revisionId);
+    const row = await this.prisma.materialDrawingRevision.update({
+      where: { id: revisionId },
+      data: { status: 'DISABLED', isDefault: false, defaultChangedBy: null, defaultChangedAt: null }
+    });
+    return this.serializeMaterialDrawingRevision(row);
+  }
+
+  private serializeMaterialDrawingRevision(row: {
+    id: string;
+    materialId: string;
+    drawingNo: string;
+    drawingVersion: string;
+    drawingDate: Date | null;
+    drawingStatus: string | null;
+    drawingFileName: string | null;
+    drawingFileUrl: string | null;
+    isDefault: boolean;
+    defaultChangedBy: string | null;
+    defaultChangedAt: Date | null;
+    remark: string | null;
+    status: CommonStatus;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return {
+      id: row.id,
+      materialId: row.materialId,
+      drawingNo: row.drawingNo,
+      drawingVersion: row.drawingVersion,
+      drawingDate: this.formatDateOnly(row.drawingDate),
+      drawingStatus: row.drawingStatus,
+      drawingFileName: row.drawingFileName,
+      drawingFileUrl: row.drawingFileUrl,
+      isDefault: row.isDefault,
+      defaultChangedBy: row.defaultChangedBy,
+      defaultChangedAt: row.defaultChangedAt,
+      remark: row.remark,
+      status: row.status,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  async buildMaterialImportTemplate(): Promise<Uint8Array> {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+
+    const worksheet = workbook.addWorksheet(materialImportSheetName, {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+    worksheet.columns = [
+      { header: '零件编码', key: 'partCode', width: 24 },
+      { header: '零件名称', key: 'partName', width: 24 },
+      { header: '单位', key: 'unit', width: 10 },
+      { header: '成品规格', key: 'partSpecification', width: 24 },
+      { header: '图号', key: 'drawingNo', width: 24 },
+      { header: '图纸版本', key: 'drawingVersion', width: 14 },
+      { header: '图纸日期', key: 'drawingDate', width: 14 },
+      { header: '图纸状态', key: 'drawingStatus', width: 14 },
+      { header: '厚度', key: 'partThickness', width: 12 },
+      { header: '项目型号', key: 'projectModel', width: 18 },
+      { header: '备注', key: 'remark', width: 34 }
+    ];
+    worksheet.addRows([
+      {
+        partCode: 'RS10703010033',
+        partName: '顶盖',
+        unit: '件',
+        drawingNo: 'RBKS-300DBII-10-50-01',
+        drawingStatus: '旧图',
+        partThickness: 1,
+        projectModel: 'B型5P',
+        remark: '百胜样机款'
+      },
+      {
+        partCode: 'RS1071123',
+        partName: '风机支架组件',
+        unit: '套',
+        drawingNo: 'B5机型物料号-10-30',
+        drawingStatus: '旧图',
+        partThickness: 2,
+        projectModel: 'B型5P',
+        remark: '组件主件，子件后续在机型零件包维护'
+      },
+      {
+        partCode: 'P-BASE-001',
+        partName: '百胜通用半成品',
+        unit: '件',
+        drawingNo: 'BASE-001',
+        drawingStatus: '旧图',
+        partThickness: 2,
+        projectModel: '',
+        remark: '示例来源零件，可加工为客户特定零件'
+      }
+    ]);
+    worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } };
+    worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
+    worksheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFB7C9D6' } },
+          left: { style: 'thin', color: { argb: 'FFB7C9D6' } },
+          bottom: { style: 'thin', color: { argb: 'FFB7C9D6' } },
+          right: { style: 'thin', color: { argb: 'FFB7C9D6' } }
+        };
+      });
+    });
+    (worksheet as ExcelJS.Worksheet & { dataValidations: { add(address: string, validation: ExcelJS.DataValidation): void } }).dataValidations.add('C2:C2000', {
+      type: 'list',
+      allowBlank: false,
+      formulae: ['"件,套,个,张,米,公斤"'],
+      showErrorMessage: true,
+      errorTitle: '单位必填',
+      error: '请选择或填写常用单位'
+    });
+
+    const scopeSheet = workbook.addWorksheet(materialApplicabilityImportSheetName, {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+    scopeSheet.columns = [
+      { header: '零件编码', key: 'partCode', width: 24 },
+      { header: '客户编码', key: 'customerCode', width: 18 },
+      { header: '客户名称', key: 'customerName', width: 24 },
+      { header: '项目型号', key: 'projectModel', width: 18 },
+      { header: '状态', key: 'status', width: 12 },
+      { header: '备注', key: 'remark', width: 34 }
+    ];
+    scopeSheet.addRows([
+      {
+        partCode: 'RS10703010033',
+        customerName: '',
+        projectModel: '',
+        status: '启用',
+        remark: '空客户、空项目表示全部客户 / 全部机型通用'
+      },
+      {
+        partCode: 'RS1071123',
+        customerName: '常州某钣金客户',
+        projectModel: 'B型5P',
+        status: '启用',
+        remark: '指定客户 + 指定机型'
+      }
+    ]);
+
+    const sourceSheet = workbook.addWorksheet(materialTransformImportSheetName, {
+      views: [{ state: 'frozen', ySplit: 1 }]
+    });
+    sourceSheet.columns = [
+      { header: '来源零件编码', key: 'sourcePartCode', width: 24 },
+      { header: '目标零件编码', key: 'targetPartCode', width: 24 },
+      { header: '客户编码', key: 'customerCode', width: 18 },
+      { header: '客户名称', key: 'customerName', width: 24 },
+      { header: '项目型号', key: 'projectModel', width: 18 },
+      { header: '倍率', key: 'multiplier', width: 12 },
+      { header: '损耗率', key: 'lossRate', width: 12 },
+      { header: '默认工艺', key: 'defaultProcessRoute', width: 24 },
+      { header: '转换说明', key: 'conversionDescription', width: 34 },
+      { header: '状态', key: 'status', width: 12 },
+      { header: '备注', key: 'remark', width: 34 }
+    ];
+    sourceSheet.addRows([
+      {
+        sourcePartCode: 'P-BASE-001',
+        targetPartCode: 'RS1071123',
+        customerName: '常州某钣金客户',
+        projectModel: 'B型5P',
+        multiplier: 1,
+        lossRate: 0,
+        defaultProcessRoute: '激光切割→折弯',
+        conversionDescription: '百胜通用件加工为客户 B5 风机支架组件',
+        status: '启用',
+        remark: '只作为库存来源建议'
+      }
+    ]);
+
+    for (const extraSheet of [scopeSheet, sourceSheet]) {
+      extraSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      extraSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } };
+      extraSheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
+      extraSheet.eachRow((row) => {
+        row.eachCell((cell) => {
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFB7C9D6' } },
+            left: { style: 'thin', color: { argb: 'FFB7C9D6' } },
+            bottom: { style: 'thin', color: { argb: 'FFB7C9D6' } },
+            right: { style: 'thin', color: { argb: 'FFB7C9D6' } }
+          };
+        });
+      });
+    }
+    for (const address of ['E2:E2000', 'J2:J2000']) {
+      (workbook.getWorksheet(address.startsWith('E') ? materialApplicabilityImportSheetName : materialTransformImportSheetName) as
+        | (ExcelJS.Worksheet & { dataValidations: { add(address: string, validation: ExcelJS.DataValidation): void } })
+        | undefined)?.dataValidations.add(address, {
+        type: 'list',
+        allowBlank: true,
+        formulae: ['"启用,停用,ENABLED,DISABLED"'],
+        showErrorMessage: true,
+        errorTitle: '状态格式',
+        error: '状态只能填写启用、停用、ENABLED 或 DISABLED'
+      });
+    }
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return new Uint8Array(buffer as unknown as ArrayBuffer);
+  }
+
+  async createMaterialImportSession(dto: CreateMaterialImportSessionDto = {}) {
+    const session = await this.prisma.materialImportSession.create({
+      data: { createdBy: dto.createdBy?.trim() || null }
+    });
+    return this.buildMaterialImportSessionPreview(session.id);
+  }
+
+  async getMaterialImportSession(sessionId: string, query: GetMaterialImportSessionQueryDto = {}) {
+    return this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions(query));
+  }
+
+  async buildMaterialImportIssueReport(sessionId: string): Promise<Uint8Array> {
+    const preview = await this.buildMaterialImportSessionPreview(sessionId, { includeRows: false });
+    const [materialRows, applicabilityRows, transformRows] = await Promise.all([
+      this.prisma.materialImportRow.findMany({
+        where: { sessionId, OR: [{ errorCount: { gt: 0 } }, { warningCount: { gt: 0 } }] },
+        include: { file: { select: { fileName: true, sheetName: true } } },
+        orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }]
+      }),
+      this.prisma.materialApplicabilityImportRow.findMany({
+        where: { sessionId, OR: [{ errorCount: { gt: 0 } }, { warningCount: { gt: 0 } }] },
+        include: { file: { select: { fileName: true, sheetName: true } } },
+        orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }]
+      }),
+      this.prisma.materialTransformImportRow.findMany({
+        where: { sessionId, OR: [{ errorCount: { gt: 0 } }, { warningCount: { gt: 0 } }] },
+        include: { file: { select: { fileName: true, sheetName: true } } },
+        orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }]
+      })
+    ]);
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const headerFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF1F4E78' } };
+    const headerFont = { bold: true, color: { argb: 'FFFFFFFF' } };
+    const border = {
+      top: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      bottom: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      left: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      right: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } }
+    };
+    const styleHeader = (worksheet: ExcelJS.Worksheet) => {
+      worksheet.getRow(1).eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = headerFont;
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = border;
+      });
+      worksheet.getRow(1).height = 26;
+    };
+    const styleBody = (worksheet: ExcelJS.Worksheet, startRow = 2) => {
+      for (let rowNo = startRow; rowNo <= worksheet.rowCount; rowNo += 1) {
+        worksheet.getRow(rowNo).eachCell((cell) => {
+          cell.alignment = { vertical: 'top', wrapText: true };
+          cell.border = border;
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowNo % 2 === 0 ? 'FFF4FBFD' : 'FFFFFFFF' } };
+        });
+      }
+    };
+
+    const overviewSheet = workbook.addWorksheet('导入概览');
+    overviewSheet.columns = [{ width: 24 }, { width: 28 }, { width: 24 }, { width: 48 }];
+    overviewSheet.addRow(['项目', '数值', '项目', '数值']);
+    overviewSheet.addRows([
+      ['导入会话', preview.id, '状态', preview.status === 'DRAFT' ? '草稿' : '已提交'],
+      ['上传文件数', preview.summary.fileCount, '读取行数', preview.summary.rowCount],
+      ['可写入行', preview.summary.importableRowCount, '重复行', preview.summary.duplicateRowCount],
+      ['零件数', preview.summary.materialUpsertCount, '图纸版本', preview.summary.drawingRevisionUpsertCount || 0],
+      ['适用范围', preview.summary.applicabilityUpsertCount || 0, '来源关系', preview.summary.transformRuleUpsertCount || 0],
+      ['错误数', preview.summary.errorCount, '警告数', preview.summary.warningCount],
+      ['生成时间', new Date().toISOString(), '说明', '仅用于修正 Excel；提交前后端仍会重新校验']
+    ]);
+    styleHeader(overviewSheet);
+    styleBody(overviewSheet);
+
+    const fileSheet = workbook.addWorksheet('上传文件');
+    fileSheet.columns = [
+      { header: '文件名', key: 'fileName', width: 38 },
+      { header: '工作表', key: 'sheetName', width: 34 },
+      { header: '读取行', key: 'rowCount', width: 12 },
+      { header: '零件行', key: 'materialRowCount', width: 12 },
+      { header: '范围行', key: 'scopeRowCount', width: 12 },
+      { header: '来源关系行', key: 'transformRowCount', width: 14 },
+      { header: '重复行', key: 'duplicateRowCount', width: 12 }
+    ];
+    fileSheet.addRows(
+      preview.files.map((file) => ({
+        fileName: file.fileName,
+        sheetName: file.sheetName,
+        rowCount: file.rowCount,
+        materialRowCount: file.materialRowCount || 0,
+        scopeRowCount: file.scopeRowCount || 0,
+        transformRowCount: file.transformRowCount || 0,
+        duplicateRowCount: file.duplicateRowCount
+      }))
+    );
+    styleHeader(fileSheet);
+    styleBody(fileSheet);
+
+    const issueSheet = workbook.addWorksheet('问题明细', { views: [{ state: 'frozen', ySplit: 1 }] });
+    issueSheet.columns = [
+      { header: '业务表', key: 'sheetType', width: 16 },
+      { header: '来源文件', key: 'sourceFileName', width: 34 },
+      { header: '工作表', key: 'sourceSheetName', width: 24 },
+      { header: 'Excel 行', key: 'sourceRowNo', width: 10 },
+      { header: '零件编码', key: 'partCode', width: 18 },
+      { header: '零件名称', key: 'partName', width: 22 },
+      { header: '来源零件编码', key: 'sourcePartCode', width: 18 },
+      { header: '目标零件编码', key: 'targetPartCode', width: 18 },
+      { header: '客户编码', key: 'customerCode', width: 16 },
+      { header: '客户名称', key: 'customerName', width: 22 },
+      { header: '项目型号', key: 'projectModel', width: 16 },
+      { header: '图号', key: 'drawingNo', width: 18 },
+      { header: '图纸版本', key: 'drawingVersion', width: 12 },
+      { header: '图纸日期', key: 'drawingDate', width: 14 },
+      { header: '图纸状态', key: 'drawingStatus', width: 14 },
+      { header: '厚度', key: 'partThickness', width: 10 },
+      { header: '单位', key: 'unit', width: 10 },
+      { header: '状态', key: 'status', width: 12 },
+      { header: '严重程度', key: 'severity', width: 12 },
+      { header: '问题代码', key: 'code', width: 24 },
+      { header: '问题说明', key: 'message', width: 62 },
+      { header: '备注', key: 'remark', width: 34 }
+    ];
+    styleHeader(issueSheet);
+
+    // 零件库导入问题导出只输出校验明细，不写入正式零件库。
+    const addIssueRows = (base: Record<string, string | number | null | undefined>, issues: MaterialImportIssue[]) => {
+      for (const issue of issues) {
+        issueSheet.addRow({
+          ...base,
+          severity: issue.severity === 'ERROR' ? '错误' : '警告',
+          code: issue.code,
+          message: issue.message
+        });
+      }
+    };
+    for (const row of materialRows) {
+      addIssueRows(
+        {
+          sheetType: '零件基础库',
+          sourceFileName: row.file.fileName,
+          sourceSheetName: row.file.sheetName,
+          sourceRowNo: row.sourceRowNo,
+          partCode: row.partCode,
+          partName: row.partName,
+          projectModel: row.projectModel,
+          drawingNo: row.drawingNo,
+          drawingVersion: row.drawingVersion,
+          drawingDate: this.formatDateOnly(row.drawingDate),
+          drawingStatus: row.drawingStatus,
+          partThickness: row.partThickness === null ? null : decimalToNumber(row.partThickness),
+          unit: row.unit,
+          remark: row.remark
+        },
+        this.materialImportIssueArray(row.issues)
+      );
+    }
+    for (const row of applicabilityRows) {
+      addIssueRows(
+        {
+          sheetType: '适用范围',
+          sourceFileName: row.file.fileName,
+          sourceSheetName: row.file.sheetName,
+          sourceRowNo: row.sourceRowNo,
+          partCode: row.partCode,
+          customerCode: row.customerCode,
+          customerName: row.customerName,
+          projectModel: row.projectModel,
+          status: row.status === 'ENABLED' ? '启用' : '停用',
+          remark: row.remark
+        },
+        this.materialImportIssueArray(row.issues)
+      );
+    }
+    for (const row of transformRows) {
+      addIssueRows(
+        {
+          sheetType: '来源加工关系',
+          sourceFileName: row.file.fileName,
+          sourceSheetName: row.file.sheetName,
+          sourceRowNo: row.sourceRowNo,
+          sourcePartCode: row.sourcePartCode,
+          targetPartCode: row.targetPartCode,
+          customerCode: row.customerCode,
+          customerName: row.customerName,
+          projectModel: row.projectModel,
+          status: row.status === 'ENABLED' ? '启用' : '停用',
+          remark: row.remark
+        },
+        this.materialImportIssueArray(row.issues)
+      );
+    }
+    if (issueSheet.rowCount === 1) {
+      issueSheet.addRow({ severity: '通过', message: '当前零件库导入预览没有错误或警告' });
+    }
+    issueSheet.autoFilter = { from: 'A1', to: 'V1' };
+    styleBody(issueSheet);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return new Uint8Array(buffer as unknown as ArrayBuffer);
+  }
+
+  async uploadMaterialImportFile(sessionId: string, file: Express.Multer.File) {
+    const normalizedFileName = normalizeMultipartFileName(file.originalname);
+    const session = await this.prisma.materialImportSession.findUnique({ where: { id: sessionId } });
+    if (!session) {
+      await this.removeMaterialImportStoredFile(file.filename);
+      throw new NotFoundException('零件导入会话不存在');
+    }
+    if (session.status !== 'DRAFT') {
+      await this.removeMaterialImportStoredFile(file.filename);
+      throw new BadRequestException('已提交或已放弃的零件导入会话不能继续上传');
+    }
+
+    const fileHash = await this.hashMaterialImportFile(file.path);
+    const duplicatedFile = await this.prisma.materialImportFile.findUnique({
+      where: { sessionId_fileHash: { sessionId, fileHash } },
+      select: { id: true, fileName: true }
+    });
+    if (duplicatedFile) {
+      await this.removeMaterialImportStoredFile(file.filename);
+      throw new BadRequestException(`当前会话已上传过相同文件：${duplicatedFile.fileName}`);
+    }
+
+    let parsed: Awaited<ReturnType<typeof this.parseMaterialImportWorkbook>>;
+    try {
+      parsed = await this.parseMaterialImportWorkbook(file.path);
+    } catch (error) {
+      await this.removeMaterialImportStoredFile(file.filename);
+      throw error;
+    }
+    const parsedRowCount = parsed.rows.length + parsed.applicabilityRows.length + parsed.transformRows.length;
+    if (parsedRowCount === 0) {
+      await this.removeMaterialImportStoredFile(file.filename);
+      throw new BadRequestException('Excel 中没有可读取的零件行');
+    }
+    await this.enrichMaterialImportWorkbookRows(parsed);
+
+    try {
+      const createdFile = await this.prisma.$transaction(async (tx) => {
+        const importFile = await tx.materialImportFile.create({
+          data: {
+            sessionId,
+            fileName: normalizedFileName,
+            storedFileName: file.filename,
+            fileHash,
+            sheetName: parsed.sheetName,
+            rowCount: parsedRowCount,
+            materialRowCount: parsed.rows.length,
+            scopeRowCount: parsed.applicabilityRows.length,
+            transformRowCount: parsed.transformRows.length
+          }
+        });
+        const createRowsResult = parsed.rows.length
+          ? await tx.materialImportRow.createMany({
+              data: parsed.rows.map((row) => ({
+                sessionId,
+                fileId: importFile.id,
+                sourceRowNo: row.sourceRowNo,
+                rowHash: row.rowHash,
+                partCode: row.partCode,
+                partName: row.partName,
+                unit: row.unit,
+                partSpecification: row.partSpecification,
+                drawingNo: row.drawingNo,
+                drawingVersion: row.drawingVersion,
+                drawingDate: row.drawingDate,
+                drawingStatus: row.drawingStatus,
+                partThickness: row.partThickness,
+                projectModel: row.projectModel,
+                remark: row.remark,
+                raw: row.raw,
+                issues: row.issues,
+                errorCount: row.errorCount,
+                warningCount: row.warningCount
+              })),
+              skipDuplicates: true
+            })
+          : { count: 0 };
+        const createApplicabilityRowsResult = parsed.applicabilityRows.length
+          ? await tx.materialApplicabilityImportRow.createMany({
+              data: parsed.applicabilityRows.map((row) => ({
+                sessionId,
+                fileId: importFile.id,
+                sourceRowNo: row.sourceRowNo,
+                rowHash: row.rowHash,
+                partCode: row.partCode,
+                customerCode: row.customerCode,
+                customerName: row.customerName,
+                projectModel: row.projectModel,
+                remark: row.remark,
+                status: row.status,
+                raw: row.raw,
+                issues: row.issues,
+                errorCount: row.errorCount,
+                warningCount: row.warningCount
+              })),
+              skipDuplicates: true
+            })
+          : { count: 0 };
+        const createTransformRowsResult = parsed.transformRows.length
+          ? await tx.materialTransformImportRow.createMany({
+              data: parsed.transformRows.map((row) => ({
+                sessionId,
+                fileId: importFile.id,
+                sourceRowNo: row.sourceRowNo,
+                rowHash: row.rowHash,
+                sourcePartCode: row.sourcePartCode,
+                targetPartCode: row.targetPartCode,
+                customerCode: row.customerCode,
+                customerName: row.customerName,
+                projectModel: row.projectModel,
+                multiplier: row.multiplier,
+                lossRate: row.lossRate,
+                defaultProcessRoute: row.defaultProcessRoute,
+                conversionDescription: row.conversionDescription,
+                remark: row.remark,
+                status: row.status,
+                raw: row.raw,
+                issues: row.issues,
+                errorCount: row.errorCount,
+                warningCount: row.warningCount
+              })),
+              skipDuplicates: true
+            })
+          : { count: 0 };
+        const acceptedRowCount = createRowsResult.count + createApplicabilityRowsResult.count + createTransformRowsResult.count;
+        return tx.materialImportFile.update({
+          where: { id: importFile.id },
+          data: {
+            acceptedRowCount,
+            duplicateRowCount: parsedRowCount - acceptedRowCount
+          }
+        });
+      });
+
+      return {
+        ...(await this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions())),
+        uploadResult: {
+          fileName: normalizedFileName,
+          sheetName: parsed.sheetName,
+          rowCount: parsedRowCount,
+          acceptedRowCount: createdFile.acceptedRowCount,
+          duplicateRowCount: createdFile.duplicateRowCount
+        }
+      };
+    } catch (error) {
+      await this.removeMaterialImportStoredFile(file.filename);
+      throw error;
+    }
+  }
+
+  async commitMaterialImportSession(sessionId: string, dto: CommitMaterialImportSessionDto) {
+    const preview = await this.buildMaterialImportSessionPreview(sessionId, { includeRows: false });
+    if (preview.status !== 'DRAFT') {
+      throw new BadRequestException('只有草稿导入会话可以提交');
+    }
+    if (!preview.previewToken || dto.previewToken !== preview.previewToken) {
+      throw new BadRequestException('导入预览已变化，请刷新预览后再提交');
+    }
+    if (preview.summary.rowCount === 0) {
+      throw new BadRequestException('没有可提交的零件导入行');
+    }
+    if (preview.summary.errorCount > 0) {
+      throw new BadRequestException('导入存在错误，请先修正 Excel 后重新上传');
+    }
+
+    const rows = await this.prisma.materialImportRow.findMany({
+      where: { sessionId, errorCount: 0 },
+      orderBy: [{ partCode: 'asc' }, { createdAt: 'asc' }]
+    });
+    const [applicabilityRows, transformRows] = await Promise.all([
+      this.prisma.materialApplicabilityImportRow.findMany({
+        where: { sessionId, errorCount: 0 },
+        orderBy: [{ partCode: 'asc' }, { createdAt: 'asc' }]
+      }),
+      this.prisma.materialTransformImportRow.findMany({
+        where: { sessionId, errorCount: 0 },
+        orderBy: [{ targetPartCode: 'asc' }, { createdAt: 'asc' }]
+      })
+    ]);
+    const materialRows = this.uniqueMaterialImportRows(rows);
+    const partCodes = [
+      ...materialRows.map((row) => row.partCode),
+      ...applicabilityRows.map((row) => row.partCode),
+      ...transformRows.flatMap((row) => [row.sourcePartCode, row.targetPartCode])
+    ];
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const existingMaterials = await this.findExistingMaterialsByPartCodes(partCodes, tx);
+      const existingByCode = new Map(existingMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+      const customerLookup = await this.findMaterialImportCustomers([...applicabilityRows, ...transformRows], tx);
+      let createdCount = 0;
+      let updatedCount = 0;
+      let drawingRevisionUpsertCount = 0;
+      let applicabilityUpsertCount = 0;
+      let transformRuleUpsertCount = 0;
+      const committedMaterialCodes: string[] = [];
+
+      for (const row of materialRows) {
+        const key = row.partCode.trim().toLocaleLowerCase();
+        const existing = existingByCode.get(key);
+        if (existing) {
+          await tx.material.update({
+            where: { id: existing.id },
+            data: {
+              partCode: row.partCode,
+              partName: row.partName,
+              unit: row.unit,
+              partSpecification: row.partSpecification || null,
+              status: 'ENABLED'
+            }
+          });
+          updatedCount += 1;
+        } else {
+          const created = await tx.material.create({
+            data: {
+              partCode: row.partCode,
+              partName: row.partName,
+              unit: row.unit,
+              partSpecification: row.partSpecification || null,
+              status: 'ENABLED'
+            }
+          });
+          existingByCode.set(key, created);
+          createdCount += 1;
+        }
+        committedMaterialCodes.push(row.partCode);
+      }
+
+      const drawingRows = this.uniqueMaterialDrawingImportRows(rows);
+      const drawingMaterialIds = [
+        ...new Set(
+          drawingRows
+            .map((row) => existingByCode.get(String(row.partCode || '').trim().toLocaleLowerCase())?.id)
+            .filter(Boolean)
+        )
+      ] as string[];
+      const existingDefaultDrawingRows =
+        drawingMaterialIds.length > 0
+          ? await tx.materialDrawingRevision.findMany({
+              where: { materialId: { in: drawingMaterialIds }, isDefault: true, status: 'ENABLED' },
+              select: { materialId: true }
+            })
+          : [];
+      const materialsWithDefaultDrawing = new Set(existingDefaultDrawingRows.map((row) => row.materialId));
+      for (const row of drawingRows) {
+        const material = existingByCode.get(String(row.partCode || '').trim().toLocaleLowerCase());
+        if (!material) {
+          continue;
+        }
+        const drawingNo = String(row.drawingNo || '').trim();
+        if (!drawingNo) {
+          continue;
+        }
+        const drawingVersion = String(row.drawingVersion || 'A').trim() || 'A';
+        const existingRevision = await tx.materialDrawingRevision.findFirst({
+          where: {
+            materialId: material.id,
+            drawingNo: { equals: drawingNo, mode: 'insensitive' },
+            drawingVersion: { equals: drawingVersion, mode: 'insensitive' }
+          },
+          select: { id: true, isDefault: true }
+        });
+        const shouldSetDefault = Boolean(existingRevision?.isDefault) || !materialsWithDefaultDrawing.has(material.id);
+        if (shouldSetDefault) {
+          await tx.materialDrawingRevision.updateMany({
+            where: { materialId: material.id, isDefault: true, ...(existingRevision ? { id: { not: existingRevision.id } } : {}) },
+            data: { isDefault: false }
+          });
+        }
+        const data = {
+          drawingNo,
+          drawingVersion,
+          drawingDate: row.drawingDate || null,
+          drawingStatus: row.drawingStatus || null,
+          drawingFileName: null,
+          drawingFileUrl: null,
+          isDefault: shouldSetDefault,
+          defaultChangedBy: shouldSetDefault ? '零件库导入' : null,
+          defaultChangedAt: shouldSetDefault ? new Date() : null,
+          remark: row.remark || null,
+          status: 'ENABLED' as const
+        };
+        if (existingRevision) {
+          await tx.materialDrawingRevision.update({ where: { id: existingRevision.id }, data });
+        } else {
+          await tx.materialDrawingRevision.create({ data: { materialId: material.id, ...data } });
+        }
+        if (shouldSetDefault) {
+          materialsWithDefaultDrawing.add(material.id);
+        }
+        drawingRevisionUpsertCount += 1;
+      }
+
+      for (const row of applicabilityRows) {
+        const material = existingByCode.get(row.partCode.trim().toLocaleLowerCase());
+        if (!material) {
+          throw new BadRequestException(`适用范围零件 ${row.partCode} 不存在，请先导入或新增零件基础资料`);
+        }
+        const customer = this.resolveMaterialImportCustomer(row, customerLookup);
+        const projectModel = String(row.projectModel || '').trim() || null;
+        const data = {
+          customerId: customer?.id || null,
+          customerNameSnapshot: customer?.customerName || null,
+          projectModel,
+          customerScopeKey: customer?.id || 'ALL',
+          projectModelScopeKey: this.normalizeMaterialScopeKey(projectModel),
+          remark: row.remark || null,
+          status: row.status
+        };
+        const existing = await tx.materialApplicability.findUnique({
+          where: {
+            materialId_customerScopeKey_projectModelScopeKey: {
+              materialId: material.id,
+              customerScopeKey: data.customerScopeKey,
+              projectModelScopeKey: data.projectModelScopeKey
+            }
+          },
+          select: { id: true }
+        });
+        if (existing) {
+          await tx.materialApplicability.update({ where: { id: existing.id }, data });
+        } else {
+          await tx.materialApplicability.create({ data: { materialId: material.id, ...data } });
+        }
+        applicabilityUpsertCount += 1;
+      }
+
+      for (const row of transformRows) {
+        const sourceMaterial = existingByCode.get(row.sourcePartCode.trim().toLocaleLowerCase());
+        const targetMaterial = existingByCode.get(row.targetPartCode.trim().toLocaleLowerCase());
+        if (!sourceMaterial || !targetMaterial) {
+          throw new BadRequestException(
+            `来源加工关系 ${row.sourcePartCode} -> ${row.targetPartCode} 的来源或目标零件不存在，请先导入或新增零件基础资料`
+          );
+        }
+        const customer = this.resolveMaterialImportCustomer(row, customerLookup);
+        const projectModel = String(row.projectModel || '').trim() || null;
+        const processNames = this.splitDefaultProcessRoute(row.defaultProcessRoute || '');
+        if (processNames.length > 0) {
+          // 提交前重新核对标准工序，避免预览后标准工序被停用仍写入正式来源加工关系。
+          await this.processDefinitionsService.ensureActiveNames(processNames);
+        }
+        const data = {
+          sourceMaterialId: sourceMaterial.id,
+          targetMaterialId: targetMaterial.id,
+          customerId: customer?.id || null,
+          customerNameSnapshot: customer?.customerName || null,
+          projectModel,
+          customerScopeKey: customer?.id || 'ALL',
+          projectModelScopeKey: this.normalizeMaterialScopeKey(projectModel),
+          conversionDescription: row.conversionDescription || null,
+          defaultProcessRoute: processNames.length > 0 ? processNames.join('、') : null,
+          multiplier: row.multiplier ?? 1,
+          lossRate: row.lossRate ?? null,
+          remark: row.remark || null,
+          status: row.status
+        };
+        const existing = await tx.materialTransformRule.findUnique({
+          where: {
+            sourceMaterialId_targetMaterialId_customerScopeKey_projectModelScopeKey: {
+              sourceMaterialId: data.sourceMaterialId,
+              targetMaterialId: data.targetMaterialId,
+              customerScopeKey: data.customerScopeKey,
+              projectModelScopeKey: data.projectModelScopeKey
+            }
+          },
+          select: { id: true }
+        });
+        if (existing) {
+          await tx.materialTransformRule.update({ where: { id: existing.id }, data });
+        } else {
+          await tx.materialTransformRule.create({ data });
+        }
+        transformRuleUpsertCount += 1;
+      }
+
+      await tx.materialImportSession.update({
+        where: { id: sessionId },
+        data: {
+          status: 'COMMITTED',
+          committedAt: new Date(),
+          committedMaterialCodes
+        }
+      });
+
+      return { createdCount, updatedCount, drawingRevisionUpsertCount, applicabilityUpsertCount, transformRuleUpsertCount, committedMaterialCodes };
+    });
+
+    return {
+      sessionId,
+      ...result,
+      committedMaterialCount: result.createdCount + result.updatedCount
+    };
+  }
+
+  async deleteMaterialImportFile(sessionId: string, fileId: string) {
+    const session = await this.prisma.materialImportSession.findUnique({ where: { id: sessionId } });
+    if (!session) {
+      throw new NotFoundException('零件导入会话不存在');
+    }
+    if (session.status !== 'DRAFT') {
+      throw new BadRequestException('已提交或已放弃的零件导入会话不能删除文件');
+    }
+    const importFile = await this.prisma.materialImportFile.findFirst({ where: { id: fileId, sessionId } });
+    if (!importFile) {
+      throw new NotFoundException('零件导入文件不存在');
+    }
+    await this.prisma.materialImportFile.delete({ where: { id: importFile.id } });
+    await this.removeMaterialImportStoredFile(importFile.storedFileName);
+    return this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions());
+  }
+
+  async discardMaterialImportSession(sessionId: string) {
+    const session = await this.prisma.materialImportSession.findUnique({
+      where: { id: sessionId },
+      include: { files: true }
+    });
+    if (!session) {
+      throw new NotFoundException('零件导入会话不存在');
+    }
+    if (session.status === 'COMMITTED') {
+      throw new BadRequestException('已提交的零件导入会话不能放弃');
+    }
+    await this.prisma.materialImportSession.delete({ where: { id: sessionId } });
+    await Promise.all(session.files.map((file) => this.removeMaterialImportStoredFile(file.storedFileName)));
+    return {
+      sessionId,
+      discarded: true,
+      deletedFileCount: session.files.length
+    };
+  }
+
+  async materialApplicabilities(materialId: string) {
+    const material = await this.prisma.material.findUnique({
+      where: { id: materialId },
+      select: {
+        id: true,
+        partCode: true,
+        partName: true,
+        applicabilities: {
+          include: {
+            customer: {
+              select: {
+                id: true,
+                customerName: true,
+                customerCode: true
+              }
+            }
+          },
+          orderBy: [{ status: 'asc' }, { customerScopeKey: 'asc' }, { projectModelScopeKey: 'asc' }]
+        }
+      }
+    });
+    if (!material) {
+      throw new NotFoundException('物料基础资料不存在');
+    }
+    return {
+      material: {
+        id: material.id,
+        partCode: material.partCode,
+        partName: material.partName
+      },
+      items: material.applicabilities.map((item) => this.serializeMaterialApplicability(item))
+    };
+  }
+
+  async saveMaterialApplicability(materialId: string, dto: SaveMaterialApplicabilityDto) {
+    const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
+    if (!material) {
+      throw new NotFoundException('物料基础资料不存在');
+    }
+    const scope = await this.resolveMaterialApplicabilityScope(dto);
+    const existing = await this.prisma.materialApplicability.findUnique({
+      where: {
+        materialId_customerScopeKey_projectModelScopeKey: {
+          materialId,
+          customerScopeKey: scope.customerScopeKey,
+          projectModelScopeKey: scope.projectModelScopeKey
+        }
+      }
+    });
+
+    const row = existing
+      ? await this.prisma.materialApplicability.update({
+          where: { id: existing.id },
+          data: scope,
+          include: { customer: { select: { id: true, customerName: true, customerCode: true } } }
+        })
+      : await this.prisma.materialApplicability.create({
+          data: {
+            materialId,
+            ...scope
+          },
+          include: { customer: { select: { id: true, customerName: true, customerCode: true } } }
+        });
+    return this.serializeMaterialApplicability(row);
+  }
+
+  async updateMaterialApplicability(applicabilityId: string, dto: SaveMaterialApplicabilityDto) {
+    const existing = await this.prisma.materialApplicability.findUnique({
+      where: { id: applicabilityId },
+      select: { id: true, materialId: true }
+    });
+    if (!existing) {
+      throw new NotFoundException('零件适用范围不存在');
+    }
+    const scope = await this.resolveMaterialApplicabilityScope(dto);
+    const duplicate = await this.prisma.materialApplicability.findUnique({
+      where: {
+        materialId_customerScopeKey_projectModelScopeKey: {
+          materialId: existing.materialId,
+          customerScopeKey: scope.customerScopeKey,
+          projectModelScopeKey: scope.projectModelScopeKey
+        }
+      },
+      select: { id: true }
+    });
+    if (duplicate && duplicate.id !== existing.id) {
+      throw new BadRequestException('相同客户和机型/项目适用范围已存在');
+    }
+    const row = await this.prisma.materialApplicability.update({
+      where: { id: existing.id },
+      data: scope,
+      include: { customer: { select: { id: true, customerName: true, customerCode: true } } }
+    });
+    return this.serializeMaterialApplicability(row);
+  }
+
+  async disableMaterialApplicability(applicabilityId: string) {
+    const existing = await this.prisma.materialApplicability.findUnique({ where: { id: applicabilityId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('零件适用范围不存在');
+    }
+    const row = await this.prisma.materialApplicability.update({
+      where: { id: applicabilityId },
+      data: { status: 'DISABLED' },
+      include: { customer: { select: { id: true, customerName: true, customerCode: true } } }
+    });
+    return this.serializeMaterialApplicability(row);
+  }
+
+  private serializeMaterialApplicability(item: {
+    id: string;
+    materialId: string;
+    customerId: string | null;
+    customerNameSnapshot: string | null;
+    projectModel: string | null;
+    customerScopeKey: string;
+    projectModelScopeKey: string;
+    remark: string | null;
+    status: CommonStatus;
+    createdAt: Date;
+    updatedAt: Date;
+    customer?: { id: string; customerName: string; customerCode: string } | null;
+  }) {
+    const customerName = item.customer?.customerName || item.customerNameSnapshot || '';
+    const customerScopeLabel = item.customerId ? customerName || '指定客户' : '全部客户';
+    const projectScopeLabel = item.projectModel ? item.projectModel : '全部机型/项目';
+    return {
+      id: item.id,
+      materialId: item.materialId,
+      customerId: item.customerId,
+      customerCode: item.customer?.customerCode,
+      customerName,
+      projectModel: item.projectModel,
+      customerScopeKey: item.customerScopeKey,
+      projectModelScopeKey: item.projectModelScopeKey,
+      scopeLabel: `${customerScopeLabel} / ${projectScopeLabel}`,
+      remark: item.remark,
+      status: item.status,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt
+    };
+  }
+
+  private async resolveModelBomScope(dto: SaveModelBomDto) {
+    const bomName = this.normalizeMaterialRequired(dto.bomName, '零件包名称');
+    const projectModel = this.normalizeMaterialRequired(dto.projectModel, '机型/项目');
+    const customerId = String(dto.customerId || '').trim() || null;
+    const customer = customerId
+      ? await this.prisma.customer.findUnique({
+          where: { id: customerId },
+          select: { id: true, customerName: true }
+        })
+      : null;
+    if (customerId && !customer) {
+      throw new BadRequestException('零件包适用客户不存在');
+    }
+    return {
+      bomName,
+      customerId: customer?.id || null,
+      customerNameSnapshot: customer?.customerName || null,
+      projectModel,
+      customerScopeKey: customer?.id || 'ALL',
+      projectModelScopeKey: this.normalizeMaterialScopeKey(projectModel),
+      remark: String(dto.remark || '').trim() || null,
+      status: dto.status || 'ENABLED'
+    };
+  }
+
+  private modelBomLineInclude(): Prisma.ModelBomLineInclude {
+    return {
+      defaultDrawingRevision: true,
+      material: {
+        select: {
+          id: true,
+          partCode: true,
+          partName: true,
+          unit: true,
+          partSpecification: true,
+          status: true,
+          drawingRevisions: {
+            where: { status: 'ENABLED' },
+            orderBy: [{ isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
+          }
+        }
+      }
+    };
+  }
+
+  async modelBoms(query: ModelBomQueryDto) {
+    const status = query.status || 'ENABLED';
+    const projectModel = query.projectModel?.trim();
+    const where: Prisma.ModelBomWhereInput = {
+      status,
+      ...(projectModel ? { projectModel: { contains: projectModel, mode: 'insensitive' } } : {})
+    };
+    const customerId = query.customerId?.trim();
+    if (customerId) {
+      where.OR = [{ customerId }, { customerId: null }];
+    }
+    const rows = await this.prisma.modelBom.findMany({
+      where,
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        lines: {
+          include: this.modelBomLineInclude(),
+          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
+        }
+      },
+      orderBy: [{ updatedAt: 'desc' }, { projectModel: 'asc' }, { bomName: 'asc' }]
+    });
+    const normalizedKeyword = normalizeSearchKeyword(query.keyword);
+    const filtered = normalizedKeyword
+      ? rows.filter((row) =>
+          pinyinSearchMatches(
+            [
+              row.bomName,
+              row.projectModel,
+              row.customer?.customerName,
+              row.customer?.customerCode,
+              row.customerNameSnapshot,
+              ...row.lines.flatMap((line) => [line.partCodeSnapshot, line.partNameSnapshot])
+            ],
+            normalizedKeyword
+          )
+        )
+      : rows;
+    return this.sortModelBomRows(filtered, query).map((row) => this.serializeModelBom(row));
+  }
+
+  private sortModelBomRows<T extends { customerId: string | null; projectModel: string; updatedAt: Date; bomName: string }>(
+    rows: T[],
+    query: ModelBomQueryDto
+  ) {
+    const requestedCustomerId = String(query.customerId || '').trim();
+    const requestedProjectModel = this.normalizeMaterialScopeKey(query.projectModel);
+    return [...rows].sort((left, right) => {
+      // 订单推荐 BOM 时，客户专属清单优先于百胜通用清单；通用清单只作为兜底建议。
+      const leftCustomerScore = requestedCustomerId ? (left.customerId === requestedCustomerId ? 0 : left.customerId ? 2 : 1) : left.customerId ? 1 : 0;
+      const rightCustomerScore = requestedCustomerId ? (right.customerId === requestedCustomerId ? 0 : right.customerId ? 2 : 1) : right.customerId ? 1 : 0;
+      if (leftCustomerScore !== rightCustomerScore) {
+        return leftCustomerScore - rightCustomerScore;
+      }
+
+      const leftProjectScore = requestedProjectModel === 'ALL' ? 1 : this.normalizeMaterialScopeKey(left.projectModel) === requestedProjectModel ? 0 : 1;
+      const rightProjectScore = requestedProjectModel === 'ALL' ? 1 : this.normalizeMaterialScopeKey(right.projectModel) === requestedProjectModel ? 0 : 1;
+      if (leftProjectScore !== rightProjectScore) {
+        return leftProjectScore - rightProjectScore;
+      }
+
+      const updatedDiff = right.updatedAt.getTime() - left.updatedAt.getTime();
+      if (updatedDiff !== 0) {
+        return updatedDiff;
+      }
+      return `${left.projectModel}-${left.bomName}`.localeCompare(`${right.projectModel}-${right.bomName}`, 'zh-Hans-CN');
+    });
+  }
+
+  async modelBom(bomId: string) {
+    const row = await this.prisma.modelBom.findUnique({
+      where: { id: bomId },
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        lines: {
+          include: this.modelBomLineInclude(),
+          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
+        }
+      }
+    });
+    if (!row) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    return this.serializeModelBom(row);
+  }
+
+  async createModelBom(dto: SaveModelBomDto) {
+    const scope = await this.resolveModelBomScope(dto);
+    const existing = await this.prisma.modelBom.findUnique({
+      where: {
+        bomName_customerScopeKey_projectModelScopeKey: {
+          bomName: scope.bomName,
+          customerScopeKey: scope.customerScopeKey,
+          projectModelScopeKey: scope.projectModelScopeKey
+        }
+      },
+      select: { id: true }
+    });
+    if (existing) {
+      throw new BadRequestException('相同名称、客户范围和机型/项目的零件包已存在');
+    }
+    const row = await this.prisma.modelBom.create({
+      data: scope,
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        lines: { include: this.modelBomLineInclude(), orderBy: [{ sortOrder: 'asc' }] }
+      }
+    });
+    return this.serializeModelBom(row);
+  }
+
+  async copyModelBom(sourceBomId: string, dto: CopyModelBomDto) {
+    const source = await this.prisma.modelBom.findUnique({
+      where: { id: sourceBomId },
+      include: {
+        lines: {
+          include: {
+            material: { select: { status: true } }
+          },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+        }
+      }
+    });
+    if (!source) {
+      throw new NotFoundException('来源机型零件包不存在');
+    }
+    if (source.customerId) {
+      throw new BadRequestException('当前阶段只允许从百胜通用零件包复制为客户零件包');
+    }
+    const customerId = String(dto.customerId || '').trim();
+    const customer = customerId
+      ? await this.prisma.customer.findUnique({
+          where: { id: customerId },
+          select: { id: true, customerName: true, customerCode: true }
+        })
+      : null;
+    if (!customer) {
+      throw new BadRequestException('请选择复制目标客户');
+    }
+    const projectModel = String(dto.projectModel || source.projectModel).trim();
+    if (!projectModel) {
+      throw new BadRequestException('机型/项目不能为空');
+    }
+    const bomName = String(dto.bomName || `${source.bomName}-${customer.customerName}`).trim();
+    const customerScopeKey = customer.id;
+    const projectModelScopeKey = this.normalizeMaterialScopeKey(projectModel);
+    const duplicate = await this.prisma.modelBom.findUnique({
+      where: {
+        bomName_customerScopeKey_projectModelScopeKey: {
+          bomName,
+          customerScopeKey,
+          projectModelScopeKey
+        }
+      },
+      select: { id: true }
+    });
+    if (duplicate) {
+      throw new BadRequestException('目标客户下已存在相同名称和机型/项目的零件包');
+    }
+    const enabledComponentNos = new Set(
+      source.lines
+        .filter((line) => line.status === 'ENABLED' && line.material.status === 'ENABLED' && line.lineType === 'COMPONENT' && line.componentNo)
+        .map((line) => this.normalizeModelBomComponentNo(line.componentNo))
+        .filter(Boolean)
+    );
+    const copyableSourceLines = source.lines.filter((line) => {
+      if (line.status !== 'ENABLED' || line.material.status !== 'ENABLED') {
+        return false;
+      }
+      const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
+      return !parentComponentNo || enabledComponentNos.has(parentComponentNo);
+    });
+
+    const row = await this.prisma.modelBom.create({
+      data: {
+        bomName,
+        customerId: customer.id,
+        customerNameSnapshot: customer.customerName,
+        projectModel,
+        customerScopeKey,
+        projectModelScopeKey,
+        sourceBomId: source.id,
+        sourceBomNameSnapshot: source.bomName,
+        remark: String(dto.remark || `从 ${source.bomName} 复制生成`).trim() || null,
+        status: dto.status || 'ENABLED',
+        // 复制 BOM 只复制当前启用明细并生成客户独立副本，不反向修改百胜通用 BOM，也不生成订单、生产或库存数据。
+        lines: {
+          create: copyableSourceLines.map((line) => ({
+            materialId: line.materialId,
+            partCodeSnapshot: line.partCodeSnapshot,
+            partNameSnapshot: line.partNameSnapshot,
+            unitSnapshot: line.unitSnapshot,
+            partSpecificationSnapshot: line.partSpecificationSnapshot,
+            lineType: line.lineType,
+            partCategory: line.partCategory,
+            componentNo: line.componentNo,
+            parentComponentNo: line.parentComponentNo,
+            defaultDrawingRevisionId: line.defaultDrawingRevisionId,
+            defaultProcessRoute: line.defaultProcessRoute,
+            defaultQuantity: line.defaultQuantity,
+            remark: line.remark,
+            sortOrder: line.sortOrder,
+            status: 'ENABLED'
+          }))
+        }
+      },
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        lines: {
+          include: this.modelBomLineInclude(),
+          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
+        }
+      }
+    });
+    return this.serializeModelBom(row);
+  }
+
+  async updateModelBom(bomId: string, dto: SaveModelBomDto) {
+    const existing = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const scope = await this.resolveModelBomScope(dto);
+    const duplicate = await this.prisma.modelBom.findUnique({
+      where: {
+        bomName_customerScopeKey_projectModelScopeKey: {
+          bomName: scope.bomName,
+          customerScopeKey: scope.customerScopeKey,
+          projectModelScopeKey: scope.projectModelScopeKey
+        }
+      },
+      select: { id: true }
+    });
+    if (duplicate && duplicate.id !== bomId) {
+      throw new BadRequestException('相同名称、客户范围和机型/项目的零件包已存在');
+    }
+    const row = await this.prisma.modelBom.update({
+      where: { id: bomId },
+      data: scope,
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        lines: {
+          include: this.modelBomLineInclude(),
+          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }]
+        }
+      }
+    });
+    return this.serializeModelBom(row);
+  }
+
+  async disableModelBom(bomId: string) {
+    const existing = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const row = await this.prisma.modelBom.update({
+      where: { id: bomId },
+      data: { status: 'DISABLED' },
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        lines: {
+          include: this.modelBomLineInclude(),
+          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }]
+        }
+      }
+    });
+    return this.serializeModelBom(row);
+  }
+
+  private normalizeModelBomLineType(value?: string | null) {
+    return value === 'COMPONENT' ? 'COMPONENT' : 'PART';
+  }
+
+  private normalizeModelBomComponentNo(value?: string | null) {
+    const normalized = String(value || '').trim().toUpperCase();
+    return normalized || null;
+  }
+
+  private async nextModelBomComponentNo(bomId: string) {
+    const rows = await this.prisma.modelBomLine.findMany({
+      where: { bomId, lineType: 'COMPONENT' },
+      select: { componentNo: true }
+    });
+    let maxNo = 0;
+    for (const row of rows) {
+      const matched = /^C(\d+)$/i.exec(row.componentNo || '');
+      if (matched) {
+        maxNo = Math.max(maxNo, Number(matched[1]) || 0);
+      }
+    }
+    return `C${String(maxNo + 1).padStart(3, '0')}`;
+  }
+
+  private async resolveModelBomLineStructure(bomId: string, dto: SaveModelBomLineDto, excludeId?: string) {
+    const lineType = this.normalizeModelBomLineType(dto.lineType);
+    const partCategory = String(dto.partCategory || '').trim() || null;
+    let componentNo = this.normalizeModelBomComponentNo(dto.componentNo);
+    let parentComponentNo = this.normalizeModelBomComponentNo(dto.parentComponentNo);
+
+    if (lineType === 'COMPONENT') {
+      parentComponentNo = null;
+      componentNo = componentNo || (await this.nextModelBomComponentNo(bomId));
+      const duplicateComponent = await this.prisma.modelBomLine.findFirst({
+        where: {
+          bomId,
+          lineType: 'COMPONENT',
+          componentNo,
+          ...(excludeId ? { id: { not: excludeId } } : {})
+        },
+        select: { id: true }
+      });
+      if (duplicateComponent) {
+        throw new BadRequestException('当前零件包内组件编号已存在');
+      }
+    } else {
+      componentNo = null;
+      if (parentComponentNo) {
+        const parent = await this.prisma.modelBomLine.findFirst({
+          where: { bomId, lineType: 'COMPONENT', componentNo: parentComponentNo },
+          select: { id: true, status: true }
+        });
+        if (!parent) {
+          throw new BadRequestException('所属组件不存在，请先维护组件行');
+        }
+        if ((dto.status || 'ENABLED') !== 'DISABLED' && parent.status !== 'ENABLED') {
+          throw new BadRequestException('所属组件已停用，请先启用组件行再维护子零件');
+        }
+      }
+    }
+
+    return {
+      lineType,
+      partCategory,
+      componentNo,
+      parentComponentNo
+    };
+  }
+
+  private async ensureModelBomLineUnique(
+    bomId: string,
+    materialId: string,
+    structure: Awaited<ReturnType<InventoryService['resolveModelBomLineStructure']>>,
+    excludeId?: string
+  ) {
+    const duplicate = await this.prisma.modelBomLine.findFirst({
+      where: {
+        bomId,
+        materialId,
+        lineType: structure.lineType,
+        componentNo: structure.componentNo,
+        parentComponentNo: structure.parentComponentNo,
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      },
+      select: { id: true }
+    });
+    if (duplicate) {
+      throw new BadRequestException('该零件已经存在于当前零件包的相同结构位置');
+    }
+  }
+
+  private splitDefaultProcessRoute(value?: string) {
+    return String(value || '')
+      .split(/(?:->|→|[、,，;；\n\r]+)/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  private async resolveModelBomLineDefaults(materialId: string, dto: SaveModelBomLineDto) {
+    const defaultDrawingRevisionId = String(dto.defaultDrawingRevisionId || '').trim() || null;
+    if (defaultDrawingRevisionId) {
+      const revision = await this.prisma.materialDrawingRevision.findUnique({
+        where: { id: defaultDrawingRevisionId },
+        select: { id: true, materialId: true, status: true }
+      });
+      if (!revision || revision.materialId !== materialId || revision.status !== 'ENABLED') {
+        throw new BadRequestException('BOM 默认图纸必须选择当前零件的启用图纸版本');
+      }
+    }
+
+    const processNames = this.splitDefaultProcessRoute(dto.defaultProcessRoute);
+    if (processNames.length > 0) {
+      // BOM 行默认工艺只作为下单建议；保存前仍校验标准工序库，订单保存后会形成独立流程快照。
+      await this.processDefinitionsService.ensureActiveNames(processNames);
+    }
+
+    return {
+      defaultDrawingRevisionId,
+      defaultProcessRoute: processNames.length > 0 ? processNames.join('、') : null
+    };
+  }
+
+  async saveModelBomLine(bomId: string, dto: SaveModelBomLineDto) {
+    const [bom, material] = await Promise.all([
+      this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } }),
+      this.prisma.material.findUnique({ where: { id: dto.materialId }, select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } })
+    ]);
+    if (!bom) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    if (!material) {
+      throw new BadRequestException('零件基础资料不存在');
+    }
+    const defaultQuantity = Number(dto.defaultQuantity || 0);
+    if (defaultQuantity <= 0) {
+      throw new BadRequestException('默认数量必须大于 0');
+    }
+    if ((dto.status || 'ENABLED') === 'ENABLED' && material.status !== 'ENABLED') {
+      throw new BadRequestException('停用零件不能加入启用 BOM 行，请先启用零件或将 BOM 行保存为停用');
+    }
+    const structure = await this.resolveModelBomLineStructure(bomId, dto);
+    await this.ensureModelBomLineUnique(bomId, material.id, structure);
+    const defaults = await this.resolveModelBomLineDefaults(material.id, dto);
+    const sortOrder =
+      dto.sortOrder ??
+      ((await this.prisma.modelBomLine.aggregate({
+        where: { bomId },
+        _max: { sortOrder: true }
+      }))._max.sortOrder || 0) + 10;
+    const data = {
+      materialId: material.id,
+      partCodeSnapshot: material.partCode,
+      partNameSnapshot: material.partName,
+      unitSnapshot: material.unit,
+      partSpecificationSnapshot: material.partSpecification,
+      lineType: structure.lineType,
+      partCategory: structure.partCategory,
+      componentNo: structure.componentNo,
+      parentComponentNo: structure.parentComponentNo,
+      defaultDrawingRevisionId: defaults.defaultDrawingRevisionId,
+      defaultProcessRoute: defaults.defaultProcessRoute,
+      defaultQuantity,
+      remark: String(dto.remark || '').trim() || null,
+      sortOrder,
+      status: dto.status || 'ENABLED'
+    };
+    const row = await this.prisma.modelBomLine.create({
+      data: { bomId, ...data },
+      include: this.modelBomLineInclude()
+    });
+    return this.serializeModelBomLine(row);
+  }
+
+  async updateModelBomLine(lineId: string, dto: SaveModelBomLineDto) {
+    const existing = await this.prisma.modelBomLine.findUnique({
+      where: { id: lineId },
+      select: { id: true, bomId: true, lineType: true, componentNo: true }
+    });
+    if (!existing) {
+      throw new NotFoundException('机型零件包明细不存在');
+    }
+    const material = await this.prisma.material.findUnique({
+      where: { id: dto.materialId },
+      select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true }
+    });
+    if (!material) {
+      throw new BadRequestException('零件基础资料不存在');
+    }
+    const defaultQuantity = Number(dto.defaultQuantity || 0);
+    if (defaultQuantity <= 0) {
+      throw new BadRequestException('默认数量必须大于 0');
+    }
+    if ((dto.status || 'ENABLED') === 'ENABLED' && material.status !== 'ENABLED') {
+      throw new BadRequestException('停用零件不能启用到 BOM 行，请先启用零件或将 BOM 行保存为停用');
+    }
+    const structure = await this.resolveModelBomLineStructure(existing.bomId, dto, existing.id);
+    await this.ensureModelBomLineUnique(existing.bomId, material.id, structure, existing.id);
+    const defaults = await this.resolveModelBomLineDefaults(material.id, dto);
+    const shouldSyncChildren =
+      existing.lineType === 'COMPONENT' &&
+      existing.componentNo &&
+      structure.lineType === 'COMPONENT' &&
+      structure.componentNo &&
+      existing.componentNo !== structure.componentNo;
+    const shouldClearChildren = existing.lineType === 'COMPONENT' && existing.componentNo && structure.lineType !== 'COMPONENT';
+    const shouldDisableChildren = structure.lineType === 'COMPONENT' && structure.componentNo && (dto.status || 'ENABLED') === 'DISABLED';
+
+    const row = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.modelBomLine.update({
+        where: { id: existing.id },
+        data: {
+          materialId: material.id,
+          partCodeSnapshot: material.partCode,
+          partNameSnapshot: material.partName,
+          unitSnapshot: material.unit,
+          partSpecificationSnapshot: material.partSpecification,
+          lineType: structure.lineType,
+          partCategory: structure.partCategory,
+          componentNo: structure.componentNo,
+          parentComponentNo: structure.parentComponentNo,
+          defaultDrawingRevisionId: defaults.defaultDrawingRevisionId,
+          defaultProcessRoute: defaults.defaultProcessRoute,
+          defaultQuantity,
+          remark: String(dto.remark || '').trim() || null,
+          sortOrder: dto.sortOrder ?? 0,
+          status: dto.status || 'ENABLED'
+        },
+        include: this.modelBomLineInclude()
+      });
+      if (shouldSyncChildren) {
+        // BOM 组件编号变更时，仅同步仍指向旧组件编号的子零件，保留人工改到其他组件的关系。
+        await tx.modelBomLine.updateMany({
+          where: { bomId: existing.bomId, parentComponentNo: existing.componentNo },
+          data: { parentComponentNo: structure.componentNo }
+        });
+      }
+      if (shouldClearChildren) {
+        // 组件行改成普通零件后，原子零件不再挂靠已经不存在的组件。
+        await tx.modelBomLine.updateMany({
+          where: { bomId: existing.bomId, parentComponentNo: existing.componentNo },
+          data: { parentComponentNo: null }
+        });
+      }
+      if (shouldDisableChildren) {
+        // 停用组件行时，所属子零件同步软停用，避免启用子零件继续挂在停用父组件下。
+        await tx.modelBomLine.updateMany({
+          where: { bomId: existing.bomId, parentComponentNo: structure.componentNo, status: 'ENABLED' },
+          data: { status: 'DISABLED' }
+        });
+      }
+      return updated;
+    });
+    return this.serializeModelBomLine(row);
+  }
+
+  async reorderModelBomLines(bomId: string, dto: ReorderModelBomLinesDto) {
+    const items = dto.items || [];
+    if (items.length === 0) {
+      throw new BadRequestException('请提供需要排序的 BOM 明细');
+    }
+    const lineIds = items.map((item) => String(item.lineId || '').trim()).filter(Boolean);
+    const uniqueLineIds = new Set(lineIds);
+    if (lineIds.length !== items.length || uniqueLineIds.size !== lineIds.length) {
+      throw new BadRequestException('BOM 排序明细存在空行或重复行');
+    }
+
+    const normalizedItems = items.map((item) => {
+      const sortOrder = Number(item.sortOrder);
+      if (!Number.isFinite(sortOrder) || sortOrder < 0) {
+        throw new BadRequestException('BOM 排序值必须是大于等于 0 的数字');
+      }
+      return {
+        lineId: String(item.lineId).trim(),
+        sortOrder
+      };
+    });
+
+    const bom = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } });
+    if (!bom) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const lines = await this.prisma.modelBomLine.findMany({
+      where: { id: { in: normalizedItems.map((item) => item.lineId) } },
+      select: { id: true, bomId: true }
+    });
+    if (lines.length !== normalizedItems.length || lines.some((line) => line.bomId !== bomId)) {
+      throw new BadRequestException('BOM 排序明细必须全部属于当前机型零件包');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      // BOM 拖拽排序必须事务化保存，避免多行逐个更新造成部分成功、部分失败。
+      for (const item of normalizedItems) {
+        await tx.modelBomLine.update({
+          where: { id: item.lineId },
+          data: { sortOrder: item.sortOrder }
+        });
+      }
+    });
+    return this.modelBom(bomId);
+  }
+
+  async disableModelBomLine(lineId: string) {
+    const existing = await this.prisma.modelBomLine.findUnique({
+      where: { id: lineId },
+      select: { id: true, bomId: true, lineType: true, componentNo: true }
+    });
+    if (!existing) {
+      throw new NotFoundException('机型零件包明细不存在');
+    }
+    const row = await this.prisma.$transaction(async (tx) => {
+      const disabled = await tx.modelBomLine.update({
+        where: { id: lineId },
+        data: { status: 'DISABLED' },
+        include: this.modelBomLineInclude()
+      });
+      if (existing.lineType === 'COMPONENT' && existing.componentNo) {
+        // BOM 行只能软停用；组件停用后子零件也必须停用，避免后续推荐出不完整结构。
+        await tx.modelBomLine.updateMany({
+          where: { bomId: existing.bomId, parentComponentNo: existing.componentNo, status: 'ENABLED' },
+          data: { status: 'DISABLED' }
+        });
+      }
+      return disabled;
+    });
+    return this.serializeModelBomLine(row);
+  }
+
+  private async resolveMaterialTransformRuleData(dto: SaveMaterialTransformRuleDto) {
+    const sourceMaterialId = this.normalizeMaterialRequired(dto.sourceMaterialId, '来源零件');
+    const targetMaterialId = this.normalizeMaterialRequired(dto.targetMaterialId, '目标零件');
+    if (sourceMaterialId === targetMaterialId) {
+      throw new BadRequestException('来源零件和目标零件不能相同');
+    }
+    const customerId = String(dto.customerId || '').trim() || null;
+    const [sourceMaterial, targetMaterial, customer] = await Promise.all([
+      this.prisma.material.findUnique({
+        where: { id: sourceMaterialId },
+        select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true }
+      }),
+      this.prisma.material.findUnique({
+        where: { id: targetMaterialId },
+        select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true }
+      }),
+      customerId
+        ? this.prisma.customer.findUnique({
+            where: { id: customerId },
+            select: { id: true, customerName: true }
+          })
+        : null
+    ]);
+    if (!sourceMaterial) {
+      throw new BadRequestException('来源零件不存在');
+    }
+    if (!targetMaterial) {
+      throw new BadRequestException('目标零件不存在');
+    }
+    if (customerId && !customer) {
+      throw new BadRequestException('适用客户不存在');
+    }
+    const status = dto.status || 'ENABLED';
+    if (status === 'ENABLED' && (sourceMaterial.status !== 'ENABLED' || targetMaterial.status !== 'ENABLED')) {
+      throw new BadRequestException('来源加工关系启用时，来源零件和目标零件都必须是启用状态');
+    }
+    const multiplier = Number(dto.multiplier ?? 1);
+    if (!Number.isFinite(multiplier) || multiplier <= 0) {
+      throw new BadRequestException('换算倍率必须大于 0');
+    }
+    const lossRate = dto.lossRate === undefined || dto.lossRate === null ? null : Number(dto.lossRate);
+    if (lossRate !== null && (!Number.isFinite(lossRate) || lossRate < 0)) {
+      throw new BadRequestException('损耗率不能小于 0');
+    }
+    const projectModel = String(dto.projectModel || '').trim() || null;
+    const processNames = this.splitDefaultProcessRoute(dto.defaultProcessRoute);
+    if (processNames.length > 0) {
+      // 来源加工关系只作为库存来源建议，默认工艺保存前仍必须来自标准工序库。
+      await this.processDefinitionsService.ensureActiveNames(processNames);
+    }
+    return {
+      sourceMaterialId: sourceMaterial.id,
+      targetMaterialId: targetMaterial.id,
+      customerId: customer?.id || null,
+      customerNameSnapshot: customer?.customerName || null,
+      projectModel,
+      customerScopeKey: customer?.id || 'ALL',
+      projectModelScopeKey: this.normalizeMaterialScopeKey(projectModel),
+      conversionDescription: String(dto.conversionDescription || '').trim() || null,
+      defaultProcessRoute: processNames.length > 0 ? processNames.join('、') : null,
+      multiplier,
+      lossRate,
+      remark: String(dto.remark || '').trim() || null,
+      status
+    };
+  }
+
+  private async ensureMaterialTransformRuleUnique(
+    data: Awaited<ReturnType<InventoryService['resolveMaterialTransformRuleData']>>,
+    excludeId?: string
+  ) {
+    const existing = await this.prisma.materialTransformRule.findFirst({
+      where: {
+        sourceMaterialId: data.sourceMaterialId,
+        targetMaterialId: data.targetMaterialId,
+        customerScopeKey: data.customerScopeKey,
+        projectModelScopeKey: data.projectModelScopeKey,
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      },
+      select: { id: true }
+    });
+    if (existing) {
+      throw new BadRequestException('相同来源、目标、客户范围和机型范围的加工关系已存在');
+    }
+  }
+
+  async materialTransformRules(query: MaterialTransformRuleQueryDto) {
+    const status = query.status || 'ENABLED';
+    const and: Prisma.MaterialTransformRuleWhereInput[] = [{ status }];
+    if (status === 'ENABLED') {
+      and.push({ sourceMaterial: { status: 'ENABLED' }, targetMaterial: { status: 'ENABLED' } });
+    }
+    const customerId = query.customerId?.trim();
+    if (customerId) {
+      and.push({ OR: [{ customerId }, { customerId: null }] });
+    }
+    const projectModel = query.projectModel?.trim();
+    if (projectModel) {
+      and.push({ OR: [{ projectModel: { contains: projectModel, mode: 'insensitive' } }, { projectModel: null }] });
+    }
+    if (query.sourceMaterialId?.trim()) {
+      and.push({ sourceMaterialId: query.sourceMaterialId.trim() });
+    }
+    if (query.sourcePartCode?.trim()) {
+      and.push({ sourceMaterial: { partCode: { equals: query.sourcePartCode.trim(), mode: 'insensitive' } } });
+    }
+    if (query.targetMaterialId?.trim()) {
+      and.push({ targetMaterialId: query.targetMaterialId.trim() });
+    }
+    if (query.targetPartCode?.trim()) {
+      and.push({ targetMaterial: { partCode: { equals: query.targetPartCode.trim(), mode: 'insensitive' } } });
+    }
+    const rows = await this.prisma.materialTransformRule.findMany({
+      where: { AND: and },
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
+        targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
+      },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
+    });
+    const normalizedKeyword = normalizeSearchKeyword(query.keyword);
+    const filtered = normalizedKeyword
+      ? rows.filter((row) =>
+          pinyinSearchMatches(
+            [
+              row.sourceMaterial.partCode,
+              row.sourceMaterial.partName,
+              row.targetMaterial.partCode,
+              row.targetMaterial.partName,
+              row.customer?.customerName,
+              row.customer?.customerCode,
+              row.customerNameSnapshot,
+              row.projectModel,
+              row.conversionDescription,
+              row.defaultProcessRoute,
+              row.remark
+            ],
+            normalizedKeyword
+          )
+        )
+      : rows;
+    return filtered.map((row) => this.serializeMaterialTransformRule(row));
+  }
+
+  async createMaterialTransformRule(dto: SaveMaterialTransformRuleDto) {
+    const data = await this.resolveMaterialTransformRuleData(dto);
+    await this.ensureMaterialTransformRuleUnique(data);
+    const row = await this.prisma.materialTransformRule.create({
+      data,
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
+        targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
+      }
+    });
+    return this.serializeMaterialTransformRule(row);
+  }
+
+  async updateMaterialTransformRule(ruleId: string, dto: SaveMaterialTransformRuleDto) {
+    const existing = await this.prisma.materialTransformRule.findUnique({ where: { id: ruleId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('来源加工关系不存在');
+    }
+    const data = await this.resolveMaterialTransformRuleData(dto);
+    await this.ensureMaterialTransformRuleUnique(data, ruleId);
+    const row = await this.prisma.materialTransformRule.update({
+      where: { id: ruleId },
+      data,
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
+        targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
+      }
+    });
+    return this.serializeMaterialTransformRule(row);
+  }
+
+  async disableMaterialTransformRule(ruleId: string) {
+    const existing = await this.prisma.materialTransformRule.findUnique({ where: { id: ruleId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('来源加工关系不存在');
+    }
+    const row = await this.prisma.materialTransformRule.update({
+      where: { id: ruleId },
+      data: { status: 'DISABLED' },
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
+        targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
+      }
+    });
+    return this.serializeMaterialTransformRule(row);
+  }
+
+  private serializeMaterialTransformRule(row: {
+    id: string;
+    sourceMaterialId: string;
+    targetMaterialId: string;
+    customerId: string | null;
+    customerNameSnapshot: string | null;
+    projectModel: string | null;
+    customerScopeKey: string;
+    projectModelScopeKey: string;
+    conversionDescription: string | null;
+    defaultProcessRoute: string | null;
+    multiplier: Prisma.Decimal | number;
+    lossRate: Prisma.Decimal | number | null;
+    remark: string | null;
+    status: CommonStatus;
+    createdAt: Date;
+    updatedAt: Date;
+    customer?: { id: string; customerName: string; customerCode: string } | null;
+    sourceMaterial: { id: string; partCode: string; partName: string; unit: string; partSpecification: string | null; status: CommonStatus };
+    targetMaterial: { id: string; partCode: string; partName: string; unit: string; partSpecification: string | null; status: CommonStatus };
+  }) {
+    const customerName = row.customer?.customerName || row.customerNameSnapshot || '';
+    const customerScopeLabel = row.customerId ? customerName || '指定客户' : '全部客户';
+    const projectScopeLabel = row.projectModel || '全部机型/项目';
+    return {
+      id: row.id,
+      sourceMaterialId: row.sourceMaterialId,
+      sourcePartCode: row.sourceMaterial.partCode,
+      sourcePartName: row.sourceMaterial.partName,
+      sourceUnit: row.sourceMaterial.unit,
+      sourcePartSpecification: row.sourceMaterial.partSpecification,
+      sourceMaterialStatus: row.sourceMaterial.status,
+      targetMaterialId: row.targetMaterialId,
+      targetPartCode: row.targetMaterial.partCode,
+      targetPartName: row.targetMaterial.partName,
+      targetUnit: row.targetMaterial.unit,
+      targetPartSpecification: row.targetMaterial.partSpecification,
+      targetMaterialStatus: row.targetMaterial.status,
+      customerId: row.customerId,
+      customerCode: row.customer?.customerCode,
+      customerName,
+      projectModel: row.projectModel,
+      customerScopeKey: row.customerScopeKey,
+      projectModelScopeKey: row.projectModelScopeKey,
+      scopeLabel: `${customerScopeLabel} / ${projectScopeLabel}`,
+      conversionDescription: row.conversionDescription,
+      defaultProcessRoute: row.defaultProcessRoute,
+      multiplier: decimalToNumber(row.multiplier),
+      lossRate: row.lossRate === null ? null : decimalToNumber(row.lossRate),
+      remark: row.remark,
+      status: row.status,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  private serializeModelBom(row: {
+    id: string;
+    bomName: string;
+    customerId: string | null;
+    customerNameSnapshot: string | null;
+    projectModel: string;
+    customerScopeKey: string;
+    projectModelScopeKey: string;
+    sourceBomId: string | null;
+    sourceBomNameSnapshot: string | null;
+    remark: string | null;
+    status: CommonStatus;
+    createdAt: Date;
+    updatedAt: Date;
+    customer?: { id: string; customerName: string; customerCode: string } | null;
+    lines: Array<Parameters<InventoryService['serializeModelBomLine']>[0]>;
+  }) {
+    const customerName = row.customer?.customerName || row.customerNameSnapshot || '';
+    return {
+      id: row.id,
+      bomName: row.bomName,
+      customerId: row.customerId,
+      customerCode: row.customer?.customerCode,
+      customerName,
+      projectModel: row.projectModel,
+      customerScopeKey: row.customerScopeKey,
+      projectModelScopeKey: row.projectModelScopeKey,
+      scopeLabel: `${customerName || '全部客户'} / ${row.projectModel}`,
+      sourceBomId: row.sourceBomId,
+      sourceBomNameSnapshot: row.sourceBomNameSnapshot,
+      remark: row.remark,
+      status: row.status,
+      lineCount: row.lines.filter((line) => line.status === 'ENABLED' && line.material?.status !== 'DISABLED').length,
+      lines: row.lines.map((line) => this.serializeModelBomLine(line)),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  private serializeModelBomLine(line: {
+    id: string;
+    bomId: string;
+    materialId: string;
+    partCodeSnapshot: string;
+    partNameSnapshot: string;
+    unitSnapshot: string;
+    partSpecificationSnapshot: string | null;
+    lineType: string;
+    partCategory: string | null;
+    componentNo: string | null;
+    parentComponentNo: string | null;
+    defaultDrawingRevisionId: string | null;
+    defaultProcessRoute: string | null;
+    defaultQuantity: Prisma.Decimal | number;
+    remark: string | null;
+    sortOrder: number;
+    status: CommonStatus;
+    createdAt: Date;
+    updatedAt: Date;
+    defaultDrawingRevision?: {
+      id: string;
+      materialId: string;
+      drawingNo: string;
+      drawingVersion: string;
+      drawingDate: Date | null;
+      drawingStatus: string | null;
+      drawingFileName: string | null;
+      drawingFileUrl: string | null;
+      isDefault: boolean;
+      defaultChangedBy: string | null;
+      defaultChangedAt: Date | null;
+      remark: string | null;
+      status: CommonStatus;
+      createdAt: Date;
+      updatedAt: Date;
+    } | null;
+    material?: {
+      id: string;
+      partCode: string;
+      partName: string;
+      unit: string;
+      partSpecification: string | null;
+      status: CommonStatus;
+      drawingRevisions?: Array<{
+        id: string;
+        materialId: string;
+        drawingNo: string;
+        drawingVersion: string;
+        drawingDate: Date | null;
+        drawingStatus: string | null;
+        drawingFileName: string | null;
+        drawingFileUrl: string | null;
+        isDefault: boolean;
+        defaultChangedBy: string | null;
+        defaultChangedAt: Date | null;
+        remark: string | null;
+        status: CommonStatus;
+        createdAt: Date;
+        updatedAt: Date;
+      }>;
+    } | null;
+  }) {
+    const lineType = this.normalizeModelBomLineType(line.lineType);
+    const componentNo = this.normalizeModelBomComponentNo(line.componentNo);
+    const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
+    const structureType = lineType === 'COMPONENT' ? 'COMPONENT' : parentComponentNo ? 'CHILD_PART' : 'STANDALONE_PART';
+    const structureLabel =
+      structureType === 'COMPONENT'
+        ? `组件 ${componentNo || '-'}`
+        : structureType === 'CHILD_PART'
+          ? `属于 ${parentComponentNo}`
+          : '单独零件';
+    const defaultDrawingRevision = line.defaultDrawingRevision?.status === 'ENABLED' ? line.defaultDrawingRevision : null;
+    const drawingRevision = defaultDrawingRevision || line.material?.drawingRevisions?.[0] || null;
+    return {
+      id: line.id,
+      bomId: line.bomId,
+      materialId: line.materialId,
+      partCode: line.material?.partCode || line.partCodeSnapshot,
+      partName: line.material?.partName || line.partNameSnapshot,
+      unit: line.material?.unit || line.unitSnapshot,
+      partSpecification: line.material?.partSpecification ?? line.partSpecificationSnapshot,
+      lineType,
+      partCategory: line.partCategory,
+      componentNo,
+      parentComponentNo,
+      structureType,
+      structureLabel,
+      level: structureType === 'CHILD_PART' ? 1 : 0,
+      defaultDrawingRevisionId: line.defaultDrawingRevisionId,
+      resolvedDrawingRevisionId: drawingRevision?.id,
+      drawingNo: drawingRevision?.drawingNo,
+      drawingVersion: drawingRevision?.drawingVersion,
+      drawingDate: this.formatDateOnly(drawingRevision?.drawingDate),
+      drawingStatus: drawingRevision?.drawingStatus,
+      drawingFileName: drawingRevision?.drawingFileName,
+      drawingFileUrl: drawingRevision?.drawingFileUrl,
+      drawingSource: defaultDrawingRevision ? 'BOM_LINE' : drawingRevision ? 'MATERIAL_DEFAULT' : undefined,
+      defaultProcessRoute: line.defaultProcessRoute,
+      defaultQuantity: decimalToNumber(line.defaultQuantity),
+      remark: line.remark,
+      sortOrder: line.sortOrder,
+      status: line.status,
+      materialStatus: line.material?.status,
+      createdAt: line.createdAt,
+      updatedAt: line.updatedAt
+    };
   }
 
   private inventoryBatchMatchesKeyword(
@@ -1897,6 +4298,11 @@ export class InventoryService {
       batchNo: batch.batchNo,
       partCode: batch.partCode,
       partName: batch.partName,
+      lineType: sourceLine?.lineType || undefined,
+      partCategory: sourceLine?.partCategory || undefined,
+      componentNo: sourceLine?.componentNo || undefined,
+      parentComponentNo: sourceLine?.parentComponentNo || undefined,
+      importSequence: sourceLine?.importSequence || undefined,
       quantity,
       physicalQuantity,
       reservedQuantity,
@@ -1993,6 +4399,11 @@ export class InventoryService {
         batchNo: batch.batchNo,
         partCode: batch.partCode,
         partName: batch.partName,
+        lineType: sourceLine?.lineType || undefined,
+        partCategory: sourceLine?.partCategory || undefined,
+        componentNo: sourceLine?.componentNo || undefined,
+        parentComponentNo: sourceLine?.parentComponentNo || undefined,
+        importSequence: sourceLine?.importSequence || undefined,
         // 批次列表的 quantity 保持账面当前剩余，盘点调整必须以它为准；availableQuantity 才是扣除预占后的可下单数量。
         quantity: physicalQuantity,
         physicalQuantity,
@@ -2033,6 +4444,1134 @@ export class InventoryService {
         updatedAt: batch.updatedAt
       };
     });
+  }
+
+  private async buildMaterialImportSessionPreview(
+    sessionId: string,
+    options: { rowLimit?: number; rowOffset?: number; includeRows?: boolean } = {}
+  ) {
+    const session = await this.prisma.materialImportSession.findUnique({
+      where: { id: sessionId },
+      include: { files: { orderBy: { createdAt: 'asc' } } }
+    });
+    if (!session) {
+      throw new NotFoundException('零件导入会话不存在');
+    }
+
+    const [
+      materialRowCount,
+      materialImportableRowCount,
+      materialIssueAggregate,
+      scopeRowCount,
+      scopeImportableRowCount,
+      scopeIssueAggregate,
+      transformRowCount,
+      transformImportableRowCount,
+      transformIssueAggregate,
+      duplicateAggregate,
+      importableCodes,
+      importableDrawingRows
+    ] = await Promise.all([
+      this.prisma.materialImportRow.count({ where: { sessionId } }),
+      this.prisma.materialImportRow.count({ where: { sessionId, errorCount: 0 } }),
+      this.prisma.materialImportRow.aggregate({
+        where: { sessionId },
+        _sum: { errorCount: true, warningCount: true }
+      }),
+      this.prisma.materialApplicabilityImportRow.count({ where: { sessionId } }),
+      this.prisma.materialApplicabilityImportRow.count({ where: { sessionId, errorCount: 0 } }),
+      this.prisma.materialApplicabilityImportRow.aggregate({
+        where: { sessionId },
+        _sum: { errorCount: true, warningCount: true }
+      }),
+      this.prisma.materialTransformImportRow.count({ where: { sessionId } }),
+      this.prisma.materialTransformImportRow.count({ where: { sessionId, errorCount: 0 } }),
+      this.prisma.materialTransformImportRow.aggregate({
+        where: { sessionId },
+        _sum: { errorCount: true, warningCount: true }
+      }),
+      this.prisma.materialImportFile.aggregate({
+        where: { sessionId },
+        _sum: { duplicateRowCount: true }
+      }),
+      this.prisma.materialImportRow.groupBy({
+        by: ['partCode'],
+        where: { sessionId, errorCount: 0, partCode: { not: '' } }
+      }),
+      this.prisma.materialImportRow.findMany({
+        where: { sessionId, errorCount: 0, drawingNo: { not: null } },
+        select: { partCode: true, drawingNo: true, drawingVersion: true }
+      })
+    ]);
+    const drawingRevisionUpsertCount = new Set(
+      importableDrawingRows
+        .filter((row) => String(row.partCode || '').trim() && String(row.drawingNo || '').trim())
+        .map((row) =>
+          [row.partCode, row.drawingNo, String(row.drawingVersion || 'A')]
+            .map((item) => String(item || '').trim().toLocaleLowerCase())
+            .join('|')
+        )
+    ).size;
+    const rowCount = materialRowCount + scopeRowCount + transformRowCount;
+    const importableRowCount = materialImportableRowCount + scopeImportableRowCount + transformImportableRowCount;
+    const rowLimit = options.rowLimit ?? 100;
+    const rowOffset = options.rowOffset ?? 0;
+    const shouldIncludeRows = options.includeRows !== false;
+    const [previewRows, previewApplicabilityRows, previewTransformRows] = shouldIncludeRows
+      ? await Promise.all([
+          this.prisma.materialImportRow.findMany({
+            where: { sessionId },
+            include: { file: { select: { fileName: true, sheetName: true } } },
+            orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }],
+            skip: rowOffset,
+            take: rowLimit
+          }),
+          this.prisma.materialApplicabilityImportRow.findMany({
+            where: { sessionId },
+            include: { file: { select: { fileName: true, sheetName: true } } },
+            orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }],
+            skip: rowOffset,
+            take: rowLimit
+          }),
+          this.prisma.materialTransformImportRow.findMany({
+            where: { sessionId },
+            include: { file: { select: { fileName: true, sheetName: true } } },
+            orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }],
+            skip: rowOffset,
+            take: rowLimit
+          })
+        ])
+      : [[], [], []];
+    const errorCount =
+      Number(materialIssueAggregate._sum.errorCount || 0) +
+      Number(scopeIssueAggregate._sum.errorCount || 0) +
+      Number(transformIssueAggregate._sum.errorCount || 0);
+    const warningCount =
+      Number(materialIssueAggregate._sum.warningCount || 0) +
+      Number(scopeIssueAggregate._sum.warningCount || 0) +
+      Number(transformIssueAggregate._sum.warningCount || 0);
+    const duplicateRowCount = Number(duplicateAggregate._sum.duplicateRowCount || 0);
+    const previewToken = createHash('sha256')
+      .update(
+        JSON.stringify({
+          sessionId,
+          status: session.status,
+          updatedAt: session.updatedAt.toISOString(),
+          rowCount,
+          errorCount,
+          warningCount,
+          duplicateRowCount,
+          files: session.files.map((file) => [
+            file.id,
+            file.fileHash,
+            file.rowCount,
+            file.materialRowCount,
+            file.scopeRowCount,
+            file.transformRowCount,
+            file.acceptedRowCount,
+            file.duplicateRowCount
+          ])
+        })
+      )
+      .digest('hex');
+
+    return {
+      id: session.id,
+      status: session.status,
+      createdBy: session.createdBy || undefined,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      committedAt: session.committedAt || undefined,
+      committedMaterialCodes: Array.isArray(session.committedMaterialCodes) ? session.committedMaterialCodes : [],
+      previewToken,
+      files: session.files.map((file) => ({
+        id: file.id,
+        fileName: file.fileName,
+        sheetName: file.sheetName,
+        rowCount: file.rowCount,
+        materialRowCount: file.materialRowCount,
+        scopeRowCount: file.scopeRowCount,
+        transformRowCount: file.transformRowCount,
+        acceptedRowCount: file.acceptedRowCount,
+        duplicateRowCount: file.duplicateRowCount,
+        createdAt: file.createdAt
+      })),
+      summary: {
+        fileCount: session.files.length,
+        rowCount,
+        importableRowCount,
+        materialUpsertCount: importableCodes.length,
+        drawingRevisionUpsertCount,
+        materialRowCount,
+        applicabilityRowCount: scopeRowCount,
+        transformRowCount,
+        applicabilityUpsertCount: scopeImportableRowCount,
+        transformRuleUpsertCount: transformImportableRowCount,
+        errorCount,
+        warningCount,
+        duplicateRowCount
+      },
+      rowPage: {
+        offset: rowOffset,
+        limit: rowLimit,
+        loadedCount: previewRows.length,
+        totalCount: rowCount,
+        hasMore: rowOffset + previewRows.length < rowCount
+      },
+      rows: previewRows.map((row) => ({
+        id: row.id,
+        sourceFileName: row.file.fileName,
+        sourceSheetName: row.file.sheetName,
+        sourceRowNo: row.sourceRowNo,
+        partCode: row.partCode,
+        partName: row.partName,
+        unit: row.unit,
+        partSpecification: row.partSpecification,
+        drawingNo: row.drawingNo,
+        drawingVersion: row.drawingVersion,
+        drawingDate: this.formatDateOnly(row.drawingDate),
+        drawingStatus: row.drawingStatus,
+        partThickness: row.partThickness ? decimalToNumber(row.partThickness) : null,
+        projectModel: row.projectModel,
+        remark: row.remark,
+        issues: this.materialImportIssueArray(row.issues),
+        errorCount: row.errorCount,
+        warningCount: row.warningCount
+      })),
+      applicabilityRows: previewApplicabilityRows.map((row) => ({
+        id: row.id,
+        sourceFileName: row.file.fileName,
+        sourceSheetName: row.file.sheetName,
+        sourceRowNo: row.sourceRowNo,
+        partCode: row.partCode,
+        customerCode: row.customerCode,
+        customerName: row.customerName,
+        projectModel: row.projectModel,
+        remark: row.remark,
+        status: row.status,
+        issues: this.materialImportIssueArray(row.issues),
+        errorCount: row.errorCount,
+        warningCount: row.warningCount
+      })),
+      transformRows: previewTransformRows.map((row) => ({
+        id: row.id,
+        sourceFileName: row.file.fileName,
+        sourceSheetName: row.file.sheetName,
+        sourceRowNo: row.sourceRowNo,
+        sourcePartCode: row.sourcePartCode,
+        targetPartCode: row.targetPartCode,
+        customerCode: row.customerCode,
+        customerName: row.customerName,
+        projectModel: row.projectModel,
+        multiplier: row.multiplier === null ? null : decimalToNumber(row.multiplier),
+        lossRate: row.lossRate === null ? null : decimalToNumber(row.lossRate),
+        defaultProcessRoute: row.defaultProcessRoute,
+        conversionDescription: row.conversionDescription,
+        remark: row.remark,
+        status: row.status,
+        issues: this.materialImportIssueArray(row.issues),
+        errorCount: row.errorCount,
+        warningCount: row.warningCount
+      }))
+    };
+  }
+
+  private materialImportPageOptions(query: GetMaterialImportSessionQueryDto = {}) {
+    const rowLimit = Math.min(Math.max(Math.floor(Number(query.rowLimit || 100)), 1), 500);
+    const rowOffset = Math.max(Math.floor(Number(query.rowOffset || 0)), 0);
+    return { rowLimit, rowOffset, includeRows: true };
+  }
+
+  private materialImportIssueArray(value: Prisma.JsonValue | MaterialImportIssue[] | null | undefined): MaterialImportIssue[] {
+    return Array.isArray(value) ? (value as MaterialImportIssue[]) : [];
+  }
+
+  private countMaterialImportIssues(issues: MaterialImportIssue[]) {
+    return {
+      errorCount: issues.filter((issue) => issue.severity === 'ERROR').length,
+      warningCount: issues.filter((issue) => issue.severity === 'WARNING').length
+    };
+  }
+
+  private pushMaterialImportIssue(row: ParsedMaterialImportIssueRow, issue: MaterialImportIssue) {
+    if (row.issues.some((current) => current.severity === issue.severity && current.code === issue.code && current.message === issue.message)) {
+      return;
+    }
+    row.issues.push(issue);
+    const counts = this.countMaterialImportIssues(row.issues);
+    row.errorCount = counts.errorCount;
+    row.warningCount = counts.warningCount;
+  }
+
+  private async parseMaterialImportWorkbook(filePath: string) {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+    if (workbook.worksheets.length === 0) {
+      throw new BadRequestException('Excel 中没有可读取的工作表');
+    }
+
+    const materialWorksheet =
+      workbook.getWorksheet(materialImportSheetName) ||
+      workbook.worksheets.find((worksheet) => this.findMaterialImportHeaderRow(worksheet, materialImportRequiredHeaders));
+    const scopeWorksheet = workbook.getWorksheet(materialApplicabilityImportSheetName);
+    const transformWorksheet = workbook.getWorksheet(materialTransformImportSheetName);
+
+    const rows = materialWorksheet ? this.parseMaterialImportRowsFromWorksheet(materialWorksheet) : [];
+    const applicabilityRows = scopeWorksheet
+      ? this.parseMaterialApplicabilityImportRowsFromWorksheet(scopeWorksheet)
+      : [];
+    const transformRows = transformWorksheet
+      ? this.parseMaterialTransformImportRowsFromWorksheet(transformWorksheet)
+      : [];
+
+    this.applyMaterialImportDuplicateConflicts(rows);
+    this.applyMaterialApplicabilityImportDuplicateConflicts(applicabilityRows);
+    this.applyMaterialTransformImportDuplicateConflicts(transformRows);
+
+    const sheetName = [
+      rows.length ? materialWorksheet?.name : '',
+      applicabilityRows.length ? scopeWorksheet?.name : '',
+      transformRows.length ? transformWorksheet?.name : ''
+    ]
+      .filter(Boolean)
+      .join(' / ');
+    return { sheetName: sheetName || materialWorksheet?.name || workbook.worksheets[0].name, rows, applicabilityRows, transformRows };
+  }
+
+  private parseMaterialImportRowsFromWorksheet(worksheet: ExcelJS.Worksheet) {
+    const headerRowNo = this.findMaterialImportHeaderRow(worksheet, materialImportRequiredHeaders);
+    if (!headerRowNo) {
+      throw new BadRequestException(`没有找到零件导入表头，必须包含：${materialImportRequiredHeaders.join('、')}`);
+    }
+    const { columns, labels } = this.mapMaterialImportColumns(
+      worksheet.getRow(headerRowNo),
+      materialImportRequiredHeaders,
+      materialImportHeaderAliases
+    );
+    const rows: ParsedMaterialImportRow[] = [];
+
+    for (let rowNo = headerRowNo + 1; rowNo <= worksheet.rowCount; rowNo += 1) {
+      const row = worksheet.getRow(rowNo);
+      const raw = this.rawMaterialImportRow(row, columns, labels);
+      if (Object.values(raw).every((value) => String(value ?? '').trim() === '')) {
+        continue;
+      }
+      const parsedRow: ParsedMaterialImportRow = {
+        sourceRowNo: rowNo,
+        partCode: this.materialImportCellText(row, columns.partCode),
+        partName: this.materialImportCellText(row, columns.partName),
+        unit: this.materialImportCellText(row, columns.unit),
+        partSpecification: this.materialImportOptionalCellText(row, columns.partSpecification),
+        drawingNo: this.materialImportOptionalCellText(row, columns.drawingNo),
+        drawingVersion: this.materialImportOptionalCellText(row, columns.drawingVersion),
+        drawingDate: this.materialImportCellDate(row, columns.drawingDate),
+        drawingStatus: this.materialImportOptionalCellText(row, columns.drawingStatus),
+        partThickness: this.materialImportCellNumber(row, columns.partThickness),
+        projectModel: this.materialImportOptionalCellText(row, columns.projectModel),
+        remark: this.materialImportOptionalCellText(row, columns.remark),
+        raw,
+        rowHash: '',
+        issues: [],
+        errorCount: 0,
+        warningCount: 0
+      };
+      parsedRow.issues = this.buildMaterialImportRowIssues(parsedRow);
+      const counts = this.countMaterialImportIssues(parsedRow.issues);
+      parsedRow.errorCount = counts.errorCount;
+      parsedRow.warningCount = counts.warningCount;
+      parsedRow.rowHash = this.hashMaterialImportRow(parsedRow);
+      rows.push(parsedRow);
+    }
+
+    return rows;
+  }
+
+  private parseMaterialApplicabilityImportRowsFromWorksheet(worksheet: ExcelJS.Worksheet) {
+    const headerRowNo = this.findMaterialImportHeaderRow(worksheet, materialApplicabilityImportRequiredHeaders);
+    if (!headerRowNo) {
+      throw new BadRequestException(`没有找到适用范围表头，必须包含：${materialApplicabilityImportRequiredHeaders.join('、')}`);
+    }
+    const { columns, labels } = this.mapMaterialImportColumns(
+      worksheet.getRow(headerRowNo),
+      materialApplicabilityImportRequiredHeaders,
+      materialApplicabilityImportHeaderAliases
+    );
+    const rows: ParsedMaterialApplicabilityImportRow[] = [];
+
+    for (let rowNo = headerRowNo + 1; rowNo <= worksheet.rowCount; rowNo += 1) {
+      const row = worksheet.getRow(rowNo);
+      const raw = this.rawMaterialImportRow(row, columns, labels);
+      if (Object.values(raw).every((value) => String(value ?? '').trim() === '')) {
+        continue;
+      }
+      const statusText = this.materialImportCellText(row, columns.status);
+      const parsedStatus = this.parseMaterialImportStatus(statusText);
+      const parsedRow: ParsedMaterialApplicabilityImportRow = {
+        sourceRowNo: rowNo,
+        partCode: this.materialImportCellText(row, columns.partCode),
+        customerCode: this.materialImportOptionalCellText(row, columns.customerCode),
+        customerName: this.materialImportOptionalCellText(row, columns.customerName),
+        projectModel: this.materialImportOptionalCellText(row, columns.projectModel),
+        remark: this.materialImportOptionalCellText(row, columns.remark),
+        status: parsedStatus || 'ENABLED',
+        raw,
+        rowHash: '',
+        issues: [],
+        errorCount: 0,
+        warningCount: 0
+      };
+      parsedRow.issues = this.buildMaterialApplicabilityImportRowIssues(parsedRow, statusText, parsedStatus);
+      const counts = this.countMaterialImportIssues(parsedRow.issues);
+      parsedRow.errorCount = counts.errorCount;
+      parsedRow.warningCount = counts.warningCount;
+      parsedRow.rowHash = this.hashMaterialApplicabilityImportRow(parsedRow);
+      rows.push(parsedRow);
+    }
+
+    return rows;
+  }
+
+  private parseMaterialTransformImportRowsFromWorksheet(worksheet: ExcelJS.Worksheet) {
+    const headerRowNo = this.findMaterialImportHeaderRow(worksheet, materialTransformImportRequiredHeaders);
+    if (!headerRowNo) {
+      throw new BadRequestException(`没有找到来源加工关系表头，必须包含：${materialTransformImportRequiredHeaders.join('、')}`);
+    }
+    const { columns, labels } = this.mapMaterialImportColumns(
+      worksheet.getRow(headerRowNo),
+      materialTransformImportRequiredHeaders,
+      materialTransformImportHeaderAliases
+    );
+    const rows: ParsedMaterialTransformImportRow[] = [];
+
+    for (let rowNo = headerRowNo + 1; rowNo <= worksheet.rowCount; rowNo += 1) {
+      const row = worksheet.getRow(rowNo);
+      const raw = this.rawMaterialImportRow(row, columns, labels);
+      if (Object.values(raw).every((value) => String(value ?? '').trim() === '')) {
+        continue;
+      }
+      const statusText = this.materialImportCellText(row, columns.status);
+      const parsedStatus = this.parseMaterialImportStatus(statusText);
+      const parsedRow: ParsedMaterialTransformImportRow = {
+        sourceRowNo: rowNo,
+        sourcePartCode: this.materialImportCellText(row, columns.sourcePartCode),
+        targetPartCode: this.materialImportCellText(row, columns.targetPartCode),
+        customerCode: this.materialImportOptionalCellText(row, columns.customerCode),
+        customerName: this.materialImportOptionalCellText(row, columns.customerName),
+        projectModel: this.materialImportOptionalCellText(row, columns.projectModel),
+        multiplier: this.materialImportCellNumber(row, columns.multiplier),
+        lossRate: this.materialImportCellRatio(row, columns.lossRate),
+        defaultProcessRoute: this.materialImportOptionalCellText(row, columns.defaultProcessRoute),
+        conversionDescription: this.materialImportOptionalCellText(row, columns.conversionDescription),
+        remark: this.materialImportOptionalCellText(row, columns.remark),
+        status: parsedStatus || 'ENABLED',
+        raw,
+        rowHash: '',
+        issues: [],
+        errorCount: 0,
+        warningCount: 0
+      };
+      parsedRow.issues = this.buildMaterialTransformImportRowIssues(parsedRow, statusText, parsedStatus);
+      const counts = this.countMaterialImportIssues(parsedRow.issues);
+      parsedRow.errorCount = counts.errorCount;
+      parsedRow.warningCount = counts.warningCount;
+      parsedRow.rowHash = this.hashMaterialTransformImportRow(parsedRow);
+      rows.push(parsedRow);
+    }
+
+    return rows;
+  }
+
+  private findMaterialImportHeaderRow(worksheet: ExcelJS.Worksheet, requiredHeaders: string[]) {
+    const maxRow = Math.min(worksheet.rowCount, 30);
+    for (let rowNo = 1; rowNo <= maxRow; rowNo += 1) {
+      const row = worksheet.getRow(rowNo);
+      const headers = new Set<string>();
+      row.eachCell((cell) => headers.add(this.normalizeMaterialImportHeader(this.materialImportCellValueText(cell.value))));
+      const hasAllRequired = requiredHeaders.every((requiredHeader) =>
+        headers.has(this.normalizeMaterialImportHeader(requiredHeader))
+      );
+      if (hasAllRequired) {
+        return rowNo;
+      }
+    }
+    return 0;
+  }
+
+  private mapMaterialImportColumns(row: ExcelJS.Row, requiredHeaders: string[], headerAliases: Record<string, string[]>) {
+    const headerToColumn = new Map<string, number>();
+    const labels: Record<string, string> = {};
+    row.eachCell((cell, column) => {
+      const text = this.materialImportCellValueText(cell.value);
+      if (!text) {
+        return;
+      }
+      headerToColumn.set(this.normalizeMaterialImportHeader(text), column);
+    });
+    const columns: Record<string, number | undefined> = {};
+    for (const [field, aliases] of Object.entries(headerAliases)) {
+      const matchedAlias = aliases.find((alias) => headerToColumn.has(this.normalizeMaterialImportHeader(alias)));
+      if (matchedAlias) {
+        const normalizedAlias = this.normalizeMaterialImportHeader(matchedAlias);
+        columns[field] = headerToColumn.get(normalizedAlias);
+        labels[field] = matchedAlias;
+      }
+    }
+    for (const requiredHeader of requiredHeaders) {
+      const hasColumn = Object.values(headerAliases).some(
+        (aliases) => aliases.includes(requiredHeader) && columns[Object.keys(headerAliases).find((key) => headerAliases[key].includes(requiredHeader)) || '']
+      );
+      if (!hasColumn && !headerToColumn.has(this.normalizeMaterialImportHeader(requiredHeader))) {
+        throw new BadRequestException(`缺少必填列：${requiredHeader}`);
+      }
+    }
+    return { columns: columns as Record<string, number>, labels };
+  }
+
+  private rawMaterialImportRow(row: ExcelJS.Row, columns: Record<string, number>, labels: Record<string, string>) {
+    return Object.entries(columns).reduce<Record<string, string | number | null>>((raw, [field, column]) => {
+      if (!column) {
+        return raw;
+      }
+      raw[labels[field] || field] = this.materialImportCellText(row, column);
+      return raw;
+    }, {});
+  }
+
+  private buildMaterialImportRowIssues(row: ParsedMaterialImportRow): MaterialImportIssue[] {
+    const issues: MaterialImportIssue[] = [];
+    if (!row.partCode) {
+      issues.push({ severity: 'ERROR', code: 'REQUIRED_PART_CODE', message: '零件编码不能为空' });
+    }
+    if (!row.partName) {
+      issues.push({ severity: 'ERROR', code: 'REQUIRED_PART_NAME', message: '零件名称不能为空' });
+    }
+    if (!row.unit) {
+      issues.push({ severity: 'ERROR', code: 'REQUIRED_UNIT', message: '单位不能为空' });
+    }
+    return issues;
+  }
+
+  private buildMaterialApplicabilityImportRowIssues(
+    row: ParsedMaterialApplicabilityImportRow,
+    statusText: string,
+    parsedStatus: CommonStatus | null
+  ): MaterialImportIssue[] {
+    const issues: MaterialImportIssue[] = [];
+    if (!row.partCode) {
+      issues.push({ severity: 'ERROR', code: 'REQUIRED_PART_CODE', message: '零件编码不能为空' });
+    }
+    if (statusText && !parsedStatus) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_STATUS', message: '状态只能填写启用、停用、ENABLED 或 DISABLED' });
+    }
+    return issues;
+  }
+
+  private buildMaterialTransformImportRowIssues(
+    row: ParsedMaterialTransformImportRow,
+    statusText: string,
+    parsedStatus: CommonStatus | null
+  ): MaterialImportIssue[] {
+    const issues: MaterialImportIssue[] = [];
+    if (!row.sourcePartCode) {
+      issues.push({ severity: 'ERROR', code: 'REQUIRED_SOURCE_PART_CODE', message: '来源零件编码不能为空' });
+    }
+    if (!row.targetPartCode) {
+      issues.push({ severity: 'ERROR', code: 'REQUIRED_TARGET_PART_CODE', message: '目标零件编码不能为空' });
+    }
+    if (row.sourcePartCode && row.targetPartCode && row.sourcePartCode.trim().toLocaleLowerCase() === row.targetPartCode.trim().toLocaleLowerCase()) {
+      issues.push({ severity: 'ERROR', code: 'SAME_SOURCE_TARGET', message: '来源零件和目标零件不能相同' });
+    }
+    if (row.multiplier !== null && row.multiplier !== undefined && row.multiplier <= 0) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_MULTIPLIER', message: '倍率必须大于 0' });
+    }
+    if (row.lossRate !== null && row.lossRate !== undefined && row.lossRate < 0) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_LOSS_RATE', message: '损耗率不能小于 0' });
+    }
+    if (statusText && !parsedStatus) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_STATUS', message: '状态只能填写启用、停用、ENABLED 或 DISABLED' });
+    }
+    return issues;
+  }
+
+  private applyMaterialImportDuplicateConflicts(rows: ParsedMaterialImportRow[]) {
+    const rowsByCode = new Map<string, ParsedMaterialImportRow[]>();
+    for (const row of rows) {
+      const key = row.partCode.trim().toLocaleLowerCase();
+      if (!key) {
+        continue;
+      }
+      rowsByCode.set(key, [...(rowsByCode.get(key) || []), row]);
+    }
+    for (const sameCodeRows of rowsByCode.values()) {
+      const signatures = new Set(sameCodeRows.map((row) => this.materialImportIdentitySignature(row)));
+      if (signatures.size <= 1) {
+        continue;
+      }
+      for (const row of sameCodeRows) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'DUPLICATE_PART_CONFLICT',
+          message: '同一导入会话内相同零件编码的名称、单位或规格不一致'
+        });
+      }
+    }
+  }
+
+  private applyMaterialApplicabilityImportDuplicateConflicts(rows: ParsedMaterialApplicabilityImportRow[]) {
+    const rowsByScope = new Map<string, ParsedMaterialApplicabilityImportRow[]>();
+    for (const row of rows) {
+      const key = [
+        row.partCode.trim().toLocaleLowerCase(),
+        String(row.customerCode || row.customerName || 'ALL').trim().toLocaleLowerCase(),
+        this.normalizeMaterialScopeKey(row.projectModel)
+      ].join('|');
+      if (!row.partCode.trim()) {
+        continue;
+      }
+      rowsByScope.set(key, [...(rowsByScope.get(key) || []), row]);
+    }
+    for (const sameScopeRows of rowsByScope.values()) {
+      const signatures = new Set(sameScopeRows.map((row) => this.hashMaterialApplicabilityImportRow(row)));
+      if (signatures.size <= 1) {
+        continue;
+      }
+      for (const row of sameScopeRows) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'DUPLICATE_SCOPE_CONFLICT',
+          message: '同一零件、客户和机型/项目适用范围在导入会话内存在不一致信息'
+        });
+      }
+    }
+  }
+
+  private applyMaterialTransformImportDuplicateConflicts(rows: ParsedMaterialTransformImportRow[]) {
+    const rowsByScope = new Map<string, ParsedMaterialTransformImportRow[]>();
+    for (const row of rows) {
+      const key = [
+        row.sourcePartCode.trim().toLocaleLowerCase(),
+        row.targetPartCode.trim().toLocaleLowerCase(),
+        String(row.customerCode || row.customerName || 'ALL').trim().toLocaleLowerCase(),
+        this.normalizeMaterialScopeKey(row.projectModel)
+      ].join('|');
+      if (!row.sourcePartCode.trim() || !row.targetPartCode.trim()) {
+        continue;
+      }
+      rowsByScope.set(key, [...(rowsByScope.get(key) || []), row]);
+    }
+    for (const sameScopeRows of rowsByScope.values()) {
+      const signatures = new Set(sameScopeRows.map((row) => this.hashMaterialTransformImportRow(row)));
+      if (signatures.size <= 1) {
+        continue;
+      }
+      for (const row of sameScopeRows) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'DUPLICATE_TRANSFORM_CONFLICT',
+          message: '同一来源、目标、客户和机型/项目加工关系在导入会话内存在不一致信息'
+        });
+      }
+    }
+  }
+
+  private async enrichMaterialImportWorkbookRows(parsed: {
+    rows: ParsedMaterialImportRow[];
+    applicabilityRows: ParsedMaterialApplicabilityImportRow[];
+    transformRows: ParsedMaterialTransformImportRow[];
+  }) {
+    await this.enrichMaterialImportRows(parsed.rows);
+    await this.enrichMaterialRelationImportRows(parsed);
+  }
+
+  private async enrichMaterialImportRows(rows: ParsedMaterialImportRow[]) {
+    const partCodes = [...new Set(rows.map((row) => row.partCode.trim()).filter(Boolean))];
+    if (partCodes.length === 0) {
+      return;
+    }
+    const existingMaterials = await this.findExistingMaterialsByPartCodes(partCodes);
+    const existingByCode = new Map(existingMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+    const historyRows = await this.findOrderLineHistoryByPartCodes(partCodes);
+    const historyByCode = new Map<string, typeof historyRows>();
+    for (const line of historyRows) {
+      const key = line.partCode.trim().toLocaleLowerCase();
+      historyByCode.set(key, [...(historyByCode.get(key) || []), line]);
+    }
+
+    for (const row of rows) {
+      const key = row.partCode.trim().toLocaleLowerCase();
+      if (!key) {
+        continue;
+      }
+      const existing = existingByCode.get(key);
+      if (
+        existing &&
+        this.materialImportIdentitySignature(existing) !== this.materialImportIdentitySignature(row)
+      ) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'WARNING',
+          code: 'EXISTING_MATERIAL_DIFFERENT',
+          message: '系统零件库中已有相同编码，但名称、单位或规格与本次导入不完全一致，提交后会更新零件库'
+        });
+      }
+      const history = historyByCode.get(key) || [];
+      if (history.some((line) => this.materialImportHistoryIdentitySignature(line) !== this.materialImportHistoryIdentitySignature(row))) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'WARNING',
+          code: 'ORDER_HISTORY_DIFFERENT',
+          message: '历史订单中相同零件编码存在不同图号、名称、规格或厚度，请提交前确认'
+        });
+      }
+    }
+  }
+
+  private async enrichMaterialRelationImportRows(parsed: {
+    rows: ParsedMaterialImportRow[];
+    applicabilityRows: ParsedMaterialApplicabilityImportRow[];
+    transformRows: ParsedMaterialTransformImportRow[];
+  }) {
+    const importedMaterialCodes = new Set(parsed.rows.map((row) => row.partCode.trim().toLocaleLowerCase()).filter(Boolean));
+    const relationMaterialCodes = [
+      ...parsed.applicabilityRows.map((row) => row.partCode),
+      ...parsed.transformRows.flatMap((row) => [row.sourcePartCode, row.targetPartCode])
+    ];
+    const existingMaterials = await this.findExistingMaterialsByPartCodes(relationMaterialCodes);
+    const existingMaterialCodes = new Set(existingMaterials.map((material) => material.partCode.trim().toLocaleLowerCase()));
+    const materialExistsInImportOrDb = (partCode: string) => {
+      const key = partCode.trim().toLocaleLowerCase();
+      return Boolean(key && (importedMaterialCodes.has(key) || existingMaterialCodes.has(key)));
+    };
+    const customerLookup = await this.findMaterialImportCustomers([...parsed.applicabilityRows, ...parsed.transformRows]);
+
+    for (const row of parsed.applicabilityRows) {
+      if (row.partCode && !materialExistsInImportOrDb(row.partCode)) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'UNKNOWN_PART_CODE',
+          message: '适用范围引用的零件编码在系统和本次零件基础库导入中都不存在'
+        });
+      }
+      const customerIssue = this.materialImportCustomerValidationMessage(row, customerLookup);
+      if (customerIssue) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'INVALID_CUSTOMER',
+          message: customerIssue
+        });
+      }
+    }
+
+    for (const row of parsed.transformRows) {
+      if (row.sourcePartCode && !materialExistsInImportOrDb(row.sourcePartCode)) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'UNKNOWN_SOURCE_PART_CODE',
+          message: '来源加工关系引用的来源零件编码在系统和本次零件基础库导入中都不存在'
+        });
+      }
+      if (row.targetPartCode && !materialExistsInImportOrDb(row.targetPartCode)) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'UNKNOWN_TARGET_PART_CODE',
+          message: '来源加工关系引用的目标零件编码在系统和本次零件基础库导入中都不存在'
+        });
+      }
+      const customerIssue = this.materialImportCustomerValidationMessage(row, customerLookup);
+      if (customerIssue) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'INVALID_CUSTOMER',
+          message: customerIssue
+        });
+      }
+      await this.validateMaterialTransformImportDefaultProcessRoute(row);
+    }
+  }
+
+  private async validateMaterialTransformImportDefaultProcessRoute(row: ParsedMaterialTransformImportRow) {
+    const processNames = this.splitDefaultProcessRoute(row.defaultProcessRoute || '');
+    if (processNames.length === 0) {
+      row.defaultProcessRoute = null;
+      return;
+    }
+    try {
+      // 零件库导入来源加工关系时，默认工艺也只能引用标准工序库，不允许绕过页面自由写入。
+      await this.processDefinitionsService.ensureActiveNames(processNames);
+      row.defaultProcessRoute = processNames.join('、');
+    } catch (error) {
+      this.pushMaterialImportIssue(row, {
+        severity: 'ERROR',
+        code: 'INVALID_DEFAULT_PROCESS_ROUTE',
+        message: error instanceof Error ? error.message : '默认工艺必须来自启用的标准工序'
+      });
+    }
+  }
+
+  private uniqueMaterialImportRows(rows: any[]) {
+    const byCode = new Map<string, any>();
+    for (const row of rows) {
+      const key = String(row.partCode || '').trim().toLocaleLowerCase();
+      if (!key) {
+        continue;
+      }
+      const existing = byCode.get(key);
+      if (existing && this.materialImportIdentitySignature(existing) !== this.materialImportIdentitySignature(row)) {
+        throw new BadRequestException(`零件编码 ${row.partCode} 在导入会话内存在不一致信息，请重新上传`);
+      }
+      byCode.set(key, row);
+    }
+    return [...byCode.values()];
+  }
+
+  private uniqueMaterialDrawingImportRows(
+    rows: Array<{
+      partCode?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      drawingDate?: Date | null;
+      drawingStatus?: string | null;
+      remark?: string | null;
+    }>
+  ) {
+    const byDrawing = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      const partCode = String(row.partCode || '').trim();
+      const drawingNo = String(row.drawingNo || '').trim();
+      if (!partCode || !drawingNo) {
+        continue;
+      }
+      const drawingVersion = String(row.drawingVersion || 'A').trim() || 'A';
+      const key = [partCode, drawingNo, drawingVersion].map((item) => item.toLocaleLowerCase()).join('|');
+      byDrawing.set(key, row);
+    }
+    return [...byDrawing.values()];
+  }
+
+  private async findMaterialImportCustomers(
+    rows: Array<{ customerCode?: string | null; customerName?: string | null }>,
+    client: any = this.prisma
+  ) {
+    const customerCodes = [...new Set(rows.map((row) => String(row.customerCode || '').trim()).filter(Boolean))];
+    const customerNames = [...new Set(rows.map((row) => String(row.customerName || '').trim()).filter(Boolean))];
+    if (customerCodes.length === 0 && customerNames.length === 0) {
+      return {
+        byCode: new Map<string, { id: string; customerCode: string; customerName: string }>(),
+        byName: new Map<string, { id: string; customerCode: string; customerName: string }>(),
+        duplicateNames: new Set<string>()
+      };
+    }
+    const customers = await client.customer.findMany({
+      where: {
+        OR: [
+          ...customerCodes.map((customerCode) => ({ customerCode: { equals: customerCode, mode: 'insensitive' as const } })),
+          ...customerNames.map((customerName) => ({ customerName: { equals: customerName, mode: 'insensitive' as const } }))
+        ]
+      },
+      select: { id: true, customerCode: true, customerName: true }
+    });
+    const byCode = new Map<string, { id: string; customerCode: string; customerName: string }>();
+    const byName = new Map<string, { id: string; customerCode: string; customerName: string }>();
+    const duplicateNames = new Set<string>();
+    for (const customer of customers) {
+      byCode.set(customer.customerCode.trim().toLocaleLowerCase(), customer);
+      const nameKey = customer.customerName.trim().toLocaleLowerCase();
+      if (byName.has(nameKey)) {
+        duplicateNames.add(nameKey);
+      } else {
+        byName.set(nameKey, customer);
+      }
+    }
+    return { byCode, byName, duplicateNames };
+  }
+
+  private materialImportCustomerValidationMessage(
+    row: { customerCode?: string | null; customerName?: string | null },
+    lookup: Awaited<ReturnType<InventoryService['findMaterialImportCustomers']>>
+  ) {
+    try {
+      this.resolveMaterialImportCustomer(row, lookup);
+      return '';
+    } catch (error) {
+      return error instanceof Error ? error.message : '客户信息无法识别';
+    }
+  }
+
+  private resolveMaterialImportCustomer(
+    row: { customerCode?: string | null; customerName?: string | null },
+    lookup: Awaited<ReturnType<InventoryService['findMaterialImportCustomers']>>
+  ) {
+    const customerCode = String(row.customerCode || '').trim();
+    const customerName = String(row.customerName || '').trim();
+    if (!customerCode && !customerName) {
+      return null;
+    }
+    if (customerCode) {
+      const customer = lookup.byCode.get(customerCode.toLocaleLowerCase());
+      if (!customer) {
+        throw new BadRequestException(`客户编码 ${customerCode} 不存在`);
+      }
+      if (customerName && customer.customerName.trim().toLocaleLowerCase() !== customerName.toLocaleLowerCase()) {
+        throw new BadRequestException(`客户编码 ${customerCode} 与客户名称 ${customerName} 不一致`);
+      }
+      return customer;
+    }
+    const nameKey = customerName.toLocaleLowerCase();
+    if (lookup.duplicateNames.has(nameKey)) {
+      throw new BadRequestException(`客户名称 ${customerName} 对应多个客户，请填写客户编码`);
+    }
+    const customer = lookup.byName.get(nameKey);
+    if (!customer) {
+      throw new BadRequestException(`客户名称 ${customerName} 不存在`);
+    }
+    return customer;
+  }
+
+  private async findExistingMaterialsByPartCodes(partCodes: string[], client: any = this.prisma) {
+    const uniquePartCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
+    const results: Array<{ id: string; partCode: string; partName: string; unit: string; partSpecification?: string | null }> = [];
+    for (let index = 0; index < uniquePartCodes.length; index += 500) {
+      const chunk = uniquePartCodes.slice(index, index + 500);
+      if (chunk.length === 0) {
+        continue;
+      }
+      results.push(
+        ...(await client.material.findMany({
+          where: { OR: chunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } })) },
+          select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true }
+        }))
+      );
+    }
+    return results;
+  }
+
+  private async findOrderLineHistoryByPartCodes(partCodes: string[]) {
+    const uniquePartCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
+    const results: Array<{
+      partCode: string;
+      partName: string;
+      unit: string;
+      partSpecification?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      partThickness: Prisma.Decimal;
+    }> = [];
+    for (let index = 0; index < uniquePartCodes.length; index += 500) {
+      const chunk = uniquePartCodes.slice(index, index + 500);
+      if (chunk.length === 0) {
+        continue;
+      }
+      results.push(
+        ...(await this.prisma.orderLine.findMany({
+          where: { OR: chunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } })) },
+          select: {
+            partCode: true,
+            partName: true,
+            unit: true,
+            partSpecification: true,
+            drawingNo: true,
+            drawingVersion: true,
+            partThickness: true
+          },
+          orderBy: { createdAt: 'desc' }
+        }))
+      );
+    }
+    return results;
+  }
+
+  private materialImportIdentitySignature(value: {
+    partName?: string | null;
+    unit?: string | null;
+    partSpecification?: string | null;
+  }) {
+    return [value.partName, value.unit, value.partSpecification].map((item) => String(item || '').trim()).join('|');
+  }
+
+  private materialImportHistoryIdentitySignature(value: {
+    partName?: string | null;
+    unit?: string | null;
+    partSpecification?: string | null;
+    drawingNo?: string | null;
+    drawingVersion?: string | null;
+    partThickness?: number | Prisma.Decimal | null;
+  }) {
+    const thickness =
+      value.partThickness === null || value.partThickness === undefined
+        ? ''
+        : typeof value.partThickness === 'number'
+          ? String(value.partThickness)
+          : String(decimalToNumber(value.partThickness));
+    return [value.partName, value.unit, value.partSpecification, value.drawingNo, value.drawingVersion, thickness]
+      .map((item) => String(item || '').trim())
+      .join('|');
+  }
+
+  private hashMaterialImportRow(row: ParsedMaterialImportRow) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          partCode: row.partCode,
+          partName: row.partName,
+          unit: row.unit,
+          partSpecification: row.partSpecification,
+          drawingNo: row.drawingNo,
+          drawingVersion: row.drawingVersion,
+          drawingDate: this.formatDateOnly(row.drawingDate),
+          drawingStatus: row.drawingStatus,
+          partThickness: row.partThickness,
+          projectModel: row.projectModel,
+          remark: row.remark
+        })
+      )
+      .digest('hex');
+  }
+
+  private hashMaterialApplicabilityImportRow(row: ParsedMaterialApplicabilityImportRow) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          partCode: row.partCode,
+          customerCode: row.customerCode,
+          customerName: row.customerName,
+          projectModel: row.projectModel,
+          remark: row.remark,
+          status: row.status
+        })
+      )
+      .digest('hex');
+  }
+
+  private hashMaterialTransformImportRow(row: ParsedMaterialTransformImportRow) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          sourcePartCode: row.sourcePartCode,
+          targetPartCode: row.targetPartCode,
+          customerCode: row.customerCode,
+          customerName: row.customerName,
+          projectModel: row.projectModel,
+          multiplier: row.multiplier,
+          lossRate: row.lossRate,
+          defaultProcessRoute: row.defaultProcessRoute,
+          conversionDescription: row.conversionDescription,
+          remark: row.remark,
+          status: row.status
+        })
+      )
+      .digest('hex');
+  }
+
+  private async hashMaterialImportFile(filePath: string) {
+    return createHash('sha256').update(await readFile(filePath)).digest('hex');
+  }
+
+  private parseMaterialImportStatus(value?: string | null): CommonStatus | null {
+    const normalized = String(value || '').trim().toLocaleLowerCase();
+    if (!normalized || ['启用', 'enabled', 'enable', '1', '是', 'yes'].includes(normalized)) {
+      return 'ENABLED';
+    }
+    if (['停用', 'disabled', 'disable', '0', '否', 'no'].includes(normalized)) {
+      return 'DISABLED';
+    }
+    return null;
+  }
+
+  private normalizeMaterialImportHeader(value: string) {
+    return value.replace(/\s+/g, '').trim().toLocaleLowerCase();
+  }
+
+  private materialImportOptionalCellText(row: ExcelJS.Row, column?: number) {
+    if (!column) {
+      return null;
+    }
+    return this.materialImportCellText(row, column) || null;
+  }
+
+  private materialImportCellText(row: ExcelJS.Row, column?: number) {
+    if (!column) {
+      return '';
+    }
+    return this.materialImportCellValueText(row.getCell(column).value);
+  }
+
+  private materialImportCellValueText(value: ExcelJS.CellValue): string {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    if (value instanceof Date) {
+      return this.formatDateOnly(value) || '';
+    }
+    if (typeof value === 'object') {
+      if ('text' in value && value.text !== undefined) {
+        return String(value.text).trim();
+      }
+      if ('result' in value && value.result !== undefined) {
+        return this.materialImportCellValueText(value.result as ExcelJS.CellValue);
+      }
+      if ('richText' in value && Array.isArray(value.richText)) {
+        return value.richText.map((part) => part.text).join('').trim();
+      }
+      if ('hyperlink' in value && 'text' in value) {
+        return String(value.text || '').trim();
+      }
+      return String(JSON.stringify(value)).trim();
+    }
+    return String(value).trim();
+  }
+
+  private materialImportCellNumber(row: ExcelJS.Row, column?: number) {
+    const text = this.materialImportCellText(row, column).replace(/mm$/i, '').trim();
+    if (!text) {
+      return null;
+    }
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private materialImportCellRatio(row: ExcelJS.Row, column?: number) {
+    const text = this.materialImportCellText(row, column).trim();
+    if (!text) {
+      return null;
+    }
+    if (text.endsWith('%')) {
+      const parsedPercent = Number(text.slice(0, -1).trim());
+      return Number.isFinite(parsedPercent) ? parsedPercent / 100 : null;
+    }
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private materialImportCellDate(row: ExcelJS.Row, column?: number) {
+    if (!column) {
+      return null;
+    }
+    const value = row.getCell(column).value;
+    if (value instanceof Date && !Number.isNaN(value.getTime())) {
+      return value;
+    }
+    const text = this.materialImportCellText(row, column);
+    if (!text) {
+      return null;
+    }
+    const parsed = new Date(text.replace(/\./g, '/').replace(/-/g, '/'));
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  private async removeMaterialImportStoredFile(storedFileName?: string | null) {
+    if (!storedFileName) {
+      return false;
+    }
+    const uploadDir = resolve(materialImportUploadPath());
+    const safeFileName = basename(storedFileName);
+    const filePath = resolve(uploadDir, safeFileName);
+    if (!filePath.startsWith(uploadDir)) {
+      return false;
+    }
+    try {
+      await unlink(filePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private buildAdjustmentNo() {

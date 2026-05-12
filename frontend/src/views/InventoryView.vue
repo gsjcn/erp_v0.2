@@ -2,7 +2,15 @@
   <section class="page">
     <div class="page-header">
       <h2 class="page-title">库存界面</h2>
-      <el-button :loading="loading" @click="loadInventory">刷新</el-button>
+      <div class="page-actions">
+        <RouterLink to="/materials">
+          <el-button>零件基础库</el-button>
+        </RouterLink>
+        <RouterLink to="/inventory/model-boms">
+          <el-button>机型零件包</el-button>
+        </RouterLink>
+        <el-button :loading="loading" @click="loadInventory">刷新</el-button>
+      </div>
     </div>
 
     <div class="stat-grid">
@@ -85,6 +93,12 @@
           <span>下单和 Excel 导入同步的搜索记忆；删除只停用记忆，不删除订单、库存和生产追溯。</span>
         </div>
         <div class="material-memory-toolbar">
+          <RouterLink to="/materials">
+            <el-button type="primary" plain>打开零件基础库</el-button>
+          </RouterLink>
+          <RouterLink to="/inventory/model-boms">
+            <el-button plain>机型零件包</el-button>
+          </RouterLink>
           <el-input v-model="materialMemoryFilters.keyword" clearable placeholder="编码 / 名称 / 拼音 / 规格 / 客户 / 订单 / 图号" style="width: 320px" @keyup.enter="loadMaterialMemory" />
           <el-select v-model="materialMemoryFilters.status" placeholder="状态" style="width: 120px" @change="loadMaterialMemory">
             <el-option label="启用" value="ENABLED" />
@@ -946,18 +960,36 @@ function drawingInfoText(row: InventoryBatch) {
 }
 
 function taskRelationText(row: InventoryBatch) {
+  const texts: string[] = [];
   if (row.replenishmentSourceLabel) {
-    return row.sourceProductionTaskNo ? `${row.replenishmentSourceLabel} / 源任务 ${row.sourceProductionTaskNo}` : row.replenishmentSourceLabel;
-  }
-  if (row.replenishmentSourceType) {
+    texts.push(row.sourceProductionTaskNo ? `${row.replenishmentSourceLabel} / 源任务 ${row.sourceProductionTaskNo}` : row.replenishmentSourceLabel);
+  } else if (row.replenishmentSourceType) {
     const label = row.replenishmentSourceType === 'PRODUCTION_SCRAP' ? '生产报废补单' : '订单补单';
-    return row.replenishmentSourceRequestNo ? `${label}：${row.replenishmentSourceRequestNo}` : label;
+    texts.push(row.replenishmentSourceRequestNo ? `${label}：${row.replenishmentSourceRequestNo}` : label);
+  } else if (row.isReplenishment && row.sourceReplenishmentTaskNo) {
+    texts.push(`补单来源：${row.sourceReplenishmentTaskNo}`);
+  } else if (row.isReplenishment) {
+    texts.push('补单任务');
   }
-  if (row.isReplenishment && row.sourceReplenishmentTaskNo) {
-    return `补单来源：${row.sourceReplenishmentTaskNo}`;
+  const componentText = inventoryComponentText(row);
+  if (componentText) {
+    texts.push(componentText);
   }
-  if (row.isReplenishment) {
-    return '补单任务';
+  if (row.importSequence) {
+    texts.push(`Excel 序号 ${row.importSequence}`);
+  }
+  return texts.join('；');
+}
+
+function inventoryComponentText(row: InventoryBatch) {
+  if (row.lineType === 'COMPONENT' && row.componentNo) {
+    return `组件 ${row.componentNo}`;
+  }
+  if (row.parentComponentNo) {
+    return `属于组件 ${row.parentComponentNo}`;
+  }
+  if (row.lineType === 'PART') {
+    return '单独零件';
   }
   return '';
 }

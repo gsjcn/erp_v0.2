@@ -87,6 +87,8 @@ const issues: VerifyIssue[] = [];
 async function main() {
   await checkMasterDataUniqueness();
   await checkProcessMemoryData();
+  await checkModelBomData();
+  await checkMaterialTransformRuleData();
   await checkProductionOperators();
   await checkCustomerContacts();
   await checkOrderNoReservations();
@@ -108,6 +110,125 @@ async function main() {
   printSummary();
 
   process.exitCode = issues.some((issue) => issue.level === 'ERROR') ? 1 : 0;
+}
+
+async function checkModelBomData() {
+  const boms = await prisma.modelBom.findMany({
+    include: {
+      lines: {
+        include: {
+          material: {
+            select: { id: true, status: true }
+          },
+          defaultDrawingRevision: {
+            select: { id: true, materialId: true, status: true, drawingNo: true, drawingVersion: true }
+          }
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+      }
+    },
+    orderBy: { bomName: 'asc' }
+  });
+
+  for (const bom of boms) {
+    const enabledComponentsByNo = new Map<string, (typeof bom.lines)[number]>();
+    const seenEnabledComponentNos = new Set<string>();
+
+    for (const line of bom.lines) {
+      const componentNo = stringValue(line.componentNo);
+      if (line.lineType !== 'COMPONENT' || line.status !== CommonStatus.ENABLED || !componentNo) {
+        continue;
+      }
+      const key = componentNo.toLocaleUpperCase();
+      if (seenEnabledComponentNos.has(key)) {
+        addIssue('ERROR', 'MODEL_BOM_COMPONENT_NO_DUPLICATE', `BOM ${bom.bomName} 存在重复启用组件编号 ${componentNo}`);
+      }
+      seenEnabledComponentNos.add(key);
+      enabledComponentsByNo.set(key, line);
+    }
+
+    for (const line of bom.lines) {
+      const label = `BOM ${bom.bomName} / ${line.partCodeSnapshot}`;
+      const componentNo = stringValue(line.componentNo);
+      const parentComponentNo = stringValue(line.parentComponentNo);
+
+      if (line.status === CommonStatus.ENABLED && line.material.status !== CommonStatus.ENABLED) {
+        addIssue(
+          'ERROR',
+          'MODEL_BOM_LINE_DISABLED_MATERIAL_ENABLED',
+          `${label} 引用了停用零件但 BOM 行仍启用，请先启用零件或停用该 BOM 行`
+        );
+      }
+
+      if (line.status === CommonStatus.ENABLED && line.defaultDrawingRevisionId) {
+        const revision = line.defaultDrawingRevision;
+        if (!revision || revision.status !== CommonStatus.ENABLED) {
+          addIssue(
+            'ERROR',
+            'MODEL_BOM_DEFAULT_DRAWING_DISABLED',
+            `${label} 默认图纸 ${line.defaultDrawingRevisionId} 不存在或已停用，请先调整 BOM 行默认图纸`
+          );
+        } else if (revision.materialId !== line.materialId) {
+          addIssue(
+            'ERROR',
+            'MODEL_BOM_DEFAULT_DRAWING_MATERIAL_MISMATCH',
+            `${label} 默认图纸 ${revision.drawingNo} / ${revision.drawingVersion} 不属于当前零件`
+          );
+        }
+      }
+
+      if (line.lineType === 'COMPONENT') {
+        if (!componentNo) {
+          addIssue('ERROR', 'MODEL_BOM_COMPONENT_NO_MISSING', `${label} 是组件行但缺少 componentNo`);
+        }
+        if (parentComponentNo) {
+          addIssue('ERROR', 'MODEL_BOM_COMPONENT_HAS_PARENT', `${label} 是组件行但填写了 parentComponentNo=${parentComponentNo}`);
+        }
+        continue;
+      }
+
+      if (componentNo) {
+        addIssue('ERROR', 'MODEL_BOM_PART_COMPONENT_NO_NOT_ALLOWED', `${label} 是零件行，不能填写 componentNo=${componentNo}`);
+      }
+      if (line.status !== CommonStatus.ENABLED || !parentComponentNo) {
+        continue;
+      }
+      const parent = enabledComponentsByNo.get(parentComponentNo.toLocaleUpperCase());
+      if (!parent) {
+        addIssue(
+          'ERROR',
+          'MODEL_BOM_CHILD_PARENT_DISABLED_OR_MISSING',
+          `${label} 启用子零件所属组件 ${parentComponentNo} 不存在或已停用`
+        );
+      }
+    }
+  }
+}
+
+async function checkMaterialTransformRuleData() {
+  const rules = await prisma.materialTransformRule.findMany({
+    where: { status: CommonStatus.ENABLED },
+    select: {
+      id: true,
+      customerNameSnapshot: true,
+      projectModel: true,
+      sourceMaterial: { select: { partCode: true, status: true } },
+      targetMaterial: { select: { partCode: true, status: true } }
+    },
+    orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
+  });
+
+  for (const rule of rules) {
+    const scopeText = [rule.customerNameSnapshot, rule.projectModel].filter(Boolean).join(' / ') || '全部范围';
+    const label = `来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode} / ${scopeText}`;
+    if (rule.sourceMaterial.status !== CommonStatus.ENABLED || rule.targetMaterial.status !== CommonStatus.ENABLED) {
+      addIssue(
+        'ERROR',
+        'MATERIAL_TRANSFORM_RULE_DISABLED_MATERIAL_ENABLED',
+        `${label} 引用了停用零件但规则仍启用，请先启用零件或停用该来源加工关系`
+      );
+    }
+  }
 }
 
 function loadRootEnv() {
@@ -280,6 +401,13 @@ function processSnapshotToSteps(value: Prisma.JsonValue | null | undefined): Pro
       };
     })
     .filter((step) => step.processName);
+}
+
+function splitDefaultProcessRoute(value?: string | null) {
+  return String(value || '')
+    .split(/(?:->|→|[、,，;；\n\r]+)/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function processRowsToSteps(rows: Array<{ processName: string; processRemark?: string | null }>): ProcessStepSnapshot[] {
@@ -576,7 +704,7 @@ function assertCaseInsensitiveUnique(
 }
 
 async function checkProcessMemoryData() {
-  const [definitions, templates] = await Promise.all([
+  const [definitions, templates, bomLines, transformRules] = await Promise.all([
     prisma.processDefinition.findMany({
       select: {
         id: true,
@@ -598,6 +726,26 @@ async function checkProcessMemoryData() {
         remark: true
       },
       orderBy: { templateName: 'asc' }
+    }),
+    prisma.modelBomLine.findMany({
+      where: { defaultProcessRoute: { not: null } },
+      select: {
+        defaultProcessRoute: true,
+        partCodeSnapshot: true,
+        bom: { select: { bomName: true } }
+      },
+      orderBy: [{ bom: { bomName: 'asc' } }, { sortOrder: 'asc' }]
+    }),
+    prisma.materialTransformRule.findMany({
+      where: { defaultProcessRoute: { not: null } },
+      select: {
+        defaultProcessRoute: true,
+        sourceMaterial: { select: { partCode: true } },
+        targetMaterial: { select: { partCode: true } },
+        customerNameSnapshot: true,
+        projectModel: true
+      },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
     })
   ]);
 
@@ -701,6 +849,27 @@ async function checkProcessMemoryData() {
       stepKeys.add(stepKey);
       if (!enabledDefinitionNames.has(stepKey)) {
         addIssue('ERROR', 'PROCESS_TEMPLATE_STEP_DEFINITION_MISSING', `${stepLabel} 没有对应的启用标准工序`);
+      }
+    }
+  }
+
+  for (const line of bomLines) {
+    const label = `BOM ${line.bom.bomName} / ${line.partCodeSnapshot}`;
+    for (const processName of splitDefaultProcessRoute(line.defaultProcessRoute)) {
+      const processKey = normalizeSearchKeyword(processName);
+      if (!enabledDefinitionNames.has(processKey)) {
+        addIssue('ERROR', 'MODEL_BOM_DEFAULT_PROCESS_DEFINITION_MISSING', `${label} 默认工艺 ${processName} 没有对应的启用标准工序`);
+      }
+    }
+  }
+
+  for (const rule of transformRules) {
+    const scopeText = [rule.customerNameSnapshot, rule.projectModel].filter(Boolean).join(' / ') || '全部范围';
+    const label = `来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode} / ${scopeText}`;
+    for (const processName of splitDefaultProcessRoute(rule.defaultProcessRoute)) {
+      const processKey = normalizeSearchKeyword(processName);
+      if (!enabledDefinitionNames.has(processKey)) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DEFINITION_MISSING', `${label} 默认工艺 ${processName} 没有对应的启用标准工序`);
       }
     }
   }
@@ -3184,11 +3353,12 @@ async function checkInventoryAdjustments() {
 }
 
 function resolveUploadRootPath() {
-  if (process.env.UPLOAD_DIR?.trim()) {
-    return resolve(process.env.UPLOAD_DIR.trim());
-  }
   const cwd = process.cwd();
-  return resolve(cwd, cwd.endsWith('backend') ? '../storage/uploads' : 'storage/uploads');
+  const projectRoot = basename(cwd) === 'backend' ? resolve(cwd, '..') : cwd;
+  if (process.env.UPLOAD_DIR?.trim()) {
+    return resolve(projectRoot, process.env.UPLOAD_DIR.trim());
+  }
+  return resolve(projectRoot, 'storage/uploads');
 }
 
 function printSummary() {

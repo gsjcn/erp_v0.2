@@ -97,7 +97,7 @@ function verifyNavigation() {
     return;
   }
 
-  const expectedLabels = ['客户', '订单', '生产流程', '流程记忆', '生产', '统计', '仓库', '库存'];
+  const expectedLabels = ['客户', '零件管理', '订单', '生产流程', '流程记忆', '生产', '统计', '仓库', '库存'];
   const source = readFile(navPath);
   const labels = [...source.matchAll(/label:\s*['"`]([^'"`]+)['"`]/g)].map((match) => match[1]);
 
@@ -274,12 +274,14 @@ function verifyResponsiveElementPlusDialogs() {
 
 function verifyCustomerSelectOnlyShowsName() {
   const componentPath = 'frontend/src/components/CustomerSelect.vue';
+  const customersViewPath = 'frontend/src/views/CustomersView.vue';
   const servicePath = 'backend/src/modules/customers/customers.service.ts';
   if (!fileExists(componentPath)) {
     return;
   }
 
   const source = readFile(componentPath);
+  const customersViewSource = fileExists(customersViewPath) ? readFile(customersViewPath) : '';
   const serviceSource = readFile(servicePath);
   const forbiddenDetails = ['customerCode', 'contactName', 'phone', 'mobile', 'province', 'city', 'address'];
 
@@ -325,6 +327,9 @@ function verifyCustomerSelectOnlyShowsName() {
   if (!agentsSource.includes('客户搜索结果必须按命中强度排序')) {
     addFailure('AGENTS.md must document ranked customer search behavior.');
   }
+  if (customersViewSource.includes('default-first-option')) {
+    addFailure('CustomersView.vue customer region selects must not enable default-first-option; city/country require explicit confirmation or typed value.');
+  }
 }
 
 function verifyOrderSelectDisplayContract() {
@@ -354,6 +359,9 @@ function verifyOrderSelectDisplayContract() {
 
   if (/:label="[^"]*customerName/.test(source)) {
     addFailure('OrderSelect.vue selected input label must stay orderNo-only; customer details belong in summary/options.');
+  }
+  if (source.includes('default-first-option')) {
+    addFailure('OrderSelect.vue must not enable default-first-option; operators should explicitly pick the target order.');
   }
 }
 
@@ -1603,6 +1611,426 @@ function verifyProcessStepDragSortWorkflow() {
   }
   if (!agentsSource.includes('拖拽排序结束后必须清理工序下拉筛选关键字')) {
     addFailure('AGENTS.md must document process step drag filter cleanup requirement.');
+  }
+}
+
+function verifyPartComponentStructureWorkflow() {
+  const requiredFiles = [
+    'frontend/src/components/OrderLineEditor.vue',
+    'frontend/src/views/ModelBomsView.vue',
+    'frontend/src/views/MaterialsManagementView.vue',
+    'frontend/src/views/MaterialsView.vue',
+    'frontend/src/views/MaterialTransformsView.vue',
+    'frontend/src/views/OrdersListView.vue',
+    'frontend/src/views/OrderDetailView.vue',
+    'frontend/src/views/ProcessSelectionView.vue',
+    'frontend/src/views/ProductionView.vue',
+    'frontend/src/views/WarehouseView.vue',
+    'frontend/src/views/InventoryView.vue',
+    'frontend/src/components/InventorySourceDetailsDialog.vue',
+    'frontend/src/api/erp.ts',
+    'backend/src/modules/materials/materials.service.ts',
+    'backend/src/modules/inventory/dto.ts',
+    'backend/src/modules/inventory/inventory.controller.ts',
+    'backend/src/modules/orders/orders.service.ts',
+    'backend/src/modules/inventory/inventory.service.ts',
+    'database/prisma/verify-first-stage.ts'
+  ];
+  for (const projectPath of requiredFiles) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing part component structure workflow file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const orderLineEditorSource = readFile('frontend/src/components/OrderLineEditor.vue');
+  const modelBomSource = readFile('frontend/src/views/ModelBomsView.vue');
+  const materialDashboardSource = readFile('frontend/src/views/MaterialsManagementView.vue');
+  const materialsViewSource = readFile('frontend/src/views/MaterialsView.vue');
+  const materialTransformsSource = readFile('frontend/src/views/MaterialTransformsView.vue');
+  const ordersListSource = readFile('frontend/src/views/OrdersListView.vue');
+  const orderDetailSource = readFile('frontend/src/views/OrderDetailView.vue');
+  const processSelectionSource = readFile('frontend/src/views/ProcessSelectionView.vue');
+  const productionSource = readFile('frontend/src/views/ProductionView.vue');
+  const warehouseSource = readFile('frontend/src/views/WarehouseView.vue');
+  const inventorySource = readFile('frontend/src/views/InventoryView.vue');
+  const inventorySourceDialogSource = readFile('frontend/src/components/InventorySourceDetailsDialog.vue');
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  const materialsServiceSource = readFile('backend/src/modules/materials/materials.service.ts');
+  const inventoryDtoSource = readFile('backend/src/modules/inventory/dto.ts');
+  const inventoryControllerSource = readFile('backend/src/modules/inventory/inventory.controller.ts');
+  const ordersServiceSource = readFile('backend/src/modules/orders/orders.service.ts');
+  const inventoryServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
+  const dataVerifierSource = readFile('database/prisma/verify-first-stage.ts');
+
+  const orderLineSnippets = [
+    'class="line-drag-handle"',
+    ':draggable="lines.length > 1"',
+    '@dragstart.stop="startLineDrag($event, $index)"',
+    '@dragover.prevent="handleLineDragOver($event, $index)"',
+    '@drop.prevent="dropLineDrag($index)"',
+    '<el-icon><Rank /></el-icon>',
+    'props.lines.splice(0, props.lines.length, ...ordered);',
+    'function syncChildParentComponentNo',
+    'function clearChildParentComponentNo',
+    'line.parentComponentNo = inheritedParentComponentNoForLine(line);'
+  ];
+  for (const snippet of orderLineSnippets) {
+    if (!orderLineEditorSource.includes(snippet)) {
+      addFailure(`OrderLineEditor.vue must keep order line component drag/parent-child snippet: ${snippet}`);
+    }
+  }
+
+  const modelBomSnippets = [
+    'activeBomStructureGroups',
+    'class="bom-line-drag-handle"',
+    '@dragstart.stop="startLineDrag($event, index)"',
+    '@drop.prevent="dropLineDrag"',
+    '@drop.self.prevent="dropLineDragAtEnd"',
+    'function copyBomStructureText',
+    '固定格式清单已复制',
+    '未匹配父级',
+    '单独零件',
+    '组件 ${group.line.componentNo',
+    'bom-source-diff-panel',
+    'sourceBomForDiff',
+    'buildSourceBomDiffIssues',
+    'sourceActiveLines',
+    'targetActiveLines',
+    "line.status === 'ENABLED' && line.materialStatus !== 'DISABLED'",
+    '客户 BOM 缺少',
+    '后续来源更新只提示差异，不自动覆盖客户 BOM',
+    'erpApi.reorderModelBomLines(activeBom.value.id, { items })',
+    '手机端仅查看机型零件包，${actionLabel}请在电脑端操作'
+  ];
+  for (const snippet of modelBomSnippets) {
+    if (!modelBomSource.includes(snippet)) {
+      addFailure(`ModelBomsView.vue must keep BOM component structure snippet: ${snippet}`);
+    }
+  }
+
+  const dashboardSnippets = [
+    'copyDashboardText',
+    '零件管理固定格式清单',
+    "openMaterialMaintain(row, 'drawing')",
+    "openMaterialMaintain(row, 'applicability')",
+    'openMaterialDrawingMaintain(row)',
+    'openMaterialApplicabilityMaintain(row)',
+    'openBomMaintain(row)',
+    'openSourceDetails(row)',
+    'InventorySourceDetailsDialog',
+    'guardDesktopOperation',
+    '手机端仅查看零件管理信息，${actionLabel}请在电脑端操作',
+    'mobile-pagination-bar',
+    'dashboard.hasMore',
+    'loadMobileNextPage',
+    '继续加载',
+    'quickProjectHiddenCount',
+    '上方下拉搜索',
+    "openDesktopMaintenancePage('/inventory/materials'",
+    "path: '/inventory/materials'",
+    "path: '/inventory/model-boms'"
+  ];
+  for (const snippet of dashboardSnippets) {
+    if (!materialDashboardSource.includes(snippet)) {
+      addFailure(`MaterialsManagementView.vue must keep control panel quick action snippet: ${snippet}`);
+    }
+  }
+
+  const materialProjectModelSnippets = [
+    'scoreByProject',
+    '客户常用机型按历史下单和 BOM/适用范围热度排序',
+    'score.orderCount += 1',
+    'latestOrderTime',
+    'latestMasterTime',
+    'return b.orderCount - a.orderCount'
+  ];
+  for (const snippet of materialProjectModelSnippets) {
+    if (!materialsServiceSource.includes(snippet)) {
+      addFailure(`materials.service.ts must keep customer project/model relevance sort snippet: ${snippet}`);
+    }
+  }
+
+  const materialLibraryRouteActionSnippets = [
+    'const routeActionApplied = ref(false)',
+    'applyRouteActionAfterLoad',
+    "action !== 'drawing' && action !== 'applicability'",
+    'openDrawingDialog(matchedMaterial)',
+    'openApplicabilityDialog(matchedMaterial)',
+    'guardDesktopOperation',
+    '手机端仅查看零件基础资料，${actionLabel}请在电脑端操作',
+    "openDesktopMaintenancePage('/inventory/model-boms'"
+  ];
+  for (const snippet of materialLibraryRouteActionSnippets) {
+    if (!materialsViewSource.includes(snippet)) {
+      addFailure(`MaterialsView.vue must keep control-panel route action snippet: ${snippet}`);
+    }
+  }
+
+  const materialTransformMobileSnippets = [
+    '手机端仅查看来源加工关系',
+    '手机端仅查看来源加工关系，${actionLabel}请在电脑端操作',
+    'guardDesktopOperation',
+    '新增、编辑、停用和启用来源加工关系请在电脑端操作'
+  ];
+  for (const snippet of materialTransformMobileSnippets) {
+    if (!materialTransformsSource.includes(snippet)) {
+      addFailure(`MaterialTransformsView.vue must keep mobile read-only guard snippet: ${snippet}`);
+    }
+  }
+
+  const materialTransformProcessSnippets = [
+    'defaultProcessRouteSteps',
+    "erpApi.processDefinitions(undefined, 'ENABLED')",
+    '.split(/(?:->|→|[、,，;；\\n\\r]+)/)',
+    "splitDefaultProcessRoute(row.defaultProcessRoute || '')",
+    "defaultProcessRoute: form.defaultProcessRouteSteps.join('、') || undefined"
+  ];
+  for (const snippet of materialTransformProcessSnippets) {
+    if (!materialTransformsSource.includes(snippet)) {
+      addFailure(`MaterialTransformsView.vue must keep standard process selection for transform default route snippet: ${snippet}`);
+    }
+  }
+
+  const fixedFormatStructureFiles = [
+    ['OrdersListView.vue', ordersListSource],
+    ['OrderDetailView.vue', orderDetailSource],
+    ['ProcessSelectionView.vue', processSelectionSource]
+  ];
+  for (const [label, source] of fixedFormatStructureFiles) {
+    const snippets = ['component', 'standalone', 'orphan', '复制清单', '未匹配父级', '单独零件'];
+    for (const snippet of snippets) {
+      if (!source.includes(snippet)) {
+        addFailure(`${label} must keep fixed-format component structure snippet: ${snippet}`);
+      }
+    }
+  }
+
+  const orderBomRecommendationSnippets = [
+    '零件包推荐',
+    'modelBomRecommendationVisible',
+    'loadModelBomRecommendations',
+    'modelBomStructureGroups',
+    'createLineFromModelBomLine',
+    'buildBomComponentNoMap',
+    'nextAvailableOrderComponentNo',
+    'orderImportableModelBomLines',
+    'componentNoMap.get(sourceParentComponentNo)',
+    '组件编号已避让当前草稿',
+    '父组件缺失或组件编号无效的 BOM 行',
+    'applyModelBomToOrder',
+    'BOM 默认工艺只作为下单初始建议',
+    '已带入 ${importedLines.length} 个零件',
+    '只带入当前草稿明细，不提交生产、不占库存。'
+  ];
+  for (const snippet of orderBomRecommendationSnippets) {
+    if (!ordersListSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue must keep order BOM recommendation snippet: ${snippet}`);
+    }
+  }
+
+  const componentTraceFiles = [
+    ['ProductionView.vue', productionSource, 'productionComponentText'],
+    ['WarehouseView.vue', warehouseSource, 'warehouseComponentText'],
+    ['InventoryView.vue', inventorySource, 'inventoryComponentText'],
+    ['InventorySourceDetailsDialog.vue', inventorySourceDialogSource, 'sourceComponentText']
+  ];
+  for (const [label, source, functionName] of componentTraceFiles) {
+    const snippets = [functionName, '属于组件', '单独零件'];
+    for (const snippet of snippets) {
+      if (!source.includes(snippet)) {
+        addFailure(`${label} must keep component traceability display snippet: ${snippet}`);
+      }
+    }
+  }
+
+  const orderFormComponentSnippets = [
+    'clearParentComponentNoAfterRemovingLine',
+    'const [removedLine] = orderForm.lines.splice(index, 1);',
+    'clearParentComponentNoAfterRemovingLine(removedLine);',
+    'normalizeComponentNo(line.parentComponentNo) === removedComponentNo'
+  ];
+  for (const snippet of orderFormComponentSnippets) {
+    if (!ordersListSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue must keep component parent cleanup after deleting a component row snippet: ${snippet}`);
+    }
+  }
+
+  const orderBackendSnippets = [
+    'validateOrderLineComponentStructure',
+    '同一订单内组件编号重复',
+    '不能填写所属组件',
+    '不能填写组件编号；如属于组件，请填写所属组件',
+    '所属组件 ${parentComponentNo} 在当前订单内不存在',
+    'normalizeEditableOrderLineComponentFields',
+    'componentNo: this.normalizeEditableComponentNo(line.componentNo) || null',
+    'parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || null'
+  ];
+  for (const snippet of orderBackendSnippets) {
+    if (!ordersServiceSource.includes(snippet)) {
+      addFailure(`orders.service.ts must keep component structure backend validation snippet: ${snippet}`);
+    }
+  }
+
+  const bomBackendSnippets = [
+    'async modelBom(bomId: string)',
+    'resolveModelBomLineStructure',
+    'nextModelBomComponentNo',
+    '当前零件包内组件编号已存在',
+    '所属组件不存在，请先维护组件行',
+    'sortModelBomRows',
+    '客户专属清单优先于百胜通用清单',
+    'async reorderModelBomLines(bomId: string',
+    'BOM 拖拽排序必须事务化保存',
+    'copyableSourceLines',
+    '复制 BOM 只复制当前启用明细并生成客户独立副本',
+    "line.status === 'ENABLED' && line.material.status === 'ENABLED'",
+    "status: 'ENABLED'",
+    'BOM 组件编号变更时，仅同步仍指向旧组件编号的子零件',
+    '组件行改成普通零件后，原子零件不再挂靠已经不存在的组件',
+    '所属组件已停用，请先启用组件行再维护子零件',
+    '停用组件行时，所属子零件同步软停用',
+    '组件停用后子零件也必须停用',
+    'ensureMaterialDrawingRevisionCanBeDisabled',
+    "defaultDrawingRevision?.status === 'ENABLED'",
+    '该图纸版本已被启用 BOM 行指定为默认图纸',
+    'disableMaterialRecommendationLinks',
+    '零件软停用只影响后续推荐',
+    '停用零件不能加入启用 BOM 行',
+    'materialApplicability.updateMany',
+    'materialTransformRule.updateMany'
+  ];
+  for (const snippet of bomBackendSnippets) {
+    if (!inventoryServiceSource.includes(snippet)) {
+      addFailure(`inventory.service.ts must keep BOM component structure backend validation snippet: ${snippet}`);
+    }
+  }
+
+  const bomDataVerifierSnippets = [
+    'checkModelBomData',
+    'MODEL_BOM_CHILD_PARENT_DISABLED_OR_MISSING',
+    'MODEL_BOM_COMPONENT_NO_DUPLICATE',
+    'MODEL_BOM_LINE_DISABLED_MATERIAL_ENABLED',
+    'MODEL_BOM_DEFAULT_DRAWING_DISABLED',
+    'MODEL_BOM_DEFAULT_DRAWING_MATERIAL_MISMATCH',
+    'checkMaterialTransformRuleData',
+    'MATERIAL_TRANSFORM_RULE_DISABLED_MATERIAL_ENABLED',
+    '启用子零件所属组件 ${parentComponentNo} 不存在或已停用'
+  ];
+  for (const snippet of bomDataVerifierSnippets) {
+    if (!dataVerifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep BOM component data verification snippet: ${snippet}`);
+    }
+  }
+
+  const transformBackendSnippets = [
+    'const processNames = this.splitDefaultProcessRoute(dto.defaultProcessRoute);',
+    '来源加工关系只作为库存来源建议',
+    'validateMaterialTransformImportDefaultProcessRoute',
+    'INVALID_DEFAULT_PROCESS_ROUTE',
+    '预览后标准工序被停用',
+    '.split(/(?:->|→|[、,，;；\\n\\r]+)/)',
+    'await this.processDefinitionsService.ensureActiveNames(processNames);',
+    "defaultProcessRoute: processNames.length > 0 ? processNames.join('、') : null",
+    '来源加工关系启用时，来源零件和目标零件都必须是启用状态',
+    "sourceMaterial: { status: 'ENABLED' }",
+    "targetMaterial: { status: 'ENABLED' }"
+  ];
+  for (const snippet of transformBackendSnippets) {
+    if (!inventoryServiceSource.includes(snippet)) {
+      addFailure(`inventory.service.ts must keep transform-rule default process validation snippet: ${snippet}`);
+    }
+  }
+
+  const bomApiSnippets = [
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomLinesDto'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomLineItemDto'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'modelBom(bomId: string)'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'reorderModelBomLines(bomId: string'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Get('model-boms/:bomId')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, 'return this.inventoryService.modelBom(bomId);'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Patch('model-boms/:bomId/lines/reorder')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, 'return this.inventoryService.reorderModelBomLines(bomId, dto);']
+  ];
+  for (const [label, source, snippet] of bomApiSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${label} must keep single BOM query snippet for source diff: ${snippet}`);
+    }
+  }
+}
+
+function verifyMaterialImportIssueReportWorkflow() {
+  const requiredFiles = [
+    'backend/src/modules/inventory/inventory.service.ts',
+    'backend/src/modules/inventory/inventory.controller.ts',
+    'frontend/src/api/erp.ts',
+    'frontend/src/views/MaterialsView.vue',
+    'database/prisma/schema.prisma'
+  ];
+  for (const projectPath of requiredFiles) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing material import issue report file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const inventoryServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
+  const inventoryControllerSource = readFile('backend/src/modules/inventory/inventory.controller.ts');
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  const materialsViewSource = readFile('frontend/src/views/MaterialsView.vue');
+  const schemaSource = readFile('database/prisma/schema.prisma');
+
+  const serviceSnippets = [
+    'async buildMaterialImportIssueReport(sessionId: string)',
+    "workbook.addWorksheet('问题明细'",
+    '零件库导入问题导出只输出校验明细，不写入正式零件库。',
+    'materialImportIssueArray(row.issues)',
+    '当前零件库导入预览没有错误或警告'
+  ];
+  for (const snippet of serviceSnippets) {
+    if (!inventoryServiceSource.includes(snippet)) {
+      addFailure(`inventory.service.ts must keep material import issue report snippet: ${snippet}`);
+    }
+  }
+
+  const controllerSnippets = [
+    "@Get('material-import-sessions/:sessionId/error-report')",
+    'downloadMaterialImportIssueReport',
+    'buildMaterialImportIssueReport(sessionId)'
+  ];
+  for (const snippet of controllerSnippets) {
+    if (!inventoryControllerSource.includes(snippet)) {
+      addFailure(`inventory.controller.ts must keep material import issue report API snippet: ${snippet}`);
+    }
+  }
+
+  const frontendSnippets = [
+    'downloadMaterialImportIssueReport(sessionId: string)',
+    '/inventory/material-import-sessions/${sessionId}/error-report',
+    '零件库导入问题明细.xlsx',
+    '下载问题明细',
+    'importIssueReportDownloading',
+    'materialImportHasIssues'
+  ];
+  for (const snippet of frontendSnippets) {
+    if (!frontendApiSource.includes(snippet) && !materialsViewSource.includes(snippet)) {
+      addFailure(`Frontend must keep material import issue report UI/API snippet: ${snippet}`);
+    }
+  }
+
+  const schemaSnippets = [
+    'model MaterialImportSession',
+    'model MaterialImportRow',
+    'model MaterialApplicabilityImportRow',
+    'model MaterialTransformImportRow',
+    'issues            Json?',
+    'errorCount        Int                   @default(0)',
+    'warningCount      Int                   @default(0)'
+  ];
+  for (const snippet of schemaSnippets) {
+    if (!schemaSource.includes(snippet)) {
+      addFailure(`Prisma schema must keep material import issue persistence snippet: ${snippet}`);
+    }
   }
 }
 
@@ -4151,11 +4579,28 @@ function verifyProcessDefinitionReferenceGuard() {
   }
 
   const source = readFile(servicePath);
-  if (!source.includes('findProcessDefinitionReferences') || !source.includes('orderLineProcessStep.findMany') || !source.includes('processTemplate.findMany')) {
-    addFailure('ProcessDefinitionsService must check existing order process and process template references before disabling or renaming a process definition.');
+  if (
+    !source.includes('findProcessDefinitionReferences') ||
+    !source.includes('orderLineProcessStep.findMany') ||
+    !source.includes('processTemplate.findMany') ||
+    !source.includes('modelBomLine.findMany') ||
+    !source.includes('materialTransformRule.findMany')
+  ) {
+    addFailure('ProcessDefinitionsService must check order process, process template, BOM, and transform-rule references before disabling or renaming a process definition.');
   }
   if (!source.includes('processSnapshotToDetails') || !source.includes("action: '停用' | '改名'") || !source.includes('不能${action}')) {
     addFailure('ProcessDefinitionsService must parse process template steps and reject disabling or renaming referenced process definitions with a clear message.');
+  }
+  const processReferenceSnippets = [
+    'splitDefaultProcessRoute',
+    '.split(/(?:->|→|[、,，;；\\n\\r]+)/)',
+    '来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode}',
+    '订单流程、流程记忆、BOM 或来源加工关系'
+  ];
+  for (const snippet of processReferenceSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`ProcessDefinitionsService must keep default-process reference guard snippet: ${snippet}`);
+    }
   }
   if (!/async\s+update\s*\([^)]*\)\s*{[\s\S]*nextStatus[\s\S]*findProcessDefinitionReferences\(existing\.processNameNormalized\)[\s\S]*referencedProcessDefinitionError/.test(source)) {
     addFailure('ProcessDefinitionsService.update must reject renaming or disabling referenced process definitions.');
@@ -4185,6 +4630,10 @@ function verifyMissingProcessDefinitionRepairCoverage() {
     'prisma.processDefinition.findMany',
     'prisma.processTemplate.findMany',
     'prisma.orderLineProcessStep.findMany',
+    'prisma.modelBomLine.findMany',
+    'prisma.materialTransformRule.findMany',
+    'splitDefaultProcessRoute',
+    '来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode}',
     'processSnapshotToDetails(template.steps)',
     'normalizeSearchKeyword(processName)',
     'referencedByNormalized',
@@ -4219,6 +4668,11 @@ function verifyMissingProcessDefinitionRepairCoverage() {
     'enabledProcessKeys',
     'normalizeSearchKeyword(processName)',
     'ORDER_LINE_PROCESS_DEFINITION_MISSING',
+    'MODEL_BOM_DEFAULT_PROCESS_DEFINITION_MISSING',
+    'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DEFINITION_MISSING',
+    'prisma.modelBomLine.findMany',
+    'prisma.materialTransformRule.findMany',
+    'splitDefaultProcessRoute',
     '没有对应的启用标准工序'
   ];
   for (const snippet of verifierSnippets) {
@@ -5049,6 +5503,8 @@ verifyProcessPinyinSearchWorkflow();
 verifyMaterialSuggestionSearchWorkflow();
 verifyProcessEditDisabledReasonWorkflow();
 verifyProcessStepDragSortWorkflow();
+verifyPartComponentStructureWorkflow();
+verifyMaterialImportIssueReportWorkflow();
 verifyMobileCompactOrderCards();
 verifyProductionProcessCompletionSequenceWorkflow();
 verifyProductionReplenishmentAndWithdrawWorkflow();

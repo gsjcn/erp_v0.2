@@ -38,3 +38,7 @@ export function inventoryAdjustmentUploadPath() {
 export function orderImportUploadPath() {
   return ensureDirectory(resolve(uploadRootPath(), 'order-imports'));
 }
+
+export function materialImportUploadPath() {
+  return ensureDirectory(resolve(uploadRootPath(), 'material-imports'));
+}

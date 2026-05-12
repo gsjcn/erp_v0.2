@@ -213,6 +213,34 @@
           <h3 class="panel-title">订单零件</h3>
           <OrderNoLink :order-no="order.orderNo" />
         </div>
+        <div class="process-structure-panel">
+          <div class="process-structure-header">
+            <div>
+              <strong>流程固定格式清单</strong>
+              <span>{{ processStructureGroups.length }} 组 / {{ order.lines.length }} 行</span>
+            </div>
+            <el-button size="small" :disabled="order.lines.length === 0" @click="copyProcessStructureText">复制清单</el-button>
+          </div>
+          <div v-if="processStructureGroups.length" class="process-structure-list">
+            <div v-for="(group, groupIndex) in processStructureGroups" :key="group.id" class="process-structure-group">
+              <div class="process-structure-main">
+                <span>{{ groupIndex + 1 }}</span>
+                <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
+                  {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                </el-tag>
+                <strong>{{ formatProcessStructureCore(group.line) }}</strong>
+                <span>{{ formatProcessStructureMeta(group.line) }}</span>
+              </div>
+              <div v-for="(child, childIndex) in group.children" :key="child.id" class="process-structure-child">
+                <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+                <el-tag type="success" effect="plain">子零件</el-tag>
+                <strong>{{ formatProcessStructureCore(child) }}</strong>
+                <span>{{ formatProcessStructureMeta(child) }}</span>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="暂无流程清单" />
+        </div>
         <button
           v-for="line in order.lines"
           :key="line.id"
@@ -224,6 +252,7 @@
             <strong>{{ line.partName }}</strong>
             <small>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</small>
             <small>{{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</small>
+            <small v-if="componentTraceText(line)">{{ componentTraceText(line) }}</small>
           </span>
           <em>{{ lineProcessBadgeText(line) }}</em>
         </button>
@@ -489,6 +518,7 @@
               <strong>{{ line.partCode }} / {{ line.partName }}</strong>
               <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}，订单 {{ formatQuantity(line.quantity, line.unit) }}，生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
             </div>
+            <small v-if="componentTraceText(line)">组件关系：{{ componentTraceText(line) }}</small>
             <small v-if="lineRequiresProductionProcess(line)">流程：{{ line.processSteps.length ? line.processSteps.join('、') : '未配置' }}</small>
             <small v-if="stockSourceSummary(line)">库存来源：{{ stockSourceSummary(line) }}</small>
             <small v-if="submitOrderLineWarning(line)" class="submit-production-line-warning">{{ submitOrderLineWarning(line) }}</small>
@@ -538,6 +568,13 @@ import { orderDisplayStatus } from '../utils/orderStatus';
 import { filterPinyinSearchOptions } from '../utils/pinyinSearch';
 import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
 
+type ProcessStructureGroup = {
+  id: string;
+  type: 'component' | 'standalone' | 'orphan';
+  line: OrderLine;
+  children: OrderLine[];
+};
+
 const route = useRoute();
 const router = useRouter();
 const orders = ref<OrderSummary[]>([]);
@@ -586,6 +623,7 @@ const selectedLineTemplateName = computed(() => (selectedLine.value?.partName ? 
 const savedSteps = computed(() => selectedLineProcessDetails(selectedLine.value));
 const isDirty = computed(() => JSON.stringify(normalizeSteps(draftSteps.value)) !== JSON.stringify(normalizeSteps(savedSteps.value)));
 const processRequiredLines = computed(() => order.value?.lines.filter(lineRequiresProductionProcess) || []);
+const processStructureGroups = computed<ProcessStructureGroup[]>(() => buildProcessStructureGroups(order.value?.lines || []));
 const totalLineCount = computed(() => processRequiredLines.value.length);
 const processEditorOptionRows = computed(() => operatorRowsWithSelected(processEditorOperators.value, processEditorCode.value));
 const submitPlanOperatorOptionRows = computed(() => operatorRowsWithSelected(submitPlanOperators.value, submitPlanOperatorCode.value));
@@ -681,6 +719,100 @@ const filteredProcessOptions = computed(() => filterPinyinSearchOptions(processO
 
 function lineRequiresProductionProcess(line: OrderLine) {
   return Number(line.productionPlanQuantity ?? 0) > 0;
+}
+
+function normalizeComponentNo(value?: string | null) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function buildProcessStructureGroups(lines: OrderLine[]): ProcessStructureGroup[] {
+  const childrenByParent = new Map<string, OrderLine[]>();
+  const rootLines: OrderLine[] = [];
+  for (const line of lines) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo) {
+      const key = normalizeComponentNo(line.parentComponentNo);
+      childrenByParent.set(key, [...(childrenByParent.get(key) || []), line]);
+    } else {
+      rootLines.push(line);
+    }
+  }
+  const groups: ProcessStructureGroup[] = [];
+  const attachedIds = new Set<string>();
+  for (const line of rootLines) {
+    if (line.lineType === 'COMPONENT') {
+      const children = childrenByParent.get(normalizeComponentNo(line.componentNo)) || [];
+      children.forEach((child) => attachedIds.add(child.id));
+      groups.push({ id: `component-${line.id}`, type: 'component', line, children });
+      continue;
+    }
+    groups.push({ id: `standalone-${line.id}`, type: 'standalone', line, children: [] });
+  }
+  for (const line of lines) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo && !attachedIds.has(line.id)) {
+      groups.push({ id: `orphan-${line.id}`, type: 'orphan', line, children: [] });
+    }
+  }
+  return groups;
+}
+
+function componentTraceText(line: OrderLine) {
+  if (line.lineType === 'COMPONENT' && line.componentNo) {
+    return `组件 ${line.componentNo}`;
+  }
+  if (line.parentComponentNo) {
+    return `属于组件 ${line.parentComponentNo}`;
+  }
+  if (line.lineType === 'PART') {
+    return '单独零件';
+  }
+  return '';
+}
+
+function processStepText(line: OrderLine) {
+  return line.processSteps.length ? line.processSteps.join('、') : lineRequiresProductionProcess(line) ? '未配置' : '无生产任务';
+}
+
+function formatProcessStructureCore(line: OrderLine) {
+  return `${line.partCode || '-'} | ${line.partName || '-'} | 订单 ${formatQuantity(line.quantity, line.unit)}`;
+}
+
+function formatProcessStructureMeta(line: OrderLine) {
+  return `${fulfillmentModeLabel(line.fulfillmentMode)} | 生产计划 ${formatQuantity(line.productionPlanQuantity, line.unit)} | 流程 ${processStepText(line)}`;
+}
+
+const processStructureText = computed(() => {
+  const currentOrder = order.value;
+  if (!currentOrder) {
+    return '';
+  }
+  const lines = [`${currentOrder.orderNo} / ${currentOrder.customerName} / ${formatDate(currentOrder.orderDate)} / 交期 ${formatDate(currentOrder.deliveryDate)}`];
+  for (const [groupIndex, group] of processStructureGroups.value.entries()) {
+    const prefix =
+      group.type === 'component'
+        ? `${groupIndex + 1}. 组件 ${group.line.componentNo || '-'}`
+        : group.type === 'orphan'
+          ? `${groupIndex + 1}. 未匹配父级 ${group.line.parentComponentNo || '-'}`
+          : `${groupIndex + 1}. 单独零件`;
+    lines.push(`${prefix} | ${formatProcessStructureCore(group.line)} | ${formatProcessStructureMeta(group.line)}`);
+    group.children.forEach((child, childIndex) => {
+      lines.push(`  ${groupIndex + 1}.${childIndex + 1} 子零件 | ${formatProcessStructureCore(child)} | ${formatProcessStructureMeta(child)}`);
+    });
+  }
+  return lines.join('\n');
+});
+
+async function copyProcessStructureText() {
+  const text = processStructureText.value.trim();
+  if (!text) {
+    ElMessage.warning('暂无可复制的流程清单');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('流程固定格式清单已复制');
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
 }
 
 function lineProcessBadgeText(line: OrderLine) {
@@ -1753,6 +1885,84 @@ onMounted(loadInitialState);
   color: #1d4ed8;
 }
 
+.process-structure-panel {
+  display: grid;
+  gap: 10px;
+  margin: 0 17px 14px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.process-structure-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.process-structure-header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.process-structure-header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.process-structure-list {
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.process-structure-group {
+  display: grid;
+  gap: 6px;
+}
+
+.process-structure-main,
+.process-structure-child {
+  display: grid;
+  grid-template-columns: 28px 108px minmax(160px, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  background: #fff;
+  border-radius: 6px;
+}
+
+.process-structure-child {
+  margin-left: 22px;
+  background: #f0fdf4;
+}
+
+.process-structure-main > span:first-child,
+.process-structure-child > span:first-child {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.process-structure-main strong,
+.process-structure-child strong,
+.process-structure-main > span:last-child,
+.process-structure-child > span:last-child {
+  grid-column: 3;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.process-structure-main > span:last-child,
+.process-structure-child > span:last-child {
+  color: #475569;
+  font-size: 12px;
+}
+
 .dirty-text {
   color: #d97706;
   font-size: 13px;
@@ -2057,6 +2267,15 @@ onMounted(loadInitialState);
   .step-actions {
     grid-column: 2;
     text-align: left;
+  }
+
+  .process-structure-main,
+  .process-structure-child {
+    grid-template-columns: 28px minmax(92px, auto) minmax(0, 1fr);
+  }
+
+  .process-structure-child {
+    margin-left: 14px;
   }
 }
 

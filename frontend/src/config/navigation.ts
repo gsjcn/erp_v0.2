@@ -1,5 +1,5 @@
 import type { Component } from 'vue';
-import { Box, Cpu, DataAnalysis, Files, Goods, Memo, Tickets, User } from '@element-plus/icons-vue';
+import { Box, Cpu, DataAnalysis, Files, Goods, Memo, Operation, Tickets, User } from '@element-plus/icons-vue';
 
 export interface NavigationItem {
   label: string;
@@ -9,6 +9,7 @@ export interface NavigationItem {
 
 export const navItems: NavigationItem[] = [
   { label: '客户', path: '/customers', icon: User },
+  { label: '零件管理', path: '/materials', icon: Operation },
   { label: '订单', path: '/orders', icon: Tickets },
   { label: '生产流程', path: '/processes', icon: Files },
   { label: '流程记忆', path: '/process-templates', icon: Memo },

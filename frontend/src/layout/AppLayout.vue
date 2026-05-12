@@ -101,6 +101,27 @@ const breadcrumbs = computed<BreadcrumbItem[]>(() => {
     ];
   }
 
+  if (route.path === '/inventory/materials') {
+    return [
+      { label: '零件管理', path: '/materials' },
+      { label: '零件基础库' }
+    ];
+  }
+
+  if (route.path === '/inventory/model-boms') {
+    return [
+      { label: '零件管理', path: '/materials' },
+      { label: '机型零件包' }
+    ];
+  }
+
+  if (route.path === '/inventory/material-transforms') {
+    return [
+      { label: '零件管理', path: '/materials' },
+      { label: '来源加工关系' }
+    ];
+  }
+
   const current = navItems.find((item) => item.path === route.path);
   return [{ label: current?.label || String(route.meta.title || '百胜 ERP') }];
 });
@@ -118,6 +139,15 @@ const parentPath = computed(() => {
   }
   if (route.path === '/production' && orderNo.value) {
     return '/production';
+  }
+  if (route.path === '/inventory/materials') {
+    return '/materials';
+  }
+  if (route.path === '/inventory/model-boms') {
+    return '/materials';
+  }
+  if (route.path === '/inventory/material-transforms') {
+    return '/materials';
   }
   return '';
 });

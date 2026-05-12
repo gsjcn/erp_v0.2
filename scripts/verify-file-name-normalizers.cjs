@@ -77,6 +77,11 @@ const cases = [
     name: '来源 Excel 中文文件名',
     input: mojibakeLatin1('示例订单来源 ERP净表.xlsx'),
     expected: '示例订单来源 ERP净表.xlsx'
+  },
+  {
+    name: '不可恢复问号文件名',
+    input: '?????????-??.xlsx',
+    expected: '上传文件.xlsx'
   }
 ];
 

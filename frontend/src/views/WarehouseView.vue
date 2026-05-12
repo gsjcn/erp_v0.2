@@ -571,6 +571,7 @@
           <template #default="{ row }">
             <div class="cell-main">{{ row.batchNo || '-' }}</div>
             <small v-if="row.productionTaskNo" class="muted">{{ row.productionTaskNo }}</small>
+            <small v-if="taskRelationText(row)" class="muted">{{ taskRelationText(row) }}</small>
           </template>
         </el-table-column>
         <el-table-column label="数量" width="120">
@@ -649,6 +650,7 @@
             <span>
               {{ transaction.batchNo || '-' }}
               <small v-if="transaction.productionTaskNo" class="muted">{{ transaction.productionTaskNo }}</small>
+              <small v-if="taskRelationText(transaction)" class="muted">{{ taskRelationText(transaction) }}</small>
             </span>
           </div>
           <div v-if="transaction.batchNo" class="mobile-field">
@@ -2083,23 +2085,48 @@ function resetBatchShipmentDialog() {
 }
 
 function taskRelationText(
-  row: Pick<
-    WarehouseReceipt | WarehouseShipment,
-    'isReplenishment' | 'sourceProductionTaskNo' | 'replenishmentSourceType' | 'replenishmentSourceRequestNo' | 'replenishmentSourceLabel'
-  >
+  row: {
+    isReplenishment?: boolean;
+    sourceProductionTaskNo?: string;
+    replenishmentSourceType?: 'PRODUCTION_SCRAP' | 'ORDER_CHANGE' | string;
+    replenishmentSourceRequestNo?: string;
+    replenishmentSourceLabel?: string;
+    lineType?: string;
+    componentNo?: string;
+    parentComponentNo?: string;
+    importSequence?: string;
+  }
 ) {
+  const texts: string[] = [];
   if (row.replenishmentSourceLabel) {
-    return row.sourceProductionTaskNo ? `${row.replenishmentSourceLabel} / 源任务 ${row.sourceProductionTaskNo}` : row.replenishmentSourceLabel;
-  }
-  if (row.replenishmentSourceType) {
+    texts.push(row.sourceProductionTaskNo ? `${row.replenishmentSourceLabel} / 源任务 ${row.sourceProductionTaskNo}` : row.replenishmentSourceLabel);
+  } else if (row.replenishmentSourceType) {
     const label = row.replenishmentSourceType === 'PRODUCTION_SCRAP' ? '生产报废补单' : '订单补单';
-    return row.replenishmentSourceRequestNo ? `${label}：${row.replenishmentSourceRequestNo}` : label;
+    texts.push(row.replenishmentSourceRequestNo ? `${label}：${row.replenishmentSourceRequestNo}` : label);
+  } else if (row.isReplenishment && row.sourceProductionTaskNo) {
+    texts.push(`补单来源：${row.sourceProductionTaskNo}`);
+  } else if (row.isReplenishment) {
+    texts.push('补单任务');
   }
-  if (row.isReplenishment && row.sourceProductionTaskNo) {
-    return `补单来源：${row.sourceProductionTaskNo}`;
+  const componentText = warehouseComponentText(row);
+  if (componentText) {
+    texts.push(componentText);
   }
-  if (row.isReplenishment) {
-    return '补单任务';
+  if (row.importSequence) {
+    texts.push(`Excel 序号 ${row.importSequence}`);
+  }
+  return texts.join('；');
+}
+
+function warehouseComponentText(row: { lineType?: string; componentNo?: string; parentComponentNo?: string }) {
+  if (row.lineType === 'COMPONENT' && row.componentNo) {
+    return `组件 ${row.componentNo}`;
+  }
+  if (row.parentComponentNo) {
+    return `属于组件 ${row.parentComponentNo}`;
+  }
+  if (row.lineType === 'PART') {
+    return '单独零件';
   }
   return '';
 }

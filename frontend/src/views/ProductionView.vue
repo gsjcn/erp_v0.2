@@ -4105,6 +4105,9 @@ function productionComponentText(row: ProductionTask | { lineType?: string; comp
   if (row.parentComponentNo) {
     return `属于组件 ${row.parentComponentNo}`;
   }
+  if (row.lineType === 'PART') {
+    return '单独零件';
+  }
   return '';
 }
 

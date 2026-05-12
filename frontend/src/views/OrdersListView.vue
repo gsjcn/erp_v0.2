@@ -214,7 +214,13 @@
       <el-form label-width="86px">
         <div class="order-form-grid">
           <el-form-item label="客户">
-            <CustomerSelect v-model="orderForm.customerId" placeholder="选择客户" status="ENABLED" width="260px" />
+            <CustomerSelect
+              v-model="orderForm.customerId"
+              placeholder="选择客户"
+              status="ENABLED"
+              width="260px"
+              @change="handleOrderCustomerChange"
+            />
           </el-form-item>
           <el-form-item label="订单号">
             <div class="order-no-field">
@@ -268,8 +274,102 @@
           </div>
           <div class="dialog-subtitle-actions">
             <el-button size="small" @click="processDefinitionManagerVisible = true">标准工序维护</el-button>
+            <el-button size="small" @click="toggleModelBomRecommendation">零件包推荐</el-button>
             <el-button size="small" @click="addLine">新增零件</el-button>
           </div>
+        </div>
+
+        <div v-if="modelBomRecommendationVisible" class="model-bom-recommendation">
+          <div class="model-bom-recommendation-toolbar">
+            <div class="model-bom-recommendation-title">
+              <strong>按客户 / 机型推荐零件包</strong>
+              <span>只带入当前草稿明细，不提交生产、不占库存。</span>
+            </div>
+            <div class="model-bom-recommendation-search">
+              <el-input
+                v-model="modelBomSearch.projectModel"
+                clearable
+                placeholder="项目型号 / 机型，例如 B3、B5"
+                @keyup.enter="loadModelBomRecommendations"
+              />
+              <el-input
+                v-model="modelBomSearch.keyword"
+                clearable
+                placeholder="零件包、物料、客户关键字"
+                @keyup.enter="loadModelBomRecommendations"
+              />
+              <el-button type="primary" :loading="modelBomLoading" @click="loadModelBomRecommendations">
+                搜索零件包
+              </el-button>
+            </div>
+          </div>
+          <el-empty
+            v-if="!modelBomLoading && modelBomRecommendations.length === 0"
+            description="请选择客户并输入机型后搜索；也可以搜索全局通用零件包。"
+          />
+          <div v-else class="model-bom-card-list">
+            <article v-for="bom in modelBomRecommendations" :key="bom.id" class="model-bom-card">
+              <div class="model-bom-card-main">
+                <div class="model-bom-card-title">
+                  <strong>{{ bom.bomName }}</strong>
+                  <el-tag size="small" effect="plain">{{ bom.scopeLabel }}</el-tag>
+                </div>
+                <div class="model-bom-card-meta">
+                  <span>{{ bom.projectModel }}</span>
+                  <span>{{ enabledModelBomLineCount(bom) }} 个启用零件</span>
+                  <span v-if="bom.remark">{{ bom.remark }}</span>
+                </div>
+                <div class="model-bom-structure-preview">
+                  <div v-for="(group, groupIndex) in modelBomStructureGroups(bom)" :key="group.id" class="model-bom-structure-group">
+                    <div class="model-bom-structure-main">
+                      <span>{{ groupIndex + 1 }}</span>
+                      <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
+                        {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                      </el-tag>
+                      <strong>{{ formatModelBomStructureCore(group.line) }}</strong>
+                      <span>{{ formatModelBomStructureMeta(group.line) }}</span>
+                    </div>
+                    <div v-for="(child, childIndex) in group.children" :key="child.id" class="model-bom-structure-child">
+                      <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+                      <el-tag type="success" effect="plain">子零件</el-tag>
+                      <strong>{{ formatModelBomStructureCore(child) }}</strong>
+                      <span>{{ formatModelBomStructureMeta(child) }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <el-button type="primary" plain @click="applyModelBomToOrder(bom)">带入明细</el-button>
+            </article>
+          </div>
+        </div>
+
+        <div class="order-form-structure-panel">
+          <div class="order-form-structure-header">
+            <div>
+              <strong>当前草稿固定格式清单</strong>
+              <span>{{ orderFormStructureGroups.length }} 组 / {{ orderForm.lines.length }} 行</span>
+            </div>
+            <el-button size="small" :disabled="orderForm.lines.length === 0" @click="copyOrderFormStructureText">复制清单</el-button>
+          </div>
+          <div v-if="orderFormStructureGroups.length" class="order-form-structure-list">
+            <div v-for="(group, groupIndex) in orderFormStructureGroups" :key="group.id" class="order-form-structure-group">
+              <div class="order-form-structure-main">
+                <span>{{ groupIndex + 1 }}</span>
+                <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
+                  {{ group.type === 'component' ? `组件 ${group.entry.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.entry.line.parentComponentNo || '-'}` : '单独零件' }}
+                </el-tag>
+                <strong>{{ formatOrderFormStructureCore(group.entry.line) }}</strong>
+                <span>{{ formatOrderFormStructureMeta(group.entry.line) }}</span>
+              </div>
+              <div v-for="(child, childIndex) in group.children" :key="child.key" class="order-form-structure-child">
+                <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+                <el-tag type="success" effect="plain">子零件</el-tag>
+                <strong>{{ formatOrderFormStructureCore(child.line) }}</strong>
+                <span>{{ formatOrderFormStructureMeta(child.line) }}</span>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="暂无固定格式清单" />
         </div>
 
         <OrderLineEditor
@@ -518,6 +618,32 @@
         <el-table-column type="selection" width="48" :selectable="isImportOrderSelectable" />
         <el-table-column type="expand">
           <template #default="{ row }">
+            <div class="import-structure-panel">
+              <div class="import-structure-header">
+                <strong>固定格式清单</strong>
+                <span>{{ importStructureGroups(row.rows).length }} 组 / {{ row.rows.length }} 行</span>
+                <el-button size="small" :disabled="row.rows.length === 0" @click="copyImportOrderStructureText(row)">复制清单</el-button>
+              </div>
+              <div v-if="importStructureGroups(row.rows).length" class="import-structure-list">
+                <div v-for="(group, groupIndex) in importStructureGroups(row.rows)" :key="group.id" class="import-structure-group">
+                  <div class="import-structure-main">
+                    <span>{{ groupIndex + 1 }}</span>
+                    <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
+                      {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                    </el-tag>
+                    <strong>{{ formatImportStructureCore(group.line) }}</strong>
+                    <span>{{ formatImportStructureMeta(group.line) }}</span>
+                  </div>
+                  <div v-for="(child, childIndex) in group.children" :key="child.id" class="import-structure-child">
+                    <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+                    <el-tag type="success" effect="plain">子零件</el-tag>
+                    <strong>{{ formatImportStructureCore(child) }}</strong>
+                    <span>{{ formatImportStructureMeta(child) }}</span>
+                  </div>
+                </div>
+              </div>
+              <el-empty v-else description="暂无固定格式清单" />
+            </div>
             <el-table :data="row.rows" size="small" class="import-line-table">
               <el-table-column prop="importSequence" label="序号" width="90" />
               <el-table-column label="行类型" width="90">
@@ -740,6 +866,40 @@
               打开原 Excel
             </a>
           </div>
+            <div class="import-file-structure-panel">
+              <div class="import-structure-header">
+                <strong>固定格式清单</strong>
+                <span>{{ importFileStructureOrders.length }} 个订单 / 已加载 {{ importFilePreview.rows.length }} 行</span>
+                <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="copyImportFileStructureText">复制全部</el-button>
+              </div>
+            <div v-if="importFileStructureOrders.length" class="import-file-structure-orders">
+              <section v-for="previewOrder in importFileStructureOrders" :key="previewOrder.orderNo" class="import-file-structure-order">
+                <div class="import-file-structure-order__title">
+                  <strong>{{ previewOrder.orderNo }}</strong>
+                  <span>{{ previewOrder.customerName || '-' }} / {{ previewOrder.projectModel || '-' }}</span>
+                </div>
+                <div class="import-structure-list">
+                  <div v-for="(group, groupIndex) in previewOrder.groups" :key="group.id" class="import-structure-group">
+                    <div class="import-structure-main">
+                      <span>{{ groupIndex + 1 }}</span>
+                      <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
+                        {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                      </el-tag>
+                      <strong>{{ formatImportStructureCore(group.line) }}</strong>
+                      <span>{{ formatImportStructureMeta(group.line) }}</span>
+                    </div>
+                    <div v-for="(child, childIndex) in group.children" :key="child.id" class="import-structure-child">
+                      <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+                      <el-tag type="success" effect="plain">子零件</el-tag>
+                      <strong>{{ formatImportStructureCore(child) }}</strong>
+                      <span>{{ formatImportStructureMeta(child) }}</span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+            <el-empty v-else description="暂无固定格式清单" />
+          </div>
           <el-table :data="importFilePreview.rows" max-height="520" size="small" class="import-line-table">
             <el-table-column prop="sourceRowNo" label="Excel行" width="86" />
             <el-table-column prop="orderNo" label="订单编号" min-width="160" />
@@ -809,6 +969,7 @@ import {
   type OrderImportConfigResponse,
   type OrderImportFilePreview,
   type OrderImportPreviewOrder,
+  type OrderImportPreviewRow,
   type OrderImportSessionSummary,
   type OrderImportSessionPreview,
   type OrderImportSelectableOrderNosResponse
@@ -823,6 +984,7 @@ import StatusTag from '../components/StatusTag.vue';
 import type {
   Customer,
   InventorySummaryRow,
+  ModelBom,
   OrderDetail,
   OrderLine,
   OrderLineProductionTask,
@@ -845,6 +1007,60 @@ import {
   suggestedProductionPlanQuantity,
   validateDraftStockSourceLines
 } from '../utils/stockSourceReview';
+
+type ImportStructureRow = {
+  id: string;
+  orderNo?: string;
+  customerName?: string;
+  projectModel?: string;
+  lineType?: string;
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  partCode?: string;
+  drawingNo?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
+  partName?: string;
+  orderQuantity?: number;
+  unitUsage?: number;
+  demandQuantity: number;
+  unit: string;
+  processRoute?: string;
+};
+
+type ImportStructureGroup = {
+  id: string;
+  type: 'component' | 'standalone' | 'orphan';
+  line: ImportStructureRow;
+  children: ImportStructureRow[];
+};
+
+type ImportFileStructureOrder = {
+  orderNo: string;
+  customerName?: string;
+  projectModel?: string;
+  groups: ImportStructureGroup[];
+};
+
+type ModelBomStructureGroup = {
+  id: string;
+  type: 'component' | 'standalone' | 'orphan';
+  line: ModelBom['lines'][number];
+  children: Array<ModelBom['lines'][number]>;
+};
+
+type OrderFormStructureLine = {
+  key: string;
+  line: CreateOrderLinePayload;
+};
+
+type OrderFormStructureGroup = {
+  id: string;
+  type: 'component' | 'standalone' | 'orphan';
+  entry: OrderFormStructureLine;
+  children: OrderFormStructureLine[];
+};
 
 const router = useRouter();
 const customers = ref<Customer[]>([]);
@@ -893,6 +1109,20 @@ const selectedImportOrderNos = ref<Set<string>>(new Set());
 const allSelectableImportOrderNos = ref<Set<string> | null>(null);
 const allSelectableImportOrderWarnings = ref<Map<string, number> | null>(null);
 const selectedImportOrders = ref<OrderImportPreviewOrder[]>([]);
+const importFileStructureOrders = computed<ImportFileStructureOrder[]>(() => {
+  const rows = importFilePreview.value?.rows || [];
+  const byOrderNo = new Map<string, ImportStructureRow[]>();
+  for (const row of rows) {
+    const key = String(row.orderNo || '未识别订单').trim() || '未识别订单';
+    byOrderNo.set(key, [...(byOrderNo.get(key) || []), row]);
+  }
+  return [...byOrderNo.entries()].map(([orderNo, orderRows]) => ({
+    orderNo,
+    customerName: orderRows[0]?.customerName,
+    projectModel: orderRows[0]?.projectModel,
+    groups: importStructureGroups(orderRows)
+  }));
+});
 const activeCancelOrder = ref<OrderSummary>();
 const activeCancelOrderDetail = ref<OrderDetail>();
 const activeDeleteDraftOrder = ref<OrderSummary>();
@@ -937,6 +1167,14 @@ const orderForm = reactive<{
   orderDate: '',
   deliveryDate: '',
   lines: []
+});
+const orderFormStructureGroups = computed<OrderFormStructureGroup[]>(() => buildOrderFormStructureGroups(orderForm.lines));
+const modelBomRecommendationVisible = ref(false);
+const modelBomLoading = ref(false);
+const modelBomRecommendations = ref<ModelBom[]>([]);
+const modelBomSearch = reactive({
+  projectModel: '',
+  keyword: ''
 });
 const orderNoTouched = ref(false);
 const generatingOrderNo = ref(false);
@@ -1045,6 +1283,457 @@ function inheritedParentComponentNo(lines: CreateOrderLinePayload[]) {
     return previousLine.componentNo?.trim().toUpperCase() || '';
   }
   return previousLine.parentComponentNo?.trim().toUpperCase() || '';
+}
+
+function toggleModelBomRecommendation() {
+  modelBomRecommendationVisible.value = !modelBomRecommendationVisible.value;
+  if (modelBomRecommendationVisible.value && modelBomRecommendations.value.length === 0) {
+    void loadModelBomRecommendations();
+  }
+}
+
+function handleOrderCustomerChange() {
+  modelBomRecommendations.value = [];
+}
+
+async function loadModelBomRecommendations() {
+  if (!orderForm.customerId && !modelBomSearch.projectModel.trim() && !modelBomSearch.keyword.trim()) {
+    ElMessage.warning('请先选择客户，或输入机型 / 零件包关键字');
+    return;
+  }
+  modelBomLoading.value = true;
+  try {
+    modelBomRecommendations.value = await erpApi.modelBoms({
+      customerId: orderForm.customerId || undefined,
+      projectModel: modelBomSearch.projectModel.trim() || undefined,
+      keyword: modelBomSearch.keyword.trim() || undefined,
+      status: 'ENABLED'
+    });
+    if (modelBomRecommendations.value.length === 0) {
+      ElMessage.info('没有找到适用零件包');
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件包推荐加载失败');
+  } finally {
+    modelBomLoading.value = false;
+  }
+}
+
+function enabledModelBomLines(bom: ModelBom) {
+  const lines = bom.lines
+    .filter((line) => line.status === 'ENABLED' && line.materialStatus !== 'DISABLED')
+    .sort((left, right) => left.sortOrder - right.sortOrder);
+  const childrenByParent = new Map<string, typeof lines>();
+  const rootLines: typeof lines = [];
+  for (const line of lines) {
+    if (line.lineType === 'PART' && line.parentComponentNo) {
+      const key = line.parentComponentNo;
+      childrenByParent.set(key, [...(childrenByParent.get(key) || []), line]);
+    } else {
+      rootLines.push(line);
+    }
+  }
+  const ordered: typeof lines = [];
+  const attachedIds = new Set<string>();
+  for (const line of rootLines) {
+    ordered.push(line);
+    if (line.lineType === 'COMPONENT' && line.componentNo) {
+      for (const child of childrenByParent.get(line.componentNo) || []) {
+        ordered.push(child);
+        attachedIds.add(child.id);
+      }
+    }
+  }
+  for (const line of lines) {
+    if (line.lineType === 'PART' && line.parentComponentNo && !attachedIds.has(line.id)) {
+      ordered.push(line);
+    }
+  }
+  return ordered;
+}
+
+function enabledModelBomLineCount(bom: ModelBom) {
+  return enabledModelBomLines(bom).length;
+}
+
+function normalizeComponentNo(value?: string | null) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function buildOrderFormStructureGroups(lines: CreateOrderLinePayload[]): OrderFormStructureGroup[] {
+  const entries = lines.map((line, index) => ({ key: `order-form-line-${index}`, line }));
+  const childrenByParent = new Map<string, OrderFormStructureLine[]>();
+  const rootLines: OrderFormStructureLine[] = [];
+  for (const entry of entries) {
+    if (entry.line.lineType !== 'COMPONENT' && entry.line.parentComponentNo) {
+      const key = normalizeComponentNo(entry.line.parentComponentNo);
+      childrenByParent.set(key, [...(childrenByParent.get(key) || []), entry]);
+    } else {
+      rootLines.push(entry);
+    }
+  }
+  const groups: OrderFormStructureGroup[] = [];
+  const attachedKeys = new Set<string>();
+  for (const entry of rootLines) {
+    if (entry.line.lineType === 'COMPONENT') {
+      const children = childrenByParent.get(normalizeComponentNo(entry.line.componentNo)) || [];
+      children.forEach((child) => attachedKeys.add(child.key));
+      groups.push({ id: `component-${entry.key}`, type: 'component', entry, children });
+      continue;
+    }
+    groups.push({ id: `standalone-${entry.key}`, type: 'standalone', entry, children: [] });
+  }
+  for (const entry of entries) {
+    if (entry.line.lineType !== 'COMPONENT' && entry.line.parentComponentNo && !attachedKeys.has(entry.key)) {
+      groups.push({ id: `orphan-${entry.key}`, type: 'orphan', entry, children: [] });
+    }
+  }
+  return groups;
+}
+
+function displayOrderFormPartCode(line: CreateOrderLinePayload) {
+  return isGeneratedPlaceholderPartCode(line.partCode) ? '-' : line.partCode || '-';
+}
+
+function orderFormProcessText(line: CreateOrderLinePayload) {
+  const steps = line.processSteps?.map((step) => step.processName).filter(Boolean) || [];
+  return steps.length ? steps.join('、') : '-';
+}
+
+function formatOrderFormStructureCore(line: CreateOrderLinePayload) {
+  return `${displayOrderFormPartCode(line)} | ${line.partName || '未填写零件名称'} | 订单 ${formatQuantity(line.quantity || 0, line.unit || '件')}`;
+}
+
+function formatOrderFormStructureMeta(line: CreateOrderLinePayload) {
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  return `计划 ${formatQuantity(line.productionPlanQuantity || 0, line.unit || '件')} | 图纸 ${drawingText} | 工艺 ${orderFormProcessText(line)}`;
+}
+
+const orderFormStructureText = computed(() => {
+  const header = `${orderForm.orderNo || '未生成订单号'} / ${orderForm.orderDate || '-'} / ${orderForm.deliveryDate || '-'}`;
+  const lines = [header];
+  for (const [groupIndex, group] of orderFormStructureGroups.value.entries()) {
+    const groupLine = group.entry.line;
+    const prefix =
+      group.type === 'component'
+        ? `${groupIndex + 1}. 组件 ${groupLine.componentNo || '-'}`
+        : group.type === 'orphan'
+          ? `${groupIndex + 1}. 未匹配父级 ${groupLine.parentComponentNo || '-'}`
+          : `${groupIndex + 1}. 单独零件`;
+    lines.push(`${prefix} | ${formatOrderFormStructureCore(groupLine)} | ${formatOrderFormStructureMeta(groupLine)}`);
+    group.children.forEach((child, childIndex) => {
+      lines.push(`  ${groupIndex + 1}.${childIndex + 1} 子零件 | ${formatOrderFormStructureCore(child.line)} | ${formatOrderFormStructureMeta(child.line)}`);
+    });
+  }
+  return lines.join('\n');
+});
+
+async function copyOrderFormStructureText() {
+  const text = orderFormStructureText.value.trim();
+  if (!text) {
+    ElMessage.warning('暂无可复制的固定格式清单');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('当前草稿固定格式清单已复制');
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
+}
+
+function importStructureGroups(rows: ImportStructureRow[]): ImportStructureGroup[] {
+  const childrenByParent = new Map<string, ImportStructureRow[]>();
+  const rootLines: ImportStructureRow[] = [];
+  for (const line of rows) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo) {
+      const key = normalizeComponentNo(line.parentComponentNo);
+      childrenByParent.set(key, [...(childrenByParent.get(key) || []), line]);
+    } else {
+      rootLines.push(line);
+    }
+  }
+  const groups: ImportStructureGroup[] = [];
+  const attachedIds = new Set<string>();
+  for (const line of rootLines) {
+    if (line.lineType === 'COMPONENT') {
+      const children = childrenByParent.get(normalizeComponentNo(line.componentNo)) || [];
+      children.forEach((child) => attachedIds.add(child.id));
+      groups.push({ id: `component-${line.id}`, type: 'component', line, children });
+      continue;
+    }
+    groups.push({ id: `standalone-${line.id}`, type: 'standalone', line, children: [] });
+  }
+  for (const line of rows) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo && !attachedIds.has(line.id)) {
+      groups.push({ id: `orphan-${line.id}`, type: 'orphan', line, children: [] });
+    }
+  }
+  return groups;
+}
+
+function formatImportStructureCore(line: ImportStructureRow) {
+  return `${line.partCode || '-'} | ${line.partName || '-'} | 需求 ${formatQuantity(line.demandQuantity, line.unit)}`;
+}
+
+function formatImportStructureMeta(line: ImportStructureRow) {
+  const drawingText = [line.drawingNo, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const processText = line.processRoute || '-';
+  const quantityText = line.orderQuantity || line.unitUsage ? `订单 ${line.orderQuantity ?? '-'} / 单套 ${line.unitUsage ?? '-'}` : '数量 -';
+  return `${quantityText} | 图纸 ${drawingText} | 工艺 ${processText}`;
+}
+
+function formatImportStructureGroupsText(title: string, groups: ImportStructureGroup[]) {
+  const lines = [title];
+  for (const [groupIndex, group] of groups.entries()) {
+    const prefix =
+      group.type === 'component'
+        ? `${groupIndex + 1}. 组件 ${group.line.componentNo || '-'}`
+        : group.type === 'orphan'
+          ? `${groupIndex + 1}. 未匹配父级 ${group.line.parentComponentNo || '-'}`
+          : `${groupIndex + 1}. 单独零件`;
+    lines.push(`${prefix} | ${formatImportStructureCore(group.line)} | ${formatImportStructureMeta(group.line)}`);
+    group.children.forEach((child, childIndex) => {
+      lines.push(`  ${groupIndex + 1}.${childIndex + 1} 子零件 | ${formatImportStructureCore(child)} | ${formatImportStructureMeta(child)}`);
+    });
+  }
+  return lines.join('\n');
+}
+
+function formatImportStructureText(title: string, rows: ImportStructureRow[]) {
+  return formatImportStructureGroupsText(title, importStructureGroups(rows));
+}
+
+function importOrderStructureTitle(order: Pick<OrderImportPreviewOrder, 'orderNo' | 'customerName' | 'projectModel'>) {
+  return [order.orderNo || '未识别订单', order.customerName || '-', order.projectModel || '-'].join(' / ');
+}
+
+async function copyStructureTextToClipboard(text: string, successMessage: string) {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    ElMessage.warning('暂无可复制的固定格式清单');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(normalizedText);
+    ElMessage.success(successMessage);
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
+}
+
+async function copyImportOrderStructureText(order: OrderImportPreviewOrder) {
+  await copyStructureTextToClipboard(
+    formatImportStructureText(importOrderStructureTitle(order), order.rows),
+    '导入订单固定格式清单已复制'
+  );
+}
+
+async function copyImportFileStructureText() {
+  const sections = importFileStructureOrders.value.map((order) =>
+    formatImportStructureGroupsText(
+      [order.orderNo || '未识别订单', order.customerName || '-', order.projectModel || '-'].join(' / '),
+      order.groups
+    )
+  );
+  await copyStructureTextToClipboard(sections.join('\n\n'), '文件预览固定格式清单已复制');
+}
+
+function modelBomStructureGroups(bom: ModelBom): ModelBomStructureGroup[] {
+  const lines = enabledModelBomLines(bom);
+  const childrenByParent = new Map<string, typeof lines>();
+  const rootLines: typeof lines = [];
+  for (const line of lines) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo) {
+      const key = normalizeComponentNo(line.parentComponentNo);
+      childrenByParent.set(key, [...(childrenByParent.get(key) || []), line]);
+    } else {
+      rootLines.push(line);
+    }
+  }
+  const groups: ModelBomStructureGroup[] = [];
+  const attachedIds = new Set<string>();
+  for (const line of rootLines) {
+    if (line.lineType === 'COMPONENT') {
+      const children = childrenByParent.get(normalizeComponentNo(line.componentNo)) || [];
+      children.forEach((child) => attachedIds.add(child.id));
+      groups.push({ id: `component-${line.id}`, type: 'component', line, children });
+      continue;
+    }
+    groups.push({ id: `standalone-${line.id}`, type: 'standalone', line, children: [] });
+  }
+  for (const line of lines) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo && !attachedIds.has(line.id)) {
+      groups.push({ id: `orphan-${line.id}`, type: 'orphan', line, children: [] });
+    }
+  }
+  return groups;
+}
+
+function formatModelBomStructureCore(line: ModelBom['lines'][number]) {
+  return `${line.partCode || '-'} | ${line.partName || '-'} | 默认 ${formatQuantity(line.defaultQuantity, line.unit)}`;
+}
+
+function formatModelBomStructureMeta(line: ModelBom['lines'][number]) {
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const processText = line.defaultProcessRoute || '-';
+  const specificationText = line.partSpecification || '-';
+  return `图纸 ${drawingText} | 工艺 ${processText} | 规格 ${specificationText}`;
+}
+
+function isGeneratedPlaceholderPartCode(value?: string) {
+  return /^P-\d{4}-\d+$/i.test(String(value || '').trim());
+}
+
+function isBlankOrderLine(line: CreateOrderLinePayload) {
+  const partCode = line.partCode?.trim();
+  return (
+    (!partCode || isGeneratedPlaceholderPartCode(partCode)) &&
+    !line.partName?.trim() &&
+    !line.drawingNo?.trim() &&
+    !line.partSpecification?.trim() &&
+    !line.componentNo?.trim() &&
+    !line.parentComponentNo?.trim() &&
+    (!line.processSteps || line.processSteps.length === 0)
+  );
+}
+
+function splitBomDefaultProcessRoute(value?: string | null) {
+  return String(value || '')
+    .split(/[、,，;；\n\r]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function nextAvailableOrderComponentNo(usedComponentNos: Set<string>) {
+  let maxNo = 0;
+  for (const componentNo of usedComponentNos) {
+    const matched = /^C(\d+)$/i.exec(componentNo);
+    if (matched) {
+      maxNo = Math.max(maxNo, Number(matched[1]) || 0);
+    }
+  }
+  for (let nextNo = maxNo + 1; nextNo <= 9999; nextNo += 1) {
+    const componentNo = `C${String(nextNo).padStart(3, '0')}`;
+    if (!usedComponentNos.has(componentNo)) {
+      usedComponentNos.add(componentNo);
+      return componentNo;
+    }
+  }
+  throw new Error('当前订单组件编号已超过 C9999，无法继续带入零件包');
+}
+
+function buildBomComponentNoMap(bomLines: ModelBom['lines'], existingLines: CreateOrderLinePayload[]) {
+  const usedComponentNos = new Set(
+    existingLines
+      .filter((line) => line.lineType === 'COMPONENT')
+      .map((line) => normalizeComponentNo(line.componentNo))
+      .filter(Boolean)
+  );
+  const componentNoMap = new Map<string, string>();
+
+  // BOM 推荐带入时，componentNo 只在当前订单内有效；遇到已有编号必须重映射并同步子零件父级。
+  for (const bomLine of bomLines) {
+    if (bomLine.lineType !== 'COMPONENT') {
+      continue;
+    }
+    const sourceComponentNo = normalizeComponentNo(bomLine.componentNo);
+    if (!sourceComponentNo || componentNoMap.has(sourceComponentNo)) {
+      continue;
+    }
+    if (!usedComponentNos.has(sourceComponentNo)) {
+      usedComponentNos.add(sourceComponentNo);
+      componentNoMap.set(sourceComponentNo, sourceComponentNo);
+      continue;
+    }
+    componentNoMap.set(sourceComponentNo, nextAvailableOrderComponentNo(usedComponentNos));
+  }
+
+  return componentNoMap;
+}
+
+function orderImportableModelBomLines(bomLines: ModelBom['lines'], componentNoMap: Map<string, string>) {
+  return bomLines.filter((bomLine) => {
+    if (bomLine.lineType === 'COMPONENT') {
+      const sourceComponentNo = normalizeComponentNo(bomLine.componentNo);
+      return Boolean(sourceComponentNo && componentNoMap.has(sourceComponentNo));
+    }
+    const sourceParentComponentNo = normalizeComponentNo(bomLine.parentComponentNo);
+    return !sourceParentComponentNo || componentNoMap.has(sourceParentComponentNo);
+  });
+}
+
+function createLineFromModelBomLine(
+  bom: ModelBom,
+  bomLine: ModelBom['lines'][number],
+  index: number,
+  componentNoMap = new Map<string, string>()
+): CreateOrderLinePayload {
+  const quantity = Number(bomLine.defaultQuantity || 1);
+  const line = newLine(index);
+  line.lineType = bomLine.lineType === 'COMPONENT' ? 'COMPONENT' : 'PART';
+  line.partCategory = bomLine.partCategory || '';
+  const sourceComponentNo = normalizeComponentNo(bomLine.componentNo);
+  const sourceParentComponentNo = normalizeComponentNo(bomLine.parentComponentNo);
+  line.componentNo = bomLine.lineType === 'COMPONENT' ? componentNoMap.get(sourceComponentNo) || sourceComponentNo : '';
+  line.parentComponentNo = bomLine.lineType === 'PART' ? componentNoMap.get(sourceParentComponentNo) || sourceParentComponentNo : '';
+  line.importSequence = '';
+  line.partCode = bomLine.partCode;
+  line.partName = bomLine.partName;
+  line.projectModel = bom.projectModel;
+  line.partSpecification = bomLine.partSpecification || '';
+  line.drawingNo = bomLine.drawingNo || '';
+  line.drawingVersion = bomLine.drawingVersion || line.drawingVersion;
+  line.drawingDate = bomLine.drawingDate || undefined;
+  line.drawingStatus = bomLine.drawingStatus || '';
+  line.drawingFileName = bomLine.drawingFileName || '';
+  line.drawingFileUrl = bomLine.drawingFileUrl || '';
+  line.quantity = quantity > 0 ? quantity : 1;
+  line.productionPlanQuantity = line.quantity;
+  line.productionPlanSuggestedQuantity = line.quantity;
+  line.unit = bomLine.unit || line.unit;
+  line.deliveryDate = orderForm.deliveryDate;
+  line.remark = bomLine.remark || '';
+  line.fulfillmentMode = 'PRODUCTION';
+  line.selectedStockSources = [];
+  // BOM 默认工艺只作为下单初始建议，保存订单后每个订单零件仍保留独立流程快照。
+  line.processSteps = splitBomDefaultProcessRoute(bomLine.defaultProcessRoute).map((processName) => ({ processName }));
+  return line;
+}
+
+async function applyModelBomToOrder(bom: ModelBom) {
+  const bomLines = enabledModelBomLines(bom);
+  if (bomLines.length === 0) {
+    ElMessage.warning('该零件包没有可带入的启用零件');
+    return;
+  }
+  const filledLines = orderForm.lines.filter((line) => !isBlankOrderLine(line));
+  const existingPartCodes = new Set(filledLines.map((line) => line.partCode?.trim()).filter(Boolean));
+  const componentNoMap = buildBomComponentNoMap(bomLines, filledLines);
+  const importableBomLines = orderImportableModelBomLines(bomLines, componentNoMap);
+  const skippedInvalidStructureCount = bomLines.length - importableBomLines.length;
+  if (importableBomLines.length === 0) {
+    ElMessage.warning('该零件包没有可带入的有效组件结构');
+    return;
+  }
+  const duplicatePartCodes = [...new Set(importableBomLines.map((line) => line.partCode).filter((partCode) => existingPartCodes.has(partCode)))];
+  if (duplicatePartCodes.length > 0) {
+    try {
+      await ElMessageBox.confirm(
+        `当前订单已存在 ${duplicatePartCodes.join('、')}，继续会追加重复零件。是否继续？`,
+        '确认带入零件包',
+        { type: 'warning', confirmButtonText: '继续带入', cancelButtonText: '取消' }
+      );
+    } catch {
+      return;
+    }
+  }
+  const remappedComponentCount = [...componentNoMap.entries()].filter(([sourceComponentNo, targetComponentNo]) => sourceComponentNo !== targetComponentNo).length;
+  const importedLines = importableBomLines.map((line, index) => createLineFromModelBomLine(bom, line, filledLines.length + index, componentNoMap));
+  orderForm.lines = [...filledLines, ...importedLines];
+  const remapText = remappedComponentCount > 0 ? `，${remappedComponentCount} 个组件编号已避让当前草稿` : '';
+  const skippedText = skippedInvalidStructureCount > 0 ? `，已跳过 ${skippedInvalidStructureCount} 个父组件缺失或组件编号无效的 BOM 行` : '';
+  ElMessage.success(`已带入 ${importedLines.length} 个零件${remapText}${skippedText}，请核对数量、图号、厚度和工艺后保存草稿订单`);
 }
 
 async function loadCustomers() {
@@ -1208,6 +1897,10 @@ async function openCreate() {
   orderForm.deliveryDate = defaultDeliveryDate(orderForm.orderDate);
   syncOrderDateRangeFromForm();
   orderForm.lines = [newLine(0), newLine(1), newLine(2)];
+  modelBomRecommendationVisible.value = true;
+  modelBomRecommendations.value = [];
+  modelBomSearch.projectModel = '';
+  modelBomSearch.keyword = '';
   orderNoTouched.value = false;
   clearOrderNoCheck();
   if (!(await loadInventorySummary())) {
@@ -2187,11 +2880,31 @@ function addLine() {
 function removeLine(index: number) {
   // 默认仍创建三行零件，操作人员可删除误填行，但订单至少保留一行零件。
   if (orderForm.lines.length > 1) {
-    orderForm.lines.splice(index, 1);
+    const [removedLine] = orderForm.lines.splice(index, 1);
+    clearParentComponentNoAfterRemovingLine(removedLine);
     return;
   }
   orderForm.lines = [newLine(0)];
   ElMessage.info('订单至少保留一行，已清空当前零件');
+}
+
+function clearParentComponentNoAfterRemovingLine(removedLine?: CreateOrderLinePayload) {
+  const removedComponentNo = normalizeComponentNo(removedLine?.componentNo);
+  if (removedLine?.lineType !== 'COMPONENT' || !removedComponentNo) {
+    return;
+  }
+  const stillHasComponent = orderForm.lines.some(
+    (line) => line.lineType === 'COMPONENT' && normalizeComponentNo(line.componentNo) === removedComponentNo
+  );
+  if (stillHasComponent) {
+    return;
+  }
+  // 组件行删除后，只清空仍指向该组件的子零件；已手工指向其他组件的子零件不覆盖。
+  for (const line of orderForm.lines) {
+    if (line.lineType !== 'COMPONENT' && normalizeComponentNo(line.parentComponentNo) === removedComponentNo) {
+      line.parentComponentNo = '';
+    }
+  }
 }
 
 async function saveOrder() {
@@ -2761,6 +3474,207 @@ onMounted(async () => {
   margin-left: 0;
 }
 
+.model-bom-recommendation {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+}
+
+.model-bom-recommendation-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(360px, 1.5fr);
+  align-items: end;
+  gap: 12px;
+}
+
+.model-bom-recommendation-title {
+  display: grid;
+  gap: 4px;
+}
+
+.model-bom-recommendation-title span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-recommendation-search {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  gap: 8px;
+}
+
+.model-bom-card-list {
+  display: grid;
+  gap: 8px;
+}
+
+.model-bom-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.model-bom-card-main {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.model-bom-card-title,
+.model-bom-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-bom-card-meta {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.model-bom-structure-preview {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.model-bom-structure-group {
+  display: grid;
+  gap: 5px;
+}
+
+.model-bom-structure-main,
+.model-bom-structure-child {
+  display: grid;
+  grid-template-columns: 28px 108px minmax(180px, 1fr) minmax(220px, 1.25fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.model-bom-structure-child {
+  margin-left: 28px;
+  background: #f0fdf4;
+}
+
+.model-bom-structure-main > span:first-child,
+.model-bom-structure-child > span:first-child {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-structure-main strong,
+.model-bom-structure-child strong,
+.model-bom-structure-main > span:last-child,
+.model-bom-structure-child > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-bom-structure-main > span:last-child,
+.model-bom-structure-child > span:last-child {
+  color: #475569;
+  font-size: 12px;
+}
+
+.order-form-structure-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.order-form-structure-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.order-form-structure-header > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.order-form-structure-header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.order-form-structure-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.order-form-structure-group {
+  display: grid;
+  gap: 6px;
+}
+
+.order-form-structure-main,
+.order-form-structure-child {
+  display: grid;
+  grid-template-columns: 34px 118px minmax(220px, 1fr) minmax(320px, 1.45fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.order-form-structure-child {
+  margin-left: 34px;
+  background: #f0fdf4;
+}
+
+.order-form-structure-main > span:first-child,
+.order-form-structure-child > span:first-child {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.order-form-structure-main strong,
+.order-form-structure-child strong,
+.order-form-structure-main > span:last-child,
+.order-form-structure-child > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-form-structure-main > span:last-child,
+.order-form-structure-child > span:last-child {
+  color: #475569;
+  font-size: 12px;
+}
+
 .duplicate-help-button {
   color: #f59e0b;
 }
@@ -2988,8 +3902,113 @@ onMounted(async () => {
   gap: 4px;
 }
 
+.import-structure-panel {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 12px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.import-structure-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.import-structure-header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.import-structure-list {
+  display: grid;
+  gap: 8px;
+}
+
+.import-structure-group {
+  display: grid;
+  gap: 6px;
+}
+
+.import-structure-main,
+.import-structure-child {
+  display: grid;
+  grid-template-columns: 34px 118px minmax(220px, 1fr) minmax(280px, 1.35fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.import-structure-child {
+  margin-left: 34px;
+  background: #f0fdf4;
+}
+
+.import-structure-main > span:first-child,
+.import-structure-child > span:first-child {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.import-structure-main strong,
+.import-structure-child strong,
+.import-structure-main > span:last-child,
+.import-structure-child > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-structure-main > span:last-child,
+.import-structure-child > span:last-child {
+  color: #475569;
+  font-size: 12px;
+}
+
 .import-file-preview-panel {
   min-height: 180px;
+}
+
+.import-file-structure-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.import-file-structure-orders {
+  display: grid;
+  gap: 10px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.import-file-structure-order {
+  display: grid;
+  gap: 8px;
+}
+
+.import-file-structure-order__title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 2px;
+}
+
+.import-file-structure-order__title span {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .import-file-preview-header {
@@ -3196,6 +4215,51 @@ onMounted(async () => {
     width: 100%;
   }
 
+  .model-bom-recommendation-toolbar,
+  .model-bom-recommendation-search,
+  .model-bom-card {
+    grid-template-columns: 1fr;
+  }
+
+  .model-bom-line-preview {
+    white-space: normal;
+  }
+
+  .model-bom-structure-main,
+  .model-bom-structure-child {
+    grid-template-columns: 28px minmax(92px, auto) minmax(0, 1fr);
+  }
+
+  .model-bom-structure-main > span:last-child,
+  .model-bom-structure-child > span:last-child {
+    grid-column: 3;
+    white-space: normal;
+  }
+
+  .model-bom-structure-child {
+    margin-left: 16px;
+  }
+
+  .order-form-structure-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .order-form-structure-main,
+  .order-form-structure-child {
+    grid-template-columns: 28px minmax(92px, auto) minmax(0, 1fr);
+  }
+
+  .order-form-structure-main > span:last-child,
+  .order-form-structure-child > span:last-child {
+    grid-column: 3;
+    white-space: normal;
+  }
+
+  .order-form-structure-child {
+    margin-left: 16px;
+  }
+
   .dialog-footer-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3230,8 +4294,34 @@ onMounted(async () => {
     flex-direction: column;
   }
 
+  .import-structure-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .import-structure-main,
+  .import-structure-child {
+    grid-template-columns: 28px minmax(92px, auto) minmax(0, 1fr);
+  }
+
+  .import-structure-main > span:last-child,
+  .import-structure-child > span:last-child {
+    grid-column: 3;
+    white-space: normal;
+  }
+
+  .import-structure-child {
+    margin-left: 16px;
+  }
+
   .import-file-actions {
     justify-content: flex-start;
+  }
+
+  .import-file-structure-order__title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
   }
 }
 </style>

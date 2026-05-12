@@ -5,7 +5,18 @@ import type {
   InventoryBatch,
   InventoryAdjustment,
   InventoryMaterialSuggestion,
+  MaterialApplicability,
+  MaterialApplicabilityResponse,
+  MaterialDashboardResponse,
+  MaterialDrawingRevision,
+  MaterialDrawingRevisionResponse,
+  CommitMaterialImportSessionResponse,
+  DiscardMaterialImportSessionResponse,
+  MaterialImportSessionPreview,
+  MaterialTransformRule,
   MaterialMemory,
+  ModelBom,
+  ModelBomLine,
   InventoryReservationAudit,
   InventorySourceDetailResponse,
   InventorySummaryRow,
@@ -122,11 +133,123 @@ export interface MaterialMemoryFilters {
   status?: CommonStatus;
 }
 
+export interface MaterialDashboardFilters {
+  keyword?: string;
+  customerId?: string;
+  projectModel?: string;
+  scopeType?: 'COMMON' | 'CUSTOM';
+  drawingNo?: string;
+  drawingStatus?: string;
+  drawingDateFrom?: string;
+  drawingDateTo?: string;
+  lastOrderDateFrom?: string;
+  lastOrderDateTo?: string;
+  status?: CommonStatus;
+  limit?: number;
+  offset?: number;
+}
+
 export interface UpdateMaterialMemoryPayload {
   partCode?: string;
   partName?: string;
   unit?: string;
   partSpecification?: string;
+  status?: CommonStatus;
+}
+
+export interface CreateMaterialMemoryPayload {
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string;
+  status?: CommonStatus;
+}
+
+export interface SaveMaterialApplicabilityPayload {
+  customerId?: string;
+  projectModel?: string;
+  remark?: string;
+  status?: CommonStatus;
+}
+
+export interface ModelBomFilters {
+  keyword?: string;
+  customerId?: string;
+  projectModel?: string;
+  status?: CommonStatus;
+}
+
+export interface SaveModelBomPayload {
+  bomName: string;
+  customerId?: string;
+  projectModel: string;
+  remark?: string;
+  status?: CommonStatus;
+}
+
+export interface CopyModelBomPayload {
+  customerId: string;
+  bomName?: string;
+  projectModel?: string;
+  remark?: string;
+  status?: CommonStatus;
+}
+
+export interface SaveMaterialDrawingRevisionPayload {
+  drawingNo: string;
+  drawingVersion: string;
+  drawingDate?: string;
+  drawingStatus?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
+  isDefault?: boolean;
+  defaultChangedBy?: string;
+  remark?: string;
+  status?: CommonStatus;
+}
+
+export interface SaveModelBomLinePayload {
+  materialId: string;
+  lineType?: 'PART' | 'COMPONENT';
+  partCategory?: string;
+  componentNo?: string;
+  parentComponentNo?: string;
+  defaultDrawingRevisionId?: string;
+  defaultProcessRoute?: string;
+  defaultQuantity: number;
+  remark?: string;
+  sortOrder?: number;
+  status?: CommonStatus;
+}
+
+export interface ReorderModelBomLinesPayload {
+  items: Array<{
+    lineId: string;
+    sortOrder: number;
+  }>;
+}
+
+export interface MaterialTransformRuleFilters {
+  keyword?: string;
+  customerId?: string;
+  projectModel?: string;
+  sourceMaterialId?: string;
+  sourcePartCode?: string;
+  targetMaterialId?: string;
+  targetPartCode?: string;
+  status?: CommonStatus;
+}
+
+export interface SaveMaterialTransformRulePayload {
+  sourceMaterialId: string;
+  targetMaterialId: string;
+  customerId?: string;
+  projectModel?: string;
+  conversionDescription?: string;
+  defaultProcessRoute?: string;
+  multiplier?: number;
+  lossRate?: number;
+  remark?: string;
   status?: CommonStatus;
 }
 
@@ -1178,6 +1301,209 @@ export const erpApi = {
         status: filters.status
       })}`
     );
+  },
+  materialDashboard(filters: MaterialDashboardFilters = {}) {
+    return request<MaterialDashboardResponse>(
+      `/materials/dashboard${toQuery({
+        keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
+        scopeType: filters.scopeType,
+        drawingNo: filters.drawingNo,
+        drawingStatus: filters.drawingStatus,
+        drawingDateFrom: filters.drawingDateFrom,
+        drawingDateTo: filters.drawingDateTo,
+        lastOrderDateFrom: filters.lastOrderDateFrom,
+        lastOrderDateTo: filters.lastOrderDateTo,
+        status: filters.status,
+        limit: filters.limit ? String(filters.limit) : undefined,
+        offset: filters.offset ? String(filters.offset) : undefined
+      })}`
+    );
+  },
+  materialProjectModels(customerId?: string) {
+    return request<string[]>(`/materials/project-models${toQuery({ customerId })}`);
+  },
+  createMaterialImportSession(createdBy?: string) {
+    return request<MaterialImportSessionPreview>('/inventory/material-import-sessions', {
+      method: 'POST',
+      body: JSON.stringify({ createdBy })
+    });
+  },
+  materialImportSession(sessionId: string, rowLimit = 100, rowOffset = 0) {
+    return request<MaterialImportSessionPreview>(
+      `/inventory/material-import-sessions/${sessionId}${toQuery({
+        rowLimit: String(rowLimit),
+        rowOffset: String(rowOffset)
+      })}`
+    );
+  },
+  async downloadMaterialImportTemplate() {
+    const response = await fetch(`${apiBaseUrl}/inventory/material-import-template`);
+    if (!response.ok) {
+      throw new Error(await uploadErrorMessage(response, '零件库导入模板下载失败'));
+    }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = '零件基础库导入模板.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+  },
+  async downloadMaterialImportIssueReport(sessionId: string) {
+    const response = await fetch(`${apiBaseUrl}/inventory/material-import-sessions/${sessionId}/error-report`);
+    if (!response.ok) {
+      throw new Error(await uploadErrorMessage(response, '零件库导入问题明细下载失败'));
+    }
+    const blob = await response.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = '零件库导入问题明细.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+  },
+  async uploadMaterialImportFile(sessionId: string, file: File) {
+    const formData = new FormData();
+    formData.set('file', file);
+    const response = await fetch(`${apiBaseUrl}/inventory/material-import-sessions/${sessionId}/files`, {
+      method: 'POST',
+      body: formData
+    });
+    if (!response.ok) {
+      throw new Error(await uploadErrorMessage(response, '零件库导入文件上传失败'));
+    }
+    return response.json() as Promise<MaterialImportSessionPreview>;
+  },
+  commitMaterialImportSession(sessionId: string, previewToken: string) {
+    return request<CommitMaterialImportSessionResponse>(`/inventory/material-import-sessions/${sessionId}/commit`, {
+      method: 'POST',
+      body: JSON.stringify({ previewToken })
+    });
+  },
+  deleteMaterialImportFile(sessionId: string, fileId: string) {
+    return request<MaterialImportSessionPreview>(`/inventory/material-import-sessions/${sessionId}/files/${fileId}`, {
+      method: 'DELETE'
+    });
+  },
+  discardMaterialImportSession(sessionId: string) {
+    return request<DiscardMaterialImportSessionResponse>(`/inventory/material-import-sessions/${sessionId}`, {
+      method: 'DELETE'
+    });
+  },
+  createInventoryMaterial(payload: CreateMaterialMemoryPayload) {
+    return request<MaterialMemory>('/inventory/materials', { method: 'POST', body: JSON.stringify(payload) });
+  },
+  materialDrawingRevisions(materialId: string) {
+    return request<MaterialDrawingRevisionResponse>(`/inventory/materials/${materialId}/drawing-revisions`);
+  },
+  saveMaterialDrawingRevision(materialId: string, payload: SaveMaterialDrawingRevisionPayload) {
+    return request<MaterialDrawingRevision>(`/inventory/materials/${materialId}/drawing-revisions`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  updateMaterialDrawingRevision(revisionId: string, payload: SaveMaterialDrawingRevisionPayload) {
+    return request<MaterialDrawingRevision>(`/inventory/material-drawing-revisions/${revisionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  disableMaterialDrawingRevision(revisionId: string) {
+    return request<MaterialDrawingRevision>(`/inventory/material-drawing-revisions/${revisionId}`, {
+      method: 'DELETE'
+    });
+  },
+  materialApplicabilities(materialId: string) {
+    return request<MaterialApplicabilityResponse>(`/inventory/materials/${materialId}/applicabilities`);
+  },
+  saveMaterialApplicability(materialId: string, payload: SaveMaterialApplicabilityPayload) {
+    return request<MaterialApplicability>(`/inventory/materials/${materialId}/applicabilities`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  updateMaterialApplicability(applicabilityId: string, payload: SaveMaterialApplicabilityPayload) {
+    return request<MaterialApplicability>(`/inventory/material-applicabilities/${applicabilityId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  disableMaterialApplicability(applicabilityId: string) {
+    return request<MaterialApplicability>(`/inventory/material-applicabilities/${applicabilityId}`, {
+      method: 'DELETE'
+    });
+  },
+  modelBoms(filters: ModelBomFilters = {}) {
+    return request<ModelBom[]>(
+      `/inventory/model-boms${toQuery({
+        keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
+        status: filters.status
+      })}`
+    );
+  },
+  modelBom(bomId: string) {
+    return request<ModelBom>(`/inventory/model-boms/${bomId}`);
+  },
+  createModelBom(payload: SaveModelBomPayload) {
+    return request<ModelBom>('/inventory/model-boms', { method: 'POST', body: JSON.stringify(payload) });
+  },
+  copyModelBom(bomId: string, payload: CopyModelBomPayload) {
+    return request<ModelBom>(`/inventory/model-boms/${bomId}/copy`, { method: 'POST', body: JSON.stringify(payload) });
+  },
+  updateModelBom(bomId: string, payload: SaveModelBomPayload) {
+    return request<ModelBom>(`/inventory/model-boms/${bomId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  },
+  disableModelBom(bomId: string) {
+    return request<ModelBom>(`/inventory/model-boms/${bomId}`, { method: 'DELETE' });
+  },
+  saveModelBomLine(bomId: string, payload: SaveModelBomLinePayload) {
+    return request<ModelBomLine>(`/inventory/model-boms/${bomId}/lines`, { method: 'POST', body: JSON.stringify(payload) });
+  },
+  reorderModelBomLines(bomId: string, payload: ReorderModelBomLinesPayload) {
+    return request<ModelBom>(`/inventory/model-boms/${bomId}/lines/reorder`, { method: 'PATCH', body: JSON.stringify(payload) });
+  },
+  updateModelBomLine(lineId: string, payload: SaveModelBomLinePayload) {
+    return request<ModelBomLine>(`/inventory/model-bom-lines/${lineId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  },
+  disableModelBomLine(lineId: string) {
+    return request<ModelBomLine>(`/inventory/model-bom-lines/${lineId}`, { method: 'DELETE' });
+  },
+  materialTransformRules(filters: MaterialTransformRuleFilters = {}) {
+    return request<MaterialTransformRule[]>(
+      `/inventory/material-transform-rules${toQuery({
+        keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
+        sourceMaterialId: filters.sourceMaterialId,
+        sourcePartCode: filters.sourcePartCode,
+        targetMaterialId: filters.targetMaterialId,
+        targetPartCode: filters.targetPartCode,
+        status: filters.status
+      })}`
+    );
+  },
+  createMaterialTransformRule(payload: SaveMaterialTransformRulePayload) {
+    return request<MaterialTransformRule>('/inventory/material-transform-rules', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  updateMaterialTransformRule(ruleId: string, payload: SaveMaterialTransformRulePayload) {
+    return request<MaterialTransformRule>(`/inventory/material-transform-rules/${ruleId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  disableMaterialTransformRule(ruleId: string) {
+    return request<MaterialTransformRule>(`/inventory/material-transform-rules/${ruleId}`, {
+      method: 'DELETE'
+    });
   },
   updateInventoryMaterial(materialId: string, payload: UpdateMaterialMemoryPayload) {
     return request<MaterialMemory>(`/inventory/materials/${materialId}`, {

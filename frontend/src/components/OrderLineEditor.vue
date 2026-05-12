@@ -1,5 +1,23 @@
 <template>
-  <el-table class="desktop-table order-line-table" :data="lines" border>
+  <el-table class="desktop-table order-line-table" :data="lines" border :row-class-name="orderLineRowClassName">
+    <el-table-column label="顺序" width="72" fixed="left" align="center">
+      <template #default="{ $index }">
+        <el-button
+          class="line-drag-handle"
+          text
+          :draggable="lines.length > 1"
+          :disabled="lines.length <= 1"
+          title="拖动调整顺序"
+          @dragstart.stop="startLineDrag($event, $index)"
+          @dragenter.prevent="handleLineDragOver($event, $index)"
+          @dragover.prevent="handleLineDragOver($event, $index)"
+          @drop.prevent="dropLineDrag($index)"
+          @dragend="endLineDrag"
+        >
+          <el-icon><Rank /></el-icon>
+        </el-button>
+      </template>
+    </el-table-column>
     <el-table-column label="行类型" width="104">
       <template #default="{ row }">
         <el-select v-model="row.lineType" placeholder="行类型" @change="handleLineTypeChange(row)">
@@ -495,7 +513,7 @@
 import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import type { UploadRequestOptions } from 'element-plus';
-import { Delete } from '@element-plus/icons-vue';
+import { Delete, Rank } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import type { CreateOrderLinePayload, StockSourceSelectionPayload } from '../api/erp';
 import type { InventoryMaterialSuggestion, InventorySourceDetailResponse, InventorySourceExpected, InventorySummaryRow } from '../types/erp';
@@ -551,6 +569,9 @@ const stockCoverAutoSyncedLines = new WeakSet<CreateOrderLinePayload>();
 const materialSuggestionRequestSeq = ref(0);
 const expandedMobileLineIndexes = ref<number[]>([]);
 const mobileLineExpansionInitialized = ref(false);
+const draggedLineIndex = ref<number | null>(null);
+const dragOverLineIndex = ref<number | null>(null);
+const dragOverLineInsertAfter = ref(false);
 const otherLineSelectedStockSources = computed(() =>
   currentSourceLine.value
     ? props.lines
@@ -643,6 +664,82 @@ function expandAllMobileLineCards() {
 
 function collapseAllMobileLineCards() {
   expandedMobileLineIndexes.value = [];
+}
+
+function isDragAfterRowMiddle(event: DragEvent) {
+  const target = event.currentTarget as HTMLElement | null;
+  if (!target) {
+    return false;
+  }
+  const rect = target.getBoundingClientRect();
+  return event.clientY > rect.top + rect.height / 2;
+}
+
+function startLineDrag(event: DragEvent, index: number) {
+  if (props.lines.length <= 1) {
+    return;
+  }
+  draggedLineIndex.value = index;
+  dragOverLineIndex.value = index;
+  dragOverLineInsertAfter.value = false;
+  event.dataTransfer?.setData('text/plain', String(index));
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+  }
+}
+
+function handleLineDragOver(event: DragEvent, index: number) {
+  if (draggedLineIndex.value === null) {
+    return;
+  }
+  dragOverLineIndex.value = index;
+  dragOverLineInsertAfter.value = isDragAfterRowMiddle(event);
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function buildDraggedLineOrder(targetIndex: number, insertAfter: boolean) {
+  if (draggedLineIndex.value === null) {
+    return props.lines;
+  }
+  const ordered = [...props.lines];
+  const [dragged] = ordered.splice(draggedLineIndex.value, 1);
+  if (!dragged) {
+    return props.lines;
+  }
+  let insertionIndex = targetIndex + (insertAfter ? 1 : 0);
+  if (draggedLineIndex.value < insertionIndex) {
+    insertionIndex -= 1;
+  }
+  ordered.splice(Math.max(0, Math.min(insertionIndex, ordered.length)), 0, dragged);
+  return ordered;
+}
+
+function dropLineDrag(index: number) {
+  if (draggedLineIndex.value === null) {
+    return;
+  }
+  const ordered = buildDraggedLineOrder(index, dragOverLineInsertAfter.value);
+  props.lines.splice(0, props.lines.length, ...ordered);
+  endLineDrag();
+}
+
+function endLineDrag() {
+  draggedLineIndex.value = null;
+  dragOverLineIndex.value = null;
+  dragOverLineInsertAfter.value = false;
+}
+
+function orderLineRowClassName({ rowIndex }: { rowIndex: number }) {
+  const classes: string[] = [];
+  if (draggedLineIndex.value === rowIndex) {
+    classes.push('is-order-line-dragging');
+  }
+  if (dragOverLineIndex.value === rowIndex) {
+    classes.push(dragOverLineInsertAfter.value ? 'is-order-line-drop-after' : 'is-order-line-drop-before');
+  }
+  return classes.join(' ');
 }
 
 function materialIdentityWarningText(line: CreateOrderLinePayload) {
@@ -1125,6 +1222,7 @@ async function openStockDetails(line: CreateOrderLinePayload) {
     drawingFileUrl: line.drawingFileUrl,
     partThickness: line.partThickness,
     partSpecification: line.partSpecification,
+    projectModel: line.projectModel,
     requiredQuantity: stockRequiredQuantity(line),
     unit: line.unit,
     fulfillmentMode: line.fulfillmentMode
@@ -1462,6 +1560,32 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
 
 .order-line-table :deep(.el-table__fixed-right .el-table__cell) {
   background: #ffffff;
+}
+
+.line-drag-handle {
+  width: 28px;
+  height: 28px;
+  cursor: grab;
+}
+
+.line-drag-handle:active {
+  cursor: grabbing;
+}
+
+.line-drag-handle:disabled {
+  cursor: not-allowed;
+}
+
+.order-line-table :deep(.is-order-line-dragging) {
+  opacity: 0.48;
+}
+
+.order-line-table :deep(.is-order-line-drop-before > td) {
+  box-shadow: inset 0 2px 0 #2563eb;
+}
+
+.order-line-table :deep(.is-order-line-drop-after > td) {
+  box-shadow: inset 0 -2px 0 #2563eb;
 }
 
 .line-remove-button {

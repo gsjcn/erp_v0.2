@@ -1179,7 +1179,7 @@ function printProcessSearchRepairs(repairs: ProcessSearchRepair[]) {
 }
 
 async function collectMissingProcessDefinitionRepairs(): Promise<MissingProcessDefinitionRepair[]> {
-  const [definitions, templates, orderSteps] = await Promise.all([
+  const [definitions, templates, orderSteps, bomLines, transformRules] = await Promise.all([
     prisma.processDefinition.findMany({
       select: {
         id: true,
@@ -1207,6 +1207,26 @@ async function collectMissingProcessDefinitionRepairs(): Promise<MissingProcessD
         }
       },
       orderBy: [{ processName: 'asc' }]
+    }),
+    prisma.modelBomLine.findMany({
+      where: { defaultProcessRoute: { not: null } },
+      select: {
+        defaultProcessRoute: true,
+        partCodeSnapshot: true,
+        bom: { select: { bomName: true } }
+      },
+      orderBy: [{ bom: { bomName: 'asc' } }, { sortOrder: 'asc' }]
+    }),
+    prisma.materialTransformRule.findMany({
+      where: { defaultProcessRoute: { not: null } },
+      select: {
+        defaultProcessRoute: true,
+        sourceMaterial: { select: { partCode: true } },
+        targetMaterial: { select: { partCode: true } },
+        customerNameSnapshot: true,
+        projectModel: true
+      },
+      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
     })
   ]);
 
@@ -1240,6 +1260,19 @@ async function collectMissingProcessDefinitionRepairs(): Promise<MissingProcessD
       step.processName,
       `${step.orderLine.order.orderNo} / ${step.orderLine.partCode} / line ${step.orderLine.lineNo}`
     );
+  }
+
+  for (const line of bomLines) {
+    for (const processName of splitDefaultProcessRoute(line.defaultProcessRoute)) {
+      addReference(processName, `BOM ${line.bom.bomName} / ${line.partCodeSnapshot}`);
+    }
+  }
+
+  for (const rule of transformRules) {
+    const scopeText = [rule.customerNameSnapshot, rule.projectModel].filter(Boolean).join(' / ') || '全部范围';
+    for (const processName of splitDefaultProcessRoute(rule.defaultProcessRoute)) {
+      addReference(processName, `来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode} / ${scopeText}`);
+    }
   }
 
   const repairs: MissingProcessDefinitionRepair[] = [];
@@ -1649,6 +1682,13 @@ function normalizeStockSourceSelections(value: Prisma.JsonValue | null | undefin
 
 function selectedStockSourceQuantity(stockSourceSelections: Prisma.JsonValue | null | undefined) {
   return normalizeStockSourceSelections(stockSourceSelections).reduce((sum, source) => sum + source.quantity, 0);
+}
+
+function splitDefaultProcessRoute(value?: string | null) {
+  return String(value || '')
+    .split(/(?:->|→|[、,，;；\n\r]+)/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function sourceKey(orderLineId: string | null | undefined, batchId: string) {

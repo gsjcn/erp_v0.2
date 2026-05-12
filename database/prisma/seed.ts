@@ -167,6 +167,7 @@ async function resetSeedData() {
   await prisma.inventoryTransaction.deleteMany();
   await prisma.inventoryBatch.deleteMany();
   await prisma.productionScrapRecord.deleteMany();
+  await prisma.productionReplenishmentRequest.deleteMany();
   await prisma.productionNotice.deleteMany();
   await prisma.productionProcessCompletionLog.deleteMany();
   await prisma.productionProcessCompletion.deleteMany();
@@ -1151,6 +1152,82 @@ async function seedMaterials() {
   for (const material of demoZeroStockMaterials) {
     await upsertMaterial(material);
   }
+
+  const drawingLines = await prisma.orderLine.findMany({
+    where: { drawingNo: { not: null } },
+    select: {
+      partCode: true,
+      drawingNo: true,
+      drawingVersion: true,
+      drawingDate: true,
+      drawingStatus: true,
+      drawingFileName: true,
+      drawingFileUrl: true
+    },
+    orderBy: [{ createdAt: 'desc' }]
+  });
+  const defaultDrawingMaterialIds = new Set<string>();
+  const seenDrawingKeys = new Set<string>();
+  for (const line of drawingLines) {
+    const drawingNo = line.drawingNo?.trim();
+    if (!drawingNo) {
+      continue;
+    }
+    const material = await prisma.material.findFirst({
+      where: { partCode: { equals: line.partCode, mode: 'insensitive' } },
+      select: { id: true }
+    });
+    if (!material) {
+      continue;
+    }
+    const drawingVersion = line.drawingVersion?.trim() || 'A';
+    const drawingKey = [material.id, drawingNo, drawingVersion].map((item) => item.toLocaleLowerCase()).join('|');
+    if (seenDrawingKeys.has(drawingKey)) {
+      continue;
+    }
+    seenDrawingKeys.add(drawingKey);
+    const isDefault = !defaultDrawingMaterialIds.has(material.id);
+    if (isDefault) {
+      await prisma.materialDrawingRevision.updateMany({
+        where: { materialId: material.id, isDefault: true },
+        data: { isDefault: false }
+      });
+      defaultDrawingMaterialIds.add(material.id);
+    }
+    await prisma.materialDrawingRevision.upsert({
+      where: {
+        materialId_drawingNo_drawingVersion: {
+          materialId: material.id,
+          drawingNo,
+          drawingVersion
+        }
+      },
+      update: {
+        drawingDate: line.drawingDate,
+        drawingStatus: line.drawingStatus,
+        drawingFileName: line.drawingFileName,
+        drawingFileUrl: line.drawingFileUrl,
+        isDefault,
+        defaultChangedBy: isDefault ? 'seed' : null,
+        defaultChangedAt: isDefault ? new Date('2026-05-08T00:00:00.000Z') : null,
+        status: 'ENABLED'
+      },
+      create: {
+        materialId: material.id,
+        drawingNo,
+        drawingVersion,
+        drawingDate: line.drawingDate,
+        drawingStatus: line.drawingStatus,
+        drawingFileName: line.drawingFileName,
+        drawingFileUrl: line.drawingFileUrl,
+        isDefault,
+        defaultChangedBy: isDefault ? 'seed' : null,
+        defaultChangedAt: isDefault ? new Date('2026-05-08T00:00:00.000Z') : null,
+        remark: '种子数据：从历史订单图纸快照生成零件默认图纸版本',
+        status: 'ENABLED'
+      }
+    });
+  }
 }
 
 async function seedInventory() {
@@ -1726,8 +1803,11 @@ async function seedStockFulfillmentOrder(options: {
       partName: sourceBatch.partName,
       quantity: options.selectedQuantity,
       unit: sourceBatch.unit,
-      compatibilityStatus: 'MATCHED',
-      compatibilityReason: '种子数据：同零件库存来源已核对'
+      compatibilityStatus: 'NEEDS_CONFIRMATION',
+      compatibilityReason: '种子数据：独立备货库存缺少生产来源图纸快照，必须人工核对后使用',
+      manualConfirmedBy: '种子库存核对员',
+      manualConfirmedAt: '2026-05-08T02:00:00.000Z',
+      manualConfirmRemark: '种子数据：已核对库存批次、图号、规格和用途，仅用于演示人工确认后的库存履约'
     }
   ];
 
@@ -1763,6 +1843,29 @@ async function seedStockFulfillmentOrder(options: {
       }
     });
   }
+
+  await prisma.inventoryReservation.deleteMany({
+    where: {
+      orderId: savedOrder.id,
+      orderLineId: savedLine.id,
+      batchId: sourceBatch.id
+    }
+  });
+  await prisma.inventoryReservation.create({
+    data: {
+      batchId: sourceBatch.id,
+      orderId: savedOrder.id,
+      orderLineId: savedLine.id,
+      orderNo: options.orderNo,
+      partCode: lineData.partCode,
+      partName: lineData.partName,
+      quantity: options.selectedQuantity,
+      unit: lineData.unit,
+      status: InventoryReservationStatus.CONSUMED,
+      statusReason: '种子数据：订单提交后已消耗备货库存',
+      consumedAt: new Date('2026-05-08T02:05:00.000Z')
+    }
+  });
 
   const suffix = '001-01';
   const remainingSourceQuantity = Math.max(sourceAvailableQuantity - options.selectedQuantity, 0);

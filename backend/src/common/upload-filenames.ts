@@ -1,5 +1,6 @@
 const mojibakeLatinPattern = /[\u00c0-\u00ff]/;
 const chinesePattern = /[\u3400-\u9fff]/;
+const unrecoverableQuestionPattern = /\?{2,}/;
 
 function cleanFileName(fileName: string) {
   const sanitizedName = fileName.replace(/[\0\r\n]/g, '').trim();
@@ -23,10 +24,19 @@ function decodePercentFileName(fileName: string) {
   }
 }
 
+function fallbackUnknownFileName(fileName: string) {
+  const extensionMatch = fileName.match(/(\.[A-Za-z0-9]{1,10})$/);
+  return `上传文件${extensionMatch?.[1] || ''}`;
+}
+
 export function normalizeMultipartFileName(fileName?: string | null) {
   const cleanName = cleanFileName(String(fileName || ''));
   if (!cleanName) {
     return cleanName;
+  }
+
+  if (unrecoverableQuestionPattern.test(cleanName)) {
+    return fallbackUnknownFileName(cleanName);
   }
 
   const percentDecodedName = decodePercentFileName(cleanName);

@@ -165,7 +165,7 @@
               </el-select>
             </el-form-item>
             <el-form-item label="城市" required>
-              <el-select v-model="form.city" filterable allow-create default-first-option placeholder="选择或输入城市">
+              <el-select v-model="form.city" filterable allow-create placeholder="选择或输入城市">
                 <el-option v-for="city in cityOptions" :key="city" :label="city" :value="city" />
               </el-select>
             </el-form-item>
@@ -173,7 +173,7 @@
 
           <template v-else>
             <el-form-item label="国家" required>
-              <el-select v-model="form.country" filterable allow-create default-first-option placeholder="选择或输入国家">
+              <el-select v-model="form.country" filterable allow-create placeholder="选择或输入国家">
                 <el-option v-for="country in worldCountryOptions" :key="country" :label="country" :value="country" />
               </el-select>
             </el-form-item>

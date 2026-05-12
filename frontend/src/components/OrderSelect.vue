@@ -7,7 +7,6 @@
       :disabled="disabled"
       filterable
       reserve-keyword
-      default-first-option
       popper-class="order-select-popper"
       :filter-method="handleFilter"
       @update:model-value="handleChange"

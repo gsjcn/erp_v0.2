@@ -48,6 +48,23 @@
           <MaterialSuggestionOption :item="item" />
         </button>
       </div>
+      <div v-if="transformRuleLoading || transformRuleSuggestions.length" v-loading="transformRuleLoading" class="transform-suggestion-panel">
+        <div class="transform-suggestion-title">
+          <strong>来源加工建议</strong>
+          <span>仅用于提示可搜索的来源零件；是否使用库存仍需逐批人工核对。</span>
+        </div>
+        <article v-for="rule in transformRuleSuggestions" :key="rule.id" class="transform-suggestion-item">
+          <div>
+            <strong>{{ rule.sourcePartCode }} / {{ rule.sourcePartName }}</strong>
+            <span>{{ rule.scopeLabel }} / 倍率 {{ rule.multiplier }} / 损耗 {{ rule.lossRate ?? '-' }}</span>
+            <small v-if="rule.defaultProcessRoute">建议工艺：{{ rule.defaultProcessRoute }}</small>
+            <small v-if="rule.conversionDescription">{{ rule.conversionDescription }}</small>
+          </div>
+          <el-button size="small" type="primary" plain @click="searchTransformSource(rule)">
+            查来源库存
+          </el-button>
+        </article>
+      </div>
     </div>
 
     <div v-loading="loading" class="source-detail-body">
@@ -307,6 +324,7 @@
               <el-tag v-if="isFocusedSource(row)" type="primary" size="small" effect="plain">当前批次</el-tag>
             </div>
             <div class="cell-subtext">{{ sourceTypeText(row.inventorySourceType) }} / {{ sourceKindText(row.sourceKind) }}</div>
+            <div v-if="sourceComponentText(row)" class="cell-subtext">{{ sourceComponentText(row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="可用库存" width="135">
@@ -370,6 +388,7 @@
             <span v-else class="muted">未记录来源订单</span>
             <div class="cell-subtext">{{ row.sourceProductionTaskNo || '未记录生产任务' }}</div>
             <div v-if="replenishmentSourceText(row)" class="cell-subtext">{{ replenishmentSourceText(row) }}</div>
+            <div v-if="sourceComponentText(row)" class="cell-subtext">{{ sourceComponentText(row) }}</div>
             <div v-if="productionCustomerName(row)" class="cell-subtext">{{ productionCustomerName(row) }}</div>
           </template>
         </el-table-column>
@@ -425,6 +444,7 @@
               <small v-if="draftReservedQuantity(row)" class="warning-text">
                 本订单其他零件已选 {{ formatQuantity(draftReservedQuantity(row), row.unit) }}
               </small>
+              <small v-if="sourceComponentText(row)">{{ sourceComponentText(row) }}</small>
               <small v-if="row.reservedQuantity" class="warning-text">{{ reservationSummary(row) }}</small>
             </div>
             <div class="mobile-card-header-actions source-mobile-header-actions">
@@ -487,6 +507,10 @@
             <div v-if="replenishmentSourceText(row)" class="mobile-field">
               <label>补单来源</label>
               <span>{{ replenishmentSourceText(row) }}</span>
+            </div>
+            <div v-if="sourceComponentText(row)" class="mobile-field">
+              <label>组件关系</label>
+              <span>{{ sourceComponentText(row) }}</span>
             </div>
             <div class="mobile-field">
               <label>生产日期</label>
@@ -615,6 +639,7 @@ import type {
   InventorySourceDetailResponse,
   InventorySourceExpected,
   InventorySourceType,
+  MaterialTransformRule,
   OrderDetail
 } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
@@ -673,6 +698,9 @@ const selectedSourceDragInsertAfter = ref(false);
 const orderPreviewVisible = ref(false);
 const orderPreviewLoading = ref(false);
 const orderPreview = ref<OrderDetail | null>(null);
+const transformRuleLoading = ref(false);
+const transformRuleRequestSeq = ref(0);
+const transformRuleSuggestions = ref<MaterialTransformRule[]>([]);
 const sourceSearchResultHint = computed(() => {
   if (lastInventorySuggestions.value.some((item) => item.hasIdentityConflict)) {
     return '同编码存在多套历史资料，请点击候选项确认';
@@ -968,6 +996,46 @@ const hasExpectedInfo = computed(() => {
   const row = expected.value;
   return Boolean(row?.drawingNo || row?.drawingVersion || row?.drawingFileName || row?.partThickness || row?.partSpecification);
 });
+
+async function loadTransformRuleSuggestions() {
+  const targetPartCode = expected.value?.partCode?.trim();
+  const requestId = ++transformRuleRequestSeq.value;
+  if (!props.modelValue || !props.reviewMode || !targetPartCode) {
+    transformRuleSuggestions.value = [];
+    transformRuleLoading.value = false;
+    return;
+  }
+  transformRuleLoading.value = true;
+  try {
+    const rows = await erpApi.materialTransformRules({
+      targetPartCode,
+      customerId: props.customerId || undefined,
+      projectModel: expected.value?.projectModel?.trim() || undefined,
+      status: 'ENABLED'
+    });
+    if (requestId === transformRuleRequestSeq.value) {
+      transformRuleSuggestions.value = rows.filter((row) => row.sourceMaterialStatus !== 'DISABLED');
+    }
+  } catch {
+    if (requestId === transformRuleRequestSeq.value) {
+      transformRuleSuggestions.value = [];
+    }
+  } finally {
+    if (requestId === transformRuleRequestSeq.value) {
+      transformRuleLoading.value = false;
+    }
+  }
+}
+
+function searchTransformSource(rule: MaterialTransformRule) {
+  resetReviewConfirmation();
+  sourceSearchManualPickRequired.value = false;
+  activeSearchFocusBatchNo.value = '';
+  lastInventorySuggestions.value = [];
+  sourceSearchKeyword.value = `${rule.sourcePartCode} ${rule.sourcePartName}`;
+  emit('sourceSearch', rule.sourcePartCode);
+  ElMessage.info('已按来源加工关系切换到来源零件库存，请逐批核对后再确认');
+}
 
 async function queryInventorySuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
   const requestId = ++inventorySuggestionRequestSeq.value;
@@ -1751,6 +1819,19 @@ function replenishmentSourceText(row: InventorySourceBatchDetail) {
   return row.replenishmentSourceRequestNo ? `${label}：${row.replenishmentSourceRequestNo}` : label;
 }
 
+function sourceComponentText(row: InventorySourceBatchDetail) {
+  if (row.lineType === 'COMPONENT' && row.componentNo) {
+    return `组件 ${row.componentNo}`;
+  }
+  if (row.parentComponentNo) {
+    return `属于组件 ${row.parentComponentNo}`;
+  }
+  if (row.lineType === 'PART') {
+    return '单独零件';
+  }
+  return '';
+}
+
 function selectedSourceReplenishmentText(source: StockSourceSelectionPayload) {
   if (source.replenishmentSourceLabel) {
     return source.replenishmentSourceLabel;
@@ -2030,17 +2111,20 @@ watch(
   (visible) => {
     if (!visible) {
       activeSearchFocusBatchNo.value = '';
+      transformRuleSuggestions.value = [];
       return;
     }
     reviewConfirmChecked.value = Boolean(props.reviewed);
     syncManualConfirmForms();
+    void loadTransformRuleSuggestions();
   }
 );
 
 watch(
-  () => expected.value?.partCode,
+  () => [expected.value?.partCode, expected.value?.projectModel, props.customerId],
   () => {
     activeSearchFocusBatchNo.value = '';
+    void loadTransformRuleSuggestions();
   }
 );
 
@@ -2099,6 +2183,46 @@ watch(
 .source-search-results > strong {
   color: #1e3a8a;
   font-size: 13px;
+}
+
+.transform-suggestion-panel {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / -1;
+  padding: 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.transform-suggestion-title {
+  display: grid;
+  gap: 3px;
+}
+
+.transform-suggestion-title span,
+.transform-suggestion-item span,
+.transform-suggestion-item small {
+  color: #475569;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.transform-suggestion-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.transform-suggestion-item > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
 .source-search-result {
@@ -2693,6 +2817,7 @@ watch(
   }
 
   .source-search-controls,
+  .transform-suggestion-item,
   .source-search-result,
   .mobile-source-selection {
     grid-template-columns: 1fr;

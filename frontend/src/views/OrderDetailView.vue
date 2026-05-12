@@ -164,6 +164,35 @@
         </div>
       </div>
 
+      <section class="order-structure-panel mt-24">
+        <div class="order-structure-panel__header">
+          <div>
+            <strong>固定格式清单</strong>
+            <span>{{ orderStructureGroups.length }} 组 / {{ order.lines.length }} 行</span>
+          </div>
+          <el-button size="small" :disabled="order.lines.length === 0" @click="copyOrderStructureText">复制清单</el-button>
+        </div>
+        <div v-if="orderStructureGroups.length > 0" class="order-structure-list">
+          <div v-for="(group, groupIndex) in orderStructureGroups" :key="group.id" class="order-structure-group">
+            <div class="order-structure-main">
+              <span class="order-structure-index">{{ groupIndex + 1 }}</span>
+              <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
+                {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+              </el-tag>
+              <strong>{{ formatOrderStructureCore(group.line) }}</strong>
+              <span>{{ formatOrderStructureMeta(group.line) }}</span>
+            </div>
+            <div v-for="(child, childIndex) in group.children" :key="child.id" class="order-structure-child">
+              <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+              <el-tag type="success" effect="plain">子零件</el-tag>
+              <strong>{{ formatOrderStructureCore(child) }}</strong>
+              <span>{{ formatOrderStructureMeta(child) }}</span>
+            </div>
+          </div>
+        </div>
+        <el-empty v-else description="暂无固定格式清单" />
+      </section>
+
       <div class="line-cards mt-24">
         <article
           v-for="line in order.lines"
@@ -1144,6 +1173,13 @@ import {
 import { validateSubmitStockSources } from '../utils/submitStockSourceChecks';
 import { normalizeDisplayFileName } from '../utils/fileNames';
 
+type OrderStructureGroup = {
+  id: string;
+  type: 'component' | 'standalone' | 'orphan';
+  line: OrderLine;
+  children: OrderLine[];
+};
+
 const route = useRoute();
 const router = useRouter();
 const { isMobileLayout } = useDeviceProfile();
@@ -1194,6 +1230,36 @@ let additionalMaterialProcessStepKeySeq = 0;
 const draggedAdditionalProcessIndex = ref<number | null>(null);
 const additionalProcessDragOverIndex = ref<number | null>(null);
 const additionalProcessDragInsertAfter = ref(false);
+const orderStructureGroups = computed<OrderStructureGroup[]>(() => {
+  const lines = order.value?.lines || [];
+  const childrenByParent = new Map<string, OrderLine[]>();
+  const rootLines: OrderLine[] = [];
+  for (const line of lines) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo) {
+      const key = normalizeComponentNo(line.parentComponentNo);
+      childrenByParent.set(key, [...(childrenByParent.get(key) || []), line]);
+    } else {
+      rootLines.push(line);
+    }
+  }
+  const groups: OrderStructureGroup[] = [];
+  const attachedIds = new Set<string>();
+  for (const line of rootLines) {
+    if (line.lineType === 'COMPONENT') {
+      const children = childrenByParent.get(normalizeComponentNo(line.componentNo)) || [];
+      children.forEach((child) => attachedIds.add(child.id));
+      groups.push({ id: `component-${line.id}`, type: 'component', line, children });
+      continue;
+    }
+    groups.push({ id: `standalone-${line.id}`, type: 'standalone', line, children: [] });
+  }
+  for (const line of lines) {
+    if (line.lineType !== 'COMPONENT' && line.parentComponentNo && !attachedIds.has(line.id)) {
+      groups.push({ id: `orphan-${line.id}`, type: 'orphan', line, children: [] });
+    }
+  }
+  return groups;
+});
 const additionalMaterialForm = ref({
   managerName: '',
   reason: ''
@@ -2398,6 +2464,10 @@ function lineTypeLabel(lineType?: string) {
   return lineType === 'COMPONENT' ? '组件' : '零件';
 }
 
+function normalizeComponentNo(value?: string | null) {
+  return String(value || '').trim().toUpperCase();
+}
+
 function componentTraceText(line: OrderLine | CreateOrderLinePayload) {
   if (line.lineType === 'COMPONENT' && line.componentNo) {
     return `组件 ${line.componentNo}`;
@@ -2406,6 +2476,64 @@ function componentTraceText(line: OrderLine | CreateOrderLinePayload) {
     return `属于 ${line.parentComponentNo}`;
   }
   return '';
+}
+
+function formatOrderStructureCore(line: OrderLine) {
+  return `${line.partCode || '-'} | ${line.partName || '-'} | 订单 ${formatQuantity(line.quantity, line.unit)}`;
+}
+
+function formatOrderStructureMeta(line: OrderLine) {
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const deliveryText = formatDate(line.deliveryDate || order.value?.deliveryDate);
+  const processText = line.processSteps?.length ? line.processSteps.join('、') : '-';
+  return `计划 ${formatQuantity(line.productionPlanQuantity, line.unit)} | 图纸 ${drawingText} | 交期 ${deliveryText} | 工艺 ${processText}`;
+}
+
+function formatOrderStructureTextLine(line: OrderLine, prefix: string) {
+  return [
+    prefix,
+    line.partCode || '-',
+    line.partName || '-',
+    line.partCategory || '-',
+    formatQuantity(line.quantity, line.unit),
+    formatQuantity(line.productionPlanQuantity, line.unit),
+    [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-',
+    line.processSteps?.length ? line.processSteps.join('、') : '-'
+  ].join(' | ');
+}
+
+const orderStructureText = computed(() => {
+  if (!order.value) {
+    return '';
+  }
+  const lines = [`${order.value.orderNo} / ${order.value.customerName} / ${formatDate(order.value.orderDate)}`];
+  for (const [groupIndex, group] of orderStructureGroups.value.entries()) {
+    const prefix =
+      group.type === 'component'
+        ? `${groupIndex + 1}. 组件 ${group.line.componentNo || '-'}`
+        : group.type === 'orphan'
+          ? `${groupIndex + 1}. 未匹配父级 ${group.line.parentComponentNo || '-'}`
+          : `${groupIndex + 1}. 单独零件`;
+    lines.push(formatOrderStructureTextLine(group.line, prefix));
+    group.children.forEach((child, childIndex) => {
+      lines.push(formatOrderStructureTextLine(child, `  ${groupIndex + 1}.${childIndex + 1} 子零件`));
+    });
+  }
+  return lines.join('\n');
+});
+
+async function copyOrderStructureText() {
+  const text = orderStructureText.value.trim();
+  if (!text) {
+    ElMessage.warning('暂无可复制的固定格式清单');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('固定格式清单已复制');
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
 }
 
 function materialIdentityConflictText(line: OrderLine | CreateOrderLinePayload) {
@@ -3120,6 +3248,81 @@ onBeforeUnmount(() => {
   display: inline-block;
   margin-top: 8px;
   font-size: 16px;
+}
+
+.order-structure-panel {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.order-structure-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.order-structure-panel__header > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.order-structure-panel__header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.order-structure-list {
+  display: grid;
+  gap: 8px;
+}
+
+.order-structure-group {
+  display: grid;
+  gap: 6px;
+}
+
+.order-structure-main,
+.order-structure-child {
+  display: grid;
+  grid-template-columns: 34px 118px minmax(220px, 1fr) minmax(320px, 1.45fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.order-structure-child {
+  margin-left: 34px;
+  background: #f0fdf4;
+}
+
+.order-structure-index,
+.order-structure-child > span:first-child {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.order-structure-main strong,
+.order-structure-child strong,
+.order-structure-main > span:last-child,
+.order-structure-child > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-structure-main > span:last-child,
+.order-structure-child > span:last-child {
+  color: #475569;
+  font-size: 12px;
 }
 
 .submit-order-confirm {
@@ -3914,6 +4117,26 @@ onBeforeUnmount(() => {
     display: flex;
     flex-shrink: 0;
     gap: 8px;
+  }
+
+  .order-structure-panel__header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .order-structure-main,
+  .order-structure-child {
+    grid-template-columns: 28px minmax(92px, auto) minmax(0, 1fr);
+  }
+
+  .order-structure-main > span:last-child,
+  .order-structure-child > span:last-child {
+    grid-column: 3;
+    white-space: normal;
+  }
+
+  .order-structure-child {
+    margin-left: 16px;
   }
 
   .import-source-preview-header {

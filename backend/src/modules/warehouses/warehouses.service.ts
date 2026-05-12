@@ -784,7 +784,8 @@ export class WarehousesService {
         batch: {
           include: {
             sourceOrder: true,
-            productionTask: { include: { order: true } },
+            sourceOrderLine: true,
+            productionTask: { include: { order: true, orderLine: true } },
             reservations: {
               where: { status: InventoryReservationStatus.ACTIVE },
               select: { quantity: true }
@@ -801,6 +802,7 @@ export class WarehousesService {
 
     return transactions.map((item) => {
       const sourceTask = this.resolveWarehouseTransactionSourceTask(item, sourceTaskMap);
+      const sourceLine = this.resolveWarehouseTransactionSourceLine(item, sourceTask);
       const batchPhysicalQuantity = item.batch?.status === 'AVAILABLE' ? decimalToNumber(item.batch.quantity) : 0;
       const batchReservedQuantity =
         item.batch && !item.batch.sourceOrderId
@@ -824,6 +826,11 @@ export class WarehousesService {
         transactionType: item.transactionType,
         partCode: item.partCode,
         partName: item.partName,
+        lineType: sourceLine?.lineType || undefined,
+        partCategory: sourceLine?.partCategory || undefined,
+        componentNo: sourceLine?.componentNo || undefined,
+        parentComponentNo: sourceLine?.parentComponentNo || undefined,
+        importSequence: sourceLine?.importSequence || undefined,
         orderNo: item.orderNo,
         sourceOrderNo,
         productionSourceOrderNo: sourceTask?.orderNo || sourceTask?.order?.orderNo || item.batch?.productionTask?.orderNo || null,
@@ -983,7 +990,7 @@ export class WarehousesService {
 
     const tasks = await this.prisma.productionTask.findMany({
       where: { productionTaskNo: { in: uniqueTaskNos } },
-      include: { order: true }
+      include: { order: true, orderLine: true }
     });
     return new Map(tasks.map((task) => [task.productionTaskNo, task]));
   }
@@ -995,6 +1002,13 @@ export class WarehousesService {
       transaction.batch?.productionTask ||
       null
     );
+  }
+
+  private resolveWarehouseTransactionSourceLine(transaction: any, sourceTask: any) {
+    if (transaction.batch?.sourceProductionTaskNo && sourceTask?.orderLine) {
+      return sourceTask.orderLine;
+    }
+    return transaction.batch?.sourceOrderLine || sourceTask?.orderLine || transaction.batch?.productionTask?.orderLine || null;
   }
 
   private async getReceivedOrderQuantity(orderLineId: string, client: WarehousePrismaClient = this.prisma) {
@@ -1105,6 +1119,11 @@ export class WarehousesService {
       deliveryDate: task.orderLine?.deliveryDate || task.order?.deliveryDate,
       partCode: task.partCode,
       partName: task.partName,
+      lineType: task.orderLine?.lineType || 'PART',
+      partCategory: task.orderLine?.partCategory,
+      componentNo: task.orderLine?.componentNo,
+      parentComponentNo: task.orderLine?.parentComponentNo,
+      importSequence: task.orderLine?.importSequence,
       plannedQuantity,
       customerOrderQuantity,
       receivedOrderQuantity,
@@ -1145,6 +1164,7 @@ export class WarehousesService {
         this.roundQuantity(Math.max(suggestionRemaining - suggestedShipmentQuantity, 0))
       );
     }
+    const sourceLine = batch.productionTask?.orderLine || batch.sourceOrderLine;
     return {
       id: batch.id,
       batchNo: batch.batchNo,
@@ -1163,6 +1183,11 @@ export class WarehousesService {
       deliveryDate: batch.productionTask?.orderLine?.deliveryDate || batch.sourceOrderLine?.deliveryDate || batch.sourceOrder?.deliveryDate,
       partCode: batch.partCode,
       partName: batch.partName,
+      lineType: sourceLine?.lineType || 'PART',
+      partCategory: sourceLine?.partCategory,
+      componentNo: sourceLine?.componentNo,
+      parentComponentNo: sourceLine?.parentComponentNo,
+      importSequence: sourceLine?.importSequence,
       quantity: availableQuantity,
       customerOrderQuantity,
       shippedQuantity: this.roundQuantity(shippedQuantity),

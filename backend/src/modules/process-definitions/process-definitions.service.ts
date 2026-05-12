@@ -68,7 +68,7 @@ export class ProcessDefinitionsService {
     const nextStatus = dto.status || existing.status;
     this.validateRemark(remark);
 
-    // 标准工序被订单流程或流程记忆引用后，不能改名或停用，否则历史流程会失去对应的启用工序。
+    // 标准工序被订单流程、流程记忆、BOM 或来源加工关系引用后，不能改名或停用，避免默认工艺建议失效。
     if (processNameNormalized !== existing.processNameNormalized || nextStatus === CommonStatus.DISABLED) {
       const references = await this.findProcessDefinitionReferences(existing.processNameNormalized);
       if (references.total > 0) {
@@ -100,12 +100,8 @@ export class ProcessDefinitionsService {
     const existing = await this.ensureExists(id);
     const references = await this.findProcessDefinitionReferences(existing.processNameNormalized);
     if (references.total > 0) {
-      // 已被历史订单或流程记忆引用的标准工序只能停用，不能物理删除；历史记录仍保留原工序名称。
-      const disabled = await this.prisma.processDefinition.update({
-        where: { id },
-        data: { status: CommonStatus.DISABLED }
-      });
-      return this.mapDefinition(disabled);
+      // 已被历史订单、流程记忆、BOM 或来源加工关系引用的标准工序不能停用，避免后续默认工艺失效。
+      throw this.referencedProcessDefinitionError(existing.processName, references, '停用');
     }
     await this.prisma.processDefinition.delete({ where: { id } });
     return this.mapDefinition({ ...existing, status: CommonStatus.DISABLED });
@@ -137,8 +133,15 @@ export class ProcessDefinitionsService {
     return row;
   }
 
+  private splitDefaultProcessRoute(value?: string | null) {
+    return String(value || '')
+      .split(/(?:->|→|[、,，;；\n\r]+)/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
   private async findProcessDefinitionReferences(processNameNormalized: string): Promise<ProcessDefinitionReferenceSummary> {
-    const [orderSteps, templates] = await Promise.all([
+    const [orderSteps, templates, bomLines, transformRules] = await Promise.all([
       this.prisma.orderLineProcessStep.findMany({
         select: {
           processName: true,
@@ -159,6 +162,26 @@ export class ProcessDefinitionsService {
           steps: true
         },
         orderBy: { templateName: 'asc' }
+      }),
+      this.prisma.modelBomLine.findMany({
+        where: { defaultProcessRoute: { not: null } },
+        select: {
+          defaultProcessRoute: true,
+          partCodeSnapshot: true,
+          bom: { select: { bomName: true } }
+        },
+        orderBy: [{ bom: { bomName: 'asc' } }, { sortOrder: 'asc' }]
+      }),
+      this.prisma.materialTransformRule.findMany({
+        where: { defaultProcessRoute: { not: null } },
+        select: {
+          defaultProcessRoute: true,
+          sourceMaterial: { select: { partCode: true } },
+          targetMaterial: { select: { partCode: true } },
+          customerNameSnapshot: true,
+          projectModel: true
+        },
+        orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
       })
     ]);
 
@@ -185,6 +208,23 @@ export class ProcessDefinitionsService {
       addReference(`流程记忆 ${template.templateName}`);
     }
 
+    for (const line of bomLines) {
+      const processNames = this.splitDefaultProcessRoute(line.defaultProcessRoute);
+      if (!processNames.some((processName) => this.normalizeProcessNameKey(processName) === processNameNormalized)) {
+        continue;
+      }
+      addReference(`BOM ${line.bom.bomName} / ${line.partCodeSnapshot}`);
+    }
+
+    for (const rule of transformRules) {
+      const processNames = this.splitDefaultProcessRoute(rule.defaultProcessRoute);
+      if (!processNames.some((processName) => this.normalizeProcessNameKey(processName) === processNameNormalized)) {
+        continue;
+      }
+      const scopeText = [rule.customerNameSnapshot, rule.projectModel].filter(Boolean).join(' / ') || '全部范围';
+      addReference(`来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode} / ${scopeText}`);
+    }
+
     return { total, samples };
   }
 
@@ -192,7 +232,7 @@ export class ProcessDefinitionsService {
     const sampleText = references.samples.join('；');
     const moreText = references.total > references.samples.length ? ` 等 ${references.total} 处` : '';
     return new BadRequestException(
-      `标准工序“${processName}”已被${sampleText}${moreText}引用，不能${action}；请先调整对应订单流程或流程记忆`
+      `标准工序“${processName}”已被${sampleText}${moreText}引用，不能${action}；请先调整对应订单流程、流程记忆、BOM 或来源加工关系`
     );
   }
 

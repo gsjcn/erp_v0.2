@@ -1,13 +1,49 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Header,
+  Param,
+  Patch,
+  Post,
+  Query,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors
+} from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
+import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { normalizeMultipartFileName } from '../../common/upload-filenames';
-import { inventoryAdjustmentUploadPath } from '../../storage/upload-paths';
-import { AdjustInventoryBatchDto, InventoryQueryDto, InventorySourceDetailQueryDto, MaterialQueryDto, MaterialSuggestionQueryDto, UpdateMaterialDto } from './dto';
+import { inventoryAdjustmentUploadPath, materialImportUploadPath } from '../../storage/upload-paths';
+import {
+  AdjustInventoryBatchDto,
+  CommitMaterialImportSessionDto,
+  CopyModelBomDto,
+  CreateMaterialDto,
+  CreateMaterialImportSessionDto,
+  GetMaterialImportSessionQueryDto,
+  InventoryQueryDto,
+  InventorySourceDetailQueryDto,
+  MaterialQueryDto,
+  MaterialSuggestionQueryDto,
+  MaterialTransformRuleQueryDto,
+  ModelBomQueryDto,
+  ReorderModelBomLinesDto,
+  SaveMaterialApplicabilityDto,
+  SaveMaterialDrawingRevisionDto,
+  SaveMaterialTransformRuleDto,
+  SaveModelBomDto,
+  SaveModelBomLineDto,
+  UpdateMaterialDto
+} from './dto';
 import { InventoryService } from './inventory.service';
 
 const allowedAdjustmentExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
+const allowedMaterialImportExtensions = new Set(['.xlsx']);
 const allowedAdjustmentMimeTypes = new Set([
   'application/pdf',
   'image/png',
@@ -18,6 +54,10 @@ const allowedAdjustmentMimeTypes = new Set([
   'image/tiff'
 ]);
 const genericUploadMimeTypes = new Set(['', 'application/octet-stream']);
+
+function materialImportUploadMaxBytes() {
+  return Number(process.env.MATERIAL_IMPORT_UPLOAD_MAX_MB || 100) * 1024 * 1024;
+}
 
 function safeAdjustmentFileName(
   _request: unknown,
@@ -31,6 +71,20 @@ function safeAdjustmentFileName(
     .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
     .slice(0, 60);
   callback(null, `${Date.now()}-${baseName || 'inventory-adjustment'}${extension}`);
+}
+
+function safeMaterialImportFileName(
+  _request: unknown,
+  file: Express.Multer.File,
+  callback: (error: Error | null, filename: string) => void
+) {
+  const originalName = normalizeMultipartFileName(file.originalname);
+  const extension = extname(originalName).toLowerCase();
+  const baseName = originalName
+    .replace(extension, '')
+    .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
+    .slice(0, 80);
+  callback(null, `${Date.now()}-${randomUUID().slice(0, 8)}-${baseName || 'material-import'}${extension}`);
 }
 
 @Controller('inventory')
@@ -52,6 +106,125 @@ export class InventoryController {
     return this.inventoryService.materials(query);
   }
 
+  @Post('materials')
+  createMaterial(@Body() dto: CreateMaterialDto) {
+    return this.inventoryService.createMaterial(dto);
+  }
+
+  @Get('materials/:materialId/drawing-revisions')
+  materialDrawingRevisions(@Param('materialId') materialId: string) {
+    return this.inventoryService.materialDrawingRevisions(materialId);
+  }
+
+  @Post('materials/:materialId/drawing-revisions')
+  saveMaterialDrawingRevision(@Param('materialId') materialId: string, @Body() dto: SaveMaterialDrawingRevisionDto) {
+    return this.inventoryService.saveMaterialDrawingRevision(materialId, dto);
+  }
+
+  @Patch('material-drawing-revisions/:revisionId')
+  updateMaterialDrawingRevision(@Param('revisionId') revisionId: string, @Body() dto: SaveMaterialDrawingRevisionDto) {
+    return this.inventoryService.updateMaterialDrawingRevision(revisionId, dto);
+  }
+
+  @Delete('material-drawing-revisions/:revisionId')
+  disableMaterialDrawingRevision(@Param('revisionId') revisionId: string) {
+    return this.inventoryService.disableMaterialDrawingRevision(revisionId);
+  }
+
+  @Post('material-import-sessions')
+  createMaterialImportSession(@Body() dto: CreateMaterialImportSessionDto) {
+    return this.inventoryService.createMaterialImportSession(dto);
+  }
+
+  @Get('material-import-template')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename*=UTF-8\'\'material-library-import-template.xlsx')
+  async materialImportTemplate() {
+    return new StreamableFile(await this.inventoryService.buildMaterialImportTemplate());
+  }
+
+  @Get('material-import-config')
+  materialImportConfig() {
+    const uploadMaxBytes = materialImportUploadMaxBytes();
+    return {
+      uploadMaxBytes,
+      uploadMaxMb: Math.round(uploadMaxBytes / 1024 / 1024),
+      allowedExtensions: [...allowedMaterialImportExtensions]
+    };
+  }
+
+  @Get('material-import-sessions/:sessionId')
+  materialImportSession(@Param('sessionId') sessionId: string, @Query() query: GetMaterialImportSessionQueryDto) {
+    return this.inventoryService.getMaterialImportSession(sessionId, query);
+  }
+
+  @Get('material-import-sessions/:sessionId/error-report')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename*=UTF-8\'\'material-library-import-issues.xlsx')
+  async downloadMaterialImportIssueReport(@Param('sessionId') sessionId: string) {
+    return new StreamableFile(await this.inventoryService.buildMaterialImportIssueReport(sessionId));
+  }
+
+  @Post('material-import-sessions/:sessionId/files')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: materialImportUploadPath(),
+        filename: safeMaterialImportFileName
+      }),
+      limits: { fileSize: materialImportUploadMaxBytes() },
+      fileFilter: (_request, file, callback) => {
+        const extension = extname(normalizeMultipartFileName(file.originalname)).toLowerCase();
+        if (!allowedMaterialImportExtensions.has(extension)) {
+          callback(new BadRequestException('零件库导入只支持 .xlsx 文件'), false);
+          return;
+        }
+        callback(null, true);
+      }
+    })
+  )
+  uploadMaterialImportFile(@Param('sessionId') sessionId: string, @UploadedFile() file?: Express.Multer.File) {
+    if (!file) {
+      throw new BadRequestException('必须上传零件库导入文件');
+    }
+    return this.inventoryService.uploadMaterialImportFile(sessionId, file);
+  }
+
+  @Post('material-import-sessions/:sessionId/commit')
+  commitMaterialImportSession(@Param('sessionId') sessionId: string, @Body() dto: CommitMaterialImportSessionDto) {
+    return this.inventoryService.commitMaterialImportSession(sessionId, dto);
+  }
+
+  @Delete('material-import-sessions/:sessionId/files/:fileId')
+  deleteMaterialImportFile(@Param('sessionId') sessionId: string, @Param('fileId') fileId: string) {
+    return this.inventoryService.deleteMaterialImportFile(sessionId, fileId);
+  }
+
+  @Delete('material-import-sessions/:sessionId')
+  discardMaterialImportSession(@Param('sessionId') sessionId: string) {
+    return this.inventoryService.discardMaterialImportSession(sessionId);
+  }
+
+  @Get('materials/:materialId/applicabilities')
+  materialApplicabilities(@Param('materialId') materialId: string) {
+    return this.inventoryService.materialApplicabilities(materialId);
+  }
+
+  @Post('materials/:materialId/applicabilities')
+  saveMaterialApplicability(@Param('materialId') materialId: string, @Body() dto: SaveMaterialApplicabilityDto) {
+    return this.inventoryService.saveMaterialApplicability(materialId, dto);
+  }
+
+  @Patch('material-applicabilities/:applicabilityId')
+  updateMaterialApplicability(@Param('applicabilityId') applicabilityId: string, @Body() dto: SaveMaterialApplicabilityDto) {
+    return this.inventoryService.updateMaterialApplicability(applicabilityId, dto);
+  }
+
+  @Delete('material-applicabilities/:applicabilityId')
+  disableMaterialApplicability(@Param('applicabilityId') applicabilityId: string) {
+    return this.inventoryService.disableMaterialApplicability(applicabilityId);
+  }
+
   @Patch('materials/:materialId')
   updateMaterial(@Param('materialId') materialId: string, @Body() dto: UpdateMaterialDto) {
     return this.inventoryService.updateMaterial(materialId, dto);
@@ -60,6 +233,76 @@ export class InventoryController {
   @Delete('materials/:materialId')
   disableMaterial(@Param('materialId') materialId: string) {
     return this.inventoryService.disableMaterial(materialId);
+  }
+
+  @Get('model-boms')
+  modelBoms(@Query() query: ModelBomQueryDto) {
+    return this.inventoryService.modelBoms(query);
+  }
+
+  @Get('model-boms/:bomId')
+  modelBom(@Param('bomId') bomId: string) {
+    return this.inventoryService.modelBom(bomId);
+  }
+
+  @Post('model-boms')
+  createModelBom(@Body() dto: SaveModelBomDto) {
+    return this.inventoryService.createModelBom(dto);
+  }
+
+  @Post('model-boms/:bomId/copy')
+  copyModelBom(@Param('bomId') bomId: string, @Body() dto: CopyModelBomDto) {
+    return this.inventoryService.copyModelBom(bomId, dto);
+  }
+
+  @Patch('model-boms/:bomId')
+  updateModelBom(@Param('bomId') bomId: string, @Body() dto: SaveModelBomDto) {
+    return this.inventoryService.updateModelBom(bomId, dto);
+  }
+
+  @Delete('model-boms/:bomId')
+  disableModelBom(@Param('bomId') bomId: string) {
+    return this.inventoryService.disableModelBom(bomId);
+  }
+
+  @Post('model-boms/:bomId/lines')
+  saveModelBomLine(@Param('bomId') bomId: string, @Body() dto: SaveModelBomLineDto) {
+    return this.inventoryService.saveModelBomLine(bomId, dto);
+  }
+
+  @Patch('model-boms/:bomId/lines/reorder')
+  reorderModelBomLines(@Param('bomId') bomId: string, @Body() dto: ReorderModelBomLinesDto) {
+    return this.inventoryService.reorderModelBomLines(bomId, dto);
+  }
+
+  @Patch('model-bom-lines/:lineId')
+  updateModelBomLine(@Param('lineId') lineId: string, @Body() dto: SaveModelBomLineDto) {
+    return this.inventoryService.updateModelBomLine(lineId, dto);
+  }
+
+  @Delete('model-bom-lines/:lineId')
+  disableModelBomLine(@Param('lineId') lineId: string) {
+    return this.inventoryService.disableModelBomLine(lineId);
+  }
+
+  @Get('material-transform-rules')
+  materialTransformRules(@Query() query: MaterialTransformRuleQueryDto) {
+    return this.inventoryService.materialTransformRules(query);
+  }
+
+  @Post('material-transform-rules')
+  createMaterialTransformRule(@Body() dto: SaveMaterialTransformRuleDto) {
+    return this.inventoryService.createMaterialTransformRule(dto);
+  }
+
+  @Patch('material-transform-rules/:ruleId')
+  updateMaterialTransformRule(@Param('ruleId') ruleId: string, @Body() dto: SaveMaterialTransformRuleDto) {
+    return this.inventoryService.updateMaterialTransformRule(ruleId, dto);
+  }
+
+  @Delete('material-transform-rules/:ruleId')
+  disableMaterialTransformRule(@Param('ruleId') ruleId: string) {
+    return this.inventoryService.disableMaterialTransformRule(ruleId);
   }
 
   @Get('materials/:partCode/source-details')
