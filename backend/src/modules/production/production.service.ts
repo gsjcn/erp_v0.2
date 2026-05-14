@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { OrderStatus, Prisma, ProductionNoticeStatus, ProductionNoticeTarget, ProductionStatus } from '@prisma/client';
+import { businessDateKey } from '../../common/business-date';
 import { decimalToNumber, processSnapshotToDetails, type ProcessStepSnapshot } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -2254,7 +2255,7 @@ export class ProductionService {
   }
 
   private async generateNextReplenishmentRequestNo(tx: Prisma.TransactionClient) {
-    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dateKey = businessDateKey();
     const prefix = `PRR-${dateKey}-`;
     const lastRequest = await tx.productionReplenishmentRequest.findFirst({
       where: { requestNo: { startsWith: prefix } },
@@ -2266,7 +2267,7 @@ export class ProductionService {
   }
 
   private async generateNextScrapNo(tx: Prisma.TransactionClient) {
-    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dateKey = businessDateKey();
     const prefix = `SCRAP-${dateKey}-`;
     const lastRecord = await tx.productionScrapRecord.findFirst({
       where: { scrapNo: { startsWith: prefix } },
@@ -2278,7 +2279,7 @@ export class ProductionService {
   }
 
   private async generateNextNoticeNo(tx: Prisma.TransactionClient) {
-    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dateKey = businessDateKey();
     const prefix = `PN-${dateKey}-`;
     const lastNotice = await tx.productionNotice.findFirst({
       where: { noticeNo: { startsWith: prefix } },

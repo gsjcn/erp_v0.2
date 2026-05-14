@@ -9,7 +9,7 @@
     <small>{{ inventoryText }}</small>
     <small v-if="baseInfoText">{{ baseInfoText }}</small>
     <small v-if="matchText">{{ matchText }}</small>
-    <small v-if="historyText">{{ historyText }}</small>
+    <small v-if="historyText" :title="historyTooltipText">{{ historyText }}</small>
   </div>
 </template>
 
@@ -88,6 +88,11 @@ const historyCustomerText = computed(() => {
   return `历史客户 ${visibleNames.join('、')}${suffix}`;
 });
 
+const historyCustomerTitle = computed(() => {
+  const names = props.item.historyCustomerNames || [];
+  return names.length ? `全部历史客户：${names.join('、')}` : '';
+});
+
 const historyText = computed(() => {
   const parts = [
     props.item.hasCurrentCustomerHistory ? '当前客户历史' : '',
@@ -100,6 +105,10 @@ const historyText = computed(() => {
     historyCustomerText.value
   ].filter(Boolean);
   return parts.join(' / ');
+});
+
+const historyTooltipText = computed(() => {
+  return [historyText.value, historyCustomerTitle.value].filter(Boolean).join(' / ');
 });
 
 const drawingText = computed(() => {

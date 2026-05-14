@@ -8,6 +8,7 @@ import {
   ProductionNoticeTarget,
   ProductionStatus
 } from '@prisma/client';
+import { businessDateKey } from '../../common/business-date';
 import { decimalToNumber } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -1651,7 +1652,7 @@ export class WarehousesService {
   }
 
   private async generateNextScrapNo(tx: Prisma.TransactionClient) {
-    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dateKey = businessDateKey();
     const prefix = `SCRAP-${dateKey}-`;
     const lastRecord = await tx.productionScrapRecord.findFirst({
       where: { scrapNo: { startsWith: prefix } },

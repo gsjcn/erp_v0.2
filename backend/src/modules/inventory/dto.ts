@@ -1,6 +1,6 @@
 import { CommonStatus, InventoryStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNumber, IsObject, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
 
 export class InventoryQueryDto {
   @IsOptional()
@@ -43,6 +43,10 @@ export class MaterialSuggestionQueryDto {
 
   @IsOptional()
   @IsString()
+  projectModel?: string;
+
+  @IsOptional()
+  @IsString()
   warehouseId?: string;
 
   @IsOptional()
@@ -66,6 +70,22 @@ export class MaterialQueryDto {
   @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
 }
 
 export class CreateMaterialImportSessionDto {
@@ -206,8 +226,36 @@ export class ModelBomQueryDto {
   projectModel?: string;
 
   @IsOptional()
-  @IsEnum(CommonStatus)
-  status?: CommonStatus;
+  @IsIn(['ALL', 'PRIVATE', 'SELECTED'])
+  scopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
+
+  @IsOptional()
+  @IsString()
+  excludeGlobalAllProject?: string;
+
+  @IsOptional()
+  @IsString()
+  commonOnly?: string;
+
+  @IsOptional()
+  @IsIn(['ENABLED', 'DISABLED', 'ALL'])
+  status?: CommonStatus | 'ALL';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
 }
 
 export class SaveModelBomDto {
@@ -218,8 +266,18 @@ export class SaveModelBomDto {
   @IsString()
   customerId?: string;
 
+  @IsOptional()
+  @IsIn(['ALL', 'PRIVATE', 'SELECTED'])
+  customerScopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  customerIds?: string[];
+
+  @IsOptional()
   @IsString()
-  projectModel!: string;
+  projectModel?: string;
 
   @IsOptional()
   @IsString()
@@ -228,6 +286,45 @@ export class SaveModelBomDto {
   @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
+
+  @IsOptional()
+  @IsBoolean()
+  isCommon?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  scopeChangeConfirmed?: boolean;
+}
+
+export class SetModelBomCommonDto {
+  @IsBoolean()
+  isCommon!: boolean;
+}
+
+export class SetModelBomsCommonBatchDto {
+  @IsArray()
+  @IsString({ each: true })
+  bomIds!: string[];
+
+  @IsBoolean()
+  isCommon!: boolean;
+}
+
+export class ReorderModelBomCommonItemDto {
+  @IsString()
+  bomId!: string;
+
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  commonSortOrder!: number;
+}
+
+export class ReorderModelBomCommonDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReorderModelBomCommonItemDto)
+  items!: ReorderModelBomCommonItemDto[];
 }
 
 export class CopyModelBomDto {
@@ -249,6 +346,10 @@ export class CopyModelBomDto {
   @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
+
+  @IsOptional()
+  @IsBoolean()
+  isCommon?: boolean;
 }
 
 export class SaveModelBomLineDto {
@@ -278,6 +379,12 @@ export class SaveModelBomLineDto {
   @IsOptional()
   @IsString()
   defaultProcessRoute?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  partThickness?: number;
 
   @Type(() => Number)
   @IsNumber()
@@ -316,6 +423,53 @@ export class ReorderModelBomLinesDto {
   items!: ReorderModelBomLineItemDto[];
 }
 
+export class ModelBomDiffReviewQueryDto {
+  @IsOptional()
+  @IsString()
+  sourceBomId?: string;
+}
+
+export class ConfirmModelBomDiffReviewDto {
+  @IsString()
+  sourceBomId!: string;
+
+  @IsString()
+  reviewKey!: string;
+
+  @IsString()
+  issueKind!: string;
+
+  @IsOptional()
+  @IsString()
+  sourceLineId?: string;
+
+  @IsOptional()
+  @IsString()
+  targetLineId?: string;
+
+  @IsString()
+  issueTitle!: string;
+
+  @IsOptional()
+  @IsString()
+  issueDetail?: string;
+
+  @IsString()
+  diffFingerprint!: string;
+
+  @IsOptional()
+  @IsObject()
+  fieldsJson?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  reviewedBy?: string;
+
+  @IsOptional()
+  @IsString()
+  reviewRemark?: string;
+}
+
 export class MaterialTransformRuleQueryDto {
   @IsOptional()
   @IsString()
@@ -346,8 +500,36 @@ export class MaterialTransformRuleQueryDto {
   targetPartCode?: string;
 
   @IsOptional()
-  @IsEnum(CommonStatus)
-  status?: CommonStatus;
+  @IsIn(['ENABLED', 'DISABLED', 'ALL'])
+  status?: CommonStatus | 'ALL';
+
+  @IsOptional()
+  @IsIn(['ALL', 'WITH_STOCK', 'NO_STOCK'])
+  sourceStockStatus?: 'ALL' | 'WITH_STOCK' | 'NO_STOCK';
+
+  @IsOptional()
+  @IsIn(['ALL', 'WITH_STOCK', 'NO_STOCK'])
+  targetStockStatus?: 'ALL' | 'WITH_STOCK' | 'NO_STOCK';
+
+  @IsOptional()
+  @IsIn(['ALL', 'TARGET_STOCK', 'SOURCE_REWORK', 'NO_STOCK'])
+  inventoryDecision?: 'ALL' | 'TARGET_STOCK' | 'SOURCE_REWORK' | 'NO_STOCK';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
 }
 
 export class SaveMaterialTransformRuleDto {
@@ -406,6 +588,10 @@ export class InventorySourceDetailQueryDto {
   @IsOptional()
   @IsIn(['ALL', 'ORDER', 'STOCK'])
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
+
+  @IsOptional()
+  @IsString()
+  customerId?: string;
 
   @IsOptional()
   @IsString()

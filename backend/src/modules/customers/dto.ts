@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import { CommonStatus, CustomerRegionType } from '@prisma/client';
-import { IsArray, IsBoolean, IsEnum, IsNotEmpty, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
 
 export class CustomerQueryDto {
   @IsOptional()
@@ -10,6 +10,22 @@ export class CustomerQueryDto {
   @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
 }
 
 export class CheckCustomerNameQueryDto {

@@ -77,6 +77,7 @@
         <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
         <el-button size="small" @click="backToOrderSummary">返回订单汇总</el-button>
         <el-button
+          v-if="!isMobileLayout"
           type="primary"
           plain
           size="small"
@@ -86,6 +87,7 @@
           批量开始待确认生产
         </el-button>
         <el-button
+          v-if="!isMobileLayout"
           type="primary"
           size="small"
           :disabled="selectedStartableTasks.length === 0"
@@ -276,12 +278,15 @@
           </div>
           <div class="mobile-card-actions">
             <el-button link type="primary" @click="openOrderProductionDetail(summary)">进入生产详情</el-button>
+            <template v-if="!isMobileLayout">
             <el-button v-if="orderSummaryNeedsShortageAttention(summary)" link type="warning" @click="goOrderShortageDetail(summary)">
               处理补单
             </el-button>
             <el-button v-if="summary.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(summary)">
               批量开始生产
             </el-button>
+            </template>
+            <span v-else class="mobile-readonly-note">手机端只查看生产概况</span>
           </div>
         </article>
         <div v-if="!filteredOrderSummaries.length && !loading" class="mobile-empty">暂无生产订单</div>
@@ -450,7 +455,7 @@
           </div>
           <div class="mobile-card-header-actions production-task-header-actions">
             <el-checkbox
-              v-if="selectedProductionOrderNo && shouldShowStartAction(task)"
+              v-if="selectedProductionOrderNo && !isMobileLayout && shouldShowStartAction(task)"
               :model-value="selectedStartableTaskIds.includes(task.id)"
               :value="task.id"
               class="mobile-start-checkbox"
@@ -516,11 +521,11 @@
                   {
                     completed: isProcessCompleted(task, step),
                     current: isCurrentProcess(task, step),
-                    locked: !canOpenProcess(task, step)
+                    locked: isMobileLayout || !canOpenProcess(task, step)
                   }
                 ]"
-                :disabled="!canOpenProcess(task, step)"
-                :title="processButtonTitle(task, step)"
+                :disabled="isMobileLayout || !canOpenProcess(task, step)"
+                :title="isMobileLayout ? '手机端只查看工序进度' : processButtonTitle(task, step)"
                 @click="openProcessCompletion(task, step)"
               >
                 {{ processStepDisplay(task, step) }}
@@ -537,6 +542,7 @@
           </div>
         </div>
         <div v-show="isMobileProductionTaskExpanded(task.id)" class="mobile-card-actions">
+          <template v-if="!isMobileLayout">
           <el-button
             v-if="pendingProductionReplenishmentRequest(task)"
             link
@@ -563,6 +569,8 @@
           <el-button v-if="canWithdrawProduction(task)" link type="danger" @click="withdrawProduction(task)">
             管理撤回
           </el-button>
+          </template>
+          <span v-if="isMobileLayout" class="mobile-readonly-note">手机端只查看生产进度</span>
           <span v-else-if="effectiveProductionStatus(task) === 'RECEIVED'" class="muted">已入库</span>
           <span v-else-if="effectiveProductionStatus(task) === 'COMPLETED'" class="muted">已完成</span>
         </div>
@@ -578,6 +586,7 @@
       class="responsive-dialog"
       :close-on-click-modal="!startSaving"
       :close-on-press-escape="!startSaving"
+      :before-close="handleStartDialogClose"
       :show-close="!startSaving"
       @closed="resetStartDialog"
     >
@@ -649,7 +658,7 @@
       </div>
       <template #footer>
         <el-button :disabled="startSaving" @click="closeStartDialog">取消</el-button>
-        <el-button type="primary" :loading="startSaving" :disabled="!startSupervisorCode" @click="confirmStartProduction">
+        <el-button type="primary" :loading="startSaving" :disabled="startSaving || !startSupervisorCode" @click="confirmStartProduction">
           确认开始生产
         </el-button>
       </template>
@@ -662,6 +671,7 @@
       class="responsive-dialog"
       :close-on-click-modal="!batchStartSaving"
       :close-on-press-escape="!batchStartSaving"
+      :before-close="handleBatchStartDialogClose"
       :show-close="!batchStartSaving"
       @closed="resetBatchStartDialog"
     >
@@ -729,7 +739,7 @@
         <el-button
           type="primary"
           :loading="batchStartSaving"
-          :disabled="!batchStartSupervisorCode || batchStartSelectedTaskIds.length === 0"
+          :disabled="batchStartSaving || !batchStartSupervisorCode || batchStartSelectedTaskIds.length === 0"
           @click="confirmBatchStartProduction"
         >
           确认批量开始生产
@@ -750,7 +760,7 @@
             </small>
           </div>
           <el-button
-            v-if="notice.status === 'PENDING'"
+            v-if="notice.status === 'PENDING' && !isMobileLayout"
             size="small"
             type="primary"
             @click="acknowledgeNotice(notice)"
@@ -829,27 +839,30 @@
             </small>
           </div>
           <div class="replenishment-request-actions">
-            <el-button
-              v-if="request.status === 'PENDING'"
-              type="primary"
-              size="small"
-              :disabled="!canReviewReplenishmentRequest(request)"
-              :title="replenishmentRequestLockedReason(request)"
-              @click="openReplenishmentApprovalFromRequest(request)"
-            >
-              主管确认
-            </el-button>
-            <el-button
-              v-if="request.status === 'PENDING'"
-              type="danger"
-              size="small"
-              plain
-              :disabled="!canReviewReplenishmentRequest(request)"
-              :title="replenishmentRequestLockedReason(request)"
-              @click="openReplenishmentReject(request)"
-            >
-              驳回申请
-            </el-button>
+            <template v-if="request.status === 'PENDING'">
+              <template v-if="!isMobileLayout">
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!canReviewReplenishmentRequest(request)"
+                  :title="replenishmentRequestLockedReason(request)"
+                  @click="openReplenishmentApprovalFromRequest(request)"
+                >
+                  主管确认
+                </el-button>
+                <el-button
+                  type="danger"
+                  size="small"
+                  plain
+                  :disabled="!canReviewReplenishmentRequest(request)"
+                  :title="replenishmentRequestLockedReason(request)"
+                  @click="openReplenishmentReject(request)"
+                >
+                  驳回申请
+                </el-button>
+              </template>
+              <span v-else class="mobile-readonly-note">手机端只查看补单申请</span>
+            </template>
             <span v-else class="muted">{{ replenishmentRequestStatusText(request.status) }}</span>
           </div>
         </article>
@@ -859,7 +872,15 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="replenishmentRejectVisible" title="驳回生产报废补单申请" width="min(620px, calc(100vw - 32px))" class="responsive-dialog">
+    <el-dialog
+      v-model="replenishmentRejectVisible"
+      title="驳回生产报废补单申请"
+      width="min(620px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!replenishmentRejectSaving"
+      :close-on-press-escape="!replenishmentRejectSaving"
+      :before-close="handleReplenishmentRejectDialogClose"
+    >
       <div v-if="activeReplenishmentRejectRequest" class="final-confirm-panel">
         <el-alert
           title="驳回后不会生成补单任务，该短缺会按管理确认缺货完成保存；请确认现场确实不需要补齐客户订单数量。"
@@ -907,8 +928,13 @@
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="replenishmentRejectVisible = false">取消</el-button>
-        <el-button type="danger" :loading="replenishmentRejectSaving" @click="saveReplenishmentReject">
+        <el-button :disabled="replenishmentRejectSaving" @click="closeReplenishmentRejectDialog">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="replenishmentRejectSaving"
+          :disabled="replenishmentRejectSaving"
+          @click="saveReplenishmentReject"
+        >
           确认驳回
         </el-button>
       </template>
@@ -939,8 +965,8 @@
           </template>
         </el-table-column>
         <el-table-column prop="productionTaskNo" label="任务号" min-width="210" />
-        <el-table-column prop="partCode" label="物料编码" min-width="130" />
-        <el-table-column prop="partName" label="物料名称" min-width="150" />
+        <el-table-column prop="partCode" label="零件编码" min-width="130" />
+        <el-table-column prop="partName" label="零件名称" min-width="150" />
         <el-table-column label="报废数量" min-width="110">
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
         </el-table-column>
@@ -959,6 +985,9 @@
       :title="processDialogTitle"
       width="min(860px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!processSaving"
+      :close-on-press-escape="!processSaving"
+      :before-close="handleProcessDialogClose"
     >
       <div v-if="activeTask" class="process-form">
         <div class="process-info-grid">
@@ -971,15 +1000,15 @@
             <strong><OrderNoLink :order-no="activeTask.orderNo" /></strong>
           </div>
           <div>
-            <label>产品名称</label>
+            <label>零件名称</label>
             <strong>{{ activeTask.partName }}</strong>
           </div>
           <div>
-            <label>物料编码</label>
+            <label>零件编码</label>
             <strong>{{ activeTask.partCode }}</strong>
           </div>
           <div>
-            <label>产品图号</label>
+            <label>零件图号</label>
             <strong>{{ activeTask.drawingNo || '-' }}</strong>
           </div>
           <div>
@@ -988,7 +1017,7 @@
           </div>
           <div>
             <label>零件厚度</label>
-            <strong>{{ activeTask.partThickness ? `${activeTask.partThickness} mm` : '-' }}</strong>
+            <strong>{{ formatProductionTaskThickness(activeTask) }}</strong>
           </div>
           <div>
             <label>成品规格</label>
@@ -1209,8 +1238,16 @@
         </div>
       </div>
       <template #footer>
-        <el-button @click="processVisible = false">取消</el-button>
-        <el-button v-if="!activeProcessReadonly" type="primary" :loading="processSaving" @click="saveProcessCompletion">确认完成</el-button>
+        <el-button :disabled="processSaving" @click="closeProcessDialog">取消</el-button>
+        <el-button
+          v-if="!activeProcessReadonly"
+          type="primary"
+          :loading="processSaving"
+          :disabled="processSaving"
+          @click="saveProcessCompletion"
+        >
+          确认完成
+        </el-button>
       </template>
     </el-dialog>
 
@@ -1242,6 +1279,7 @@
       class="responsive-dialog"
       :close-on-click-modal="!finalSaving"
       :close-on-press-escape="!finalSaving"
+      :before-close="handleFinalConfirmDialogClose"
       :show-close="!finalSaving"
       @closed="resetFinalConfirmDialog"
     >
@@ -1413,7 +1451,7 @@
       </div>
       <template #footer>
         <el-button :disabled="finalSaving" @click="closeFinalConfirmDialog">取消</el-button>
-        <el-button type="primary" :loading="finalSaving" :disabled="!finalSupervisorCode" @click="saveFinalProductionCompletion">
+        <el-button type="primary" :loading="finalSaving" :disabled="finalSaving || !finalSupervisorCode" @click="saveFinalProductionCompletion">
           {{ activeFinalTask?.status === 'COMPLETED' ? '保存修改' : '确认完成' }}
         </el-button>
       </template>
@@ -1424,6 +1462,9 @@
       title="主管确认生产报废补单"
       width="min(680px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!replenishmentApprovalSaving"
+      :close-on-press-escape="!replenishmentApprovalSaving"
+      :before-close="handleReplenishmentApprovalDialogClose"
     >
       <div v-if="activeReplenishmentApprovalTask && activeReplenishmentApprovalCompletion" class="final-confirm-panel">
         <div class="process-info-grid">
@@ -1476,8 +1517,13 @@
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="replenishmentApprovalVisible = false">取消</el-button>
-        <el-button type="primary" :loading="replenishmentApprovalSaving" @click="saveReplenishmentApproval">
+        <el-button :disabled="replenishmentApprovalSaving" @click="closeReplenishmentApprovalDialog">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="replenishmentApprovalSaving"
+          :disabled="replenishmentApprovalSaving"
+          @click="saveReplenishmentApproval"
+        >
           确认生成报废补单
         </el-button>
       </template>
@@ -1488,6 +1534,9 @@
       title="管理撤回"
       width="min(720px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!withdrawSaving"
+      :close-on-press-escape="!withdrawSaving"
+      :before-close="handleWithdrawDialogClose"
     >
       <div v-if="activeWithdrawTask" class="withdraw-panel">
         <div class="process-info-grid">
@@ -1573,8 +1622,8 @@
         </el-form>
       </div>
       <template #footer>
-        <el-button @click="withdrawVisible = false">取消</el-button>
-        <el-button type="danger" :loading="withdrawSaving" @click="saveWithdrawProduction">确认撤回</el-button>
+        <el-button :disabled="withdrawSaving" @click="closeWithdrawDialog">取消</el-button>
+        <el-button type="danger" :loading="withdrawSaving" :disabled="withdrawSaving" @click="saveWithdrawProduction">确认撤回</el-button>
       </template>
     </el-dialog>
 
@@ -1725,8 +1774,8 @@ import NoticeAcknowledgeDialog from '../components/NoticeAcknowledgeDialog.vue';
 import OrderSelect from '../components/OrderSelect.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
 import StatusTag from '../components/StatusTag.vue';
+import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
-  Customer,
   OrderSummary,
   ProductionNotice,
   ProductionOperator,
@@ -1752,11 +1801,12 @@ type BatchStartTask = ProductionOrderSummaryTask &
 
 const route = useRoute();
 const router = useRouter();
-const customers = ref<Customer[]>([]);
+const { isMobileLayout } = useDeviceProfile();
 const orderOptions = ref<OrderSummary[]>([]);
 const tasks = ref<ProductionTask[]>([]);
 const orderSummaries = ref<ProductionOrderSummary[]>([]);
 const dateRange = ref<string[]>([]);
+const selectedCustomerName = ref('');
 const loading = ref(false);
 const noticeVisible = ref(false);
 const noticeLoading = ref(false);
@@ -2086,7 +2136,7 @@ const printableRowCount = computed(() =>
 );
 
 const printScopeText = computed(() => {
-  const customerName = customers.value.find((item) => item.id === filters.customerId)?.customerName || '全部客户';
+  const customerName = filters.customerId ? selectedCustomerName.value || '当前客户' : '全部客户';
   const orderNo = selectedProductionOrderNo.value || filters.orderNo || '全部订单';
   const dateText = dateRange.value.length === 2 ? `${dateRange.value[0]} 至 ${dateRange.value[1]}` : '全部订单日期';
   const statusText = viewMode.value === 'ORDER_SUMMARY' ? activeOrderStatusLabel.value : activeStatusLabel.value;
@@ -2273,11 +2323,25 @@ function taskQueryParams() {
   };
 }
 
-async function loadCustomers() {
+let selectedCustomerNameRequestSeq = 0;
+async function loadSelectedCustomerName() {
+  const customerId = filters.customerId;
+  const requestId = ++selectedCustomerNameRequestSeq;
+  if (!customerId) {
+    selectedCustomerName.value = '';
+    return;
+  }
   try {
-    customers.value = await erpApi.customers();
+    // 生产页只按当前筛选客户回填名称，避免为了打印范围一次性加载全量客户。
+    const customer = await erpApi.customer(customerId);
+    if (requestId === selectedCustomerNameRequestSeq) {
+      selectedCustomerName.value = customer.customerName;
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败');
+    if (requestId === selectedCustomerNameRequestSeq) {
+      selectedCustomerName.value = '';
+    }
+    ElMessage.error(error instanceof Error ? error.message : '客户名称加载失败，请确认客户筛选和后端服务');
   }
 }
 
@@ -2286,8 +2350,8 @@ async function loadOperators() {
     const operators = await erpApi.productionOperators();
     setOperatorOptions(operators);
   } catch (error) {
-    setOperatorOptions([]);
-    ElMessage.error(error instanceof Error ? error.message : '操作人员列表加载失败');
+    clearOperatorOptions();
+    ElMessage.error(error instanceof Error ? error.message : '操作人员列表加载失败，请确认后端服务和人员资料');
   }
 }
 
@@ -2303,7 +2367,8 @@ async function loadOrderOptions() {
       filters.orderNo = undefined;
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败');
+    orderOptions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -2312,7 +2377,10 @@ async function loadTasks() {
     // 生产任务按客户、订单日期和订单号过滤，避免任务列表混在一起难以操作。
     tasks.value = await erpApi.productionTasks(taskQueryParams());
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '生产任务加载失败');
+    tasks.value = [];
+    selectedTaskRows.value = [];
+    expandedMobileProductionTaskIds.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '生产任务加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -2320,7 +2388,11 @@ async function loadOrderSummaries() {
   try {
     orderSummaries.value = await erpApi.productionOrderSummaries(taskQueryParams());
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '生产订单汇总加载失败');
+    orderSummaries.value = [];
+    selectedProductionOrderNo.value = '';
+    selectedTaskRows.value = [];
+    expandedMobileProductionOrderIds.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '生产订单汇总加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -2329,7 +2401,8 @@ async function loadProductionNotices() {
   try {
     productionNotices.value = await erpApi.productionNotices(undefined, 'PRODUCTION');
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '生产通知加载失败');
+    productionNotices.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '生产通知加载失败，请确认后端服务');
   } finally {
     noticeLoading.value = false;
   }
@@ -2349,7 +2422,8 @@ async function loadProductionReplenishmentRequests(showLoading = false, useServe
       keyword: useServerKeyword ? replenishmentRequestKeyword.value : undefined
     });
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '生产报废补单申请加载失败');
+    productionReplenishmentRequests.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '生产报废补单申请加载失败，请确认后端服务和筛选条件');
   } finally {
     if (showLoading) {
       replenishmentRequestLoading.value = false;
@@ -2384,7 +2458,8 @@ async function loadScrapRecords() {
       dateTo: scrapDateRange.value[1]
     });
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '报废统计加载失败');
+    scrapRecords.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '报废统计加载失败，请确认后端服务和筛选条件');
   } finally {
     scrapLoading.value = false;
   }
@@ -2410,7 +2485,7 @@ async function loadScrapOrderOptions() {
     }
   } catch (error) {
     scrapOrderOptions.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '报废统计订单选项加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '报废统计订单选项加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -2541,6 +2616,7 @@ async function handleScopeChange() {
   selectedProductionOrderNo.value = '';
   selectedTaskRows.value = [];
   viewMode.value = 'ORDER_SUMMARY';
+  await loadSelectedCustomerName();
   if (productionRouteOrderNo() || productionRouteView()) {
     pushProductionRouteForSummary();
   }
@@ -2549,6 +2625,7 @@ async function handleScopeChange() {
 
 async function resetFilters() {
   filters.customerId = undefined;
+  selectedCustomerName.value = '';
   filters.orderNo = undefined;
   dateRange.value = [];
   activeStatus.value = 'ALL';
@@ -2562,6 +2639,14 @@ async function resetFilters() {
   await queryTasks();
 }
 
+function guardDesktopProductionMutation(actionLabel: string) {
+  if (!isMobileLayout.value) {
+    return false;
+  }
+  ElMessage.warning(`手机端仅查看生产进度和通知，${actionLabel}请在电脑端操作`);
+  return true;
+}
+
 function productionNoticeTitle(notice: ProductionNotice) {
   const quantityText =
     notice.deltaQuantity && notice.unit ? `，变化 ${formatQuantity(Math.abs(notice.deltaQuantity), notice.unit)}` : '';
@@ -2569,19 +2654,25 @@ function productionNoticeTitle(notice: ProductionNotice) {
   const typeMap: Record<string, string> = {
     QUANTITY_INCREASE: '客户数量增加',
     QUANTITY_DECREASE: '客户数量减少',
-    ORDER_CANCELLED: '客户取消物料',
-    MATERIAL_ADDED: '客户新增物料',
+    ORDER_CANCELLED: '客户取消零件',
+    MATERIAL_ADDED: '客户新增零件',
     TASK_WITHDRAWN: '管理撤回'
   };
   return `${typeMap[notice.noticeType] || notice.noticeType}：${partText}${quantityText}`;
 }
 
 function acknowledgeNotice(notice: ProductionNotice) {
+  if (guardDesktopProductionMutation('确认生产通知')) {
+    return;
+  }
   activeProductionNotice.value = notice;
   acknowledgeVisible.value = true;
 }
 
 async function saveNoticeAcknowledge(acknowledgedBy: string) {
+  if (guardDesktopProductionMutation('确认生产通知')) {
+    return;
+  }
   const notice = activeProductionNotice.value;
   if (!notice) {
     return;
@@ -2600,6 +2691,9 @@ async function saveNoticeAcknowledge(acknowledgedBy: string) {
 }
 
 function openStartDialog(row: ProductionTask) {
+  if (guardDesktopProductionMutation('开始生产')) {
+    return;
+  }
   activeStartTask.value = row;
   startSupervisorCode.value = '';
   startConfirmVisible.value = true;
@@ -2608,9 +2702,18 @@ function openStartDialog(row: ProductionTask) {
 
 function closeStartDialog() {
   if (startSaving.value) {
+    warnProductionSavingClose('开始生产正在保存，请等待保存完成');
     return;
   }
   startConfirmVisible.value = false;
+}
+
+function handleStartDialogClose(done: () => void) {
+  if (startSaving.value) {
+    warnProductionSavingClose('开始生产正在保存，请等待保存完成');
+    return;
+  }
+  done();
 }
 
 function resetStartDialog() {
@@ -2619,6 +2722,12 @@ function resetStartDialog() {
 }
 
 async function confirmStartProduction() {
+  if (startSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('开始生产')) {
+    return;
+  }
   if (!activeStartTask.value) {
     return;
   }
@@ -2717,6 +2826,9 @@ function handleTaskSelectionChange(rows: ProductionTask[]) {
 }
 
 function toggleMobileStartSelection(task: ProductionTask, checked: boolean) {
+  if (guardDesktopProductionMutation('勾选生产任务')) {
+    return;
+  }
   if (!shouldShowStartAction(task)) {
     return;
   }
@@ -2742,6 +2854,9 @@ function pendingSummaryTasksForBatch(row: ProductionOrderSummary): BatchStartTas
 }
 
 function openBatchStartDialog(_orderNo: string, rows: BatchStartTask[]) {
+  if (guardDesktopProductionMutation('批量开始生产')) {
+    return;
+  }
   const startableRows = rows.filter((task) => isBatchStartCandidate(task));
   if (startableRows.length === 0) {
     ElMessage.warning('当前订单没有待确认生产的任务');
@@ -2756,9 +2871,18 @@ function openBatchStartDialog(_orderNo: string, rows: BatchStartTask[]) {
 
 function closeBatchStartDialog() {
   if (batchStartSaving.value) {
+    warnProductionSavingClose('批量开始生产正在保存，请等待保存完成');
     return;
   }
   batchStartVisible.value = false;
+}
+
+function handleBatchStartDialogClose(done: () => void) {
+  if (batchStartSaving.value) {
+    warnProductionSavingClose('批量开始生产正在保存，请等待保存完成');
+    return;
+  }
+  done();
 }
 
 function resetBatchStartDialog() {
@@ -2796,6 +2920,12 @@ function openBatchStartForSelected() {
 }
 
 async function confirmBatchStartProduction() {
+  if (batchStartSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('批量开始生产')) {
+    return;
+  }
   if (!batchStartSupervisorCode.value) {
     ElMessage.warning('请选择车间主任');
     return;
@@ -2823,6 +2953,9 @@ async function confirmBatchStartProduction() {
 }
 
 function withdrawProduction(row: ProductionTask) {
+  if (guardDesktopProductionMutation('管理撤回生产任务')) {
+    return;
+  }
   activeWithdrawTask.value = row;
   const defaultQuantity = defaultWithdrawHandlingQuantity(row);
   withdrawForm.managerName = '';
@@ -2834,7 +2967,33 @@ function withdrawProduction(row: ProductionTask) {
   withdrawVisible.value = true;
 }
 
+function warnProductionSavingClose(message: string) {
+  ElMessage.warning(message);
+}
+
+function closeWithdrawDialog() {
+  if (withdrawSaving.value) {
+    warnProductionSavingClose('生产撤回正在保存，请等待保存完成');
+    return;
+  }
+  withdrawVisible.value = false;
+}
+
+function handleWithdrawDialogClose(done: () => void) {
+  if (withdrawSaving.value) {
+    warnProductionSavingClose('生产撤回正在保存，请等待保存完成');
+    return;
+  }
+  done();
+}
+
 async function saveWithdrawProduction() {
+  if (withdrawSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('管理撤回生产任务')) {
+    return;
+  }
   const task = activeWithdrawTask.value;
   if (!task) {
     return;
@@ -3033,6 +3192,9 @@ function processButtonTitle(row: ProductionTask, processName: string) {
 }
 
 function openNextProcess(row: ProductionTask) {
+  if (guardDesktopProductionMutation('确认下一道工序')) {
+    return;
+  }
   const processName = nextIncompleteProcess(row);
   if (!processName) {
     ElMessage.info('所有工序已确认完成');
@@ -3042,6 +3204,9 @@ function openNextProcess(row: ProductionTask) {
 }
 
 function openProcessCompletion(row: ProductionTask, processName: string) {
+  if (guardDesktopProductionMutation('填写工序完成表')) {
+    return;
+  }
   if (!canOpenProcess(row, processName)) {
     ElMessage.warning(processButtonTitle(row, processName));
     return;
@@ -3062,6 +3227,22 @@ function openProcessCompletion(row: ProductionTask, processName: string) {
   resetProcessOperatorCodes();
   syncProcessOperatorRows();
   processVisible.value = true;
+}
+
+function closeProcessDialog() {
+  if (processSaving.value) {
+    warnProductionSavingClose('工序完成表正在保存，请等待保存完成');
+    return;
+  }
+  processVisible.value = false;
+}
+
+function handleProcessDialogClose(done: () => void) {
+  if (processSaving.value) {
+    warnProductionSavingClose('工序完成表正在保存，请等待保存完成');
+    return;
+  }
+  done();
 }
 
 function normalizeBatchProcessNames() {
@@ -3154,6 +3335,14 @@ function cacheOperators(operators: ProductionOperator[]) {
 function setOperatorOptions(operators: ProductionOperator[]) {
   cacheOperators(operators);
   operatorOptions.value = operators;
+}
+
+function clearOperatorOptions() {
+  operatorOptions.value = [];
+  Object.keys(operatorCache).forEach((code) => delete operatorCache[code]);
+  Object.keys(operatorOptionsByScope).forEach((scope) => delete operatorOptionsByScope[scope]);
+  Object.keys(operatorKeywordByScope).forEach((scope) => delete operatorKeywordByScope[scope]);
+  Object.keys(operatorLoadingByScope).forEach((scope) => delete operatorLoadingByScope[scope]);
 }
 
 function setOperatorOptionsForScope(scope: string, operators: ProductionOperator[]) {
@@ -3404,6 +3593,9 @@ function buildProcessQuantityPayload() {
 }
 
 async function confirmCompletedTask(row: ProductionTask) {
+  if (guardDesktopProductionMutation('确认生产完成')) {
+    return;
+  }
   if (!isAllProcessConfirmed(row)) {
     ElMessage.warning('请先确认所有生产工序');
     return;
@@ -3425,9 +3617,18 @@ async function confirmCompletedTask(row: ProductionTask) {
 
 function closeFinalConfirmDialog() {
   if (finalSaving.value) {
+    warnProductionSavingClose('生产完成确认正在保存，请等待保存完成');
     return;
   }
   finalConfirmVisible.value = false;
+}
+
+function handleFinalConfirmDialogClose(done: () => void) {
+  if (finalSaving.value) {
+    warnProductionSavingClose('生产完成确认正在保存，请等待保存完成');
+    return;
+  }
+  done();
 }
 
 function resetFinalConfirmDialog() {
@@ -3493,6 +3694,12 @@ function buildFinalShortagePayload() {
 }
 
 async function saveFinalProductionCompletion() {
+  if (finalSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('确认生产完成')) {
+    return;
+  }
   if (!activeFinalTask.value || !validateFinalCompletion()) {
     return;
   }
@@ -3518,6 +3725,12 @@ async function saveFinalProductionCompletion() {
 }
 
 async function saveProcessCompletion() {
+  if (processSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('保存工序完成表')) {
+    return;
+  }
   if (!activeTask.value || !activeProcessName.value) {
     return;
   }
@@ -3620,6 +3833,13 @@ function formatCompletedQuantity(row: ProductionTask) {
 function formatCustomerOrderQuantity(row: ProductionTask) {
   // 生产现场要同时看到客户订单数量和生产计划数量，避免把多做库存误认为客户要发货数量。
   return formatQuantity(row.customerOrderQuantity || row.plannedQuantity, row.unit);
+}
+
+function formatProductionTaskThickness(row: ProductionTask) {
+  if (row.lineType === 'COMPONENT') {
+    return '不适用（父级组件由子零件维护）';
+  }
+  return row.partThickness ? `${row.partThickness} mm` : '-';
 }
 
 function formatCompletedPlan(row: ProductionTask) {
@@ -3952,6 +4172,9 @@ function replenishmentSourceTypeText(sourceType?: string) {
 }
 
 function openReplenishmentApproval(row: ProductionTask) {
+  if (guardDesktopProductionMutation('主管确认补单')) {
+    return;
+  }
   const completion = pendingProductionReplenishmentRequest(row);
   if (!completion) {
     ElMessage.warning('当前任务没有待主管确认的生产报废补单申请');
@@ -3964,7 +4187,28 @@ function openReplenishmentApproval(row: ProductionTask) {
   replenishmentApprovalVisible.value = true;
 }
 
+function closeReplenishmentApprovalDialog() {
+  if (replenishmentApprovalSaving.value) {
+    warnProductionSavingClose('生产报废补单确认正在保存，请等待保存完成');
+    return;
+  }
+  replenishmentApprovalVisible.value = false;
+}
+
+function handleReplenishmentApprovalDialogClose(done: () => void) {
+  if (replenishmentApprovalSaving.value) {
+    warnProductionSavingClose('生产报废补单确认正在保存，请等待保存完成');
+    return;
+  }
+  done();
+}
+
 async function openReplenishmentApprovalFromRequest(request: ProductionReplenishmentRequest) {
+  if (guardDesktopProductionMutation('主管确认补单')) {
+    return;
+  }
+  activeReplenishmentApprovalTask.value = undefined;
+  activeReplenishmentApprovalCompletion.value = undefined;
   const lockedReason = replenishmentRequestLockedReason(request);
   if (lockedReason) {
     ElMessage.warning(lockedReason);
@@ -3981,7 +4225,9 @@ async function openReplenishmentApprovalFromRequest(request: ProductionReplenish
       const relatedTasks = await erpApi.productionTasks({ orderNo: request.orderNo });
       task = relatedTasks.find((item) => item.productionTaskNo === request.productionTaskNo);
     } catch (error) {
-      ElMessage.error(error instanceof Error ? error.message : '补单申请关联任务加载失败');
+      activeReplenishmentApprovalTask.value = undefined;
+      activeReplenishmentApprovalCompletion.value = undefined;
+      ElMessage.error(error instanceof Error ? error.message : '补单申请关联任务加载失败，请确认订单、任务和后端服务');
       return;
     }
   }
@@ -4002,6 +4248,12 @@ async function openReplenishmentApprovalFromRequest(request: ProductionReplenish
 }
 
 async function saveReplenishmentApproval() {
+  if (replenishmentApprovalSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('主管确认补单')) {
+    return;
+  }
   const completion = activeReplenishmentApprovalCompletion.value;
   if (!completion?.id) {
     return;
@@ -4031,6 +4283,9 @@ async function saveReplenishmentApproval() {
 }
 
 function openReplenishmentReject(request: ProductionReplenishmentRequest) {
+  if (guardDesktopProductionMutation('驳回补单申请')) {
+    return;
+  }
   const lockedReason = replenishmentRequestLockedReason(request);
   if (lockedReason) {
     ElMessage.warning(lockedReason);
@@ -4046,7 +4301,29 @@ function openReplenishmentReject(request: ProductionReplenishmentRequest) {
   replenishmentRejectVisible.value = true;
 }
 
+function closeReplenishmentRejectDialog() {
+  if (replenishmentRejectSaving.value) {
+    warnProductionSavingClose('生产报废补单驳回正在保存，请等待保存完成');
+    return;
+  }
+  replenishmentRejectVisible.value = false;
+}
+
+function handleReplenishmentRejectDialogClose(done: () => void) {
+  if (replenishmentRejectSaving.value) {
+    warnProductionSavingClose('生产报废补单驳回正在保存，请等待保存完成');
+    return;
+  }
+  done();
+}
+
 async function saveReplenishmentReject() {
+  if (replenishmentRejectSaving.value) {
+    return;
+  }
+  if (guardDesktopProductionMutation('驳回补单申请')) {
+    return;
+  }
   const request = activeReplenishmentRejectRequest.value;
   if (!request?.processCompletionId) {
     return;
@@ -4100,10 +4377,10 @@ function taskRelationText(row: ProductionTask) {
 
 function productionComponentText(row: ProductionTask | { lineType?: string; componentNo?: string; parentComponentNo?: string }) {
   if (row.lineType === 'COMPONENT' && row.componentNo) {
-    return `组件 ${row.componentNo}`;
+    return `组件 ${String(row.componentNo || '').trim().toUpperCase() || '未编号'}`;
   }
   if (row.parentComponentNo) {
-    return `属于组件 ${row.parentComponentNo}`;
+    return `子零件 -> ${String(row.parentComponentNo || '').trim().toUpperCase()}`;
   }
   if (row.lineType === 'PART') {
     return '单独零件';
@@ -4507,7 +4784,7 @@ watch(
 
 onMounted(async () => {
   applyProductionRouteScope();
-  await loadCustomers();
+  await loadSelectedCustomerName();
   await loadOperators();
   await queryTasks();
 });
@@ -4746,6 +5023,13 @@ onMounted(async () => {
 .mobile-start-checkbox :deep(.el-checkbox__label) {
   color: #2563eb;
   font-weight: 600;
+}
+
+.mobile-readonly-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .empty-production-hint {

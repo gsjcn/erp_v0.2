@@ -33,6 +33,11 @@ export class CustomersController {
     return this.customersService.checkCode(query);
   }
 
+  @Get(':id')
+  findOne(@Param('id') id: string) {
+    return this.customersService.findOne(id);
+  }
+
   @Post()
   create(@Body() dto: CreateCustomerDto) {
     return this.customersService.create(dto);

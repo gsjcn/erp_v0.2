@@ -186,7 +186,7 @@ async function buildWorkbookBuffer(customerName) {
     [2, `${orderPrefix}-002`, today, customerName, '导入验证B', '零件', '2.1', '定制件', '', 'C001', `${materialPrefix}-006`, `VERIFY-${runId}-40-A`, '验证底盘子件', '', '1.5mm', '', 3, 30, '件', '', '按父组件需求数量×3', '', '旧图'],
     [3, `${orderPrefix}-003`, today, customerName, '导入验证C', '组件', 1, '数控件', 'ASM-X1', '', `${materialPrefix}-007`, `VERIFY-${runId}-50-00`, '验证自定义编号组件', '', '1.2mm', 6, 1, 6, '套', '激光折弯', '自定义组件编号不能被 C001-C9999 写死', '', '旧图'],
     [3, `${orderPrefix}-003`, today, customerName, '导入验证C', '零件', '1.1', '数控件', '', 'ASM-X1', `${materialPrefix}-008`, `VERIFY-${runId}-50-01`, '验证自定义编号子件', '', '1.2mm', '', 2, 12, '件', '激光折弯', '按自定义父组件编号关联', '', '旧图'],
-    [4, `${orderPrefix}-BAD`, '', customerName, '导入验证错误订单', '零件', 1, '通用件', 'C999', '', `${materialPrefix}-BAD`, `VERIFY-${runId}-BAD`, '错误零件填了组件编号', '', '1mm', 1, '', 1, '件', '', '用于验证预览阶段拦截组件结构错误', '', '旧图']
+    [4, `${orderPrefix}-BAD`, '', customerName, '导入验证错误订单', '零件', 1, '通用件', 'C999', '', `${materialPrefix}-BAD`, `VERIFY-${runId}-BAD`, '错误零件填了组件编号', '', '', 1, '', 1, '件', '', '用于验证预览阶段拦截组件结构错误和缺厚度待核对', '', '旧图']
   ];
   return buildWorkbookBufferFromRows(rows);
 }
@@ -755,6 +755,119 @@ async function assertImportedMaterialsUpserted(expectedPartCodes, forbiddenPartC
   }
 }
 
+async function assertOrderImportDoesNotOverwriteExistingMaterial(customerName) {
+  const partCode = `${materialPrefix}-LOCKED`;
+  const orderNo = `${orderPrefix}-NO-MATERIAL-OVERWRITE`;
+  const originalMaterial = {
+    partCode,
+    partName: '订单导入不得覆盖已有 Material',
+    unit: '件',
+    partSpecification: '原始基础资料规格',
+    status: 'DISABLED'
+  };
+  const importedSnapshot = {
+    partName: '订单导入行独立快照名称',
+    unit: '套',
+    partSpecification: '订单行规格 888mm x 999mm'
+  };
+
+  const prisma = new PrismaClient();
+  try {
+    await prisma.material.upsert({
+      where: { partCode },
+      create: originalMaterial,
+      update: originalMaterial
+    });
+  } finally {
+    await prisma.$disconnect();
+  }
+
+  const overwriteSession = await requestJson('/orders/import-sessions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ createdBy: 'verify-material-no-overwrite' })
+  });
+  importSessionIds.push(overwriteSession.id);
+
+  const upload = await uploadWorkbook(
+    overwriteSession.id,
+    await buildWorkbookBufferFromRows([
+      [
+        1,
+        orderNo,
+        '2026/6/18',
+        customerName,
+        '导入不覆盖基础资料',
+        '零件',
+        1,
+        '通用件',
+        '',
+        '',
+        partCode,
+        `VERIFY-${runId}-LOCKED`,
+        importedSnapshot.partName,
+        importedSnapshot.partSpecification,
+        '1.5mm',
+        2,
+        '',
+        2,
+        importedSnapshot.unit,
+        '激光切割',
+        '订单导入只保存订单行快照，不能覆盖 Material 搜索记忆',
+        '2026/6/18',
+        '旧图'
+      ]
+    ]),
+    `order-import-material-no-overwrite-${runId}.xlsx`
+  );
+  assert(upload.summary.selectableOrderCount === 1, `订单导入不得覆盖已有 Material 回归预览应有 1 个可导入订单，实际 ${upload.summary.selectableOrderCount}`);
+
+  const commit = await requestJson(`/orders/import-sessions/${overwriteSession.id}/commit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ allSelectable: true, previewToken: upload.previewToken })
+  });
+  assert(commit.createdCount === 1, `订单导入不得覆盖已有 Material 回归应创建 1 个草稿订单，实际 ${commit.createdCount}`);
+  assert(commit.materialSyncCount === 1, `订单导入不得覆盖已有 Material 回归仍应统计 1 个涉及零件编码，实际 ${commit.materialSyncCount}`);
+  createdOrderNos.push(orderNo);
+
+  const verifyPrisma = new PrismaClient();
+  try {
+    const material = await verifyPrisma.material.findUnique({
+      where: { partCode },
+      select: { partCode: true, partName: true, unit: true, partSpecification: true, status: true }
+    });
+    assert(material?.status === 'DISABLED', `订单导入不得把已停用 Material 自动恢复启用，实际 ${material?.status}`);
+    assert(material.partName === originalMaterial.partName, `订单导入不得覆盖已有 Material.partName，实际 ${material.partName}`);
+    assert(material.unit === originalMaterial.unit, `订单导入不得覆盖已有 Material.unit，实际 ${material.unit}`);
+    assert(
+      material.partSpecification === originalMaterial.partSpecification,
+      `订单导入不得覆盖已有 Material.partSpecification，实际 ${material.partSpecification}`
+    );
+
+    const order = await verifyPrisma.customerOrder.findUnique({
+      where: { orderNo },
+      select: {
+        status: true,
+        lines: {
+          where: { partCode },
+          select: { partName: true, unit: true, partSpecification: true }
+        }
+      }
+    });
+    const importedLine = order?.lines?.[0];
+    assert(order?.status === 'DRAFT', `订单导入只应创建 DRAFT 草稿订单，实际 ${order?.status}`);
+    assert(importedLine?.partName === importedSnapshot.partName, `订单行应保留导入快照 partName，实际 ${importedLine?.partName}`);
+    assert(importedLine?.unit === importedSnapshot.unit, `订单行应保留导入快照 unit，实际 ${importedLine?.unit}`);
+    assert(
+      importedLine?.partSpecification === importedSnapshot.partSpecification,
+      `订单行应保留导入快照 partSpecification，实际 ${importedLine?.partSpecification}`
+    );
+  } finally {
+    await verifyPrisma.$disconnect();
+  }
+}
+
 async function assertMaterialMemoryHistorySearch(orderNo, expectedPartCode, drawingNo) {
   const prisma = new PrismaClient();
   try {
@@ -1174,6 +1287,90 @@ async function assertSubmitRejectsInvalidPersistedComponentStructure(orderNo) {
   assert(rejected, '提交生产前必须拒绝数据库中组件父子关系异常的草稿订单');
 }
 
+async function assertImportMissingThicknessDraftRequiresReview(customerName) {
+  const orderNo = `${orderPrefix}-MISSING-THICKNESS`;
+  const partCode = `${materialPrefix}-MISSING-THICKNESS`;
+  const session = await requestJson('/orders/import-sessions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ createdBy: `verify-missing-thickness-${runId}` })
+  });
+  importSessionIds.push(session.id);
+
+  const upload = await uploadWorkbook(
+    session.id,
+    await buildWorkbookBufferFromRows([
+      [
+        1,
+        orderNo,
+        '2026/6/23',
+        customerName,
+        '缺厚度提交拦截',
+        '零件',
+        1,
+        '通用件',
+        '',
+        '',
+        partCode,
+        `VERIFY-${runId}-MISSING-THICKNESS`,
+        '缺厚度待核对零件',
+        '100mm x 100mm',
+        '',
+        1,
+        '',
+        1,
+        '件',
+        '',
+        '缺厚度应保存为草稿待核对',
+        '',
+        '旧图'
+      ]
+    ]),
+    `order-import-missing-thickness-${runId}.xlsx`
+  );
+  assert(upload.summary.orderCount === 1, `缺厚度回归应只预览 1 个订单，实际 ${upload.summary.orderCount}`);
+  assert(upload.summary.selectableOrderCount === 1, `缺厚度订单应允许导入草稿，实际可导入 ${upload.summary.selectableOrderCount}`);
+  assert(upload.summary.errorCount === 0, `缺厚度订单不应在导入预览阶段变成错误订单，实际错误 ${upload.summary.errorCount}`);
+  assert(upload.summary.warningCount > 0, '缺厚度订单应在导入预览阶段产生待核对警告');
+  const previewLine = upload.orders?.[0]?.rows?.find((row) => row.partCode === partCode);
+  assert(previewLine, '缺厚度回归订单必须返回预览零件行');
+  assert(Number(previewLine.partThickness || 0) === 0, `缺厚度预览行必须保留为 0 待核对，实际 ${previewLine.partThickness}`);
+  assert(
+    previewLine.issues?.some((issue) => issue.code === 'THICKNESS_DEFAULTED' && issue.message.includes('待核对')),
+    '缺厚度预览行必须带 THICKNESS_DEFAULTED 待核对警告'
+  );
+
+  const commit = await requestJson(`/orders/import-sessions/${session.id}/commit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ allSelectable: true, previewToken: upload.previewToken })
+  });
+  assert(commit.createdCount === 1, `缺厚度草稿应能创建 1 个订单，实际 ${commit.createdCount}`);
+  assert(commit.committedOrderNos?.includes(orderNo), '缺厚度草稿提交响应必须返回创建的订单号');
+  createdOrderNos.push(orderNo);
+
+  const createdOrder = await requestJson(`/orders/${encodeURIComponent(orderNo)}`);
+  const createdLine = createdOrder.lines?.find((line) => line.partCode === partCode);
+  assert(createdOrder.status === 'DRAFT', `缺厚度导入只能创建 DRAFT 草稿，实际 ${createdOrder.status}`);
+  assert(Number(createdLine?.partThickness || 0) === 0, `缺厚度导入后数据库草稿必须保留 0 待核对，实际 ${createdLine?.partThickness}`);
+
+  let rejected = false;
+  try {
+    await requestJson(`/orders/${encodeURIComponent(orderNo)}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ submittedByCode: 'PLAN-001' })
+    });
+  } catch (error) {
+    rejected = true;
+    assert(
+      String(error.message || '').includes('厚度必须大于 0'),
+      `缺厚度草稿提交生产必须被厚度校验拦截，实际错误：${error.message}`
+    );
+  }
+  assert(rejected, '缺厚度草稿不得绕过待核对直接提交生产');
+}
+
 async function assertSubmitRejectsUnconfirmedMaterialIdentityConflict(customerName) {
   const orderNo = `${orderPrefix}-IDENTITY-BLOCK`;
   const partCode = `${materialPrefix}-IDENTITY-001`;
@@ -1297,10 +1494,10 @@ async function assertSelectedCommitSupportsUnloadedOrders(customerName) {
     body: JSON.stringify({ orderNos: [`${orderPrefix}-PAGE-003`], previewToken: firstPage.previewToken })
   });
   assert(selectedCommit.createdCount === 1, `只创建分页外已选订单时应创建 1 个草稿，实际 ${selectedCommit.createdCount}`);
-  assert(selectedCommit.materialSyncCount === 1, `分页外已选订单应同步 1 个物料基础资料，实际 ${selectedCommit.materialSyncCount}`);
+  assert(selectedCommit.materialSyncCount === 1, `分页外已选订单应补建 1 个缺失零件搜索记忆，实际 ${selectedCommit.materialSyncCount}`);
   assert(
     selectedCommit.materialSyncPreview?.[0] === `${materialPrefix}-PAGE-003`,
-    `分页外已选订单应返回物料示例 ${materialPrefix}-PAGE-003，实际 ${selectedCommit.materialSyncPreview}`
+    `分页外已选订单应返回零件编码示例 ${materialPrefix}-PAGE-003，实际 ${selectedCommit.materialSyncPreview}`
   );
   assert(
     selectedCommit.committedOrderNos?.[0] === `${orderPrefix}-PAGE-003`,
@@ -1379,11 +1576,11 @@ async function assertAllSelectableCommitSupportsExcludedOrders(customerName) {
     })
   });
   assert(commit.createdCount === 2, `全部可导入排除 1 个订单后应创建 2 个草稿，实际 ${commit.createdCount}`);
-  assert(commit.materialSyncCount === 2, `全部可导入排除 1 个订单后应同步 2 个物料基础资料，实际 ${commit.materialSyncCount}`);
+  assert(commit.materialSyncCount === 2, `全部可导入排除 1 个订单后应补建 2 个缺失零件搜索记忆，实际 ${commit.materialSyncCount}`);
   assert(
     commit.materialSyncPreview?.includes(`${materialPrefix}-EXCLUDE-001`) &&
       !commit.materialSyncPreview?.includes(`${materialPrefix}-EXCLUDE-002`),
-    `排除提交的物料示例不应包含被排除订单物料，实际 ${commit.materialSyncPreview}`
+    `排除提交的零件编码示例不应包含被排除订单零件，实际 ${commit.materialSyncPreview}`
   );
   assert(commit.excludedOrderCount === 1, `全部可导入排除提交应返回 excludedOrderCount=1，实际 ${commit.excludedOrderCount}`);
   assert(
@@ -1584,6 +1781,8 @@ async function main() {
     await assertSelectedCommitSupportsUnloadedOrders(customerName);
     await assertAllSelectableCommitSupportsExcludedOrders(customerName);
     await assertStaleImportPreviewTokenRejectsCommit(customerName);
+    await assertOrderImportDoesNotOverwriteExistingMaterial(customerName);
+    await assertImportMissingThicknessDraftRequiresReview(customerName);
     const session = await requestJson('/orders/import-sessions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1598,15 +1797,37 @@ async function main() {
     assert(upload.summary.rowCount === 9, `期望 9 行明细，实际 ${upload.summary.rowCount}`);
     assert(upload.summary.selectableOrderCount === 3, `期望 3 个可导入订单，实际 ${upload.summary.selectableOrderCount}`);
     assert(upload.summary.blockedOrderCount === 1, `期望 1 个被拦截订单，实际 ${upload.summary.blockedOrderCount}`);
-    assert(upload.summary.materialSyncCount === 8, `预览应统计 8 个预计同步物料，实际 ${upload.summary.materialSyncCount}`);
+    assert(upload.summary.materialSyncCount === 5, `预览应统计 5 个非组件零件编码，实际 ${upload.summary.materialSyncCount}`);
     assert(
       upload.summary.materialSyncPreview?.includes(`${materialPrefix}-001`) &&
+        !upload.summary.materialSyncPreview?.includes(`${materialPrefix}-002`) &&
         !upload.summary.materialSyncPreview?.includes(`${materialPrefix}-BAD`),
-      `预览物料示例应来自可导入订单且排除错误订单，实际 ${upload.summary.materialSyncPreview}`
+      `预览零件编码示例应来自可导入订单且排除错误订单，实际 ${upload.summary.materialSyncPreview}`
     );
     assert(upload.summary.errorCount > 0, '错误订单应在预览阶段产生错误');
     const invalidOrder = upload.orders.find((order) => order.orderNo === `${orderPrefix}-BAD`);
     assert(invalidOrder?.orderDate === '', `缺少制单日期的错误订单预览不应显示占位日期，实际 ${invalidOrder?.orderDate}`);
+    const invalidThicknessLine = invalidOrder?.rows?.find((row) => row.partCode === `${materialPrefix}-BAD`);
+    assert(
+      Number(invalidThicknessLine?.partThickness || 0) === 0,
+      `订单导入缺厚度零件必须保留为 0 待核对，实际 ${invalidThicknessLine?.partThickness}`
+    );
+    assert(
+      invalidThicknessLine?.issues?.some((issue) => issue.code === 'THICKNESS_DEFAULTED' && issue.message.includes('待核对')),
+      '订单导入缺厚度零件必须产生 THICKNESS_DEFAULTED 待核对警告'
+    );
+    const previewComponentLine = upload.orders
+      .flatMap((order) => order.rows || [])
+      .find((row) => row.lineType === 'COMPONENT' && row.componentNo === 'C001');
+    assert(previewComponentLine, '订单导入预览必须识别父级组件行');
+    assert(
+      Number(previewComponentLine.partThickness || 0) === 0,
+      `订单导入父级组件行厚度必须按不适用处理为 0，实际 ${previewComponentLine.partThickness}`
+    );
+    assert(
+      !previewComponentLine.issues?.some((issue) => issue.code === 'THICKNESS_DEFAULTED'),
+      '订单导入父级组件行不应产生 THICKNESS_DEFAULTED 厚度待核对警告'
+    );
     assert(
       invalidOrder?.rows?.some((row) => row.issues?.some((issue) => issue.code === 'PART_COMPONENT_NO_NOT_ALLOWED')),
       '零件行误填组件编号必须在预览阶段拦截'
@@ -1632,7 +1853,7 @@ async function main() {
     assert(upload.summary.orderCount === 5, `连续上传后期望 5 个订单，实际 ${upload.summary.orderCount}`);
     assert(upload.summary.rowCount === 11, `连续上传后期望 11 行明细，实际 ${upload.summary.rowCount}`);
     assert(upload.summary.selectableOrderCount === 4, `连续上传后期望 4 个可导入订单，实际 ${upload.summary.selectableOrderCount}`);
-    assert(upload.summary.materialSyncCount === 10, `连续上传后应统计 10 个预计同步物料，实际 ${upload.summary.materialSyncCount}`);
+    assert(upload.summary.materialSyncCount === 6, `连续上传后应统计 6 个非组件零件编码，实际 ${upload.summary.materialSyncCount}`);
     const splitOrder = upload.orders.find((order) => order.orderNo === `${orderPrefix}-SPLIT`);
     assert(splitOrder?.errorCount === 0, '跨文件连续上传的同一订单应能通过会话级组件兜底绑定');
     assert(
@@ -1655,13 +1876,14 @@ async function main() {
       `导入记录列表必须按跨文件组件关系统计 1 个不可导入订单，实际 ${historySession.blockedOrderCount}`
     );
     assert(
-      historySession.materialSyncCount === 10,
-      `导入记录列表必须统计 10 个预计同步物料，实际 ${historySession.materialSyncCount}`
+      historySession.materialSyncCount === 6,
+      `导入记录列表必须统计 6 个非组件零件编码，实际 ${historySession.materialSyncCount}`
     );
     assert(
       historySession.materialSyncPreview?.includes(`${materialPrefix}-001`) &&
+        !historySession.materialSyncPreview?.includes(`${materialPrefix}-002`) &&
         !historySession.materialSyncPreview?.includes(`${materialPrefix}-BAD`),
-      `导入记录列表物料示例应来自可导入订单且排除错误订单，实际 ${historySession.materialSyncPreview}`
+      `导入记录列表零件编码示例应来自可导入订单且排除错误订单，实际 ${historySession.materialSyncPreview}`
     );
 
     const selectable = await requestJson(`/orders/import-sessions/${sessionId}/selectable-order-nos`);
@@ -1674,11 +1896,12 @@ async function main() {
     body: JSON.stringify({ allSelectable: true, previewToken: upload.previewToken })
   });
     assert(commit.createdCount === 4, `期望创建 4 个草稿订单，实际 ${commit.createdCount}`);
-    assert(commit.materialSyncCount === 10, `期望同步 10 个物料基础资料，实际 ${commit.materialSyncCount}`);
+    assert(commit.materialSyncCount === 6, `期望补建 6 个非组件零件搜索记忆，实际 ${commit.materialSyncCount}`);
     assert(
       commit.materialSyncPreview?.includes(`${materialPrefix}-001`) &&
+        !commit.materialSyncPreview?.includes(`${materialPrefix}-002`) &&
         !commit.materialSyncPreview?.includes(`${materialPrefix}-BAD`),
-      `提交响应物料示例应来自已创建草稿，实际 ${commit.materialSyncPreview}`
+      `提交响应零件编码示例应来自已创建草稿，实际 ${commit.materialSyncPreview}`
     );
     assert(commit.skippedBlockedCount === 1, `期望跳过 1 个错误订单，实际 ${commit.skippedBlockedCount}`);
     assert(commit.skippedSelectableCount === 0, `整批创建不应跳过可导入订单，实际 ${commit.skippedSelectableCount}`);
@@ -1708,11 +1931,23 @@ async function main() {
         !committedImportSession.committedOrderNos.includes(`${orderPrefix}-BAD`),
       '导入会话只应保存实际生成的订单号，不能混入错误订单'
     );
-    await assertImportedMaterialsUpserted([
-      ...Array.from({ length: 8 }, (_, index) => `${materialPrefix}-${String(index + 1).padStart(3, '0')}`),
-      `${materialPrefix}-SPLIT-001`,
-      `${materialPrefix}-SPLIT-002`
-    ], [`${materialPrefix}-BAD`]);
+    await assertImportedMaterialsUpserted(
+      [
+        `${materialPrefix}-001`,
+        `${materialPrefix}-003`,
+        `${materialPrefix}-004`,
+        `${materialPrefix}-006`,
+        `${materialPrefix}-008`,
+        `${materialPrefix}-SPLIT-002`
+      ],
+      [
+        `${materialPrefix}-BAD`,
+        `${materialPrefix}-002`,
+        `${materialPrefix}-005`,
+        `${materialPrefix}-007`,
+        `${materialPrefix}-SPLIT-001`
+      ]
+    );
     await assertMaterialSuggestionCustomerCodeSearch(`${orderPrefix}-001`, `${materialPrefix}-001`);
     await assertMaterialSuggestionRecentCustomerHistorySort(`${orderPrefix}-002`, `${materialPrefix}-004`);
     await assertMaterialSuggestionLastOrderScopedToCustomer(`${orderPrefix}-001`, `${materialPrefix}-001`);
@@ -1754,6 +1989,7 @@ async function main() {
     await assertDisabledMaterialMemoryExcludedFromSuggestions(`${materialPrefix}-SPLIT-002`, `${orderPrefix}-SPLIT`);
     const componentLine = createdOrder.lines.find((line) => line.lineType === 'COMPONENT' && line.componentNo === 'C001');
     assert(componentLine, '导入订单应保留组件行和组件编号');
+    assert(Number(componentLine.partThickness || 0) === 0, `导入订单组件行厚度必须保存为 0，实际 ${componentLine.partThickness}`);
     const childLine = createdOrder.lines.find((line) => line.parentComponentNo === 'C001');
     assert(childLine, '导入订单应保留子零件所属组件编号');
     assert(Number(childLine.quantity) === 80, `子零件需求数量应为父组件需求数量×单套用量，实际 ${childLine.quantity}`);

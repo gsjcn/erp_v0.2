@@ -13,6 +13,7 @@ export type StockSourceComparableLine = Pick<
   | 'quantity'
   | 'productionPlanQuantity'
   | 'fulfillmentMode'
+  | 'lineType'
   | 'unit'
 >;
 
@@ -43,6 +44,7 @@ export function stockSourceReviewSignature(line: CreateOrderLinePayload) {
     .join(',');
   return [
     line.fulfillmentMode || 'PRODUCTION',
+    line.lineType || 'PART',
     line.partCode,
     line.unit,
     line.drawingNo,
@@ -551,7 +553,7 @@ export function findMissingStockSourceManualConfirmation(line: CreateOrderLinePa
   const partText = `${line.partCode || '-'} / ${line.partName || '-'}`;
   const issueReason =
     issueSource.compatibilityReason ||
-    (!requiredTextMatches(line.partCode, issueSource.partCode) ? '物料编码不同，属于替代库存' : '') ||
+    (!requiredTextMatches(line.partCode, issueSource.partCode) ? '零件编码不同，属于替代库存' : '') ||
     (missingOrderInfo.length > 0 ? `本次订单缺少${missingOrderInfo.join('、')}` : '库存来源需要人工确认');
   return `${partText} 已选库存批次 ${issueSource.batchNo || issueSource.batchId} 需要填写人工确认记录：${issueReason}`;
 }
@@ -605,13 +607,14 @@ export function stockSourceMissingOrderInfo(line: CreateOrderLinePayload) {
     !String(line.drawingNo || '').trim() ? '图号' : '',
     !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
     !String(line.partSpecification || '').trim() ? '成品规格' : '',
-    Number(line.partThickness || 0) <= 0 ? '零件厚度' : ''
+    line.lineType !== 'COMPONENT' && Number(line.partThickness || 0) <= 0 ? '零件厚度' : ''
   ].filter(Boolean);
 }
 
 export function stockSourceComparableKey(line: StockSourceComparableLine) {
   return [
     line.fulfillmentMode || 'PRODUCTION',
+    line.lineType || 'PART',
     line.partCode,
     line.unit,
     line.drawingNo,

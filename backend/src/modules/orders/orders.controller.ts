@@ -17,6 +17,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
+import { businessDateTimeKey } from '../../common/business-date';
 import { normalizeMultipartFileName } from '../../common/upload-filenames';
 import { drawingUploadPath, orderImportUploadPath } from '../../storage/upload-paths';
 import {
@@ -57,7 +58,9 @@ function safeDrawingFileName(
     .replace(extension, '')
     .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
     .substring(0, 60);
-  callback(null, `${Date.now()}-${baseName || 'drawing'}${extension}`);
+  const uniqueSuffix = randomUUID().slice(0, 8);
+  // 上传文件名使用公司业务时区时间和短随机后缀，避免 NAS / Docker 默认 UTC 偏差和同秒重名覆盖。
+  callback(null, `${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'drawing'}${extension}`);
 }
 
 function safeOrderImportFileName(
@@ -72,7 +75,8 @@ function safeOrderImportFileName(
     .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
     .substring(0, 80);
   const uniqueSuffix = randomUUID().slice(0, 8);
-  callback(null, `${Date.now()}-${uniqueSuffix}-${baseName || 'order-import'}${extension}`);
+  // 导入临时文件名只用于追溯和清理，时间戳仍按公司业务时区生成。
+  callback(null, `${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'order-import'}${extension}`);
 }
 
 function orderImportUploadMaxBytes() {

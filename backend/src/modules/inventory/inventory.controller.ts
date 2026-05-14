@@ -17,11 +17,13 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
+import { businessDateTimeKey } from '../../common/business-date';
 import { normalizeMultipartFileName } from '../../common/upload-filenames';
 import { inventoryAdjustmentUploadPath, materialImportUploadPath } from '../../storage/upload-paths';
 import {
   AdjustInventoryBatchDto,
   CommitMaterialImportSessionDto,
+  ConfirmModelBomDiffReviewDto,
   CopyModelBomDto,
   CreateMaterialDto,
   CreateMaterialImportSessionDto,
@@ -31,11 +33,15 @@ import {
   MaterialQueryDto,
   MaterialSuggestionQueryDto,
   MaterialTransformRuleQueryDto,
+  ModelBomDiffReviewQueryDto,
   ModelBomQueryDto,
+  ReorderModelBomCommonDto,
   ReorderModelBomLinesDto,
   SaveMaterialApplicabilityDto,
   SaveMaterialDrawingRevisionDto,
   SaveMaterialTransformRuleDto,
+  SetModelBomCommonDto,
+  SetModelBomsCommonBatchDto,
   SaveModelBomDto,
   SaveModelBomLineDto,
   UpdateMaterialDto
@@ -70,7 +76,9 @@ function safeAdjustmentFileName(
     .replace(extension, '')
     .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
     .slice(0, 60);
-  callback(null, `${Date.now()}-${baseName || 'inventory-adjustment'}${extension}`);
+  const uniqueSuffix = randomUUID().slice(0, 8);
+  // 盘点附件文件名按公司业务时区和短随机后缀生成，方便核对库存流水并避免同秒重名。
+  callback(null, `${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'inventory-adjustment'}${extension}`);
 }
 
 function safeMaterialImportFileName(
@@ -84,7 +92,9 @@ function safeMaterialImportFileName(
     .replace(extension, '')
     .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
     .slice(0, 80);
-  callback(null, `${Date.now()}-${randomUUID().slice(0, 8)}-${baseName || 'material-import'}${extension}`);
+  const uniqueSuffix = randomUUID().slice(0, 8);
+  // 零件库导入临时文件名按公司业务时区生成，不使用服务器本地 UTC 时间戳。
+  callback(null, `${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'material-import'}${extension}`);
 }
 
 @Controller('inventory')
@@ -240,6 +250,21 @@ export class InventoryController {
     return this.inventoryService.modelBoms(query);
   }
 
+  @Get('model-boms/:bomId/diff-reviews')
+  modelBomDiffReviews(@Param('bomId') bomId: string, @Query() query: ModelBomDiffReviewQueryDto) {
+    return this.inventoryService.modelBomDiffReviews(bomId, query);
+  }
+
+  @Post('model-boms/:bomId/diff-reviews')
+  confirmModelBomDiffReview(@Param('bomId') bomId: string, @Body() dto: ConfirmModelBomDiffReviewDto) {
+    return this.inventoryService.confirmModelBomDiffReview(bomId, dto);
+  }
+
+  @Delete('model-bom-diff-reviews/:reviewId')
+  disableModelBomDiffReview(@Param('reviewId') reviewId: string) {
+    return this.inventoryService.disableModelBomDiffReview(reviewId);
+  }
+
   @Get('model-boms/:bomId')
   modelBom(@Param('bomId') bomId: string) {
     return this.inventoryService.modelBom(bomId);
@@ -260,9 +285,29 @@ export class InventoryController {
     return this.inventoryService.updateModelBom(bomId, dto);
   }
 
+  @Patch('model-boms/:bomId/common')
+  setModelBomCommon(@Param('bomId') bomId: string, @Body() dto: SetModelBomCommonDto) {
+    return this.inventoryService.setModelBomCommon(bomId, dto);
+  }
+
+  @Patch('model-boms/common/batch')
+  setModelBomsCommonBatch(@Body() dto: SetModelBomsCommonBatchDto) {
+    return this.inventoryService.setModelBomsCommonBatch(dto);
+  }
+
+  @Patch('model-boms/common/reorder')
+  reorderModelBomCommon(@Body() dto: ReorderModelBomCommonDto) {
+    return this.inventoryService.reorderModelBomCommon(dto);
+  }
+
   @Delete('model-boms/:bomId')
   disableModelBom(@Param('bomId') bomId: string) {
     return this.inventoryService.disableModelBom(bomId);
+  }
+
+  @Delete('model-boms/:bomId/permanent')
+  deleteModelBom(@Param('bomId') bomId: string) {
+    return this.inventoryService.deleteModelBom(bomId);
   }
 
   @Post('model-boms/:bomId/lines')

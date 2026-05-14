@@ -3,8 +3,8 @@
     <div class="page-header">
       <h2 class="page-title">订单总列表</h2>
       <div class="page-header-actions orders-page-header-actions">
-        <el-button @click="openImportDialog">导入订单</el-button>
-        <el-button type="primary" @click="openCreate">新增订单</el-button>
+        <el-button v-if="!isMobileLayout" @click="openImportDialog">导入订单</el-button>
+        <el-button v-if="!isMobileLayout" type="primary" @click="openCreate">新增订单</el-button>
       </div>
     </div>
 
@@ -210,7 +210,15 @@
       <div v-if="!orders.length && !loading" class="mobile-empty">暂无订单</div>
     </div>
 
-    <el-dialog v-model="dialogVisible" title="新增订单" width="min(1500px, calc(100vw - 32px))" class="responsive-dialog order-create-dialog">
+    <el-dialog
+      v-model="dialogVisible"
+      title="新增订单"
+      width="min(1500px, calc(100vw - 32px))"
+      class="responsive-dialog order-create-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleOrderSavingDialogClose"
+    >
       <el-form label-width="86px">
         <div class="order-form-grid">
           <el-form-item label="客户">
@@ -295,7 +303,7 @@
               <el-input
                 v-model="modelBomSearch.keyword"
                 clearable
-                placeholder="零件包、物料、客户关键字"
+                placeholder="零件包、零件、客户关键字"
                 @keyup.enter="loadModelBomRecommendations"
               />
               <el-button type="primary" :loading="modelBomLoading" @click="loadModelBomRecommendations">
@@ -315,7 +323,7 @@
                   <el-tag size="small" effect="plain">{{ bom.scopeLabel }}</el-tag>
                 </div>
                 <div class="model-bom-card-meta">
-                  <span>{{ bom.projectModel }}</span>
+                  <span>{{ modelBomProjectScopeText(bom) }}</span>
                   <span>{{ enabledModelBomLineCount(bom) }} 个启用零件</span>
                   <span v-if="bom.remark">{{ bom.remark }}</span>
                 </div>
@@ -323,22 +331,24 @@
                   <div v-for="(group, groupIndex) in modelBomStructureGroups(bom)" :key="group.id" class="model-bom-structure-group">
                     <div class="model-bom-structure-main">
                       <span>{{ groupIndex + 1 }}</span>
-                      <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
-                        {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                      <el-tag :type="groupStructureTagType(group.type, group.line)" effect="plain">
+                        {{ groupStructureLabel(group.type, group.line) }}
                       </el-tag>
                       <strong>{{ formatModelBomStructureCore(group.line) }}</strong>
                       <span>{{ formatModelBomStructureMeta(group.line) }}</span>
                     </div>
                     <div v-for="(child, childIndex) in group.children" :key="child.id" class="model-bom-structure-child">
                       <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
-                      <el-tag type="success" effect="plain">子零件</el-tag>
+                      <el-tag :type="groupStructureTagType('standalone', child)" effect="plain">
+                        {{ groupStructureLabel('standalone', child) }}
+                      </el-tag>
                       <strong>{{ formatModelBomStructureCore(child) }}</strong>
                       <span>{{ formatModelBomStructureMeta(child) }}</span>
                     </div>
                   </div>
                 </div>
               </div>
-              <el-button type="primary" plain @click="applyModelBomToOrder(bom)">带入明细</el-button>
+              <el-button type="primary" plain @click="openModelBomApplyDialog(bom)">预览带入</el-button>
             </article>
           </div>
         </div>
@@ -347,23 +357,28 @@
           <div class="order-form-structure-header">
             <div>
               <strong>当前草稿固定格式清单</strong>
-              <span>{{ orderFormStructureGroups.length }} 组 / {{ orderForm.lines.length }} 行</span>
+              <span>{{ orderFormStructureGroups.length }} 组 / {{ orderFormFilledLineCount }} 行</span>
             </div>
-            <el-button size="small" :disabled="orderForm.lines.length === 0" @click="copyOrderFormStructureText">复制清单</el-button>
+            <div class="structure-header-actions">
+              <el-button size="small" :disabled="orderFormFilledLineCount === 0" @click="openOrderFormStructureTextDialog">查看固定格式</el-button>
+              <el-button size="small" :disabled="orderFormFilledLineCount === 0" @click="copyOrderFormStructureText">复制清单</el-button>
+            </div>
           </div>
           <div v-if="orderFormStructureGroups.length" class="order-form-structure-list">
             <div v-for="(group, groupIndex) in orderFormStructureGroups" :key="group.id" class="order-form-structure-group">
               <div class="order-form-structure-main">
                 <span>{{ groupIndex + 1 }}</span>
-                <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
-                  {{ group.type === 'component' ? `组件 ${group.entry.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.entry.line.parentComponentNo || '-'}` : '单独零件' }}
+                <el-tag :type="groupStructureTagType(group.type, group.entry.line)" effect="plain">
+                  {{ groupStructureLabel(group.type, group.entry.line) }}
                 </el-tag>
                 <strong>{{ formatOrderFormStructureCore(group.entry.line) }}</strong>
                 <span>{{ formatOrderFormStructureMeta(group.entry.line) }}</span>
               </div>
               <div v-for="(child, childIndex) in group.children" :key="child.key" class="order-form-structure-child">
                 <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
-                <el-tag type="success" effect="plain">子零件</el-tag>
+                <el-tag :type="groupStructureTagType('standalone', child.line)" effect="plain">
+                  {{ groupStructureLabel('standalone', child.line) }}
+                </el-tag>
                 <strong>{{ formatOrderFormStructureCore(child.line) }}</strong>
                 <span>{{ formatOrderFormStructureMeta(child.line) }}</span>
               </div>
@@ -383,8 +398,8 @@
       </el-form>
       <template #footer>
         <div class="dialog-footer-actions">
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="saving" @click="saveOrder">保存订单</el-button>
+          <el-button :disabled="saving" @click="closeCreateOrderDialog">取消</el-button>
+          <el-button type="primary" :loading="saving" :disabled="saving" @click="saveOrder">保存订单</el-button>
         </div>
       </template>
     </el-dialog>
@@ -494,7 +509,7 @@
               :loading="importSessionDeletingId === session.id"
               @click="deleteImportSessionMemory(session)"
             >
-              {{ session.status === 'DRAFT' ? '放弃' : '删除记录' }}
+              {{ session.status === 'DRAFT' ? '放弃' : '删除导入记忆' }}
             </el-button>
           </div>
         </article>
@@ -541,7 +556,7 @@
         </div>
         <div :title="materialSyncPreviewText(importPreview.summary.materialSyncPreview, importPreview.summary.materialSyncCount)">
           <strong>{{ importPreview.summary.materialSyncCount }}</strong>
-          <span>预计同步物料</span>
+          <span>涉及零件编码</span>
         </div>
         <div v-if="importPreview.status === 'COMMITTED'">
           <strong>{{ importPreview.summary.currentCommittedOrderCount || 0 }}</strong>
@@ -622,21 +637,26 @@
               <div class="import-structure-header">
                 <strong>固定格式清单</strong>
                 <span>{{ importStructureGroups(row.rows).length }} 组 / {{ row.rows.length }} 行</span>
-                <el-button size="small" :disabled="row.rows.length === 0" @click="copyImportOrderStructureText(row)">复制清单</el-button>
+                <div class="structure-header-actions">
+                  <el-button size="small" :disabled="row.rows.length === 0" @click="openImportOrderStructureTextDialog(row)">查看固定格式</el-button>
+                  <el-button size="small" :disabled="row.rows.length === 0" @click="copyImportOrderStructureText(row)">复制清单</el-button>
+                </div>
               </div>
               <div v-if="importStructureGroups(row.rows).length" class="import-structure-list">
                 <div v-for="(group, groupIndex) in importStructureGroups(row.rows)" :key="group.id" class="import-structure-group">
                   <div class="import-structure-main">
                     <span>{{ groupIndex + 1 }}</span>
-                    <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
-                      {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                    <el-tag :type="groupStructureTagType(group.type, group.line)" effect="plain">
+                      {{ groupStructureLabel(group.type, group.line) }}
                     </el-tag>
                     <strong>{{ formatImportStructureCore(group.line) }}</strong>
                     <span>{{ formatImportStructureMeta(group.line) }}</span>
                   </div>
                   <div v-for="(child, childIndex) in group.children" :key="child.id" class="import-structure-child">
                     <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
-                    <el-tag type="success" effect="plain">子零件</el-tag>
+                    <el-tag :type="groupStructureTagType('standalone', child)" effect="plain">
+                      {{ groupStructureLabel('standalone', child) }}
+                    </el-tag>
                     <strong>{{ formatImportStructureCore(child) }}</strong>
                     <span>{{ formatImportStructureMeta(child) }}</span>
                   </div>
@@ -646,16 +666,23 @@
             </div>
             <el-table :data="row.rows" size="small" class="import-line-table">
               <el-table-column prop="importSequence" label="序号" width="90" />
-              <el-table-column label="行类型" width="90">
-                <template #default="{ row: line }">{{ line.lineType === 'COMPONENT' ? '组件' : '零件' }}</template>
+              <el-table-column label="结构" min-width="170">
+                <template #default="{ row: line }">
+                  <div class="import-line-structure-cell">
+                    <el-tag size="small" :type="lineStructureTagType(line)" effect="plain">
+                      {{ lineStructureLabel(line) }}
+                    </el-tag>
+                    <small>{{ lineStructureHint(line) }}</small>
+                  </div>
+                </template>
               </el-table-column>
               <el-table-column prop="partCategory" label="零件类型" width="100" />
-              <el-table-column prop="componentNo" label="组件编号" width="110" />
-              <el-table-column prop="parentComponentNo" label="所属组件" width="110" />
-              <el-table-column prop="partCode" label="物料号" min-width="140" />
+              <el-table-column prop="partCode" label="零件编码" min-width="140" />
               <el-table-column prop="drawingNo" label="图号" min-width="170" />
               <el-table-column prop="partName" label="产品名称" min-width="160" />
-              <el-table-column prop="partThickness" label="厚度" width="90" />
+              <el-table-column label="厚度" width="90">
+                <template #default="{ row: line }">{{ formatStructureLineThickness(line) }}</template>
+              </el-table-column>
               <el-table-column label="需求数量" width="120">
                 <template #default="{ row: line }">{{ formatQuantity(line.demandQuantity, line.unit) }}</template>
               </el-table-column>
@@ -751,9 +778,17 @@
       />
     </el-dialog>
 
-    <el-dialog v-model="cancelOrderVisible" title="取消订单" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
+    <el-dialog
+      v-model="cancelOrderVisible"
+      title="取消订单"
+      width="min(980px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleOrderSavingDialogClose"
+    >
       <el-alert
-        title="正常订单和补单订单都可以取消。未开始生产的订单会删除未开工任务并释放库存；已开始生产的订单会同步通知生产和仓库处理已生产物料。"
+        title="正常订单和补单订单都可以取消。未开始生产的订单会删除未开工任务并释放库存；已开始生产的订单会同步通知生产和仓库处理已生产零件。"
         type="warning"
         :closable="false"
         class="mb-16"
@@ -818,13 +853,21 @@
       </el-form>
       <template #footer>
         <div class="dialog-footer-actions">
-          <el-button @click="cancelOrderVisible = false">返回</el-button>
-          <el-button type="danger" :loading="saving" @click="saveCancelOrder">确认取消订单</el-button>
+          <el-button :disabled="saving" @click="closeCancelOrderDialog">返回</el-button>
+          <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelOrder">确认取消订单</el-button>
         </div>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="deleteDraftVisible" title="删除草稿订单" width="min(560px, calc(100vw - 32px))" class="responsive-dialog">
+    <el-dialog
+      v-model="deleteDraftVisible"
+      title="删除草稿订单"
+      width="min(560px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleOrderSavingDialogClose"
+    >
       <el-alert
         title="只允许删除未提交生产、未产生生产和库存记录的草稿订单。删除后会释放该草稿订单的订单号，可修正 Excel 后重新导入。"
         type="warning"
@@ -838,8 +881,8 @@
       </div>
       <template #footer>
         <div class="dialog-footer-actions">
-          <el-button @click="deleteDraftVisible = false">取消</el-button>
-          <el-button type="danger" :loading="saving" @click="deleteDraftOrder">确认删除草稿</el-button>
+          <el-button :disabled="saving" @click="closeDeleteDraftDialog">取消</el-button>
+          <el-button type="danger" :loading="saving" :disabled="saving" @click="deleteDraftOrder">确认删除草稿</el-button>
         </div>
       </template>
     </el-dialog>
@@ -870,7 +913,10 @@
               <div class="import-structure-header">
                 <strong>固定格式清单</strong>
                 <span>{{ importFileStructureOrders.length }} 个订单 / 已加载 {{ importFilePreview.rows.length }} 行</span>
-                <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="copyImportFileStructureText">复制全部</el-button>
+                <div class="structure-header-actions">
+                  <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="openImportFileStructureTextDialog">查看固定格式</el-button>
+                  <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="copyImportFileStructureText">复制全部</el-button>
+                </div>
               </div>
             <div v-if="importFileStructureOrders.length" class="import-file-structure-orders">
               <section v-for="previewOrder in importFileStructureOrders" :key="previewOrder.orderNo" class="import-file-structure-order">
@@ -882,15 +928,17 @@
                   <div v-for="(group, groupIndex) in previewOrder.groups" :key="group.id" class="import-structure-group">
                     <div class="import-structure-main">
                       <span>{{ groupIndex + 1 }}</span>
-                      <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
-                        {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                      <el-tag :type="groupStructureTagType(group.type, group.line)" effect="plain">
+                        {{ groupStructureLabel(group.type, group.line) }}
                       </el-tag>
                       <strong>{{ formatImportStructureCore(group.line) }}</strong>
                       <span>{{ formatImportStructureMeta(group.line) }}</span>
                     </div>
                     <div v-for="(child, childIndex) in group.children" :key="child.id" class="import-structure-child">
                       <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
-                      <el-tag type="success" effect="plain">子零件</el-tag>
+                      <el-tag :type="groupStructureTagType('standalone', child)" effect="plain">
+                        {{ groupStructureLabel('standalone', child) }}
+                      </el-tag>
                       <strong>{{ formatImportStructureCore(child) }}</strong>
                       <span>{{ formatImportStructureMeta(child) }}</span>
                     </div>
@@ -904,16 +952,23 @@
             <el-table-column prop="sourceRowNo" label="Excel行" width="86" />
             <el-table-column prop="orderNo" label="订单编号" min-width="160" />
             <el-table-column prop="importSequence" label="序号" width="86" />
-            <el-table-column label="行类型" width="90">
-              <template #default="{ row }">{{ row.lineType === 'COMPONENT' ? '组件' : '零件' }}</template>
+            <el-table-column label="结构" min-width="170">
+              <template #default="{ row }">
+                <div class="import-line-structure-cell">
+                  <el-tag size="small" :type="lineStructureTagType(row)" effect="plain">
+                    {{ lineStructureLabel(row) }}
+                  </el-tag>
+                  <small>{{ lineStructureHint(row) }}</small>
+                </div>
+              </template>
             </el-table-column>
             <el-table-column prop="partCategory" label="零件类型" width="100" />
-            <el-table-column prop="componentNo" label="组件编号" width="110" />
-            <el-table-column prop="parentComponentNo" label="所属组件" width="110" />
-            <el-table-column prop="partCode" label="物料号" min-width="150" />
+            <el-table-column prop="partCode" label="零件编码" min-width="150" />
             <el-table-column prop="drawingNo" label="图号" min-width="150" />
             <el-table-column prop="partName" label="产品名称" min-width="160" />
-            <el-table-column prop="partThickness" label="厚度" width="90" />
+            <el-table-column label="厚度" width="90">
+              <template #default="{ row: line }">{{ formatStructureLineThickness(line) }}</template>
+            </el-table-column>
             <el-table-column label="数量" min-width="170">
               <template #default="{ row }">
                 订单 {{ row.orderQuantity ?? '-' }} / 单套 {{ row.unitUsage ?? '-' }} / 需求
@@ -955,12 +1010,188 @@
         </template>
       </div>
     </el-dialog>
+
+    <el-dialog
+      v-model="modelBomApplyDialogVisible"
+      title="零件包带入预览"
+      width="min(1080px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <div v-if="modelBomApplyPreview" class="model-bom-apply-preview">
+        <el-alert
+          title="零件包推荐只写入当前未保存的草稿明细，不提交生产、不占库存；确认带入后仍需保存订单。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+        <div class="model-bom-apply-summary">
+          <div>
+            <strong>{{ modelBomApplyPreview.bom.bomName }}</strong>
+            <span>{{ modelBomApplyPreview.bom.scopeLabel }}</span>
+          </div>
+          <div>
+            <label>本次数量倍率</label>
+            <el-input-number
+              v-model="modelBomApplyQuantityMultiplier"
+              :min="0.001"
+              :precision="3"
+              :step="1"
+              controls-position="right"
+              style="width: 180px"
+            />
+          </div>
+        </div>
+        <div class="model-bom-apply-tags">
+          <el-tag effect="plain" type="success">将带入 {{ modelBomApplyPreviewOrderLines.length }} 行</el-tag>
+          <el-tag v-if="modelBomApplyPreview.duplicatePartCodes.length > 0" effect="plain" type="warning">
+            重复零件 {{ modelBomApplyPreview.duplicatePartCodes.length }} 个
+          </el-tag>
+          <el-tag v-if="modelBomApplyPreview.remappedComponentCount > 0" effect="plain" type="warning">
+            重映射组件 {{ modelBomApplyPreview.remappedComponentCount }} 个
+          </el-tag>
+          <el-tag v-if="modelBomApplyMissingThicknessCount > 0" effect="plain" type="danger">
+            厚度需核对 {{ modelBomApplyMissingThicknessCount }} 行
+          </el-tag>
+          <el-tag v-if="modelBomApplyPreview.skippedInvalidStructureCount > 0" effect="plain" type="info">
+            跳过无效结构 {{ modelBomApplyPreview.skippedInvalidStructureCount }} 行
+          </el-tag>
+        </div>
+        <el-alert
+          v-if="modelBomApplyPreview.duplicatePartCodes.length > 0"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="`当前草稿已存在 ${modelBomApplyPreview.duplicatePartCodes.join('、')}，确认后会追加重复零件。`"
+        />
+        <el-alert
+          v-if="modelBomApplyMissingThicknessCount > 0"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="有零件缺少厚度，带入后必须在草稿明细中补齐，否则订单保存会被后端拦截。"
+        />
+        <el-alert
+          v-if="modelBomApplyRequiresRefresh"
+          type="info"
+          :closable="false"
+          show-icon
+          title="BOM 维护页已打开。补齐保存后，请回到当前订单页点击“刷新 BOM 预览”；刷新前不会把旧预览带入草稿。"
+        />
+        <div v-if="modelBomApplyMissingThicknessLines.length > 0" class="model-bom-apply-review-list">
+          <strong>需核对厚度明细</strong>
+          <div
+            v-for="(line, index) in modelBomApplyMissingThicknessLines"
+            :key="`${line.partCode || 'missing'}-${index}`"
+            class="model-bom-apply-review-item"
+          >
+            <el-tag type="danger" effect="plain">{{ index + 1 }}</el-tag>
+            <span>{{ formatModelBomApplyMissingThicknessLine(line) }}</span>
+          </div>
+        </div>
+        <div class="model-bom-apply-structure">
+          <div
+            v-for="(group, groupIndex) in modelBomApplyPreviewStructureGroups"
+            :key="group.id"
+            class="model-bom-apply-group"
+          >
+            <div class="model-bom-apply-main">
+              <span>{{ groupIndex + 1 }}</span>
+              <el-tag :type="groupStructureTagType(group.type, group.entry.line)" effect="plain">
+                {{ groupStructureLabel(group.type, group.entry.line) }}
+              </el-tag>
+              <strong>{{ formatOrderFormStructureCore(group.entry.line) }}</strong>
+              <span>{{ formatOrderFormStructureMeta(group.entry.line) }}</span>
+              <small>{{ modelBomApplyLineFlags(group.entry.line) }}</small>
+            </div>
+            <div v-for="(child, childIndex) in group.children" :key="child.key" class="model-bom-apply-child">
+              <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+              <el-tag :type="groupStructureTagType('standalone', child.line)" effect="plain">
+                {{ groupStructureLabel('standalone', child.line) }}
+              </el-tag>
+              <strong>{{ formatOrderFormStructureCore(child.line) }}</strong>
+              <span>{{ formatOrderFormStructureMeta(child.line) }}</span>
+              <small>{{ modelBomApplyLineFlags(child.line) }}</small>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button
+          :disabled="!modelBomApplyPreview"
+          :loading="modelBomApplyRefreshLoading"
+          @click="refreshModelBomApplyPreview"
+        >
+          刷新 BOM 预览
+        </el-button>
+        <el-button
+          v-if="modelBomApplyMissingThicknessSourceLines.length > 0"
+          type="warning"
+          plain
+          @click="openModelBomApplySourceBom"
+        >
+          {{ modelBomApplySourceBomActionText }}
+        </el-button>
+        <el-button @click="closeModelBomApplyDialog">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="!modelBomApplyPreview || modelBomApplyPreviewOrderLines.length === 0 || modelBomApplyRequiresRefresh"
+          @click="confirmApplyModelBomToOrder"
+        >
+          确认带入草稿
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="structureTextDialogVisible"
+      :title="structureTextDialogTitle"
+      width="min(960px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <el-input
+        class="structure-textarea"
+        :model-value="structureTextDialogContent"
+        type="textarea"
+        :rows="24"
+        readonly
+      />
+      <template #footer>
+        <el-button @click="structureTextDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!structureTextDialogContent" @click="copyStructureTextDialogContent">复制清单</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="orderConfirmDialogVisible"
+      class="responsive-dialog"
+      :title="orderConfirmTitle"
+      width="640px"
+      append-to-body
+      :close-on-click-modal="true"
+      :close-on-press-escape="true"
+      :before-close="handleOrderConfirmDialogClose"
+    >
+      <div class="order-confirm-panel">
+        <p v-for="line in orderConfirmMessageLines" :key="line">{{ line }}</p>
+        <ul v-if="orderConfirmDetails.length">
+          <li v-for="detail in orderConfirmDetails" :key="detail">{{ detail }}</li>
+        </ul>
+      </div>
+      <template #footer>
+        <el-button @click="cancelOrderConfirm">{{ orderConfirmCancelButtonText }}</el-button>
+        <el-button :type="orderConfirmButtonType" @click="acceptOrderConfirm">
+          {{ orderConfirmButtonText }}
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { ElMessage } from 'element-plus';
 import { WarningFilled } from '@element-plus/icons-vue';
 import { useRouter } from 'vue-router';
 import {
@@ -981,8 +1212,8 @@ import OrderNoLink from '../components/OrderNoLink.vue';
 import OrderSelect from '../components/OrderSelect.vue';
 import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import StatusTag from '../components/StatusTag.vue';
+import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
-  Customer,
   InventorySummaryRow,
   ModelBom,
   OrderDetail,
@@ -993,7 +1224,7 @@ import type {
   OrderSummary
 } from '../types/erp';
 import { normalizeDisplayFileName } from '../utils/fileNames';
-import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
+import { formatDate, formatDateInputValue, formatDateTime, formatQuantity } from '../utils/format';
 import {
   confirmDuplicateDrawingFiles,
   confirmDuplicateDrawingNos,
@@ -1022,6 +1253,8 @@ type ImportStructureRow = {
   drawingDate?: string;
   drawingStatus?: string;
   partName?: string;
+  partSpecification?: string;
+  partThickness?: number | null;
   orderQuantity?: number;
   unitUsage?: number;
   demandQuantity: number;
@@ -1035,6 +1268,13 @@ type ImportStructureGroup = {
   line: ImportStructureRow;
   children: ImportStructureRow[];
 };
+type LineStructureTagType = 'success' | 'warning' | 'info' | 'danger';
+type StructureLine = {
+  lineType?: string;
+  componentNo?: string | null;
+  parentComponentNo?: string | null;
+};
+type StructureGroupType = 'component' | 'standalone' | 'orphan';
 
 type ImportFileStructureOrder = {
   orderNo: string;
@@ -1062,8 +1302,18 @@ type OrderFormStructureGroup = {
   children: OrderFormStructureLine[];
 };
 
+type ModelBomApplyPreview = {
+  bom: ModelBom;
+  componentNoMap: Map<string, string>;
+  importableBomLines: ModelBom['lines'];
+  skippedInvalidStructureCount: number;
+  duplicatePartCodes: string[];
+  remappedComponentCount: number;
+};
+type OrderConfirmButtonType = 'primary' | 'success' | 'warning' | 'danger' | 'info';
+
 const router = useRouter();
-const customers = ref<Customer[]>([]);
+const { isMobileLayout } = useDeviceProfile();
 const orders = ref<OrderSummary[]>([]);
 const orderOptions = ref<OrderSummary[]>([]);
 const inventorySummary = ref<InventorySummaryRow[]>([]);
@@ -1076,6 +1326,17 @@ const cancelOrderVisible = ref(false);
 const deleteDraftVisible = ref(false);
 const processDefinitionManagerVisible = ref(false);
 const importDialogVisible = ref(false);
+const structureTextDialogVisible = ref(false);
+const structureTextDialogTitle = ref('固定格式清单');
+const structureTextDialogContent = ref('');
+const structureTextDialogSuccessMessage = ref('固定格式清单已复制');
+const orderConfirmDialogVisible = ref(false);
+const orderConfirmTitle = ref('');
+const orderConfirmMessage = ref('');
+const orderConfirmDetails = ref<string[]>([]);
+const orderConfirmButtonText = ref('确认');
+const orderConfirmCancelButtonText = ref('取消');
+const orderConfirmButtonType = ref<OrderConfirmButtonType>('primary');
 const importSessionCreating = ref(false);
 const importTemplateDownloading = ref(false);
 const importIssueReportDownloading = ref(false);
@@ -1127,6 +1388,7 @@ const activeCancelOrder = ref<OrderSummary>();
 const activeCancelOrderDetail = ref<OrderDetail>();
 const activeDeleteDraftOrder = ref<OrderSummary>();
 const expandedMobileOrderIds = ref<string[]>([]);
+let orderConfirmResolver: ((confirmed: boolean) => void) | null = null;
 
 const orderStatusOptions: Array<{ label: string; value: OrderStatus }> = [
   { label: '待提交生产', value: 'DRAFT' },
@@ -1168,10 +1430,24 @@ const orderForm = reactive<{
   deliveryDate: '',
   lines: []
 });
-const orderFormStructureGroups = computed<OrderFormStructureGroup[]>(() => buildOrderFormStructureGroups(orderForm.lines));
+const orderFormFilledLines = computed(() => filledOrderFormLines());
+const orderFormFilledLineCount = computed(() => orderFormFilledLines.value.length);
+const orderFormStructureGroups = computed<OrderFormStructureGroup[]>(() => buildOrderFormStructureGroups(orderFormFilledLines.value));
+const orderConfirmMessageLines = computed(() =>
+  orderConfirmMessage.value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+);
 const modelBomRecommendationVisible = ref(false);
 const modelBomLoading = ref(false);
 const modelBomRecommendations = ref<ModelBom[]>([]);
+const modelBomApplyDialogVisible = ref(false);
+const modelBomApplyRefreshLoading = ref(false);
+const modelBomApplySourceOpened = ref(false);
+const modelBomApplyRefreshReminderShown = ref(false);
+const modelBomApplyQuantityMultiplier = ref(1);
+const modelBomApplyPreview = ref<ModelBomApplyPreview>();
 const modelBomSearch = reactive({
   projectModel: '',
   keyword: ''
@@ -1205,7 +1481,6 @@ let orderNoCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let orderNoCheckSequence = 0;
 let syncingImportOrderSelection = false;
 
-const activeCustomers = computed(() => customers.value.filter((item) => item.status === 'ENABLED'));
 const allOrderStatusesChecked = computed(() => filters.orderStatuses.length === orderStatusOptions.length);
 const orderStatusesIndeterminate = computed(
   () => filters.orderStatuses.length > 0 && filters.orderStatuses.length < orderStatusOptions.length
@@ -1226,6 +1501,37 @@ const orderDurationDaysText = computed(() => {
   }
   return `${diffDays} 天`;
 });
+const modelBomApplyPreviewOrderLines = computed(() => {
+  const preview = modelBomApplyPreview.value;
+  if (!preview) {
+    return [];
+  }
+  const targetProjectModel = modelBomImportProjectModel(preview.bom);
+  return preview.importableBomLines.map((line, index) =>
+    createLineFromModelBomLine(
+      preview.bom,
+      line,
+      index,
+      preview.componentNoMap,
+      targetProjectModel,
+      modelBomApplyQuantityMultiplier.value
+    )
+  );
+});
+const modelBomApplyPreviewStructureGroups = computed(() => buildOrderFormStructureGroups(modelBomApplyPreviewOrderLines.value));
+const modelBomApplyMissingThicknessCount = computed(
+  () => modelBomApplyPreviewOrderLines.value.filter(orderLineNeedsThicknessReview).length
+);
+const modelBomApplyMissingThicknessLines = computed(() =>
+  modelBomApplyPreviewOrderLines.value.filter(orderLineNeedsThicknessReview)
+);
+const modelBomApplyMissingThicknessSourceLines = computed(() =>
+  (modelBomApplyPreview.value?.importableBomLines || []).filter(isModelBomLineMissingThickness)
+);
+const modelBomApplySourceBomActionText = computed(() =>
+  modelBomApplyMissingThicknessSourceLines.value.length === 1 ? '打开 BOM 明细补厚度' : '打开 BOM 维护补厚度'
+);
+const modelBomApplyRequiresRefresh = computed(() => modelBomApplySourceOpened.value && Boolean(modelBomApplyPreview.value));
 const canCommitImport = computed(
   () =>
     Boolean(importPreview.value) &&
@@ -1242,7 +1548,7 @@ const orderImportNotice = computed(() => {
   const uploadLimitText = importConfig.value
     ? `单个文件最大 ${formatFileSize(importConfig.value.uploadMaxBytes)}。`
     : '正在读取单个文件上传上限。';
-  return `导入只创建待提交生产的草稿订单；不会自动提交生产、不会占用库存、不会生成生产任务。创建草稿时会同步物料基础资料，但不会产生库存数量。只读取名为 ERP上传净表 的工作表，台账页不能直接上传。可一次多选或在同一会话连续上传多个 .xlsx 文件，${uploadLimitText}ERP上传净表明细必须连续，中间不能留空行。`;
+  return `导入只创建待提交生产的草稿订单；不会自动提交生产、不会占用库存、不会生成生产任务。创建草稿时只会补建缺失的零件搜索记忆，不覆盖已存在或已停用零件搜索记忆；客户归属来自订单历史，不会创建客户 BOM、全局适用范围或库存数量。只读取名为 ERP上传净表 的工作表，台账页不能直接上传。可一次多选或在同一会话连续上传多个 .xlsx 文件，${uploadLimitText}ERP上传净表明细必须连续，中间不能留空行。`;
 });
 const selectedValidImportOrderNos = computed(() => [...selectedImportOrderNos.value]);
 const visibleSelectableImportOrderCount = computed(
@@ -1256,7 +1562,7 @@ function newLine(index: number): CreateOrderLinePayload {
     componentNo: '',
     parentComponentNo: '',
     importSequence: '',
-    partCode: `P-${Date.now().toString().slice(-4)}-${index + 1}`,
+    partCode: '',
     partName: '',
     drawingNo: '',
     drawingVersion: 'A',
@@ -1322,12 +1628,12 @@ async function loadModelBomRecommendations() {
 function enabledModelBomLines(bom: ModelBom) {
   const lines = bom.lines
     .filter((line) => line.status === 'ENABLED' && line.materialStatus !== 'DISABLED')
-    .sort((left, right) => left.sortOrder - right.sortOrder);
+    .sort(compareModelBomLinesForImport);
   const childrenByParent = new Map<string, typeof lines>();
   const rootLines: typeof lines = [];
   for (const line of lines) {
     if (line.lineType === 'PART' && line.parentComponentNo) {
-      const key = line.parentComponentNo;
+      const key = normalizeComponentNo(line.parentComponentNo);
       childrenByParent.set(key, [...(childrenByParent.get(key) || []), line]);
     } else {
       rootLines.push(line);
@@ -1338,7 +1644,7 @@ function enabledModelBomLines(bom: ModelBom) {
   for (const line of rootLines) {
     ordered.push(line);
     if (line.lineType === 'COMPONENT' && line.componentNo) {
-      for (const child of childrenByParent.get(line.componentNo) || []) {
+      for (const child of childrenByParent.get(normalizeComponentNo(line.componentNo)) || []) {
         ordered.push(child);
         attachedIds.add(child.id);
       }
@@ -1352,12 +1658,126 @@ function enabledModelBomLines(bom: ModelBom) {
   return ordered;
 }
 
+function compareModelBomLinesForImport(left: ModelBom['lines'][number], right: ModelBom['lines'][number]) {
+  const leftDisplayOrder = Number(left.displayOrder || 0);
+  const rightDisplayOrder = Number(right.displayOrder || 0);
+  if (leftDisplayOrder > 0 && rightDisplayOrder > 0 && leftDisplayOrder !== rightDisplayOrder) {
+    return leftDisplayOrder - rightDisplayOrder;
+  }
+  if (leftDisplayOrder > 0 && rightDisplayOrder <= 0) {
+    return -1;
+  }
+  if (rightDisplayOrder > 0 && leftDisplayOrder <= 0) {
+    return 1;
+  }
+  return (left.sortOrder || 0) - (right.sortOrder || 0) || String(left.partCode || '').localeCompare(String(right.partCode || ''));
+}
+
 function enabledModelBomLineCount(bom: ModelBom) {
   return enabledModelBomLines(bom).length;
 }
 
 function normalizeComponentNo(value?: string | null) {
   return String(value || '').trim().toUpperCase();
+}
+
+function lineStructureLabel(line: StructureLine) {
+  if (line.lineType === 'COMPONENT') {
+    return `组件 ${normalizeComponentNo(line.componentNo) || '未编号'}`;
+  }
+  const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  return parentComponentNo ? `子零件 -> ${parentComponentNo}` : '单独零件';
+}
+
+function lineStructureHint(line: StructureLine) {
+  if (line.lineType === 'COMPONENT') {
+    return '父级组件';
+  }
+  const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  return parentComponentNo ? `所属组件 ${parentComponentNo}` : '不属于组件';
+}
+
+function lineStructureTagType(line: StructureLine): LineStructureTagType {
+  if (line.lineType === 'COMPONENT') {
+    return 'success';
+  }
+  return normalizeComponentNo(line.parentComponentNo) ? 'warning' : 'info';
+}
+
+function formatStructureLineThickness(line: StructureLine & { partThickness?: number | null }) {
+  if (line.lineType === 'COMPONENT') {
+    return '不适用（父级组件由子零件维护）';
+  }
+  return line.partThickness ?? '-';
+}
+
+function groupStructureLabel(type: StructureGroupType, line: StructureLine) {
+  if (type === 'component') {
+    return `组件 ${normalizeComponentNo(line.componentNo) || '未编号'}`;
+  }
+  if (type === 'orphan') {
+    return `未匹配父级 ${normalizeComponentNo(line.parentComponentNo) || '-'}`;
+  }
+  return lineStructureLabel(line);
+}
+
+function groupStructureHint(type: StructureGroupType, line: StructureLine) {
+  if (type === 'component') {
+    return '父级组件';
+  }
+  if (type === 'orphan') {
+    return '所属组件不存在';
+  }
+  return lineStructureHint(line);
+}
+
+function groupStructureTagType(type: StructureGroupType, line: StructureLine): LineStructureTagType {
+  if (type === 'orphan') {
+    return 'danger';
+  }
+  return lineStructureTagType(line);
+}
+
+function isComponentNoOutOfRange(value?: string | null) {
+  const matched = /^C(\d+)$/.exec(normalizeComponentNo(value));
+  return !!matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999);
+}
+
+function validateOrderFormComponentStructure(lines = orderForm.lines) {
+  const componentNos = new Set<string>();
+  for (const [index, line] of lines.entries()) {
+    const lineType = line.lineType || 'PART';
+    const componentNo = normalizeComponentNo(line.componentNo);
+    const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+    const label = `第 ${index + 1} 行`;
+    if (lineType === 'COMPONENT') {
+      if (!componentNo) {
+        return `${label} 是组件行，必须填写组件编号`;
+      }
+      if (isComponentNoOutOfRange(componentNo)) {
+        return `${label} 组件编号只支持 C001-C9999；自定义编号请不要使用 C 开头的非 C001-C9999 数字格式`;
+      }
+      if (parentComponentNo) {
+        return `${label} 是组件行，不能填写所属组件`;
+      }
+      if (componentNos.has(componentNo)) {
+        return `同一订单内组件编号重复：${componentNo}`;
+      }
+      componentNos.add(componentNo);
+      continue;
+    }
+    if (componentNo) {
+      return `${label} 是零件行，不能填写组件编号；如属于组件，请填写所属组件`;
+    }
+  }
+  for (const [index, line] of lines.entries()) {
+    const lineType = line.lineType || 'PART';
+    const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+    if (lineType === 'PART' && parentComponentNo && !componentNos.has(parentComponentNo)) {
+      return `第 ${index + 1} 行零件所属组件 ${parentComponentNo} 在当前订单内不存在`;
+    }
+  }
+  return '';
 }
 
 function buildOrderFormStructureGroups(lines: CreateOrderLinePayload[]): OrderFormStructureGroup[] {
@@ -1392,7 +1812,7 @@ function buildOrderFormStructureGroups(lines: CreateOrderLinePayload[]): OrderFo
 }
 
 function displayOrderFormPartCode(line: CreateOrderLinePayload) {
-  return isGeneratedPlaceholderPartCode(line.partCode) ? '-' : line.partCode || '-';
+  return line.partCode || '-';
 }
 
 function orderFormProcessText(line: CreateOrderLinePayload) {
@@ -1409,9 +1829,35 @@ function formatOrderFormStructureMeta(line: CreateOrderLinePayload) {
   return `计划 ${formatQuantity(line.productionPlanQuantity || 0, line.unit || '件')} | 图纸 ${drawingText} | 工艺 ${orderFormProcessText(line)}`;
 }
 
+function formatOrderFormStructureTextLine(line: CreateOrderLinePayload, prefix: string, type: StructureGroupType) {
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  return [
+    prefix,
+    `结构 ${groupStructureLabel(type, line)}`,
+    `父级 ${groupStructureHint(type, line)}`,
+    `编码 ${displayOrderFormPartCode(line)}`,
+    `名称 ${line.partName || '未填写零件名称'}`,
+    `类型 ${line.partCategory || '-'}`,
+    `项目 ${line.projectModel || '-'}`,
+    `厚度 ${formatStructureLineThickness(line)}`,
+    `规格 ${line.partSpecification || '-'}`,
+    `订单 ${formatQuantity(line.quantity || 0, line.unit || '件')}`,
+    `计划 ${formatQuantity(line.productionPlanQuantity || 0, line.unit || '件')}`,
+    `交期 ${line.deliveryDate || orderForm.deliveryDate || '-'}`,
+    `图纸 ${drawingText}`,
+    `工艺 ${orderFormProcessText(line)}`
+  ].join(' | ');
+}
+
 const orderFormStructureText = computed(() => {
+  if (orderFormStructureGroups.value.length === 0) {
+    return '';
+  }
   const header = `${orderForm.orderNo || '未生成订单号'} / ${orderForm.orderDate || '-'} / ${orderForm.deliveryDate || '-'}`;
-  const lines = [header];
+  const lines = [
+    header,
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 订单 | 计划 | 交期 | 图纸 | 工艺'
+  ];
   for (const [groupIndex, group] of orderFormStructureGroups.value.entries()) {
     const groupLine = group.entry.line;
     const prefix =
@@ -1420,13 +1866,29 @@ const orderFormStructureText = computed(() => {
         : group.type === 'orphan'
           ? `${groupIndex + 1}. 未匹配父级 ${groupLine.parentComponentNo || '-'}`
           : `${groupIndex + 1}. 单独零件`;
-    lines.push(`${prefix} | ${formatOrderFormStructureCore(groupLine)} | ${formatOrderFormStructureMeta(groupLine)}`);
+    lines.push(formatOrderFormStructureTextLine(groupLine, prefix, group.type));
     group.children.forEach((child, childIndex) => {
-      lines.push(`  ${groupIndex + 1}.${childIndex + 1} 子零件 | ${formatOrderFormStructureCore(child.line)} | ${formatOrderFormStructureMeta(child.line)}`);
+      lines.push(formatOrderFormStructureTextLine(child.line, `  ${groupIndex + 1}.${childIndex + 1} 子零件`, 'standalone'));
     });
   }
   return lines.join('\n');
 });
+
+function openStructureTextDialog(title: string, text: string, successMessage: string) {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    ElMessage.warning('暂无可查看的固定格式清单');
+    return;
+  }
+  structureTextDialogTitle.value = title;
+  structureTextDialogContent.value = normalizedText;
+  structureTextDialogSuccessMessage.value = successMessage;
+  structureTextDialogVisible.value = true;
+}
+
+function openOrderFormStructureTextDialog() {
+  openStructureTextDialog('当前草稿固定格式清单', orderFormStructureText.value, '当前草稿固定格式清单已复制');
+}
 
 async function copyOrderFormStructureText() {
   const text = orderFormStructureText.value.trim();
@@ -1483,8 +1945,31 @@ function formatImportStructureMeta(line: ImportStructureRow) {
   return `${quantityText} | 图纸 ${drawingText} | 工艺 ${processText}`;
 }
 
+function formatImportStructureTextLine(line: ImportStructureRow, prefix: string, type: StructureGroupType) {
+  const drawingText = [line.drawingNo, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  return [
+    prefix,
+    `结构 ${groupStructureLabel(type, line)}`,
+    `父级 ${groupStructureHint(type, line)}`,
+    `编码 ${line.partCode || '-'}`,
+    `名称 ${line.partName || '-'}`,
+    `类型 ${line.partCategory || '-'}`,
+    `项目 ${line.projectModel || '-'}`,
+    `厚度 ${formatStructureLineThickness(line)}`,
+    `规格 ${line.partSpecification || '-'}`,
+    `需求 ${formatQuantity(line.demandQuantity, line.unit)}`,
+    `订单 ${line.orderQuantity ?? '-'}`,
+    `单套 ${line.unitUsage ?? '-'}`,
+    `图纸 ${drawingText}`,
+    `工艺 ${line.processRoute || '-'}`
+  ].join(' | ');
+}
+
 function formatImportStructureGroupsText(title: string, groups: ImportStructureGroup[]) {
-  const lines = [title];
+  const lines = [
+    title,
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 需求 | 订单 | 单套 | 图纸 | 工艺'
+  ];
   for (const [groupIndex, group] of groups.entries()) {
     const prefix =
       group.type === 'component'
@@ -1492,9 +1977,9 @@ function formatImportStructureGroupsText(title: string, groups: ImportStructureG
         : group.type === 'orphan'
           ? `${groupIndex + 1}. 未匹配父级 ${group.line.parentComponentNo || '-'}`
           : `${groupIndex + 1}. 单独零件`;
-    lines.push(`${prefix} | ${formatImportStructureCore(group.line)} | ${formatImportStructureMeta(group.line)}`);
+    lines.push(formatImportStructureTextLine(group.line, prefix, group.type));
     group.children.forEach((child, childIndex) => {
-      lines.push(`  ${groupIndex + 1}.${childIndex + 1} 子零件 | ${formatImportStructureCore(child)} | ${formatImportStructureMeta(child)}`);
+      lines.push(formatImportStructureTextLine(child, `  ${groupIndex + 1}.${childIndex + 1} 子零件`, 'standalone'));
     });
   }
   return lines.join('\n');
@@ -1522,11 +2007,33 @@ async function copyStructureTextToClipboard(text: string, successMessage: string
   }
 }
 
+async function copyStructureTextDialogContent() {
+  await copyStructureTextToClipboard(structureTextDialogContent.value, structureTextDialogSuccessMessage.value);
+}
+
+function openImportOrderStructureTextDialog(order: OrderImportPreviewOrder) {
+  openStructureTextDialog(
+    '导入订单固定格式清单',
+    formatImportStructureText(importOrderStructureTitle(order), order.rows),
+    '导入订单固定格式清单已复制'
+  );
+}
+
 async function copyImportOrderStructureText(order: OrderImportPreviewOrder) {
   await copyStructureTextToClipboard(
     formatImportStructureText(importOrderStructureTitle(order), order.rows),
     '导入订单固定格式清单已复制'
   );
+}
+
+function openImportFileStructureTextDialog() {
+  const sections = importFileStructureOrders.value.map((order) =>
+    formatImportStructureGroupsText(
+      [order.orderNo || '未识别订单', order.customerName || '-', order.projectModel || '-'].join(' / '),
+      order.groups
+    )
+  );
+  openStructureTextDialog('上传文件固定格式清单', sections.join('\n\n'), '文件预览固定格式清单已复制');
 }
 
 async function copyImportFileStructureText() {
@@ -1576,19 +2083,26 @@ function formatModelBomStructureCore(line: ModelBom['lines'][number]) {
 
 function formatModelBomStructureMeta(line: ModelBom['lines'][number]) {
   const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const drawingSourceText =
+    line.drawingSource === 'BOM_LINE' ? 'BOM指定' : line.drawingSource === 'MATERIAL_DEFAULT' ? '零件默认' : line.drawingSource === 'MATERIAL_LATEST' ? '零件最新' : '-';
   const processText = line.defaultProcessRoute || '-';
   const specificationText = line.partSpecification || '-';
-  return `图纸 ${drawingText} | 工艺 ${processText} | 规格 ${specificationText}`;
+  const thicknessText = line.lineType === 'COMPONENT' ? '不适用（父级组件由子零件维护）' : Number(line.partThickness || 0) > 0 ? line.partThickness : '待核对';
+  return `图纸 ${drawingText}（${drawingSourceText}） | 工艺 ${processText} | 厚度 ${thicknessText} | 规格 ${specificationText}`;
 }
 
-function isGeneratedPlaceholderPartCode(value?: string) {
-  return /^P-\d{4}-\d+$/i.test(String(value || '').trim());
+function isModelBomLineMissingThickness(line: ModelBom['lines'][number]) {
+  return line.lineType !== 'COMPONENT' && Number(line.partThickness || 0) <= 0;
+}
+
+function orderLineNeedsThicknessReview(line: CreateOrderLinePayload) {
+  return line.lineType !== 'COMPONENT' && Number(line.partThickness || 0) <= 0;
 }
 
 function isBlankOrderLine(line: CreateOrderLinePayload) {
   const partCode = line.partCode?.trim();
   return (
-    (!partCode || isGeneratedPlaceholderPartCode(partCode)) &&
+    !partCode &&
     !line.partName?.trim() &&
     !line.drawingNo?.trim() &&
     !line.partSpecification?.trim() &&
@@ -1596,6 +2110,10 @@ function isBlankOrderLine(line: CreateOrderLinePayload) {
     !line.parentComponentNo?.trim() &&
     (!line.processSteps || line.processSteps.length === 0)
   );
+}
+
+function filledOrderFormLines() {
+  return orderForm.lines.filter((line) => !isBlankOrderLine(line));
 }
 
 function splitBomDefaultProcessRoute(value?: string | null) {
@@ -1663,13 +2181,34 @@ function orderImportableModelBomLines(bomLines: ModelBom['lines'], componentNoMa
   });
 }
 
+function modelBomProjectScopeText(bom: ModelBom) {
+  const projectModel = bom.projectModel?.trim();
+  if (projectModel) {
+    return projectModel;
+  }
+  const importProjectModel = modelBomSearch.projectModel.trim();
+  return importProjectModel ? `全部机型/项目（带入 ${importProjectModel}）` : '全部机型/项目';
+}
+
+function modelBomImportProjectModel(bom: ModelBom) {
+  return bom.projectModel?.trim() || modelBomSearch.projectModel.trim();
+}
+
+function scaleModelBomQuantity(value: number, multiplier: number) {
+  const baseQuantity = Number.isFinite(value) && value > 0 ? value : 1;
+  const safeMultiplier = Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
+  return Math.round(baseQuantity * safeMultiplier * 1000) / 1000;
+}
+
 function createLineFromModelBomLine(
   bom: ModelBom,
   bomLine: ModelBom['lines'][number],
   index: number,
-  componentNoMap = new Map<string, string>()
+  componentNoMap = new Map<string, string>(),
+  targetProjectModel = modelBomImportProjectModel(bom),
+  quantityMultiplier = 1
 ): CreateOrderLinePayload {
-  const quantity = Number(bomLine.defaultQuantity || 1);
+  const quantity = scaleModelBomQuantity(Number(bomLine.defaultQuantity || 1), quantityMultiplier);
   const line = newLine(index);
   line.lineType = bomLine.lineType === 'COMPONENT' ? 'COMPONENT' : 'PART';
   line.partCategory = bomLine.partCategory || '';
@@ -1680,7 +2219,11 @@ function createLineFromModelBomLine(
   line.importSequence = '';
   line.partCode = bomLine.partCode;
   line.partName = bomLine.partName;
-  line.projectModel = bom.projectModel;
+  // 全部机型 BOM 按当前搜索机型带入订单，避免订单行缺少项目型号影响后续筛选和追溯。
+  line.projectModel = targetProjectModel;
+  const materialThickness = Number(bomLine.partThickness || 0);
+  // 父级组件由子零件拼接，不维护自身厚度；子零件和单独零件缺厚度时必须人工补齐。
+  line.partThickness = bomLine.lineType === 'COMPONENT' ? 0 : materialThickness > 0 ? materialThickness : 0;
   line.partSpecification = bomLine.partSpecification || '';
   line.drawingNo = bomLine.drawingNo || '';
   line.drawingVersion = bomLine.drawingVersion || line.drawingVersion;
@@ -1701,47 +2244,183 @@ function createLineFromModelBomLine(
   return line;
 }
 
-async function applyModelBomToOrder(bom: ModelBom) {
+function buildModelBomApplyPreview(bom: ModelBom) {
   const bomLines = enabledModelBomLines(bom);
   if (bomLines.length === 0) {
     ElMessage.warning('该零件包没有可带入的启用零件');
-    return;
+    return undefined;
   }
   const filledLines = orderForm.lines.filter((line) => !isBlankOrderLine(line));
   const existingPartCodes = new Set(filledLines.map((line) => line.partCode?.trim()).filter(Boolean));
-  const componentNoMap = buildBomComponentNoMap(bomLines, filledLines);
+  let componentNoMap: Map<string, string>;
+  try {
+    componentNoMap = buildBomComponentNoMap(bomLines, filledLines);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件包组件编号生成失败');
+    return undefined;
+  }
   const importableBomLines = orderImportableModelBomLines(bomLines, componentNoMap);
   const skippedInvalidStructureCount = bomLines.length - importableBomLines.length;
   if (importableBomLines.length === 0) {
     ElMessage.warning('该零件包没有可带入的有效组件结构');
-    return;
+    return undefined;
   }
   const duplicatePartCodes = [...new Set(importableBomLines.map((line) => line.partCode).filter((partCode) => existingPartCodes.has(partCode)))];
-  if (duplicatePartCodes.length > 0) {
-    try {
-      await ElMessageBox.confirm(
-        `当前订单已存在 ${duplicatePartCodes.join('、')}，继续会追加重复零件。是否继续？`,
-        '确认带入零件包',
-        { type: 'warning', confirmButtonText: '继续带入', cancelButtonText: '取消' }
-      );
-    } catch {
-      return;
-    }
-  }
   const remappedComponentCount = [...componentNoMap.entries()].filter(([sourceComponentNo, targetComponentNo]) => sourceComponentNo !== targetComponentNo).length;
-  const importedLines = importableBomLines.map((line, index) => createLineFromModelBomLine(bom, line, filledLines.length + index, componentNoMap));
-  orderForm.lines = [...filledLines, ...importedLines];
-  const remapText = remappedComponentCount > 0 ? `，${remappedComponentCount} 个组件编号已避让当前草稿` : '';
-  const skippedText = skippedInvalidStructureCount > 0 ? `，已跳过 ${skippedInvalidStructureCount} 个父组件缺失或组件编号无效的 BOM 行` : '';
-  ElMessage.success(`已带入 ${importedLines.length} 个零件${remapText}${skippedText}，请核对数量、图号、厚度和工艺后保存草稿订单`);
+  return {
+    bom,
+    componentNoMap,
+    importableBomLines,
+    skippedInvalidStructureCount,
+    duplicatePartCodes,
+    remappedComponentCount
+  };
 }
 
-async function loadCustomers() {
-  try {
-    customers.value = await erpApi.customers();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败');
+function openModelBomApplyDialog(bom: ModelBom) {
+  const preview = buildModelBomApplyPreview(bom);
+  if (!preview) {
+    return;
   }
+  modelBomApplyPreview.value = preview;
+  modelBomApplyQuantityMultiplier.value = 1;
+  modelBomApplyDialogVisible.value = true;
+}
+
+async function refreshModelBomApplyPreview() {
+  const preview = modelBomApplyPreview.value;
+  if (!preview?.bom.id) {
+    return;
+  }
+
+  modelBomApplyRefreshLoading.value = true;
+  try {
+    const bom = await erpApi.modelBom(preview.bom.id);
+    const nextPreview = buildModelBomApplyPreview(bom);
+    if (!nextPreview) {
+      return;
+    }
+    modelBomApplyPreview.value = nextPreview;
+    modelBomApplySourceOpened.value = false;
+    modelBomApplyRefreshReminderShown.value = false;
+    modelBomRecommendations.value = modelBomRecommendations.value.map((item) => (item.id === bom.id ? bom : item));
+    const missingThicknessCount = nextPreview.importableBomLines.filter(isModelBomLineMissingThickness).length;
+    if (missingThicknessCount > 0) {
+      ElMessage.warning(`BOM 预览已刷新，仍有 ${missingThicknessCount} 行厚度需核对`);
+    } else {
+      ElMessage.success('BOM 预览已刷新，厚度需核对已清除');
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM 预览刷新失败，请确认后端服务和 BOM 状态');
+  } finally {
+    modelBomApplyRefreshLoading.value = false;
+  }
+}
+
+function closeModelBomApplyDialog() {
+  modelBomApplyDialogVisible.value = false;
+  modelBomApplyPreview.value = undefined;
+  modelBomApplyQuantityMultiplier.value = 1;
+  modelBomApplySourceOpened.value = false;
+  modelBomApplyRefreshReminderShown.value = false;
+}
+
+function modelBomApplyLineFlags(line: CreateOrderLinePayload) {
+  const flags: string[] = [];
+  if (modelBomApplyPreview.value?.duplicatePartCodes.includes(line.partCode)) {
+    flags.push('当前草稿已存在同编码');
+  }
+  if (orderLineNeedsThicknessReview(line)) {
+    flags.push('厚度需核对');
+  }
+  const componentNo = normalizeComponentNo(line.componentNo);
+  const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  const remappedEntries = [...(modelBomApplyPreview.value?.componentNoMap.entries() || [])].filter(
+    ([sourceComponentNo, targetComponentNo]) => sourceComponentNo !== targetComponentNo
+  );
+  if (remappedEntries.some(([, targetComponentNo]) => targetComponentNo === componentNo || targetComponentNo === parentComponentNo)) {
+    flags.push('组件编号已避让');
+  }
+  return flags.length ? flags.join('；') : '可带入';
+}
+
+function formatModelBomApplyMissingThicknessLine(line: CreateOrderLinePayload) {
+  const structureText = line.parentComponentNo
+    ? `子零件 -> ${normalizeComponentNo(line.parentComponentNo)}`
+    : '单独零件';
+  const drawingText = [line.drawingNo, line.drawingVersion].filter(Boolean).join(' / ') || '-';
+  const specificationText = line.partSpecification || '-';
+  return `${structureText} | ${line.partCode || '-'} | ${line.partName || '-'} | 图纸 ${drawingText} | 规格 ${specificationText}`;
+}
+
+function openModelBomApplySourceBom() {
+  const preview = modelBomApplyPreview.value;
+  if (!preview?.bom.id) {
+    return;
+  }
+
+  const sourceLines = modelBomApplyMissingThicknessSourceLines.value;
+  const query: Record<string, string> = {
+    bomId: preview.bom.id,
+    returnTo: '/orders'
+  };
+
+  // 只有一条缺厚度时直接定位并打开该 BOM 明细；多条时先进入 BOM 维护页统一核对。
+  if (sourceLines.length === 1 && sourceLines[0]?.id) {
+    query.lineId = sourceLines[0].id;
+    query.action = 'editLine';
+  }
+
+  const routeTarget = router.resolve({
+    path: '/inventory/model-boms',
+    query
+  });
+  // BOM 维护在新标签页打开，避免丢失当前未保存的订单草稿和零件包预览上下文。
+  const openedWindow = window.open(routeTarget.href, '_blank');
+  if (!openedWindow) {
+    ElMessage.warning('浏览器阻止了新标签页，请允许弹出窗口后再打开 BOM 维护');
+    return;
+  }
+  openedWindow.opener = null;
+  modelBomApplySourceOpened.value = true;
+  modelBomApplyRefreshReminderShown.value = false;
+  ElMessage.info('BOM 维护页已打开；补齐后回到当前订单页点击“刷新 BOM 预览”。');
+}
+
+function handleModelBomApplyWindowFocus() {
+  if (
+    !modelBomApplyDialogVisible.value ||
+    !modelBomApplyPreview.value ||
+    !modelBomApplySourceOpened.value ||
+    modelBomApplyRefreshReminderShown.value ||
+    modelBomApplyRefreshLoading.value
+  ) {
+    return;
+  }
+
+  modelBomApplyRefreshReminderShown.value = true;
+  ElMessage.info('如果已在 BOM 维护页补齐厚度，请点击“刷新 BOM 预览”读取最新 BOM。');
+}
+
+function confirmApplyModelBomToOrder() {
+  const preview = modelBomApplyPreview.value;
+  if (!preview) {
+    return;
+  }
+  if (!Number.isFinite(modelBomApplyQuantityMultiplier.value) || modelBomApplyQuantityMultiplier.value <= 0) {
+    ElMessage.warning('本次数量倍率必须大于 0');
+    return;
+  }
+  const filledLines = orderForm.lines.filter((line) => !isBlankOrderLine(line));
+  const importedLines = modelBomApplyPreviewOrderLines.value.map((line) => ({ ...line }));
+  orderForm.lines = [...filledLines, ...importedLines];
+  const remapText = preview.remappedComponentCount > 0 ? `，${preview.remappedComponentCount} 个组件编号已避让当前草稿` : '';
+  const skippedText = preview.skippedInvalidStructureCount > 0 ? `，已跳过 ${preview.skippedInvalidStructureCount} 个父组件缺失或组件编号无效的 BOM 行` : '';
+  const duplicateText = preview.duplicatePartCodes.length > 0 ? `，追加了 ${preview.duplicatePartCodes.length} 个同编码零件` : '';
+  const missingThicknessCount = importedLines.filter(orderLineNeedsThicknessReview).length;
+  const missingThicknessText = missingThicknessCount > 0 ? `，其中 ${missingThicknessCount} 行厚度需核对` : '';
+  closeModelBomApplyDialog();
+  ElMessage.success(`已带入 ${importedLines.length} 行零件包明细${remapText}${duplicateText}${skippedText}${missingThicknessText}，请核对数量、图号、厚度和工艺后保存草稿订单`);
 }
 
 async function loadOrders() {
@@ -1762,7 +2441,9 @@ async function loadOrders() {
     // 订单下拉只在当前日期/客户范围内做本地缩小，不反向改变父页面的日期和客户筛选。
     orders.value = filters.orderNo ? rows.filter((item) => item.orderNo === filters.orderNo) : rows;
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '订单列表加载失败');
+    orders.value = [];
+    expandedMobileOrderIds.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '订单列表加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
   }
@@ -1773,7 +2454,8 @@ async function loadInventorySummary() {
     inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
     return true;
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '库存汇总加载失败');
+    inventorySummary.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '库存汇总加载失败，请确认后端服务和库存状态');
     return false;
   }
 }
@@ -1791,7 +2473,7 @@ async function loadOrderOptions() {
     }
   } catch (error) {
     orderOptions.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -1891,7 +2573,8 @@ async function openCreate() {
     ElMessage.info('手机端订单新增先暂停，请在电脑端操作');
     return;
   }
-  orderForm.customerId = activeCustomers.value[0]?.id || '';
+  // 订单新增必须由操作员在 CustomerSelect 中明确选择客户，避免默认第一个客户造成误下单。
+  orderForm.customerId = '';
   orderForm.orderNo = '';
   orderForm.orderDate = todayText();
   orderForm.deliveryDate = defaultDeliveryDate(orderForm.orderDate);
@@ -1937,14 +2620,15 @@ async function openImportDialog() {
 }
 
 function isMobileOrderWorkspacePaused() {
-  return typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches;
+  return isMobileLayout.value || (typeof window !== 'undefined' && window.matchMedia('(max-width: 900px)').matches);
 }
 
 async function loadImportConfig() {
   try {
     importConfig.value = await erpApi.orderImportConfig();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入配置读取失败');
+    importConfig.value = undefined;
+    ElMessage.error(error instanceof Error ? error.message : '导入配置读取失败，请确认后端服务和上传配置');
   }
 }
 
@@ -2030,7 +2714,7 @@ function importSessionValidationSummary(session: OrderImportSessionSummary) {
     parts.push(`警告 ${session.warningCount} 个`);
   }
   if (typeof session.materialSyncCount === 'number') {
-    parts.push(`预计同步物料 ${session.materialSyncCount} 个${materialSyncPreviewSuffix(session.materialSyncPreview)}`);
+    parts.push(`涉及零件编码 ${session.materialSyncCount} 个${materialSyncPreviewSuffix(session.materialSyncPreview)}`);
   }
   return parts.join(' / ');
 }
@@ -2042,7 +2726,9 @@ function materialSyncPreviewSuffix(preview?: string[]) {
 
 function materialSyncPreviewText(preview: string[] | undefined, totalCount: number) {
   const suffix = materialSyncPreviewSuffix(preview);
-  return suffix ? `预计同步 ${totalCount} 个物料基础资料${suffix}` : `预计同步 ${totalCount} 个物料基础资料`;
+  return suffix
+    ? `本次草稿涉及 ${totalCount} 个零件编码${suffix}；仅缺失记录会补建为零件搜索记忆，已有零件搜索记忆不会被订单覆盖。`
+    : `本次草稿涉及 ${totalCount} 个零件编码；仅缺失记录会补建为零件搜索记忆，已有零件搜索记忆不会被订单覆盖。`;
 }
 
 async function loadImportSessionHistory(options: { append?: boolean } = {}) {
@@ -2058,7 +2744,12 @@ async function loadImportSessionHistory(options: { append?: boolean } = {}) {
     importSessionHistoryTotal.value = result.totalCount;
     importSessionHistoryHasMore.value = result.hasMore;
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入记录加载失败');
+    if (!append) {
+      importSessionHistory.value = [];
+      importSessionHistoryTotal.value = 0;
+    }
+    importSessionHistoryHasMore.value = false;
+    ElMessage.error(error instanceof Error ? error.message : '导入记录加载失败，请确认后端服务和导入记忆');
   } finally {
     importSessionsLoading.value = false;
   }
@@ -2075,17 +2766,14 @@ async function openImportSessionFromHistory(session: OrderImportSessionSummary) 
     importPreview.value.status === 'DRAFT' &&
     importPreview.value.summary.rowCount > 0
   ) {
-    try {
-      await ElMessageBox.confirm(
-        '当前已有未提交的导入预览。切换记录不会删除数据，但会把当前弹窗切换到所选导入记录。',
-        '切换导入记录',
-        {
-          confirmButtonText: '切换',
-          cancelButtonText: '返回',
-          type: 'warning'
-        }
-      );
-    } catch {
+    const confirmed = await openOrderConfirmDialog({
+      title: '切换导入记录',
+      message: '当前已有未提交的导入预览。切换记录不会删除数据，但会把当前弹窗切换到所选导入记录。',
+      confirmButtonText: '切换',
+      cancelButtonText: '返回',
+      confirmButtonType: 'warning'
+    });
+    if (!confirmed) {
       return;
     }
   }
@@ -2266,20 +2954,14 @@ async function confirmImportWarnings(warningCount: number, useAllSelectableCommi
     return true;
   }
   const scopeText = useAllSelectableCommit && excludedOrderCount === 0 ? '全部可导入订单' : '已勾选订单';
-  try {
-    await ElMessageBox.confirm(
-      `${scopeText}仍有 ${warningCount} 个警告。系统可以先创建待提交生产草稿，但厚度、单位、工艺路线、图纸状态等警告内容必须在 ERP 草稿里复核后再提交生产。`,
-      '导入警告复核',
-      {
-        confirmButtonText: '已知晓，继续创建草稿',
-        cancelButtonText: '返回预览',
-        type: 'warning'
-      }
-    );
-    return true;
-  } catch {
-    return false;
-  }
+  return openOrderConfirmDialog({
+    title: '导入警告复核',
+    message: `${scopeText}仍有 ${warningCount} 个警告。`,
+    details: ['系统可以先创建待提交生产草稿，但厚度、单位、工艺路线、图纸状态等警告内容必须在 ERP 草稿里复核后再提交生产。'],
+    confirmButtonText: '已知晓，继续创建草稿',
+    cancelButtonText: '返回预览',
+    confirmButtonType: 'warning'
+  });
 }
 
 function mergeImportPreviewOrders(nextPreview: OrderImportSessionPreview) {
@@ -2516,7 +3198,9 @@ async function refreshImportPreview() {
     importPreview.value = await erpApi.orderImportSession(importPreview.value.id, importPreviewOrderPageSize, 0);
     await selectImportOrdersByNos(previousSelectedOrderNos);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入预览刷新失败');
+    importPreview.value = undefined;
+    clearImportOrderSelection();
+    ElMessage.error(error instanceof Error ? error.message : '导入预览刷新失败，请确认导入记忆和后端服务');
   } finally {
     importPreviewLoading.value = false;
   }
@@ -2540,7 +3224,7 @@ async function loadMoreImportPreviewOrders() {
     });
     await selectImportOrdersByNos(previousSelectedOrderNos);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '订单预览加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '订单预览加载失败，请确认导入记忆和后端服务');
   } finally {
     importPreviewLoading.value = false;
   }
@@ -2562,7 +3246,8 @@ async function openImportFilePreview(fileId: string) {
     );
   } catch (error) {
     importFilePreviewVisible.value = false;
-    ElMessage.error(error instanceof Error ? error.message : '上传文件预览失败');
+    importFilePreview.value = undefined;
+    ElMessage.error(error instanceof Error ? error.message : '上传文件预览失败，请确认导入文件和后端服务');
   } finally {
     importFilePreviewLoading.value = false;
     importFilePreviewLoadingId.value = '';
@@ -2586,7 +3271,7 @@ async function loadMoreImportFilePreviewRows() {
       rows: [...importFilePreview.value.rows, ...nextPreview.rows]
     };
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '上传文件预览加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '上传文件预览加载失败，请确认导入文件和后端服务');
   } finally {
     importFilePreviewLoading.value = false;
   }
@@ -2597,17 +3282,15 @@ async function deleteImportFile(fileId: string) {
     return;
   }
   const file = importPreview.value.files.find((item) => item.id === fileId);
-  try {
-    await ElMessageBox.confirm(
-      `确定删除上传文件“${displayImportFileName(file?.fileName || fileId)}”吗？该文件带来的预览明细会从本次导入中移除。`,
-      '删除上传文件',
-      {
-        confirmButtonText: '删除',
-        cancelButtonText: '返回',
-        type: 'warning'
-      }
-    );
-  } catch {
+  const confirmed = await openOrderConfirmDialog({
+    title: '删除上传文件',
+    message: `确定删除上传文件“${displayImportFileName(file?.fileName || fileId)}”吗？`,
+    details: ['该文件带来的预览明细会从本次导入中移除。'],
+    confirmButtonText: '删除',
+    cancelButtonText: '返回',
+    confirmButtonType: 'warning'
+  });
+  if (!confirmed) {
     return;
   }
 
@@ -2637,13 +3320,15 @@ async function discardImportSession() {
   if (!importPreview.value?.id || importPreview.value.status !== 'DRAFT') {
     return;
   }
-  try {
-    await ElMessageBox.confirm('确定放弃本次导入预览吗？已上传但未创建草稿订单的 Excel 数据会被清空。', '放弃导入', {
-      confirmButtonText: '放弃',
-      cancelButtonText: '返回',
-      type: 'warning'
-    });
-  } catch {
+  const confirmed = await openOrderConfirmDialog({
+    title: '放弃导入',
+    message: '确定放弃本次导入预览吗？',
+    details: ['已上传但未创建草稿订单的 Excel 数据会被清空。'],
+    confirmButtonText: '放弃',
+    cancelButtonText: '返回',
+    confirmButtonType: 'warning'
+  });
+  if (!confirmed) {
     return;
   }
 
@@ -2706,32 +3391,28 @@ async function commitImportSession() {
     if (blockedCount > 0) {
       messages.push(`${blockedCount} 个不可导入订单会被跳过，需修正 Excel 后重新上传。`);
     }
-    try {
-      await ElMessageBox.confirm(
-        messages.join(''),
-        '只创建已勾选订单',
-        {
-          confirmButtonText: '继续创建已勾选',
-          cancelButtonText: '返回勾选',
-          type: 'warning'
-        }
-      );
-    } catch {
+    const confirmed = await openOrderConfirmDialog({
+      title: '只创建已勾选订单',
+      message: messages[0],
+      details: messages.slice(1),
+      confirmButtonText: '继续创建已勾选',
+      cancelButtonText: '返回勾选',
+      confirmButtonType: 'warning'
+    });
+    if (!confirmed) {
       return;
     }
   }
   if (importPreview.value.orderPage?.hasMore) {
-    try {
-      await ElMessageBox.confirm(
-        `当前只显示了 ${importPreview.value.orders.length} / ${importPreview.value.orderPage.totalCount} 个订单预览。继续操作只会创建 ${selectedCount} 个已勾选订单，没有勾选的订单不会创建。`,
-        '还有未加载订单',
-        {
-          confirmButtonText: '继续创建已选',
-          cancelButtonText: '返回加载更多',
-          type: 'warning'
-        }
-      );
-    } catch {
+    const confirmed = await openOrderConfirmDialog({
+      title: '还有未加载订单',
+      message: `当前只显示了 ${importPreview.value.orders.length} / ${importPreview.value.orderPage.totalCount} 个订单预览。`,
+      details: [`继续操作只会创建 ${selectedCount} 个已勾选订单，没有勾选的订单不会创建。`],
+      confirmButtonText: '继续创建已选',
+      cancelButtonText: '返回加载更多',
+      confirmButtonType: 'warning'
+    });
+    if (!confirmed) {
       return;
     }
   }
@@ -2756,7 +3437,7 @@ async function commitImportSession() {
     );
     const previewText = result.createdOrdersTruncated ? `，返回前 ${result.createdOrdersPreviewCount} 个订单摘要` : '';
     const skippedSelectableText = result.skippedSelectableCount > 0 ? `，未创建 ${result.skippedSelectableCount} 个可导入订单` : '';
-    const materialSyncText = `，同步 ${result.materialSyncCount || 0} 个物料基础资料${materialSyncPreviewSuffix(result.materialSyncPreview)}`;
+    const materialSyncText = `，涉及 ${result.materialSyncCount || 0} 个零件编码${materialSyncPreviewSuffix(result.materialSyncPreview)}，仅补建缺失的零件搜索记忆`;
     ElMessage.success(`已创建 ${result.createdCount} 个草稿订单${materialSyncText}${skippedSelectableText}${previewText}`);
     importPreview.value = undefined;
     clearImportOrderSelection();
@@ -2797,15 +3478,17 @@ async function commitAllImportSelectableOrders() {
     if (!(await confirmImportWarnings(selectableWarningCount, true))) {
       return;
     }
-    await ElMessageBox.confirm(
-      `确定创建本次导入中 ${importPreview.value.summary.selectableOrderCount} 个可导入订单的草稿吗？该操作不依赖前端传入订单号列表，适合大批量导入。${skippedText}`,
-      '创建全部可导入草稿',
-      {
-        confirmButtonText: '创建全部可导入',
-        cancelButtonText: '返回',
-        type: importPreview.value.summary.blockedOrderCount > 0 ? 'warning' : 'info'
-      }
-    );
+    const confirmed = await openOrderConfirmDialog({
+      title: '创建全部可导入草稿',
+      message: `确定创建本次导入中 ${importPreview.value.summary.selectableOrderCount} 个可导入订单的草稿吗？`,
+      details: ['该操作不依赖前端传入订单号列表，适合大批量导入。', skippedText].filter(Boolean),
+      confirmButtonText: '创建全部可导入',
+      cancelButtonText: '返回',
+      confirmButtonType: importPreview.value.summary.blockedOrderCount > 0 ? 'warning' : 'info'
+    });
+    if (!confirmed) {
+      return;
+    }
   } catch {
     return;
   }
@@ -2821,7 +3504,7 @@ async function commitAllImportSelectableOrders() {
     const skippedText = result.skippedBlockedCount > 0 ? `，跳过 ${result.skippedBlockedCount} 个不可导入订单` : '';
     const skippedSelectableText = result.skippedSelectableCount > 0 ? `，未创建 ${result.skippedSelectableCount} 个可导入订单` : '';
     const previewText = result.createdOrdersTruncated ? `，返回前 ${result.createdOrdersPreviewCount} 个订单摘要` : '';
-    const materialSyncText = `，同步 ${result.materialSyncCount || 0} 个物料基础资料${materialSyncPreviewSuffix(result.materialSyncPreview)}`;
+    const materialSyncText = `，涉及 ${result.materialSyncCount || 0} 个零件编码${materialSyncPreviewSuffix(result.materialSyncPreview)}，仅补建缺失的零件搜索记忆`;
     ElMessage.success(`已创建 ${result.createdCount} 个草稿订单${materialSyncText}${skippedSelectableText}${skippedText}${previewText}`);
     importPreview.value = undefined;
     clearImportOrderSelection();
@@ -2841,17 +3524,19 @@ async function deleteImportSessionMemory(session: OrderImportSessionSummary) {
     session.status === 'COMMITTED' && session.committedOrderCount && session.currentCommittedOrderCount !== session.committedOrderCount
       ? `提交时生成过 ${session.committedOrderCount} 个订单。`
       : '';
+  // 已提交导入只能删除上传和预览记忆，正式订单与订单来源文字追溯必须保留。
   const message =
     session.status === 'DRAFT'
       ? `确定放弃这次未提交导入吗？${session.fileCount} 个上传文件和 ${session.rowCount} 行预览会被清空。`
-      : `确定删除这条导入记录吗？系统只会删除上传记忆和预览行，不会删除当前仍存在的订单：${importCurrentCommittedOrderNosSummary(session)}。${staleCommittedText}`;
-  try {
-    await ElMessageBox.confirm(message, session.status === 'DRAFT' ? '放弃导入' : '删除导入记录', {
-      confirmButtonText: session.status === 'DRAFT' ? '放弃' : '删除记录',
-      cancelButtonText: '返回',
-      type: 'warning'
-    });
-  } catch {
+      : `确定删除这条导入记忆吗？系统只会删除上传文件、预览行和会话记录，不会删除已经生成的订单。当前仍存在的订单：${importCurrentCommittedOrderNosSummary(session)}。删除后订单仍保留来源文字，但原 Excel 文件不可再预览。${staleCommittedText}`;
+  const confirmed = await openOrderConfirmDialog({
+    title: session.status === 'DRAFT' ? '放弃导入' : '删除导入记忆',
+    message,
+    confirmButtonText: session.status === 'DRAFT' ? '放弃' : '删除导入记忆',
+    cancelButtonText: '返回',
+    confirmButtonType: 'warning'
+  });
+  if (!confirmed) {
     return;
   }
 
@@ -2907,7 +3592,93 @@ function clearParentComponentNoAfterRemovingLine(removedLine?: CreateOrderLinePa
   }
 }
 
+function warnOrderSavingDialogClose() {
+  ElMessage.warning('订单操作正在保存，请等待保存完成');
+}
+
+function closeCreateOrderDialog() {
+  if (saving.value) {
+    warnOrderSavingDialogClose();
+    return;
+  }
+  dialogVisible.value = false;
+}
+
+function closeCancelOrderDialog() {
+  if (saving.value) {
+    warnOrderSavingDialogClose();
+    return;
+  }
+  cancelOrderVisible.value = false;
+}
+
+function closeDeleteDraftDialog() {
+  if (saving.value) {
+    warnOrderSavingDialogClose();
+    return;
+  }
+  deleteDraftVisible.value = false;
+}
+
+function handleOrderSavingDialogClose(done: () => void) {
+  if (saving.value) {
+    warnOrderSavingDialogClose();
+    return;
+  }
+  done();
+}
+
+function openOrderConfirmDialog(options: {
+  title: string;
+  message: string;
+  details?: string[];
+  confirmButtonText: string;
+  cancelButtonText?: string;
+  confirmButtonType?: OrderConfirmButtonType;
+}) {
+  if (orderConfirmResolver) {
+    orderConfirmResolver(false);
+  }
+  orderConfirmTitle.value = options.title;
+  orderConfirmMessage.value = options.message;
+  orderConfirmDetails.value = options.details || [];
+  orderConfirmButtonText.value = options.confirmButtonText;
+  orderConfirmCancelButtonText.value = options.cancelButtonText || '取消';
+  orderConfirmButtonType.value = options.confirmButtonType || 'primary';
+  orderConfirmDialogVisible.value = true;
+  return new Promise<boolean>((resolve) => {
+    orderConfirmResolver = resolve;
+  });
+}
+
+function resolveOrderConfirm(confirmed: boolean, closeDialog = true) {
+  const resolver = orderConfirmResolver;
+  orderConfirmResolver = null;
+  if (closeDialog) {
+    orderConfirmDialogVisible.value = false;
+  }
+  if (resolver) {
+    resolver(confirmed);
+  }
+}
+
+function cancelOrderConfirm() {
+  resolveOrderConfirm(false);
+}
+
+function acceptOrderConfirm() {
+  resolveOrderConfirm(true);
+}
+
+function handleOrderConfirmDialogClose(done: () => void) {
+  resolveOrderConfirm(false, false);
+  done();
+}
+
 async function saveOrder() {
+  if (saving.value) {
+    return;
+  }
   if (!orderForm.customerId) {
     ElMessage.warning('请选择客户');
     return;
@@ -2916,16 +3687,17 @@ async function saveOrder() {
     ElMessage.warning('请填写订单号');
     return;
   }
-  if (orderForm.lines.length === 0) {
+  const filledLines = filledOrderFormLines();
+  if (filledLines.length === 0) {
     ElMessage.warning('订单至少需要一个零件');
     return;
   }
   if (
-    orderForm.lines.some(
+    filledLines.some(
       (line) =>
         !line.partCode ||
         !line.partName ||
-        !line.partThickness ||
+        orderLineNeedsThicknessReview(line) ||
         !line.quantity ||
         (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) ||
         !line.unit
@@ -2934,14 +3706,19 @@ async function saveOrder() {
     ElMessage.warning('请补齐订单零件、厚度等必填信息');
     return;
   }
+  const componentStructureMessage = validateOrderFormComponentStructure(filledLines);
+  if (componentStructureMessage) {
+    ElMessage.warning(componentStructureMessage);
+    return;
+  }
   if (!(await loadInventorySummary())) {
     return;
   }
-  const stockCheck = validateStockModeLines(orderForm.lines, inventorySummary.value);
+  const stockCheck = validateStockModeLines(filledLines, inventorySummary.value);
   if (!stockCheck.ok) {
     ElMessage.warning(`待提交生产订单可先保存；${stockCheck.message}，提交生产前必须补足`);
   }
-  const draftStockCheck = validateDraftStockSourceLines(orderForm.lines);
+  const draftStockCheck = validateDraftStockSourceLines(filledLines);
   if (!draftStockCheck.ok) {
     ElMessage.warning(draftStockCheck.message);
     return;
@@ -2949,16 +3726,16 @@ async function saveOrder() {
   if (draftStockCheck.warning) {
     ElMessage.warning(draftStockCheck.warning);
   }
-  if (!(await confirmDuplicateDrawingNos(orderForm.lines))) {
+  if (!(await confirmDuplicateDrawingNos(filledLines))) {
     return;
   }
-  if (!(await confirmDuplicateDrawingFiles(orderForm.lines))) {
+  if (!(await confirmDuplicateDrawingFiles(filledLines))) {
     return;
   }
-  if (!(await confirmExistingDrawingNos(orderForm.lines))) {
+  if (!(await confirmExistingDrawingNos(filledLines))) {
     return;
   }
-  if (!(await confirmExistingDrawingFiles(orderForm.lines))) {
+  if (!(await confirmExistingDrawingFiles(filledLines))) {
     return;
   }
   if (!(await checkOrderNo(true))) {
@@ -2973,7 +3750,7 @@ async function saveOrder() {
       orderNo: orderForm.orderNo.trim(),
       orderDate: orderForm.orderDate,
       deliveryDate: orderForm.deliveryDate,
-      lines: normalizedLines()
+      lines: normalizedLines(filledLines)
     });
     ElMessage.success('订单已保存');
     dialogVisible.value = false;
@@ -2986,13 +3763,14 @@ async function saveOrder() {
 }
 
 function todayText() {
-  return new Date().toISOString().slice(0, 10);
+  // 订单制单日期必须按本地业务日期生成，避免 UTC 日期在凌晨回退到前一天。
+  return formatDateInputValue(new Date());
 }
 
 function defaultDeliveryDate(orderDate: string) {
-  const date = orderDate ? new Date(orderDate) : new Date();
+  const date = orderDate ? toDateOnly(orderDate) : new Date();
   date.setDate(date.getDate() + 14);
-  return date.toISOString().slice(0, 10);
+  return formatDateInputValue(date);
 }
 
 function toDateOnly(value: string) {
@@ -3141,8 +3919,8 @@ function clearProductionPlanOverride(line: CreateOrderLinePayload) {
   line.productionPlanOverrideReason = '';
 }
 
-function normalizedLines() {
-  return orderForm.lines.map((line) => sanitizeOrderLinePayload(line, orderForm.deliveryDate));
+function normalizedLines(lines = filledOrderFormLines()) {
+  return lines.map((line) => sanitizeOrderLinePayload(line, orderForm.deliveryDate));
 }
 
 function goDetail(row: OrderSummary) {
@@ -3220,7 +3998,7 @@ async function openCancelOrder(row: OrderSummary) {
   activeCancelOrder.value = row;
   activeCancelOrderDetail.value = undefined;
   cancelHandlingPlanRows.value = [];
-  cancelOrderForm.cancelAt = formatDateTime(new Date().toISOString());
+  cancelOrderForm.cancelAt = formatDateTime(new Date());
   cancelOrderForm.managerName = '';
   cancelOrderForm.productionCancelState = 'NOT_PRODUCED';
   cancelOrderForm.reason = '';
@@ -3258,6 +4036,9 @@ function requireDesktopOrderListMutation(actionName: string) {
 }
 
 async function deleteDraftOrder() {
+  if (saving.value) {
+    return;
+  }
   if (!activeDeleteDraftOrder.value) {
     return;
   }
@@ -3341,6 +4122,9 @@ function collectCancelHandlingPlan() {
 }
 
 async function saveCancelOrder() {
+  if (saving.value) {
+    return;
+  }
   if (!activeCancelOrder.value) {
     return;
   }
@@ -3376,9 +4160,13 @@ async function saveCancelOrder() {
 }
 
 onMounted(async () => {
-  await loadCustomers();
+  window.addEventListener('focus', handleModelBomApplyWindowFocus);
   await loadOrderOptions();
   await loadOrders();
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', handleModelBomApplyWindowFocus);
 });
 </script>
 
@@ -3472,6 +4260,25 @@ onMounted(async () => {
 
 .dialog-subtitle-actions .el-button {
   margin-left: 0;
+}
+
+.order-confirm-panel {
+  display: grid;
+  gap: 10px;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.order-confirm-panel p {
+  margin: 0;
+}
+
+.order-confirm-panel ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
 }
 
 .model-bom-recommendation {
@@ -3597,6 +4404,120 @@ onMounted(async () => {
   font-size: 12px;
 }
 
+.model-bom-apply-preview {
+  display: grid;
+  gap: 12px;
+}
+
+.model-bom-apply-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.model-bom-apply-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.model-bom-apply-summary span,
+.model-bom-apply-summary label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-apply-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.model-bom-apply-review-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
+.model-bom-apply-review-list > strong {
+  color: #9a3412;
+}
+
+.model-bom-apply-review-item {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.model-bom-apply-review-item > span:last-child {
+  overflow: hidden;
+  color: #7c2d12;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-bom-apply-structure {
+  display: grid;
+  gap: 8px;
+  max-height: 460px;
+  overflow: auto;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.model-bom-apply-group {
+  display: grid;
+  gap: 6px;
+}
+
+.model-bom-apply-main,
+.model-bom-apply-child {
+  display: grid;
+  grid-template-columns: 34px 120px minmax(220px, 1fr) minmax(300px, 1.35fr) minmax(150px, 0.7fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 10px;
+  background: #fff;
+  border-radius: 6px;
+}
+
+.model-bom-apply-child {
+  margin-left: 34px;
+  background: #f0fdf4;
+}
+
+.model-bom-apply-main > span:first-child,
+.model-bom-apply-child > span:first-child,
+.model-bom-apply-main small,
+.model-bom-apply-child small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-apply-main strong,
+.model-bom-apply-child strong,
+.model-bom-apply-main > span:nth-child(4),
+.model-bom-apply-child > span:nth-child(4),
+.model-bom-apply-main small,
+.model-bom-apply-child small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .order-form-structure-panel {
   display: grid;
   gap: 10px;
@@ -3623,6 +4544,19 @@ onMounted(async () => {
 .order-form-structure-header span {
   color: #64748b;
   font-size: 12px;
+}
+
+.structure-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.structure-textarea :deep(textarea) {
+  min-height: 500px;
+  font-family: Consolas, 'Courier New', monospace;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .order-form-structure-list {
@@ -4047,6 +4981,18 @@ onMounted(async () => {
   width: 100%;
 }
 
+.import-line-structure-cell {
+  display: grid;
+  gap: 4px;
+  align-items: start;
+}
+
+.import-line-structure-cell small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 16px;
+}
+
 .import-preview-footer {
   display: flex;
   flex-wrap: wrap;
@@ -4237,6 +5183,36 @@ onMounted(async () => {
   }
 
   .model-bom-structure-child {
+    margin-left: 16px;
+  }
+
+  .model-bom-apply-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .model-bom-apply-main,
+  .model-bom-apply-child {
+    grid-template-columns: 28px minmax(92px, auto) minmax(0, 1fr);
+  }
+
+  .model-bom-apply-main > span:nth-child(4),
+  .model-bom-apply-child > span:nth-child(4),
+  .model-bom-apply-main small,
+  .model-bom-apply-child small {
+    grid-column: 3;
+    white-space: normal;
+  }
+
+  .model-bom-apply-review-item {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .model-bom-apply-review-item > span:last-child {
+    white-space: normal;
+  }
+
+  .model-bom-apply-child {
     margin-left: 16px;
   }
 

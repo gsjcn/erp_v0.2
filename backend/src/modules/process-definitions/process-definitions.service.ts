@@ -15,8 +15,9 @@ export class ProcessDefinitionsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll(query: ProcessDefinitionQueryDto) {
+    const status = query.status === 'ALL' ? undefined : query.status || CommonStatus.ENABLED;
     const rows = await this.prisma.processDefinition.findMany({
-      where: query.status ? { status: query.status } : undefined,
+      where: status ? { status } : undefined,
       orderBy: [{ status: 'asc' }, { processName: 'asc' }]
     });
     const keyword = normalizeSearchKeyword(query.keyword);
@@ -103,8 +104,25 @@ export class ProcessDefinitionsService {
       // 已被历史订单、流程记忆、BOM 或来源加工关系引用的标准工序不能停用，避免后续默认工艺失效。
       throw this.referencedProcessDefinitionError(existing.processName, references, '停用');
     }
-    await this.prisma.processDefinition.delete({ where: { id } });
-    return this.mapDefinition({ ...existing, status: CommonStatus.DISABLED });
+    // 标准工序属于可复用基础资料；删除入口只做软停用，保留查重和后续恢复能力。
+    const disabled = await this.prisma.processDefinition.update({
+      where: { id },
+      data: { status: CommonStatus.DISABLED }
+    });
+    return this.mapDefinition(disabled);
+  }
+
+  async restore(id: string) {
+    const existing = await this.ensureExists(id);
+    if (existing.status === CommonStatus.ENABLED) {
+      return this.mapDefinition(existing);
+    }
+    // 恢复标准工序只恢复后续下拉可选；不会自动修改已保存订单流程、BOM 或来源加工关系。
+    const restored = await this.prisma.processDefinition.update({
+      where: { id },
+      data: { status: CommonStatus.ENABLED }
+    });
+    return this.mapDefinition(restored);
   }
 
   async ensureActiveNames(processNames: string[]) {

@@ -19,6 +19,7 @@ import {
 import { buildPinyinSearchText, normalizeSearchKeyword } from '../../common/pinyin-search';
 import { runSerializableTransaction } from '../../common/transactions';
 import { normalizeMultipartFileName } from '../../common/upload-filenames';
+import { businessDateKey } from '../../common/business-date';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProcessDefinitionsService } from '../process-definitions/process-definitions.service';
 import {
@@ -1144,7 +1145,7 @@ export class OrdersService {
       ['订单数', preview.summary.orderCount, '可导入订单', preview.summary.selectableOrderCount],
       ['不可导入订单', preview.summary.blockedOrderCount, '重复行', preview.summary.duplicateRowCount],
       ['错误数', preview.summary.errorCount, '警告数', preview.summary.warningCount],
-      ['预计同步物料', preview.summary.materialSyncCount, '物料示例', (preview.summary.materialSyncPreview || []).join('、')],
+      ['涉及零件编码', preview.summary.materialSyncCount, '零件编码示例', (preview.summary.materialSyncPreview || []).join('、')],
       ['生成时间', this.formatDateTime(new Date()), '说明', '仅用于修正 Excel；创建草稿前后端仍会重新校验']
     ];
     overviewRows.forEach((row, index) => setValues(overviewSheet, index + 2, row));
@@ -1358,7 +1359,7 @@ export class OrdersService {
               drawingNo: row.drawingNo || null,
               partName: row.partName,
               partSpecification: row.partSpecification || null,
-              partThickness: row.partThickness || 1,
+              partThickness: row.lineType === 'COMPONENT' ? 0 : row.partThickness && row.partThickness > 0 ? row.partThickness : 0,
               orderQuantity: row.orderQuantity ?? null,
               unitUsage: row.unitUsage ?? null,
               demandQuantity: row.demandQuantity || 0,
@@ -1491,7 +1492,8 @@ export class OrdersService {
         throw new BadRequestException(`订单 ${order.orderNo} 未匹配到客户，不能导入`);
       }
       const lines = order.rows.map((row) => this.importRowToOrderLinePayload(row, activeProcessKeys));
-      this.validateOrderLines(lines, { requireStockSources: false });
+      // Excel 导入只创建 DRAFT，缺厚度允许先进入待核对；提交生产时会重新强制校验。
+      this.validateOrderLines(lines, { requireStockSources: false, allowMissingThickness: true });
       importOrders.push({
         order,
         orderNo: this.normalizeOrderNo(order.orderNo),
@@ -1504,7 +1506,9 @@ export class OrdersService {
     }
 
     const materialSyncSummary = this.materialSyncSummaryFromPartCodes(
-      importOrders.flatMap((item) => item.lines.map((line) => line.partCode))
+      importOrders.flatMap((item) =>
+        item.lines.filter((line) => !this.isComponentLineType(line.lineType)).map((line) => line.partCode)
+      )
     );
 
     const createdOrders = await runSerializableTransaction(
@@ -1904,6 +1908,16 @@ export class OrdersService {
       materialSyncCount: seen.size,
       materialSyncPreview
     };
+  }
+
+  private materialSyncSummaryFromImportRows(
+    rows: Array<{ partCode?: string | null; lineType?: string | null }>,
+    previewLimit = 5
+  ) {
+    return this.materialSyncSummaryFromPartCodes(
+      rows.filter((row) => !this.isComponentLineType(row.lineType)).map((row) => row.partCode),
+      previewLimit
+    );
   }
 
   private chunkValues<T>(values: T[], size = 500) {
@@ -2606,28 +2620,28 @@ export class OrdersService {
         throw new NotFoundException('订单不存在');
       }
       if (order.status === OrderStatus.DRAFT) {
-        throw new BadRequestException('待提交生产订单请直接编辑订单，不要创建补单物料');
+        throw new BadRequestException('待提交生产订单请直接编辑订单，不要创建补单零件');
       }
       this.assertOrderAcceptsProductionChange(order);
       const startedTask = order.productionTasks.find((task) => this.isStartedProductionTask(task));
       if (!startedTask) {
-        throw new BadRequestException('订单尚未开始生产，不能新增补单物料，请直接修改订单');
+        throw new BadRequestException('订单尚未开始生产，不能新增补单零件，请直接修改订单');
       }
 
       const reason = dto.reason.trim();
       if (!reason) {
-        throw new BadRequestException('新增补单物料原因不能为空');
+        throw new BadRequestException('新增补单零件原因不能为空');
       }
       const fulfillmentMode = this.normalizeFulfillmentMode(dto.fulfillmentMode);
       if (fulfillmentMode !== OrderLineFulfillmentMode.PRODUCTION) {
-        throw new BadRequestException('新增补单物料必须使用重新生产方式');
+        throw new BadRequestException('新增补单零件必须使用重新生产方式');
       }
       const steps = await this.normalizeProcessSteps(dto.processSteps, true);
       this.validateSingleOrderLine(dto);
       this.validateAdditionalMaterialComponentStructure(order.lines, dto);
-      const linePlan = await this.prepareOrderLinePlan(dto, '新增补单物料');
+      const linePlan = await this.prepareOrderLinePlan(dto, '新增补单零件');
       if (linePlan.productionPlanQuantity <= 0) {
-        throw new BadRequestException('新增补单物料生产计划数量必须大于 0');
+        throw new BadRequestException('新增补单零件生产计划数量必须大于 0');
       }
       await this.upsertMaterials(tx, [dto]);
 
@@ -2680,7 +2694,7 @@ export class OrdersService {
           isReplenishment: true,
           replenishmentSourceType: 'ORDER_CHANGE',
           replenishmentSourceRequestNo: order.orderNo,
-          remark: `客户新增物料：${reason}`
+          remark: `客户新增零件：${reason}`
         }
       });
 
@@ -2694,11 +2708,11 @@ export class OrdersService {
         beforeQuantity: 0,
         afterQuantity: decimalToNumber(line.quantity),
         deltaQuantity: decimalToNumber(line.quantity),
-        reason: `客户新增物料：${reason}。${progressText}`,
+        reason: `客户新增零件：${reason}。${progressText}`,
         managerName: dto.managerName?.trim()
       });
       },
-      '当前订单生产任务正在被其他操作修改，请刷新后重新新增补单物料'
+      '当前订单生产任务正在被其他操作修改，请刷新后重新新增补单零件'
     );
 
     return this.findOne(normalizedOrderNo);
@@ -2708,7 +2722,7 @@ export class OrdersService {
     existingLines: Array<{ lineType?: string | null; componentNo?: string | null }>,
     line: CreateAdditionalMaterialDto
   ) {
-    const lineType = line.lineType || 'PART';
+    const lineType = this.normalizeEditableLineType(line.lineType, '新增补单零件lineType');
     const componentNo = this.normalizeEditableComponentNo(line.componentNo);
     const parentComponentNo = this.normalizeEditableComponentNo(line.parentComponentNo);
     const existingComponentNos = new Set(
@@ -2720,22 +2734,23 @@ export class OrdersService {
 
     if (lineType === 'COMPONENT') {
       if (!componentNo) {
-        throw new BadRequestException('新增补单物料是组件行时，必须填写组件编号');
+        throw new BadRequestException('新增补单零件是组件行时，必须填写组件编号');
       }
+      this.ensureEditableComponentNoRange(componentNo, '新增补单零件组件编号');
       if (parentComponentNo) {
-        throw new BadRequestException('新增补单物料是组件行时，不能填写所属组件');
+        throw new BadRequestException('新增补单零件是组件行时，不能填写所属组件');
       }
       if (existingComponentNos.has(componentNo)) {
-        throw new BadRequestException(`新增补单物料组件编号 ${componentNo} 已在当前订单中存在`);
+        throw new BadRequestException(`新增补单零件组件编号 ${componentNo} 已在当前订单中存在`);
       }
       return;
     }
 
     if (componentNo) {
-      throw new BadRequestException('新增补单物料是零件行时，不能填写组件编号；如属于组件，请填写所属组件');
+      throw new BadRequestException('新增补单零件是零件行时，不能填写组件编号；如属于组件，请填写所属组件');
     }
     if (parentComponentNo && !existingComponentNos.has(parentComponentNo)) {
-      throw new BadRequestException(`新增补单物料所属组件 ${parentComponentNo} 在当前订单内不存在`);
+      throw new BadRequestException(`新增补单零件所属组件 ${parentComponentNo} 在当前订单内不存在`);
     }
   }
 
@@ -2808,8 +2823,8 @@ export class OrdersService {
         deltaQuantity > 0
           ? `客户要求增加 ${Math.abs(deltaQuantity)} ${line.unit}：${reason}。${progressText}`
           : nextQuantity === 0
-            ? `客户取消该物料：${reason}。${progressText}。请管理人员确认已生产物料转库存或销毁处理，并同步仓库。`
-            : `客户要求减少 ${Math.abs(deltaQuantity)} ${line.unit}：${reason}。${progressText}。请管理人员确认已生产多余物料转库存或销毁处理，并同步仓库。`;
+            ? `客户取消该零件：${reason}。${progressText}。请管理人员确认已生产零件转库存或销毁处理，并同步仓库。`
+            : `客户要求减少 ${Math.abs(deltaQuantity)} ${line.unit}：${reason}。${progressText}。请管理人员确认已生产多余零件转库存或销毁处理，并同步仓库。`;
       const planOverrideText = planDiffersFromSuggestion
         ? ` 生产计划调整：建议 ${suggestedPlanQuantity} ${line.unit}，实际计划 ${nextPlanQuantity} ${line.unit}，操作人员 ${planOverrideOperator?.name}（${planOverrideOperator?.accountId} / ${planOverrideOperator?.role}），说明：${planOverrideReason}。`
         : '';
@@ -2937,7 +2952,7 @@ export class OrdersService {
         const progressText = await this.describeOrderProductionProgress(tx, order.id);
         const noticeReason =
           startedTasks.length > 0
-            ? `客户取消整张订单：${reason}。${progressText}。请管理人员确认已生产物料转库存或销毁处理，并同步仓库。`
+            ? `客户取消整张订单：${reason}。${progressText}。请管理人员确认已生产零件转库存或销毁处理，并同步仓库。`
             : `客户取消整张订单：${reason}。订单尚未开始生产，系统取消未开始任务并释放未发货库存。`;
 
         // 整单取消会释放订单库存和退回备货库存，必须放在 Serializable 事务内，避免和发货/提交订单并发造成库存账不一致。
@@ -3681,7 +3696,7 @@ export class OrdersService {
   }
 
   private async generateNextNoticeNo(tx: Prisma.TransactionClient) {
-    const dateKey = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dateKey = businessDateKey();
     const prefix = `PN-${dateKey}-`;
     const lastNotice = await tx.productionNotice.findFirst({
       where: { noticeNo: { startsWith: prefix } },
@@ -4246,7 +4261,7 @@ export class OrdersService {
       !String(line.drawingNo || '').trim() ? '图号' : '',
       !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
       !String(line.partSpecification || '').trim() ? '成品规格' : '',
-      decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
+      line.lineType !== 'COMPONENT' && decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
     ].filter(Boolean);
   }
 
@@ -4454,6 +4469,7 @@ export class OrdersService {
       }
 
       const parsedLineType = this.parseImportLineType(rawLineType);
+      const lineType = parsedLineType || 'PART';
       const orderDate = this.cellDate(row, columns.orderDate) || null;
       const orderNo = this.cellText(row, columns.orderNo);
       const customerName = this.cellText(row, columns.customerName);
@@ -4469,7 +4485,7 @@ export class OrdersService {
         orderDate,
         customerName,
         projectModel,
-        lineType: parsedLineType || 'PART',
+        lineType,
         importSequence: this.cellText(row, columns.importSequence),
         partCategory: this.cellText(row, columns.partCategory),
         componentNo: this.cellText(row, columns.componentNo),
@@ -4478,7 +4494,7 @@ export class OrdersService {
         drawingNo: this.cellText(row, columns.drawingNo),
         partName: this.cellText(row, columns.partName),
         partSpecification: this.cellText(row, columns.partSpecification),
-        partThickness: partThickness && partThickness > 0 ? partThickness : 1,
+        partThickness: lineType === 'COMPONENT' ? 0 : partThickness && partThickness > 0 ? partThickness : 0,
         orderQuantity: this.cellNumber(row, columns.orderQuantity) ?? undefined,
         unitUsage: this.cellNumber(row, columns.unitUsage) ?? undefined,
         demandQuantity: demandQuantity ?? undefined,
@@ -4554,7 +4570,7 @@ export class OrdersService {
           mainSequence += 1;
           componentIndex += 1;
           if (!row.componentNo) {
-            row.componentNo = `C${String(componentIndex).padStart(3, '0')}`;
+            row.componentNo = this.nextAutoImportComponentNo(componentIndex, row);
           }
           if (!row.importSequence) {
             row.importSequence = String(mainSequence);
@@ -4603,6 +4619,22 @@ export class OrdersService {
 
   private normalizeImportComponentNo(value?: string) {
     return value?.trim().toUpperCase() || '';
+  }
+
+  private nextAutoImportComponentNo(componentIndex: number, row: { issues?: OrderImportIssue[] | Prisma.JsonValue | null }) {
+    if (componentIndex <= 9999) {
+      return `C${String(componentIndex).padStart(3, '0')}`;
+    }
+    const issues = Array.isArray(row.issues) ? [...(row.issues as OrderImportIssue[])] : [];
+    if (!issues.some((issue) => issue.code === 'COMPONENT_NO_AUTO_RANGE_EXCEEDED')) {
+      issues.push({
+        severity: 'ERROR',
+        code: 'COMPONENT_NO_AUTO_RANGE_EXCEEDED',
+        message: '组件自动编号超过 C9999，请拆分订单或手工填写当前订单内唯一组件编号'
+      });
+    }
+    row.issues = issues;
+    return '';
   }
 
   private shouldAutoBindImportParent(
@@ -4788,7 +4820,8 @@ export class OrdersService {
       issues.push({ severity: 'ERROR', code: 'CUSTOMER_REQUIRED', message: '客户名称不能为空' });
     }
     if (!row.partCode.trim()) {
-      issues.push({ severity: 'ERROR', code: 'PART_CODE_REQUIRED', message: '物料号不能为空' });
+      // Excel 源字段仍叫“物料号”，ERP 页面统一按“零件编码”提示，避免操作员在导入预览里混淆。
+      issues.push({ severity: 'ERROR', code: 'PART_CODE_REQUIRED', message: '零件编码不能为空（Excel 物料号列）' });
     }
     if (!row.partName.trim()) {
       issues.push({ severity: 'ERROR', code: 'PART_NAME_REQUIRED', message: '产品名称不能为空' });
@@ -4797,8 +4830,9 @@ export class OrdersService {
       issues.push({ severity: 'ERROR', code: 'DEMAND_QUANTITY_REQUIRED', message: '需求数量必须大于 0' });
     }
     const isOutsourcedPart = row.partCategory?.includes('外协') ?? false;
-    if (!hasThickness && !isOutsourcedPart) {
-      issues.push({ severity: 'WARNING', code: 'THICKNESS_DEFAULTED', message: '厚度为空，导入草稿暂按 1 处理，请在 ERP 中复核' });
+    const isComponentLine = row.lineType === 'COMPONENT';
+    if (!hasThickness && !isOutsourcedPart && !isComponentLine) {
+      issues.push({ severity: 'WARNING', code: 'THICKNESS_DEFAULTED', message: '厚度为空，导入草稿保留为待核对，请在 ERP 中补齐后再提交生产' });
     }
     if (!hasUnit) {
       issues.push({ severity: 'WARNING', code: 'UNIT_DEFAULTED', message: '单位为空，导入草稿暂按“件”处理，请在 ERP 中复核' });
@@ -4840,6 +4874,7 @@ export class OrdersService {
   private importPreviewPageOptions(query: GetOrderImportSessionQueryDto = {}): ImportPreviewPageOptions {
     const requestedLimit = Number(query.orderLimit ?? 50);
     const requestedOffset = Number(query.orderOffset ?? 0);
+
     return {
       orderLimit: Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 50, 1), 100),
       orderOffset: Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0)
@@ -4942,10 +4977,8 @@ export class OrdersService {
       const selectableOrderNos = new Set(
         orders.filter((order) => order.errorCount === 0).map((order) => this.normalizeOrderNo(order.orderNo))
       );
-      const materialSyncSummary = this.materialSyncSummaryFromPartCodes(
-        sessionRows
-          .filter((row) => selectableOrderNos.has(this.normalizeOrderNo(row.orderNo)))
-          .map((row) => row.partCode)
+      const materialSyncSummary = this.materialSyncSummaryFromImportRows(
+        sessionRows.filter((row) => selectableOrderNos.has(this.normalizeOrderNo(row.orderNo)))
       );
       statsBySessionId.set(sessionId, {
         orderCount,
@@ -5107,10 +5140,8 @@ export class OrdersService {
     const selectableOrderNos = new Set(
       orderSummaries.filter((order) => order.errorCount === 0).map((order) => this.normalizeOrderNo(order.orderNo))
     );
-    const materialSyncSummary = this.materialSyncSummaryFromPartCodes(
-      normalizedRows
-        .filter((row) => selectableOrderNos.has(this.normalizeOrderNo(row.orderNo)))
-        .map((row) => row.partCode)
+    const materialSyncSummary = this.materialSyncSummaryFromImportRows(
+      normalizedRows.filter((row) => selectableOrderNos.has(this.normalizeOrderNo(row.orderNo)))
     );
 
     return {
@@ -5216,7 +5247,7 @@ export class OrdersService {
           mainSequence += 1;
           componentIndex += 1;
           if (!row.componentNo) {
-            row.componentNo = `C${String(componentIndex).padStart(3, '0')}`;
+            row.componentNo = this.nextAutoImportComponentNo(componentIndex, row);
           }
           if (!row.importSequence) {
             row.importSequence = String(mainSequence);
@@ -5228,11 +5259,13 @@ export class OrdersService {
               row.demandQuantity = calculatedDemand;
             }
           }
-          currentComponentNo = row.componentNo;
-          componentSequence.set(row.componentNo, String(row.importSequence || mainSequence));
-          if (demandQuantity > 0) {
-            componentDemand.set(row.componentNo, demandQuantity);
-            row.issues = this.removeResolvedImportDemandIssue(row.issues);
+          if (row.componentNo) {
+            currentComponentNo = row.componentNo;
+            componentSequence.set(row.componentNo, String(row.importSequence || mainSequence));
+            if (demandQuantity > 0) {
+              componentDemand.set(row.componentNo, demandQuantity);
+              row.issues = this.removeResolvedImportDemandIssue(row.issues);
+            }
           }
           continue;
         }
@@ -5352,6 +5385,13 @@ export class OrdersService {
       if (row.lineType === 'COMPONENT' && !row.componentNo) {
         issues.push({ severity: 'ERROR', code: 'COMPONENT_NO_REQUIRED', message: '组件行必须填写组件编号' });
       }
+      if (row.lineType === 'COMPONENT' && this.isEditableComponentNoOutOfRange(row.componentNo)) {
+        issues.push({
+          severity: 'ERROR',
+          code: 'COMPONENT_NO_RANGE_INVALID',
+          message: '组件编号只支持 C001-C9999；自定义编号请不要使用 C 开头的非 C001-C9999 数字格式'
+        });
+      }
       if (row.lineType === 'COMPONENT' && row.parentComponentNo) {
         issues.push({
           severity: 'ERROR',
@@ -5373,7 +5413,7 @@ export class OrdersService {
         issues.push({
           severity: 'ERROR',
           code: 'DUPLICATE_IMPORT_LINE',
-          message: `同一订单内自动序号 ${importSequence} 和物料 ${row.partCode} 重复，请删除重复文件或调整清单后重新导入`
+          message: `同一订单内自动序号 ${importSequence} 和零件编码 ${row.partCode} 重复，请删除重复文件或调整清单后重新导入`
         });
       } else if (importSequence && duplicateImportSequences.has(importSequence)) {
         issues.push({
@@ -5601,6 +5641,7 @@ export class OrdersService {
     if (!processNamesAreActive && row.processRemark) {
       remarkParts.push(`Excel工艺备注：${row.processRemark}`);
     }
+    const partThickness = decimalToNumber(row.partThickness);
 
     return {
       lineType: row.lineType,
@@ -5618,7 +5659,7 @@ export class OrdersService {
       partCode: row.partCode,
       partName: row.partName,
       drawingNo: row.drawingNo || undefined,
-      partThickness: row.partThickness || 1,
+      partThickness: row.lineType === 'COMPONENT' ? 0 : partThickness > 0 ? partThickness : 0,
       partSpecification: row.partSpecification || undefined,
       quantity: row.demandQuantity,
       productionPlanQuantity: row.demandQuantity,
@@ -5686,6 +5727,10 @@ export class OrdersService {
     >();
 
     for (const line of lines) {
+      if (this.isComponentLineType(line.lineType)) {
+        // 父级组件只表达订单/BOM结构，不进入 Material 搜索记忆，避免组件编码被当成可下单零件。
+        continue;
+      }
       const partCode = line.partCode.trim();
       const partName = line.partName.trim();
       const unit = line.unit.trim();
@@ -5701,38 +5746,26 @@ export class OrdersService {
     }
 
     const materials = [...materialMap.values()];
-    const existingMaterialByCode = new Map<string, { id: string; partSpecification: string | null }>();
+    const existingMaterialCodes = new Set<string>();
     for (const chunk of this.chunkValues(materials, 200)) {
       const existingMaterials = await tx.material.findMany({
         where: {
           OR: chunk.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }))
         },
-        select: { id: true, partCode: true, partSpecification: true }
+        select: { partCode: true }
       });
       for (const material of existingMaterials) {
-        existingMaterialByCode.set(material.partCode.trim().toLocaleLowerCase(), {
-          id: material.id,
-          partSpecification: material.partSpecification
-        });
+        existingMaterialCodes.add(material.partCode.trim().toLocaleLowerCase());
       }
     }
 
     for (const material of materials) {
-      const existing = existingMaterialByCode.get(material.partCode.trim().toLocaleLowerCase());
-      if (existing) {
-        await tx.material.update({
-          where: { id: existing.id },
-          data: {
-            partName: material.partName,
-            unit: material.unit,
-            partSpecification: material.partSpecification ?? existing.partSpecification,
-            status: 'ENABLED'
-          }
-        });
+      if (existingMaterialCodes.has(material.partCode.trim().toLocaleLowerCase())) {
+        // 订单行只提供客户/订单快照，不能静默覆盖全局 Material 搜索记忆，也不能自动恢复停用的搜索记忆。
         continue;
       }
 
-      // 新订单里出现的新零件同步进入物料基础清单，库存页才能在 0 库存时搜索到它。
+      // 新订单里出现的新零件同步进入 Material 搜索记忆，库存页才能在 0 库存时搜索到它。
       await tx.material.create({
         data: {
           partCode: material.partCode,
@@ -5744,8 +5777,12 @@ export class OrdersService {
     }
   }
 
+  private isComponentLineType(value?: string | null) {
+    return String(value || '').trim().toUpperCase() === 'COMPONENT';
+  }
+
   private async generateOrderNo(orderDate: Date) {
-    const dateKey = orderDate.toISOString().slice(0, 10).replace(/-/g, '');
+    const dateKey = businessDateKey(orderDate);
     const prefix = `SO-${dateKey}-`;
     const [existingOrders, reservedOrderNos] = await Promise.all([
       this.prisma.customerOrder.findMany({
@@ -5879,14 +5916,22 @@ export class OrdersService {
     );
   }
 
-  private validateOrderLines(lines: CreateOrderDto['lines'], options: { requireStockSources?: boolean } = {}) {
+  private validateOrderLines(
+    lines: CreateOrderDto['lines'],
+    options: { requireStockSources?: boolean; allowMissingThickness?: boolean } = {}
+  ) {
     // 新增订单默认给 3 行方便录入，但允许删除误填行；业务上只要求订单至少保留 1 个零件。
     if (!lines || lines.length < 1) {
       throw new BadRequestException('订单至少需要一个零件');
     }
 
     lines.forEach((line, index) => {
-      this.validateSingleOrderLine(line, `第 ${index + 1} 个零件`, Boolean(options.requireStockSources));
+      this.validateSingleOrderLine(
+        line,
+        `第 ${index + 1} 个零件`,
+        Boolean(options.requireStockSources),
+        Boolean(options.allowMissingThickness)
+      );
     });
     this.validateOrderLineComponentStructure(lines);
   }
@@ -5897,7 +5942,7 @@ export class OrdersService {
 
     lines.forEach((line, index) => {
       const label = `第 ${index + 1} 个零件`;
-      const lineType = line.lineType || 'PART';
+      const lineType = this.normalizeEditableLineType(line.lineType, `${label}lineType`);
       const componentNo = this.normalizeEditableComponentNo(line.componentNo);
       const parentComponentNo = this.normalizeEditableComponentNo(line.parentComponentNo);
 
@@ -5905,6 +5950,7 @@ export class OrdersService {
         if (!componentNo) {
           throw new BadRequestException(`${label}是组件行，必须填写组件编号`);
         }
+        this.ensureEditableComponentNoRange(componentNo, `${label}组件编号`);
         if (parentComponentNo) {
           throw new BadRequestException(`${label}是组件行，不能填写所属组件`);
         }
@@ -5925,7 +5971,8 @@ export class OrdersService {
     }
 
     lines.forEach((line, index) => {
-      const lineType = line.lineType || 'PART';
+      const label = `第 ${index + 1} 个零件`;
+      const lineType = this.normalizeEditableLineType(line.lineType, `${label}lineType`);
       const parentComponentNo = this.normalizeEditableComponentNo(line.parentComponentNo);
       if (lineType === 'PART' && parentComponentNo && !componentNos.has(parentComponentNo)) {
         throw new BadRequestException(`第 ${index + 1} 个零件所属组件 ${parentComponentNo} 在当前订单内不存在`);
@@ -5937,19 +5984,50 @@ export class OrdersService {
     return value?.trim().toUpperCase() || '';
   }
 
+  private normalizeEditableLineType(value?: string | null, label = 'lineType') {
+    const lineType = String(value || 'PART').trim().toUpperCase();
+    if (lineType === 'COMPONENT' || lineType === 'PART') {
+      return lineType;
+    }
+    throw new BadRequestException(`${label} 只能是 COMPONENT 或 PART`);
+  }
+
+  private isEditableComponentNoOutOfRange(value?: string | null) {
+    const matched = /^C(\d+)$/i.exec(this.normalizeEditableComponentNo(value));
+    return !!matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999);
+  }
+
+  private ensureEditableComponentNoRange(value?: string | null, label = '组件编号') {
+    if (this.isEditableComponentNoOutOfRange(value)) {
+      throw new BadRequestException(`${label}只支持 C001-C9999；自定义编号请不要使用 C 开头的非 C001-C9999 数字格式`);
+    }
+  }
+
   private normalizeEditableOrderLineComponentFields<T extends CreateOrderLineDto>(lines: T[]): T[] {
     return lines.map((line) => ({
       ...line,
+      lineType: this.normalizeEditableLineType(line.lineType),
       componentNo: this.normalizeEditableComponentNo(line.componentNo) || undefined,
       parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || undefined
     }));
   }
 
-  private validateSingleOrderLine(line: CreateOrderLineDto, label = 'Order line', requireStockSources = true) {
+  private validateSingleOrderLine(
+    line: CreateOrderLineDto,
+    label = 'Order line',
+    requireStockSources = true,
+    allowMissingThickness = false
+  ) {
     if (!line.partCode?.trim() || !line.partName?.trim() || !line.unit?.trim()) {
       throw new BadRequestException(`${label}资料不完整`);
     }
-    if (!Number.isFinite(Number(line.partThickness)) || Number(line.partThickness) <= 0) {
+    const lineType = this.normalizeEditableLineType(line.lineType);
+    // 父级组件由子零件拼接，不要求自身厚度；普通零件仍必须大于 0。
+    if (
+      lineType !== 'COMPONENT' &&
+      !allowMissingThickness &&
+      (!Number.isFinite(Number(line.partThickness)) || Number(line.partThickness) <= 0)
+    ) {
       throw new BadRequestException(`${label}厚度必须大于 0`);
     }
     const orderQuantity = this.normalizeQuantity(line.quantity, `${label} quantity`);
@@ -5988,9 +6066,9 @@ export class OrdersService {
       productionPlanOverrideReason: line.productionPlanOverrideReason || undefined,
       fulfillmentMode: this.normalizeFulfillmentMode(line.fulfillmentMode || undefined),
       unit: line.unit,
-      deliveryDate: line.deliveryDate ? new Date(line.deliveryDate).toISOString().slice(0, 10) : undefined,
+      deliveryDate: line.deliveryDate ? this.formatDateOnly(line.deliveryDate) || undefined : undefined,
       remark: line.remark || undefined,
-      lineType: line.lineType || 'PART',
+      lineType: this.normalizeEditableLineType(line.lineType),
       partCategory: line.partCategory || undefined,
       componentNo: this.normalizeEditableComponentNo(line.componentNo) || undefined,
       parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || undefined,
@@ -6000,7 +6078,7 @@ export class OrdersService {
       sourceImportFileName: line.sourceImportFileName || undefined,
       sourceImportRowNo: line.sourceImportRowNo || undefined,
       projectModel: line.projectModel || undefined,
-      drawingDate: line.drawingDate ? new Date(line.drawingDate).toISOString().slice(0, 10) : undefined,
+      drawingDate: line.drawingDate ? this.formatDateOnly(line.drawingDate) || undefined : undefined,
       drawingStatus: line.drawingStatus || undefined,
       processSteps: this.processRowsToSnapshots(line.processSteps || []),
       selectedStockSources: this.jsonToStockSourceSelections(line.stockSourceSelections)

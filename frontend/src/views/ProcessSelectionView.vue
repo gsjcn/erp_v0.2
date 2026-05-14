@@ -10,21 +10,22 @@
         </el-tooltip>
         <el-tooltip :disabled="!processSaveDisabledReason" :content="processSaveDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
+            <el-button v-if="!isMobileLayout" :disabled="saving || !selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
           </span>
         </el-tooltip>
         <el-tooltip :disabled="!processSaveDisabledReason" :content="processSaveDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button type="primary" :disabled="!selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存零件流程</el-button>
+            <el-button v-if="!isMobileLayout" type="primary" :disabled="saving || !selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存零件流程</el-button>
           </span>
         </el-tooltip>
         <el-tooltip :disabled="!submitOrderDisabledReason" :content="submitOrderDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button type="success" :disabled="!canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog">
+            <el-button v-if="!isMobileLayout" type="success" :disabled="submitting || !canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog">
               提交生产
             </el-button>
           </span>
         </el-tooltip>
+        <span v-if="isMobileLayout" class="mobile-readonly-note">手机端只查看流程配置</span>
       </div>
     </div>
 
@@ -175,11 +176,12 @@
             </div>
           </div>
           <div class="mobile-card-actions">
-            <el-button link type="primary" @click="selectOrderFromList(item.orderNo)">{{ processEntryActionText(item) }}</el-button>
+            <el-button link type="primary" @click="selectOrderFromList(item.orderNo)">查看流程</el-button>
             <el-button link type="primary" @click="goOrderSummaryDetail(item.orderNo)">订单明细</el-button>
-            <el-button v-if="orderNeedsShortageAttention(item)" link type="warning" @click="goOrderShortageDetail(item)">
+            <el-button v-if="orderNeedsShortageAttention(item) && !isMobileLayout" link type="warning" @click="goOrderShortageDetail(item)">
               处理补单
             </el-button>
+            <span v-if="orderNeedsShortageAttention(item) && isMobileLayout" class="mobile-readonly-note">手机端只查看补单状态</span>
           </div>
         </article>
       </div>
@@ -219,21 +221,24 @@
               <strong>流程固定格式清单</strong>
               <span>{{ processStructureGroups.length }} 组 / {{ order.lines.length }} 行</span>
             </div>
-            <el-button size="small" :disabled="order.lines.length === 0" @click="copyProcessStructureText">复制清单</el-button>
+            <div class="process-structure-actions">
+              <el-button size="small" :disabled="order.lines.length === 0" @click="openProcessStructureTextDialog">查看固定格式</el-button>
+              <el-button size="small" :disabled="order.lines.length === 0" @click="copyProcessStructureText">复制清单</el-button>
+            </div>
           </div>
           <div v-if="processStructureGroups.length" class="process-structure-list">
             <div v-for="(group, groupIndex) in processStructureGroups" :key="group.id" class="process-structure-group">
               <div class="process-structure-main">
                 <span>{{ groupIndex + 1 }}</span>
-                <el-tag :type="group.type === 'component' ? 'warning' : group.type === 'orphan' ? 'danger' : 'info'" effect="plain">
-                  {{ group.type === 'component' ? `组件 ${group.line.componentNo || '-'}` : group.type === 'orphan' ? `未匹配父级 ${group.line.parentComponentNo || '-'}` : '单独零件' }}
+                <el-tag :type="processLineStructureTagType(group.line)" effect="plain">
+                  {{ processLineStructureLabel(group.line) }}
                 </el-tag>
                 <strong>{{ formatProcessStructureCore(group.line) }}</strong>
                 <span>{{ formatProcessStructureMeta(group.line) }}</span>
               </div>
               <div v-for="(child, childIndex) in group.children" :key="child.id" class="process-structure-child">
                 <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
-                <el-tag type="success" effect="plain">子零件</el-tag>
+                <el-tag :type="processLineStructureTagType(child)" effect="plain">{{ processLineStructureLabel(child) }}</el-tag>
                 <strong>{{ formatProcessStructureCore(child) }}</strong>
                 <span>{{ formatProcessStructureMeta(child) }}</span>
               </div>
@@ -272,7 +277,7 @@
               remote
               reserve-keyword
               clearable
-              :disabled="!canEditProcessBase"
+              :disabled="!canEditProcessBase || isMobileLayout"
               :remote-method="loadProcessEditorOperators"
               :loading="processEditorLoading"
               placeholder="选择下单/计划人员，车间人员只能查看"
@@ -303,6 +308,7 @@
         </el-form>
 
         <ProcessTemplateManager
+          v-if="!isMobileLayout"
           class="process-template-inline"
           compact
           selectable
@@ -314,8 +320,15 @@
           @apply="applyTemplate"
           @process-definition-updated="loadProcessDefinitions"
         />
+        <el-alert
+          v-else
+          title="手机端只查看已保存流程，流程填写、模板维护和标准工序维护请在电脑端操作。"
+          type="info"
+          :closable="false"
+          class="process-editor-notice"
+        />
 
-        <div class="available-process-toolbar">
+        <div v-if="!isMobileLayout" class="available-process-toolbar">
           <el-input
             v-model="quickProcessFilterKeyword"
             clearable
@@ -323,7 +336,7 @@
             :disabled="!canEditProcess"
           />
         </div>
-        <div class="available-processes">
+        <div v-if="!isMobileLayout" class="available-processes">
           <el-tooltip
             v-for="process in filteredQuickProcessOptions"
             :key="process"
@@ -339,7 +352,7 @@
           </el-tooltip>
           <span v-if="quickProcessFilterKeyword && filteredQuickProcessOptions.length === 0" class="process-empty-text">没有匹配工序</span>
         </div>
-        <div class="inline-process-create">
+        <div v-if="!isMobileLayout" class="inline-process-create">
           <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸、抛光" maxlength="30" :disabled="!canEditProcess" />
           <el-tooltip :disabled="!processEditDisabledReason" :content="processEditDisabledReason" placement="top">
             <span class="action-tooltip-wrap">
@@ -384,9 +397,9 @@
               <button
                 type="button"
                 class="step-drag-handle"
-                :disabled="!canEditProcess"
-                :draggable="canEditProcess"
-                title="拖拽调整顺序"
+                :disabled="!canEditProcess || isMobileLayout"
+                :draggable="canEditProcess && !isMobileLayout"
+                :title="isMobileLayout ? '手机端只查看流程顺序' : '拖拽调整顺序'"
                 aria-label="拖拽调整顺序"
                 @dragstart.stop="startStepDrag($event, index)"
                 @dragend="endStepDrag"
@@ -407,7 +420,7 @@
               <el-option v-for="process in filteredProcessOptions" :key="process" :label="process" :value="process" />
             </el-select>
             <el-input v-model="step.processRemark" placeholder="参数备注，例如 4次 / M6孔" :disabled="!canEditProcess" />
-            <div class="step-actions">
+            <div v-if="!isMobileLayout" class="step-actions">
               <el-tooltip :disabled="!stepMoveUpDisabledReason(index)" :content="stepMoveUpDisabledReason(index)" placement="top">
                 <span class="action-tooltip-wrap">
                   <el-button link :disabled="!canEditProcess || index === 0" @click="moveStep(index, -1)">上移</el-button>
@@ -431,6 +444,26 @@
     </div>
 
     <el-dialog
+      v-model="processStructureTextDialogVisible"
+      title="流程固定格式清单"
+      width="min(900px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <el-input
+        class="process-structure-textarea"
+        :model-value="processStructureText"
+        type="textarea"
+        :rows="22"
+        readonly
+      />
+      <template #footer>
+        <el-button @click="processStructureTextDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!processStructureText" @click="copyProcessStructureText">复制清单</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="processDefinitionManagerVisible"
       title="标准工序维护"
       width="min(900px, calc(100vw - 32px))"
@@ -452,6 +485,7 @@
       append-to-body
       :close-on-click-modal="!submitting"
       :close-on-press-escape="!submitting"
+      :before-close="handleSubmitOrderDialogClose"
       :show-close="!submitting"
       @closed="resetSubmitOrderDialog"
     >
@@ -561,6 +595,7 @@ import OrderSelect from '../components/OrderSelect.vue';
 import ProcessDefinitionManager from '../components/ProcessDefinitionManager.vue';
 import ProcessTemplateManager from '../components/ProcessTemplateManager.vue';
 import StatusTag from '../components/StatusTag.vue';
+import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type { OrderDetail, OrderLine, OrderSummary, ProcessStepDetail, ProductionOperator } from '../types/erp';
 import { formatDate, formatQuantity } from '../utils/format';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
@@ -577,6 +612,7 @@ type ProcessStructureGroup = {
 
 const route = useRoute();
 const router = useRouter();
+const { isMobileLayout } = useDeviceProfile();
 const orders = ref<OrderSummary[]>([]);
 const orderOptions = ref<OrderSummary[]>([]);
 const order = ref<OrderDetail>();
@@ -606,6 +642,7 @@ const quickProcessFilterKeyword = ref('');
 const draftProcessFilterKeyword = ref('');
 const processDefinitionManagerVisible = ref(false);
 const submitOrderDialogVisible = ref(false);
+const processStructureTextDialogVisible = ref(false);
 const processEditorCode = ref('');
 const processEditorOperators = ref<ProductionOperator[]>([]);
 const processEditorLoading = ref(false);
@@ -624,6 +661,18 @@ const savedSteps = computed(() => selectedLineProcessDetails(selectedLine.value)
 const isDirty = computed(() => JSON.stringify(normalizeSteps(draftSteps.value)) !== JSON.stringify(normalizeSteps(savedSteps.value)));
 const processRequiredLines = computed(() => order.value?.lines.filter(lineRequiresProductionProcess) || []);
 const processStructureGroups = computed<ProcessStructureGroup[]>(() => buildProcessStructureGroups(order.value?.lines || []));
+const processComponentNoSet = computed(() => {
+  const componentNos = new Set<string>();
+  for (const line of order.value?.lines || []) {
+    if (line.lineType === 'COMPONENT') {
+      const componentNo = normalizeComponentNo(line.componentNo);
+      if (componentNo) {
+        componentNos.add(componentNo);
+      }
+    }
+  }
+  return componentNos;
+});
 const totalLineCount = computed(() => processRequiredLines.value.length);
 const processEditorOptionRows = computed(() => operatorRowsWithSelected(processEditorOperators.value, processEditorCode.value));
 const submitPlanOperatorOptionRows = computed(() => operatorRowsWithSelected(submitPlanOperators.value, submitPlanOperatorCode.value));
@@ -651,8 +700,11 @@ const processReadyText = computed(() =>
 );
 const processReadOnlyText = computed(() => (order.value?.status === 'DRAFT' ? '' : processOrderReadOnlyReason(order.value)));
 const canEditProcessBase = computed(() => order.value?.status === 'DRAFT' && Boolean(selectedLine.value && lineRequiresProductionProcess(selectedLine.value)));
-const canEditProcess = computed(() => canEditProcessBase.value && Boolean(processEditorCode.value));
+const canEditProcess = computed(() => canEditProcessBase.value && !isMobileLayout.value && Boolean(processEditorCode.value));
 const processEditorNotice = computed(() => {
+  if (isMobileLayout.value) {
+    return '手机端只查看生产流程，流程填写和提交生产请在电脑端操作。';
+  }
   if (!order.value) {
     return '';
   }
@@ -681,6 +733,7 @@ const processSaveDisabledReason = computed(() => {
 });
 const canSubmitOrder = computed(
   () =>
+    !isMobileLayout.value &&
     order.value?.status === 'DRAFT' &&
     (order.value?.lines.length || 0) > 0 &&
     missingLineNames.value.length === 0 &&
@@ -690,6 +743,9 @@ const canSubmitOrder = computed(
 );
 const orderDetailDisabledReason = computed(() => (!order.value ? '请先选择订单，再查看订单明细。' : ''));
 const submitOrderDisabledReason = computed(() => {
+  if (isMobileLayout.value) {
+    return '手机端只查看生产流程，提交生产请在电脑端操作。';
+  }
   if (!order.value) {
     return '请先选择订单。';
   }
@@ -757,10 +813,13 @@ function buildProcessStructureGroups(lines: OrderLine[]): ProcessStructureGroup[
 
 function componentTraceText(line: OrderLine) {
   if (line.lineType === 'COMPONENT' && line.componentNo) {
-    return `组件 ${line.componentNo}`;
+    return `组件 ${normalizeComponentNo(line.componentNo) || '未编号'}`;
   }
   if (line.parentComponentNo) {
-    return `属于组件 ${line.parentComponentNo}`;
+    if (isProcessLineMissingParentComponent(line)) {
+      return `未匹配父级 ${normalizeComponentNo(line.parentComponentNo)}`;
+    }
+    return `子零件 -> ${normalizeComponentNo(line.parentComponentNo)}`;
   }
   if (line.lineType === 'PART') {
     return '单独零件';
@@ -768,8 +827,52 @@ function componentTraceText(line: OrderLine) {
   return '';
 }
 
+function isProcessLineMissingParentComponent(line: OrderLine) {
+  const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  return Boolean(line.lineType !== 'COMPONENT' && parentComponentNo && !processComponentNoSet.value.has(parentComponentNo));
+}
+
+function processLineStructureLabel(line: OrderLine) {
+  if (line.lineType === 'COMPONENT') {
+    return `组件 ${normalizeComponentNo(line.componentNo) || '未编号'}`;
+  }
+  const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  if (parentComponentNo && isProcessLineMissingParentComponent(line)) {
+    return `未匹配父级 ${parentComponentNo}`;
+  }
+  return parentComponentNo ? `子零件 -> ${parentComponentNo}` : '单独零件';
+}
+
+function processLineStructureHint(line: OrderLine) {
+  if (line.lineType === 'COMPONENT') {
+    return '父级组件';
+  }
+  const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  if (parentComponentNo && isProcessLineMissingParentComponent(line)) {
+    return '所属组件不存在';
+  }
+  return parentComponentNo ? `所属组件 ${parentComponentNo}` : '不属于组件';
+}
+
+function processLineStructureTagType(line: OrderLine): 'success' | 'warning' | 'info' | 'danger' {
+  if (line.lineType === 'COMPONENT') {
+    return 'success';
+  }
+  if (isProcessLineMissingParentComponent(line)) {
+    return 'danger';
+  }
+  return normalizeComponentNo(line.parentComponentNo) ? 'warning' : 'info';
+}
+
 function processStepText(line: OrderLine) {
   return line.processSteps.length ? line.processSteps.join('、') : lineRequiresProductionProcess(line) ? '未配置' : '无生产任务';
+}
+
+function formatProcessLineThickness(line: OrderLine) {
+  if (line.lineType === 'COMPONENT') {
+    return '不适用（父级组件由子零件维护）';
+  }
+  return line.partThickness || '-';
 }
 
 function formatProcessStructureCore(line: OrderLine) {
@@ -780,12 +883,37 @@ function formatProcessStructureMeta(line: OrderLine) {
   return `${fulfillmentModeLabel(line.fulfillmentMode)} | 生产计划 ${formatQuantity(line.productionPlanQuantity, line.unit)} | 流程 ${processStepText(line)}`;
 }
 
+function formatProcessStructureTextLine(line: OrderLine, prefix: string) {
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const deliveryText = formatDate(line.deliveryDate || order.value?.deliveryDate);
+  return [
+    prefix,
+    `结构 ${processLineStructureLabel(line)}`,
+    `父级 ${processLineStructureHint(line)}`,
+    `编码 ${line.partCode || '-'}`,
+    `名称 ${line.partName || '-'}`,
+    `类型 ${line.partCategory || '-'}`,
+    `项目 ${line.projectModel || '-'}`,
+    `厚度 ${formatProcessLineThickness(line)}`,
+    `规格 ${line.partSpecification || '-'}`,
+    `订单 ${formatQuantity(line.quantity, line.unit)}`,
+    `计划 ${formatQuantity(line.productionPlanQuantity, line.unit)}`,
+    `交期 ${deliveryText}`,
+    `图纸 ${drawingText}`,
+    `履约 ${fulfillmentModeLabel(line.fulfillmentMode)}`,
+    `流程 ${processStepText(line)}`
+  ].join(' | ');
+}
+
 const processStructureText = computed(() => {
   const currentOrder = order.value;
   if (!currentOrder) {
     return '';
   }
-  const lines = [`${currentOrder.orderNo} / ${currentOrder.customerName} / ${formatDate(currentOrder.orderDate)} / 交期 ${formatDate(currentOrder.deliveryDate)}`];
+  const lines = [
+    `${currentOrder.orderNo} / ${currentOrder.customerName} / ${formatDate(currentOrder.orderDate)} / 交期 ${formatDate(currentOrder.deliveryDate)}`,
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 订单 | 计划 | 交期 | 图纸 | 履约 | 流程'
+  ];
   for (const [groupIndex, group] of processStructureGroups.value.entries()) {
     const prefix =
       group.type === 'component'
@@ -793,13 +921,21 @@ const processStructureText = computed(() => {
         : group.type === 'orphan'
           ? `${groupIndex + 1}. 未匹配父级 ${group.line.parentComponentNo || '-'}`
           : `${groupIndex + 1}. 单独零件`;
-    lines.push(`${prefix} | ${formatProcessStructureCore(group.line)} | ${formatProcessStructureMeta(group.line)}`);
+    lines.push(formatProcessStructureTextLine(group.line, prefix));
     group.children.forEach((child, childIndex) => {
-      lines.push(`  ${groupIndex + 1}.${childIndex + 1} 子零件 | ${formatProcessStructureCore(child)} | ${formatProcessStructureMeta(child)}`);
+      lines.push(formatProcessStructureTextLine(child, `  ${groupIndex + 1}.${childIndex + 1} 子零件`));
     });
   }
   return lines.join('\n');
 });
+
+function openProcessStructureTextDialog() {
+  if (!processStructureText.value.trim()) {
+    ElMessage.warning('暂无可查看的流程清单');
+    return;
+  }
+  processStructureTextDialogVisible.value = true;
+}
 
 async function copyProcessStructureText() {
   const text = processStructureText.value.trim();
@@ -913,7 +1049,7 @@ async function loadProcessDefinitions() {
     processOptions.value = rows.map((row) => row.processName);
   } catch (error) {
     processOptions.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败，请确认后端服务');
   }
 }
 
@@ -937,7 +1073,12 @@ async function loadOrders() {
     lastDateRange.value = [...orderDateRange.value];
     ordersLoaded.value = true;
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '订单列表加载失败');
+    orderOptions.value = [];
+    orders.value = [];
+    ordersLoaded.value = true;
+    expandedMobileOrderIds.value = [];
+    resetOrderSelection();
+    ElMessage.error(error instanceof Error ? error.message : '订单列表加载失败，请确认后端服务和筛选条件');
   } finally {
     ordersLoading.value = false;
   }
@@ -971,7 +1112,7 @@ async function loadOrder() {
     selectedLineId.value = '';
     draftSteps.value = [];
     processEditorCode.value = '';
-    ElMessage.error(error instanceof Error ? error.message : '订单明细加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '订单明细加载失败，请确认订单状态和后端服务');
   } finally {
     loading.value = false;
   }
@@ -1042,7 +1183,18 @@ function stockSourceSummary(line: OrderLine) {
     .join('；');
 }
 
+function guardDesktopProcessMutation(actionLabel: string) {
+  if (!isMobileLayout.value) {
+    return false;
+  }
+  ElMessage.warning(`手机端仅查看生产流程，${actionLabel}请在电脑端操作`);
+  return true;
+}
+
 function warnProcessEditUnavailable() {
+  if (guardDesktopProcessMutation('流程填写和维护')) {
+    return false;
+  }
   if (!canEditProcessBase.value) {
     ElMessage.warning(processEditorNotice.value || '只有待提交生产订单的生产零件可以修改生产流程');
     return false;
@@ -1507,6 +1659,12 @@ async function handleRouteOrderNoChange() {
 }
 
 async function saveProcess() {
+  if (guardDesktopProcessMutation('保存零件流程')) {
+    return false;
+  }
+  if (saving.value) {
+    return false;
+  }
   if (!order.value || !selectedLine.value) {
     return false;
   }
@@ -1545,6 +1703,12 @@ async function saveProcess() {
 }
 
 async function saveAndNext() {
+  if (guardDesktopProcessMutation('保存零件流程')) {
+    return;
+  }
+  if (saving.value) {
+    return;
+  }
   const lineId = selectedLine.value?.id;
   const saved = await saveProcess();
   if (!saved || !order.value || !lineId) {
@@ -1561,6 +1725,9 @@ async function saveAndNext() {
 }
 
 function validateSubmitOrderReady() {
+  if (guardDesktopProcessMutation('提交生产')) {
+    return false;
+  }
   if (!order.value) {
     return false;
   }
@@ -1588,6 +1755,9 @@ function validateSubmitOrderReady() {
 }
 
 async function openSubmitOrderDialog() {
+  if (guardDesktopProcessMutation('提交生产')) {
+    return;
+  }
   if (!validateSubmitOrderReady()) {
     return;
   }
@@ -1598,9 +1768,18 @@ async function openSubmitOrderDialog() {
 
 function closeSubmitOrderDialog() {
   if (submitting.value) {
+    ElMessage.warning('订单正在提交生产，请等待提交完成');
     return;
   }
   submitOrderDialogVisible.value = false;
+}
+
+function handleSubmitOrderDialogClose(done: () => void) {
+  if (submitting.value) {
+    ElMessage.warning('订单正在提交生产，请等待提交完成');
+    return;
+  }
+  done();
 }
 
 function resetSubmitOrderDialog() {
@@ -1608,6 +1787,12 @@ function resetSubmitOrderDialog() {
 }
 
 async function confirmSubmitOrderFromProcess() {
+  if (guardDesktopProcessMutation('提交生产')) {
+    return;
+  }
+  if (submitting.value) {
+    return;
+  }
   if (!validateSubmitOrderReady() || !order.value) {
     submitOrderDialogVisible.value = false;
     return;
@@ -1721,7 +1906,7 @@ async function loadSubmitPlanOperators(keyword = '') {
     submitPlanOperators.value = operators.filter(isSubmitPlanOperator);
   } catch (error) {
     submitPlanOperators.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '下单/计划操作员加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '下单/计划操作员加载失败，请确认后端服务');
   } finally {
     submitPlanOperatorLoading.value = false;
   }
@@ -1735,7 +1920,7 @@ async function loadProcessEditorOperators(keyword = '') {
     processEditorOperators.value = operators.filter(isProcessEditorOperator);
   } catch (error) {
     processEditorOperators.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '流程填写人员加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '流程填写人员加载失败，请确认后端服务');
   } finally {
     processEditorLoading.value = false;
   }
@@ -1775,6 +1960,13 @@ onMounted(loadInitialState);
 .action-tooltip-wrap {
   display: inline-flex;
   max-width: 100%;
+}
+
+.mobile-readonly-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .process-layout {
@@ -1908,6 +2100,12 @@ onMounted(loadInitialState);
   gap: 3px;
 }
 
+.process-structure-header > .process-structure-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .process-structure-header span {
   color: #64748b;
   font-size: 12px;
@@ -1928,7 +2126,7 @@ onMounted(loadInitialState);
 .process-structure-main,
 .process-structure-child {
   display: grid;
-  grid-template-columns: 28px 108px minmax(160px, 1fr);
+  grid-template-columns: 28px 150px minmax(160px, 1fr);
   gap: 8px;
   align-items: center;
   min-width: 0;
@@ -1961,6 +2159,13 @@ onMounted(loadInitialState);
 .process-structure-child > span:last-child {
   color: #475569;
   font-size: 12px;
+}
+
+.process-structure-textarea :deep(textarea) {
+  min-height: 460px;
+  font-family: Consolas, 'Courier New', monospace;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .dirty-text {

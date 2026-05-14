@@ -11,6 +11,7 @@ backend/dist
 
 database/postgres-data
 database/backups
+storage
 storage/uploads
 storage/exports
 

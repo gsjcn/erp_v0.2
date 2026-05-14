@@ -2,7 +2,7 @@
   <section class="page">
     <div class="page-header">
       <h2 class="page-title">客户资料</h2>
-      <el-button type="primary" @click="openCreate">新增客户</el-button>
+      <el-button v-if="!isMobileLayout" type="primary" @click="openCreate">新增客户</el-button>
     </div>
 
     <div class="filter-bar">
@@ -19,10 +19,10 @@
           placeholder="客户名称 / ID / 联系人 / 拼音"
           style="width: 320px"
           @select="handleCustomerSuggestionSelect"
-          @keyup.enter="loadCustomers"
+          @keyup.enter="searchCustomers"
         >
           <template #default="{ item }">
-            <div class="customer-suggestion">
+            <div :class="['customer-suggestion', { 'customer-suggestion-more': item.isMoreHint }]">
               {{ item.customerName }}
             </div>
           </template>
@@ -35,8 +35,17 @@
           <el-option label="停用" value="DISABLED" />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="loadCustomers">搜索</el-button>
+      <el-button type="primary" :loading="loading" @click="searchCustomers">搜索</el-button>
       <el-button @click="reset">重置</el-button>
+    </div>
+
+    <div class="customer-bom-guide" aria-label="客户 BOM 入口说明">
+      <span>客户 BOM 入口</span>
+      <strong>客户零件包：只看客户私有 BOM。</strong>
+      <strong>可用BOM：查看该客户可用的客户私有、指定客户可用和机型级通用 BOM。</strong>
+      <strong>常用BOM：只看当前客户范围内人工设为常用的 BOM。</strong>
+      <strong>新建常用BOM：创建客户私有 BOM，并默认设为常用；不创建订单、生产任务或库存。</strong>
+      <small>客户页默认排除全部客户 / 全部机型泛用 BOM，避免把百胜通用包误认为客户资料。</small>
     </div>
 
     <div class="table-card desktop-table">
@@ -61,13 +70,31 @@
             <StatusTag :value="row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="620" fixed="right">
           <template #default="{ row }">
+            <el-button link type="primary" @click="openCustomerMaterials(row)">零件管理</el-button>
+            <el-button link type="primary" @click="openCustomerPrivateBoms(row)">客户零件包</el-button>
+            <el-button link type="primary" @click="openCustomerAvailableBoms(row)">可用BOM</el-button>
+            <el-button link type="primary" @click="openCustomerCommonBoms(row)">常用BOM</el-button>
+            <el-button link type="success" @click="openCustomerCommonSetup(row)">设置常用</el-button>
+            <el-button link type="success" @click="openCustomerBomCreate(row)">新建BOM</el-button>
+            <el-button link type="success" @click="openCustomerCommonBomCreate(row)">新建常用BOM</el-button>
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
             <el-button link @click="openStatusDialog(row)">{{ row.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="customerPagination.total > 0" class="table-pagination-row">
+        <span>第 {{ customerPagination.page }} 页，已显示 {{ customers.length }} / {{ customerPagination.total }} 个客户</span>
+        <el-pagination
+          :current-page="customerPagination.page"
+          :page-size="customerPagination.limit"
+          :total="customerPagination.total"
+          :hide-on-single-page="customerPagination.total <= customerPagination.limit"
+          layout="prev, pager, next"
+          @current-change="handleCustomerPageChange"
+        />
+      </div>
     </div>
 
     <div v-loading="loading" class="mobile-card-list">
@@ -112,14 +139,36 @@
           </div>
         </div>
         <div class="mobile-card-actions">
-          <el-button link type="primary" @click="openEdit(customer)">编辑</el-button>
-          <el-button link @click="openStatusDialog(customer)">{{ customer.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
+          <el-button link type="primary" @click="openCustomerMaterials(customer)">零件管理</el-button>
+          <el-button link type="primary" @click="openCustomerPrivateBoms(customer)">客户零件包</el-button>
+          <el-button link type="primary" @click="openCustomerAvailableBoms(customer)">可用BOM</el-button>
+          <el-button link type="primary" @click="openCustomerCommonBoms(customer)">常用BOM</el-button>
+          <span class="mobile-readonly-note">手机端只保留资料和 BOM 查看入口</span>
         </div>
       </article>
       <div v-if="!customers.length && !loading" class="mobile-empty">暂无客户资料</div>
+      <div v-if="customerPagination.total > 0" class="mobile-pagination-row">
+        <span>第 {{ customerPagination.page }} 页，已显示 {{ customers.length }} / {{ customerPagination.total }} 个客户</span>
+        <el-pagination
+          small
+          :current-page="customerPagination.page"
+          :page-size="customerPagination.limit"
+          :total="customerPagination.total"
+          layout="prev, pager, next"
+          @current-change="handleCustomerPageChange"
+        />
+      </div>
     </div>
 
-    <el-dialog v-model="dialogVisible" :title="editingId ? '编辑客户' : '新增客户'" width="min(860px, calc(100vw - 32px))" class="responsive-dialog">
+    <el-dialog
+      v-model="dialogVisible"
+      :title="editingId ? '编辑客户' : '新增客户'"
+      width="min(860px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleCustomerDialogClose"
+    >
       <el-form label-width="112px">
         <div class="customer-form-grid">
           <el-form-item label="客户ID">
@@ -216,8 +265,8 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+        <el-button :disabled="saving" @click="closeCustomerDialog">取消</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
 
@@ -263,16 +312,236 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="bomCommonDialogVisible"
+      :title="bomCommonDialogTitle"
+      width="min(980px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <div class="customer-common-bom-dialog">
+        <p class="customer-common-bom-note">
+          这里设置的是 BOM 自身的常用状态，对该 BOM 的所属适用范围生效；客户私有 BOM 只影响当前客户，全部客户或指定客户可用 BOM 会影响对应可见范围。
+        </p>
+        <div class="customer-common-bom-toolbar">
+          <div class="customer-common-bom-summary">
+            <el-tag effect="plain">可见 BOM {{ customerBomCommonSummary.total }}</el-tag>
+            <el-tag type="success" effect="plain">已设常用 {{ customerBomCommonSummary.common }}</el-tag>
+            <el-tag effect="plain">普通可用 {{ customerBomCommonSummary.available }}</el-tag>
+            <el-tag type="warning" effect="plain">客户私有 {{ customerBomCommonSummary.private }}</el-tag>
+            <el-tag type="primary" effect="plain">指定客户可用 {{ customerBomCommonSummary.selected }}</el-tag>
+            <el-tag type="info" effect="plain">全部客户机型通用 {{ customerBomCommonSummary.allCustomer }}</el-tag>
+          </div>
+          <el-radio-group v-model="bomCommonViewFilter" size="small">
+            <el-radio-button value="ALL">全部</el-radio-button>
+            <el-radio-button value="COMMON">已设常用</el-radio-button>
+            <el-radio-button value="AVAILABLE">普通可用</el-radio-button>
+          </el-radio-group>
+          <el-button size="small" :disabled="!customerBomCommonFixedText" @click="openCustomerBomCommonTextDialog">
+            查看固定格式
+          </el-button>
+          <el-button size="small" :disabled="!customerBomCommonFixedText" @click="copyCustomerBomCommonText">
+            复制当前筛选
+          </el-button>
+          <el-button
+            v-if="!isMobileLayout"
+            size="small"
+            type="success"
+            plain
+            :loading="bomCommonBatchSaving"
+            :disabled="customerBomCommonBatchSetRows.length === 0 || bomCommonBusy"
+            @click="setFilteredCustomerBomsCommon(true)"
+          >
+            筛选设为常用
+          </el-button>
+          <el-button
+            v-if="!isMobileLayout"
+            size="small"
+            type="warning"
+            plain
+            :loading="bomCommonBatchSaving"
+            :disabled="customerBomCommonBatchCancelRows.length === 0 || bomCommonBusy"
+            @click="setFilteredCustomerBomsCommon(false)"
+          >
+            取消筛选常用
+          </el-button>
+        </div>
+        <div class="customer-common-bom-filters">
+          <el-radio-group v-model="bomCommonOwnershipFilter" size="small">
+            <el-radio-button value="ALL">全部归属</el-radio-button>
+            <el-radio-button value="PRIVATE">客户私有</el-radio-button>
+            <el-radio-button value="SELECTED">指定客户可用</el-radio-button>
+            <el-radio-button value="ALL_CUSTOMER">全部客户机型通用</el-radio-button>
+          </el-radio-group>
+          <el-input
+            v-model="bomCommonKeyword"
+            class="customer-common-bom-filter"
+            clearable
+            placeholder="搜索 BOM 名称 / 适用范围 / 机型 / 客户"
+          />
+        </div>
+        <el-table
+          v-loading="bomCommonBusy"
+          :data="filteredCustomerBomCommonRows"
+          empty-text="当前条件没有可设置的 BOM"
+          max-height="460"
+        >
+          <el-table-column label="排序" width="80">
+            <template #default="{ row }">
+              <div v-if="row.status === 'ENABLED' && row.isCommon" class="customer-common-bom-sort-cell">
+                <button
+                  v-if="!isMobileLayout"
+                  class="customer-common-bom-drag-handle"
+                  :class="{
+                    'is-drop-target': draggedCustomerCommonBomOverId === row.id,
+                    'is-disabled': !canDragCustomerCommonBom(row)
+                  }"
+                  type="button"
+                  aria-label="拖拽调整客户常用 BOM 顺序"
+                  :draggable="canDragCustomerCommonBom(row)"
+                  :title="customerBomCommonDragTitle(row)"
+                  @click.stop
+                  @dragstart.stop="startCustomerCommonBomDrag($event, row)"
+                  @dragover.prevent.stop="handleCustomerCommonBomDragOver($event, row)"
+                  @drop.prevent.stop="dropCustomerCommonBom(row)"
+                  @dragend="endCustomerCommonBomDrag"
+                >
+                  <el-icon><Rank /></el-icon>
+                </button>
+                <span :title="`常用显示顺序 ${customerBomCommonDisplayOrder(row) || '-'}`">{{ customerBomCommonDisplayOrder(row) }}</span>
+              </div>
+              <span v-else class="cell-subtext">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="bomName" label="零件包" min-width="220" />
+          <el-table-column label="适用范围" min-width="220">
+            <template #default="{ row }">
+              <div class="bom-scope-cell">
+                <strong>{{ row.scopeLabel }}</strong>
+                <small>{{ row.projectModel || '全部机型/项目' }}</small>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="归属类型" width="150">
+            <template #default="{ row }">
+              <el-tag :type="customerBomOwnershipTagType(row)" effect="plain">
+                {{ customerBomOwnershipLabel(row) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="常用" width="120">
+            <template #default="{ row }">
+              <el-tag v-if="row.isCommon" type="success" effect="plain" :title="`常用显示顺序 ${customerBomCommonDisplayOrder(row) || '-'}`">
+                常用 {{ customerBomCommonDisplayOrder(row) }}
+              </el-tag>
+              <el-tag v-else effect="plain">普通可用</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <StatusTag :value="row.status" />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="230" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" :disabled="bomCommonBusy" @click="openCustomerBomDetail(row)">查看/编辑</el-button>
+              <el-button
+                link
+                :type="row.isCommon ? 'warning' : 'success'"
+                :loading="bomCommonSavingId === row.id"
+                :disabled="bomCommonBusy || (!row.isCommon && row.status === 'DISABLED')"
+                @click="setCustomerBomCommon(row, !row.isCommon)"
+              >
+                {{ row.isCommon ? '取消常用' : '设为常用' }}
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button :loading="bomCommonLoading" :disabled="bomCommonBusy" @click="loadCustomerCommonRows">刷新</el-button>
+        <el-button :disabled="bomCommonBusy" @click="bomCommonDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="bomCommonBatchDialogVisible"
+      class="responsive-dialog"
+      :title="`批量${bomCommonBatchActionText}`"
+      width="min(820px, calc(100vw - 32px))"
+      append-to-body
+      :close-on-click-modal="!bomCommonBatchSaving"
+      :close-on-press-escape="!bomCommonBatchSaving"
+      :before-close="handleBomCommonBatchDialogClose"
+    >
+      <div class="customer-common-bom-batch-preview">
+        <p>
+          将当前筛选结果中的
+          <strong>{{ bomCommonBatchRows.length }}</strong>
+          个 BOM 批量{{ bomCommonBatchActionText }}。
+        </p>
+        <p class="customer-common-bom-batch-scope">
+          筛选：常用状态 {{ customerBomCommonViewFilterLabel() }}；归属
+          {{ customerBomCommonOwnershipFilterLabel() }}；关键词 {{ bomCommonKeyword.trim() || '无' }}
+        </p>
+        <el-input
+          class="fixed-format-textarea"
+          :model-value="bomCommonBatchPreviewText"
+          type="textarea"
+          :rows="16"
+          readonly
+        />
+        <p class="customer-common-bom-batch-boundary">
+          业务边界：只修改 BOM 常用状态和显示顺序，不修改 BOM 明细、适用范围、订单、生产任务或库存。
+        </p>
+      </div>
+      <template #footer>
+        <el-button :disabled="bomCommonBatchSaving" @click="closeBomCommonBatchDialog">取消</el-button>
+        <el-button
+          :type="bomCommonBatchTargetIsCommon ? 'success' : 'warning'"
+          :loading="bomCommonBatchSaving"
+          @click="confirmFilteredCustomerBomsCommon"
+        >
+          确认{{ bomCommonBatchActionText }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="customerBomCommonTextDialogVisible"
+      class="responsive-dialog"
+      title="客户常用 BOM 固定格式清单"
+      width="min(980px, calc(100vw - 32px))"
+      append-to-body
+    >
+      <el-input
+        class="fixed-format-textarea"
+        :model-value="customerBomCommonFixedText"
+        type="textarea"
+        :rows="22"
+        readonly
+      />
+      <template #footer>
+        <el-button @click="customerBomCommonTextDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!customerBomCommonFixedText" @click="copyCustomerBomCommonText">
+          复制清单
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
+import { Rank } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import StatusTag from '../components/StatusTag.vue';
+import { useDeviceProfile } from '../composables/useDeviceProfile';
 import { chinaRegions, worldCountryOptions } from '../config/regions';
-import type { CommonStatus, Customer, CustomerContact, CustomerRegionType } from '../types/erp';
+import type { CommonStatus, Customer, CustomerContact, CustomerRegionType, ModelBom } from '../types/erp';
 
 interface CustomerForm {
   customerCode?: string;
@@ -288,12 +557,17 @@ interface CustomerForm {
   contacts: CustomerContact[];
 }
 
-type CustomerSearchSuggestion = Customer;
+type CustomerSearchSuggestion = Customer & { isMoreHint?: boolean };
+type BomCommonViewFilter = 'ALL' | 'COMMON' | 'AVAILABLE';
+type BomCommonOwnershipFilter = 'ALL' | 'PRIVATE' | 'SELECTED' | 'ALL_CUSTOMER';
 
+const router = useRouter();
+const { isMobileLayout } = useDeviceProfile();
 const customers = ref<Customer[]>([]);
 const keyword = ref('');
 const statusFilter = ref<CommonStatus>();
 const loading = ref(false);
+const customerPagination = reactive({ page: 1, limit: Number(20), total: 0 });
 const saving = ref(false);
 const dialogVisible = ref(false);
 const editingId = ref<string>();
@@ -309,10 +583,30 @@ const codeAvailable = ref(false);
 const nameCheckText = ref('');
 const codeCheckText = ref('');
 const expandedMobileCustomerIds = ref<string[]>([]);
+const bomCommonDialogVisible = ref(false);
+const customerBomCommonTextDialogVisible = ref(false);
+const bomCommonLoading = ref(false);
+const bomCommonSavingId = ref('');
+const bomCommonCustomer = ref<Customer>();
+const customerBomCommonRows = ref<ModelBom[]>([]);
+const bomCommonViewFilter = ref<BomCommonViewFilter>('ALL');
+const bomCommonOwnershipFilter = ref<BomCommonOwnershipFilter>('ALL');
+const bomCommonKeyword = ref('');
+const bomCommonDragSaving = ref(false);
+const bomCommonBatchSaving = ref(false);
+const bomCommonBatchDialogVisible = ref(false);
+const bomCommonBatchTargetIsCommon = ref(false);
+const bomCommonBatchRows = ref<ModelBom[]>([]);
+const bomCommonBatchPreviewText = ref('');
+const draggedCustomerCommonBomId = ref('');
+const draggedCustomerCommonBomScopeKey = ref('');
+const draggedCustomerCommonBomOverId = ref('');
 let nameCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let codeCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let customerSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 let customerSuggestionSequence = 0;
+const customerSuggestionLimit = Number(20);
+const customerSuggestionKeyword = ref('');
 
 const form = reactive<CustomerForm>(blankForm());
 
@@ -320,6 +614,65 @@ const cityOptions = computed(() => chinaRegions.find((item) => item.province ===
 const statusActionText = computed(() => (statusCustomer.value?.status === 'ENABLED' ? '停用' : '启用'));
 const nextCustomerStatus = computed<CommonStatus>(() => (statusCustomer.value?.status === 'ENABLED' ? 'DISABLED' : 'ENABLED'));
 const statusDialogTitle = computed(() => `${statusActionText.value}客户`);
+const bomCommonDialogTitle = computed(() =>
+  bomCommonCustomer.value ? `${bomCommonCustomer.value.customerName} 常用 BOM 设置` : '客户常用 BOM 设置'
+);
+const bomCommonBusy = computed(
+  () => bomCommonLoading.value || Boolean(bomCommonSavingId.value) || bomCommonDragSaving.value || bomCommonBatchSaving.value
+);
+const customerBomCommonSummary = computed(() => {
+  const rows = customerBomCommonRows.value;
+  return {
+    total: rows.length,
+    common: rows.filter((row) => row.isCommon).length,
+    available: rows.filter((row) => !row.isCommon).length,
+    private: rows.filter((row) => row.customerId || row.customerScopeMode === 'PRIVATE').length,
+    selected: rows.filter((row) => row.customerScopeMode === 'SELECTED').length,
+    allCustomer: rows.filter((row) => !row.customerId && row.customerScopeMode !== 'SELECTED').length
+  };
+});
+const filteredCustomerBomCommonRows = computed(() => {
+  const keywordText = bomCommonKeyword.value.trim().toLowerCase();
+  return customerBomCommonRows.value.filter((row) => {
+    if (bomCommonViewFilter.value === 'COMMON' && !row.isCommon) {
+      return false;
+    }
+    if (bomCommonViewFilter.value === 'AVAILABLE' && row.isCommon) {
+      return false;
+    }
+    return customerBomOwnershipFilterMatches(row) && customerBomCommonKeywordMatches(row, keywordText);
+  });
+});
+const customerBomCommonFixedText = computed(() => {
+  if (filteredCustomerBomCommonRows.value.length === 0) {
+    return '';
+  }
+  const customerName = bomCommonCustomer.value?.customerName || '未选择客户';
+  return [
+    `客户常用 BOM 固定格式清单`,
+    `客户：${customerName}`,
+    `筛选：常用状态 ${customerBomCommonViewFilterLabel()}；归属 ${customerBomCommonOwnershipFilterLabel()}；关键词 ${bomCommonKeyword.value.trim() || '无'}`,
+    `汇总：当前显示 ${filteredCustomerBomCommonRows.value.length} / 可见 ${customerBomCommonSummary.value.total}；已设常用 ${customerBomCommonSummary.value.common}；普通可用 ${customerBomCommonSummary.value.available}`,
+    `业务边界：本清单只用于核对 BOM 常用状态和适用范围，不会创建订单、生产任务或库存流水。`,
+    '',
+    ...filteredCustomerBomCommonRows.value.map((row, index) =>
+      [
+        `${index + 1}. ${row.bomName}`,
+        `常用 ${row.isCommon ? `是，顺序 ${customerBomCommonDisplayOrder(row)}` : '否'}`,
+        `归属 ${customerBomOwnershipLabel(row)}`,
+        `适用客户 ${customerBomCommonCustomerText(row)}`,
+        `机型/项目 ${row.projectModel || '全部机型/项目'}`,
+        `明细 ${row.lineCount} 行`,
+        `状态 ${row.status === 'ENABLED' ? '启用' : '停用'}`
+      ].join(' | ')
+    )
+  ].join('\n');
+});
+const customerBomCommonBatchSetRows = computed(() =>
+  filteredCustomerBomCommonRows.value.filter((row) => !row.isCommon && row.status === 'ENABLED')
+);
+const customerBomCommonBatchCancelRows = computed(() => filteredCustomerBomCommonRows.value.filter((row) => row.isCommon));
+const bomCommonBatchActionText = computed(() => (bomCommonBatchTargetIsCommon.value ? '设为常用' : '取消常用'));
 const statusPrimaryContact = computed(() =>
   statusCustomer.value?.contacts?.find((contact) => contact.isPrimary && contact.contactName?.trim())
 );
@@ -349,7 +702,7 @@ watch([keyword, statusFilter], () => {
     window.clearTimeout(customerSearchTimer);
   }
   customerSearchTimer = window.setTimeout(() => {
-    void loadCustomers();
+    void searchCustomers();
   }, 300);
 });
 const customerCodeHint = computed(() => {
@@ -396,27 +749,66 @@ function applyForm(next: CustomerForm) {
 async function loadCustomers() {
   loading.value = true;
   try {
-    customers.value = await erpApi.customers(keyword.value, statusFilter.value);
+    const offset = (customerPagination.page - 1) * customerPagination.limit;
+    const result = await erpApi.customersPage(keyword.value.trim() || undefined, statusFilter.value, customerPagination.limit, offset);
+    customers.value = result.items;
+    customerPagination.total = result.totalCount;
+    if (result.totalCount > 0 && customers.value.length === 0 && customerPagination.page > 1) {
+      customerPagination.page = 1;
+      await loadCustomers();
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败');
+    customers.value = [];
+    customerPagination.total = 0;
+    ElMessage.error(error instanceof Error ? error.message : '客户资料加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
   }
 }
 
+function searchCustomers() {
+  customerPagination.page = 1;
+  void loadCustomers();
+}
+
+function handleCustomerPageChange(page: number) {
+  customerPagination.page = page;
+  void loadCustomers();
+}
+
 function reset() {
   keyword.value = '';
   statusFilter.value = undefined;
-  void loadCustomers();
+  searchCustomers();
 }
 
 async function queryCustomerSuggestions(queryString: string, callback: (items: CustomerSearchSuggestion[]) => void) {
   const requestId = ++customerSuggestionSequence;
+  const normalizedKeyword = queryString.trim();
+  customerSuggestionKeyword.value = normalizedKeyword;
   callback([]);
   try {
-    const result = await erpApi.customers(queryString, statusFilter.value);
+    const result = await erpApi.customersPage(
+      normalizedKeyword || undefined,
+      statusFilter.value,
+      customerSuggestionLimit,
+      0
+    );
     if (requestId === customerSuggestionSequence) {
-      callback(result);
+      const suggestions: CustomerSearchSuggestion[] = [...result.items];
+      if (result.hasMore) {
+        suggestions.push({
+          id: '__customer_suggestion_more__',
+          customerCode: '',
+          customerName: `已显示 ${result.items.length} / ${result.totalCount} 个客户，按 Enter 查询完整列表`,
+          regionType: 'CHINA',
+          country: '',
+          status: 'ENABLED',
+          contacts: [],
+          isMoreHint: true
+        });
+      }
+      callback(suggestions);
     }
   } catch {
     if (requestId === customerSuggestionSequence) {
@@ -426,11 +818,493 @@ async function queryCustomerSuggestions(queryString: string, callback: (items: C
 }
 
 function handleCustomerSuggestionSelect(customer: CustomerSearchSuggestion) {
+  if (customer.isMoreHint) {
+    keyword.value = customerSuggestionKeyword.value;
+    searchCustomers();
+    return;
+  }
   keyword.value = customer.customerName;
-  void loadCustomers();
+  searchCustomers();
+}
+
+function openCustomerMaterials(row: Customer) {
+  // 客户零件管理入口保留客户上下文，并排除全部客户/全部机型泛用 BOM 的误显示。
+  router.push({
+    path: '/materials',
+    query: {
+      customerId: row.id,
+      excludeGlobalAllProject: 'true'
+    }
+  });
+}
+
+function openCustomerPrivateBoms(row: Customer) {
+  // 客户界面只进入客户私有 BOM，不展示全部客户通用 BOM，避免把百胜通用包误认为该客户资料。
+  router.push({
+    path: '/inventory/model-boms',
+    query: {
+      customerId: row.id,
+      scopeMode: 'PRIVATE',
+      status: 'ALL'
+    }
+  });
+}
+
+function openCustomerAvailableBoms(row: Customer) {
+  // 客户可用 BOM 会包含客户私有、指定客户可用和机型级百胜通用 BOM，但排除全部客户/全部机型泛用包。
+  router.push({
+    path: '/inventory/model-boms',
+    query: {
+      customerId: row.id,
+      excludeGlobalAllProject: 'true',
+      status: 'ALL'
+    }
+  });
+}
+
+function openCustomerCommonBoms(row: Customer) {
+  // 客户常用 BOM 包含客户私有、指定客户可用和机型级通用 BOM 中人工设为常用的零件包，但排除全部客户/全部机型泛用包。
+  router.push({
+    path: '/inventory/model-boms',
+    query: {
+      customerId: row.id,
+      excludeGlobalAllProject: 'true',
+      commonOnly: 'true',
+      status: 'ALL'
+    }
+  });
+}
+
+function openCustomerBomCreate(row: Customer) {
+  if (requireDesktopCustomerMutation('新建客户 BOM')) {
+    return;
+  }
+  // 新建入口固定为客户私有 BOM，后续是否设为常用在机型零件包页人工确认。
+  router.push({
+    path: '/inventory/model-boms',
+    query: {
+      customerId: row.id,
+      scopeMode: 'PRIVATE',
+      status: 'ALL',
+      action: 'createBom',
+      bomName: `${row.customerName} 客户零件包`
+    }
+  });
+}
+
+function openCustomerCommonBomCreate(row: Customer) {
+  if (requireDesktopCustomerMutation('新建客户常用 BOM')) {
+    return;
+  }
+  // 新建客户常用 BOM 仍然只创建客户私有 BOM；常用只影响该客户范围内的显示顺序和推荐优先级。
+  router.push({
+    path: '/inventory/model-boms',
+    query: {
+      customerId: row.id,
+      scopeMode: 'PRIVATE',
+      commonOnly: 'true',
+      isCommon: 'true',
+      status: 'ALL',
+      action: 'createBom',
+      bomName: `${row.customerName} 客户常用零件包`
+    }
+  });
+}
+
+function openCustomerCommonSetup(row: Customer) {
+  if (requireDesktopCustomerMutation('设置客户常用 BOM')) {
+    return;
+  }
+  bomCommonCustomer.value = row;
+  bomCommonViewFilter.value = 'ALL';
+  bomCommonOwnershipFilter.value = 'ALL';
+  bomCommonKeyword.value = '';
+  customerBomCommonRows.value = [];
+  bomCommonDialogVisible.value = true;
+  void loadCustomerCommonRows();
+}
+
+function customerBomOwnershipFilterMatches(row: ModelBom) {
+  if (bomCommonOwnershipFilter.value === 'ALL') {
+    return true;
+  }
+  if (bomCommonOwnershipFilter.value === 'PRIVATE') {
+    return Boolean(row.customerId || row.customerScopeMode === 'PRIVATE');
+  }
+  if (bomCommonOwnershipFilter.value === 'SELECTED') {
+    return row.customerScopeMode === 'SELECTED';
+  }
+  return !row.customerId && row.customerScopeMode !== 'SELECTED';
+}
+
+function customerBomCommonViewFilterLabel() {
+  if (bomCommonViewFilter.value === 'COMMON') {
+    return '已设常用';
+  }
+  if (bomCommonViewFilter.value === 'AVAILABLE') {
+    return '普通可用';
+  }
+  return '全部';
+}
+
+function customerBomCommonOwnershipFilterLabel() {
+  if (bomCommonOwnershipFilter.value === 'PRIVATE') {
+    return '客户私有';
+  }
+  if (bomCommonOwnershipFilter.value === 'SELECTED') {
+    return '指定客户可用';
+  }
+  if (bomCommonOwnershipFilter.value === 'ALL_CUSTOMER') {
+    return '全部客户机型通用';
+  }
+  return '全部归属';
+}
+
+function customerBomCommonCustomerText(row: ModelBom) {
+  if (row.customerId || row.customerScopeMode === 'PRIVATE') {
+    return row.customerName || bomCommonCustomer.value?.customerName || '客户私有';
+  }
+  if (row.customerScopeMode === 'SELECTED') {
+    return row.scopeCustomers?.map((customer) => customer.customerName).join('、') || '指定客户';
+  }
+  return '全部客户';
+}
+
+function customerBomCommonKeywordMatches(row: ModelBom, keywordText: string) {
+  if (!keywordText) {
+    return true;
+  }
+  const scopeCustomerText = (row.scopeCustomers || [])
+    .map((customer) => `${customer.customerCode || ''} ${customer.customerName}`)
+    .join(' ');
+  // 客户常用 BOM 弹窗只做本地过滤，不改变后端适用范围；用于快速核对 BOM 是否客户私有、指定客户可用或机型通用。
+  return [
+    row.bomName,
+    row.scopeLabel,
+    row.scopeTypeLabel,
+    row.projectModel,
+    row.customerCode,
+    row.customerName,
+    scopeCustomerText,
+    customerBomOwnershipLabel(row),
+    row.isCommon ? '常用' : '普通可用'
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase().includes(keywordText));
+}
+
+function customerBomCommonScopeKey(row: ModelBom) {
+  return `${row.customerScopeKey || row.customerId || 'ALL'}::${row.projectModelScopeKey || row.projectModel || 'ALL'}`;
+}
+
+function customerBomCommonDragRowsForScope(row: ModelBom) {
+  const scopeKey = customerBomCommonScopeKey(row);
+  return customerBomCommonRows.value
+    .filter((item) => item.status === 'ENABLED' && item.isCommon && customerBomCommonScopeKey(item) === scopeKey)
+    .sort(
+      (left, right) =>
+        (left.commonSortOrder || Number.MAX_SAFE_INTEGER) - (right.commonSortOrder || Number.MAX_SAFE_INTEGER) ||
+        left.bomName.localeCompare(right.bomName)
+    );
+}
+
+function customerBomCommonDisplayOrder(row: ModelBom) {
+  if (row.status !== 'ENABLED' || !row.isCommon) {
+    return '-';
+  }
+  const index = customerBomCommonDragRowsForScope(row).findIndex((item) => item.id === row.id);
+  return index >= 0 ? index + 1 : '-';
+}
+
+function canDragCustomerCommonBom(row: ModelBom) {
+  return (
+    row.status === 'ENABLED' &&
+    row.isCommon &&
+    !isMobileLayout.value &&
+    !bomCommonKeyword.value.trim() &&
+    !bomCommonBusy.value &&
+    customerBomCommonDragRowsForScope(row).length > 1
+  );
+}
+
+function customerBomCommonDragTitle(row: ModelBom) {
+  if (row.status === 'DISABLED') {
+    return '停用 BOM 不参与常用排序，请先恢复启用';
+  }
+  if (!row.isCommon) {
+    return '只有已设常用的 BOM 可以拖拽排序';
+  }
+  if (bomCommonKeyword.value.trim()) {
+    return '请先清空搜索关键字，再拖拽调整完整常用顺序';
+  }
+  return customerBomCommonDragRowsForScope(row).length > 1
+    ? '拖拽调整同一客户范围和同一机型范围内的常用 BOM 顺序'
+    : '当前适用范围只有 1 个常用 BOM';
+}
+
+function startCustomerCommonBomDrag(event: DragEvent, row: ModelBom) {
+  if (!canDragCustomerCommonBom(row)) {
+    event.preventDefault();
+    return;
+  }
+  draggedCustomerCommonBomId.value = row.id;
+  draggedCustomerCommonBomScopeKey.value = customerBomCommonScopeKey(row);
+  draggedCustomerCommonBomOverId.value = row.id;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', row.id);
+  }
+}
+
+function handleCustomerCommonBomDragOver(event: DragEvent, row: ModelBom) {
+  if (
+    bomCommonBusy.value ||
+    !draggedCustomerCommonBomId.value ||
+    row.status !== 'ENABLED' ||
+    !row.isCommon ||
+    customerBomCommonScopeKey(row) !== draggedCustomerCommonBomScopeKey.value
+  ) {
+    return;
+  }
+  draggedCustomerCommonBomOverId.value = row.id;
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+async function dropCustomerCommonBom(row: ModelBom) {
+  if (bomCommonBusy.value) {
+    endCustomerCommonBomDrag();
+    return;
+  }
+  const sourceId = draggedCustomerCommonBomId.value;
+  const sourceScopeKey = draggedCustomerCommonBomScopeKey.value;
+  endCustomerCommonBomDrag();
+  if (!sourceId || row.status !== 'ENABLED' || !row.isCommon || sourceId === row.id) {
+    return;
+  }
+  if (customerBomCommonScopeKey(row) !== sourceScopeKey) {
+    ElMessage.warning('客户常用 BOM 只能在同一客户范围和同一机型/项目范围内拖拽排序');
+    return;
+  }
+  const orderedRows = [...customerBomCommonDragRowsForScope(row)];
+  const fromIndex = orderedRows.findIndex((item) => item.id === sourceId);
+  const toIndex = orderedRows.findIndex((item) => item.id === row.id);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+    return;
+  }
+  const [moved] = orderedRows.splice(fromIndex, 1);
+  if (!moved) {
+    return;
+  }
+  orderedRows.splice(toIndex, 0, moved);
+  bomCommonDragSaving.value = true;
+  try {
+    // 客户页只调整常用 BOM 显示顺序；不会修改 BOM 明细、适用范围、订单、生产任务或库存。
+    await erpApi.reorderModelBomCommon({
+      items: orderedRows.map((item, index) => ({ bomId: item.id, commonSortOrder: index + 1 }))
+    });
+    ElMessage.success('客户常用 BOM 顺序已保存');
+    await loadCustomerCommonRows();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '客户常用 BOM 排序保存失败，请确认后端服务');
+  } finally {
+    bomCommonDragSaving.value = false;
+  }
+}
+
+function openCustomerBomCommonTextDialog() {
+  if (!customerBomCommonFixedText.value) {
+    ElMessage.warning('暂无可查看的客户常用 BOM 清单');
+    return;
+  }
+  customerBomCommonTextDialogVisible.value = true;
+}
+
+async function copyCustomerBomCommonText() {
+  if (!customerBomCommonFixedText.value) {
+    ElMessage.warning('暂无可复制的客户常用 BOM 清单');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(customerBomCommonFixedText.value);
+    ElMessage.success('客户常用 BOM 固定格式清单已复制');
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
+}
+
+function customerBomCommonBatchPreviewText(rows: ModelBom[], isCommon: boolean) {
+  const actionText = isCommon ? '设为常用' : '取消常用';
+  const lines = rows.map((row, index) => {
+    const beforeText = row.isCommon ? `常用，顺序 ${customerBomCommonDisplayOrder(row)}` : '普通可用';
+    const afterText = isCommon ? '常用，顺序由后端重新计算' : '普通可用';
+    return `${index + 1}. ${row.bomName} | ${customerBomOwnershipLabel(row)} | ${row.projectModel || '全部机型/项目'} | ${beforeText} -> ${afterText}`;
+  });
+  return [
+    `变更预览：${actionText} ${rows.length} 个 BOM`,
+    ...lines,
+    `业务边界：只修改 BOM 常用状态和显示顺序，不修改 BOM 明细、适用范围、订单、生产任务或库存。`
+  ].join('\n');
+}
+
+async function setFilteredCustomerBomsCommon(isCommon: boolean) {
+  if (requireDesktopCustomerMutation('批量设置客户常用 BOM')) {
+    return;
+  }
+  if (bomCommonBusy.value) {
+    return;
+  }
+  const rows = isCommon ? customerBomCommonBatchSetRows.value : customerBomCommonBatchCancelRows.value;
+  if (rows.length === 0) {
+    ElMessage.warning(isCommon ? '当前筛选结果没有可设为常用的启用 BOM' : '当前筛选结果没有已设常用的 BOM');
+    return;
+  }
+  bomCommonBatchTargetIsCommon.value = isCommon;
+  bomCommonBatchRows.value = [...rows];
+  bomCommonBatchPreviewText.value = customerBomCommonBatchPreviewText(rows, isCommon);
+  bomCommonBatchDialogVisible.value = true;
+}
+
+function closeBomCommonBatchDialog() {
+  if (bomCommonBatchSaving.value) {
+    ElMessage.warning('客户常用 BOM 批量设置正在保存，请等待操作完成');
+    return;
+  }
+  bomCommonBatchDialogVisible.value = false;
+  bomCommonBatchRows.value = [];
+  bomCommonBatchPreviewText.value = '';
+}
+
+function handleBomCommonBatchDialogClose(done: () => void) {
+  if (bomCommonBatchSaving.value) {
+    ElMessage.warning('客户常用 BOM 批量设置正在保存，请等待操作完成');
+    return;
+  }
+  done();
+  bomCommonBatchRows.value = [];
+  bomCommonBatchPreviewText.value = '';
+}
+
+async function confirmFilteredCustomerBomsCommon() {
+  if (bomCommonBatchSaving.value) {
+    return;
+  }
+  const rows = [...bomCommonBatchRows.value];
+  if (rows.length === 0) {
+    ElMessage.warning('当前没有可批量设置的 BOM');
+    closeBomCommonBatchDialog();
+    return;
+  }
+  const isCommon = bomCommonBatchTargetIsCommon.value;
+  const actionText = isCommon ? '设为常用' : '取消常用';
+  bomCommonBatchSaving.value = true;
+  try {
+    // 批量常用只提交当前筛选结果的 BOM id；后端事务内保存常用状态和顺序，不自动创建订单、生产任务或库存流水。
+    await erpApi.setModelBomsCommonBatch({ bomIds: rows.map((row) => row.id), isCommon });
+    ElMessage.success(`已${actionText} ${rows.length} 个 BOM`);
+    bomCommonBatchDialogVisible.value = false;
+    bomCommonBatchRows.value = [];
+    bomCommonBatchPreviewText.value = '';
+    await loadCustomerCommonRows();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : `批量${actionText}失败，请确认后端服务`);
+  } finally {
+    bomCommonBatchSaving.value = false;
+  }
+}
+
+function endCustomerCommonBomDrag() {
+  draggedCustomerCommonBomId.value = '';
+  draggedCustomerCommonBomScopeKey.value = '';
+  draggedCustomerCommonBomOverId.value = '';
+}
+
+function customerBomOwnershipLabel(row: ModelBom) {
+  if (row.customerId || row.customerScopeMode === 'PRIVATE') {
+    return '客户私有';
+  }
+  if (row.customerScopeMode === 'SELECTED') {
+    return '指定客户可用';
+  }
+  return row.projectModel ? '全部客户机型通用' : '全部客户泛用';
+}
+
+function customerBomOwnershipTagType(row: ModelBom) {
+  if (row.customerId || row.customerScopeMode === 'PRIVATE') {
+    return 'warning';
+  }
+  if (row.customerScopeMode === 'SELECTED') {
+    return 'primary';
+  }
+  return 'info';
+}
+
+async function loadCustomerCommonRows() {
+  const customer = bomCommonCustomer.value;
+  if (!customer) {
+    return;
+  }
+  bomCommonLoading.value = true;
+  try {
+    // 客户页常用设置只加载当前客户可见 BOM，并排除全部客户/全部机型泛用包，避免误认为客户资料。
+    customerBomCommonRows.value = await erpApi.modelBoms({
+      customerId: customer.id,
+      excludeGlobalAllProject: true,
+      status: 'ALL'
+    });
+  } catch (error) {
+    customerBomCommonRows.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '客户可用 BOM 加载失败，请确认客户筛选和后端服务');
+  } finally {
+    bomCommonLoading.value = false;
+  }
+}
+
+async function setCustomerBomCommon(row: ModelBom, isCommon: boolean) {
+  if (requireDesktopCustomerMutation('设置客户常用 BOM')) {
+    return;
+  }
+  if (bomCommonBusy.value) {
+    return;
+  }
+  if (isCommon && row.status === 'DISABLED') {
+    ElMessage.warning('已停用 BOM 不能设为常用，请先恢复启用');
+    return;
+  }
+  bomCommonSavingId.value = row.id;
+  try {
+    await erpApi.setModelBomCommon(row.id, isCommon);
+    // 常用排序由后端按 BOM 所属范围重新计算；保存后重新加载，避免弹窗里排序号和列表顺序滞后。
+    await loadCustomerCommonRows();
+    ElMessage.success(isCommon ? '已设为常用 BOM' : '已取消常用 BOM');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '客户常用 BOM 设置失败');
+  } finally {
+    bomCommonSavingId.value = '';
+  }
+}
+
+function openCustomerBomDetail(row: ModelBom) {
+  if (bomCommonBusy.value) {
+    return;
+  }
+  bomCommonDialogVisible.value = false;
+  router.push({
+    path: '/inventory/model-boms',
+    query: {
+      customerId: bomCommonCustomer.value?.id || row.customerId || undefined,
+      excludeGlobalAllProject: 'true',
+      status: 'ALL',
+      bomId: row.id
+    }
+  });
 }
 
 function openCreate() {
+  if (requireDesktopCustomerMutation('新增客户')) {
+    return;
+  }
   editingId.value = undefined;
   primaryContactIndex.value = undefined;
   applyForm(blankForm());
@@ -441,6 +1315,9 @@ function openCreate() {
 }
 
 function openEdit(row: Customer) {
+  if (requireDesktopCustomerMutation('编辑客户')) {
+    return;
+  }
   editingId.value = row.id;
   const contacts = row.contacts?.length ? row.contacts.map((contact) => ({ ...contact })) : [blankContact()];
   applyForm({
@@ -470,6 +1347,7 @@ async function loadNextCustomerCode() {
     nextCustomerCode.value = result.customerCode;
   } catch {
     nextCustomerCode.value = '';
+    ElMessage.warning('客户ID自动生成失败，请手工填写客户ID');
   }
 }
 
@@ -701,7 +1579,30 @@ function normalizedPayload() {
   };
 }
 
+function warnCustomerSavingClose() {
+  ElMessage.warning('客户资料正在保存，请等待保存完成');
+}
+
+function closeCustomerDialog() {
+  if (saving.value) {
+    warnCustomerSavingClose();
+    return;
+  }
+  dialogVisible.value = false;
+}
+
+function handleCustomerDialogClose(done: () => void) {
+  if (saving.value) {
+    warnCustomerSavingClose();
+    return;
+  }
+  done();
+}
+
 async function save() {
+  if (saving.value) {
+    return;
+  }
   if (!validateForm()) {
     return;
   }
@@ -730,8 +1631,19 @@ async function save() {
 }
 
 function openStatusDialog(row: Customer) {
+  if (requireDesktopCustomerMutation(row.status === 'ENABLED' ? '停用客户' : '启用客户')) {
+    return;
+  }
   statusCustomer.value = row;
   statusDialogVisible.value = true;
+}
+
+function requireDesktopCustomerMutation(actionLabel: string) {
+  if (!isMobileLayout.value) {
+    return false;
+  }
+  ElMessage.warning(`手机端仅查看客户资料，${actionLabel}请在电脑端操作`);
+  return true;
 }
 
 async function confirmStatusChange() {
@@ -787,6 +1699,191 @@ onBeforeUnmount(clearCheckTimers);
 </script>
 
 <style scoped>
+.customer-bom-guide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -6px 0 14px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.customer-bom-guide > span {
+  font-weight: 700;
+  color: #334155;
+}
+
+.customer-bom-guide strong {
+  padding: 5px 8px;
+  color: #0f172a;
+  font-weight: 600;
+  background: #fff;
+  border: 1px solid #dbe4ef;
+  border-radius: 6px;
+}
+
+.customer-bom-guide small {
+  flex: 1 1 100%;
+  color: #64748b;
+}
+
+.table-pagination-row,
+.mobile-pagination-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.mobile-pagination-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.customer-common-bom-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.customer-common-bom-note {
+  margin: 0;
+  padding: 10px 12px;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #dbe4ef;
+  border-radius: 6px;
+  line-height: 1.6;
+}
+
+.customer-common-bom-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.customer-common-bom-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.customer-common-bom-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.customer-common-bom-filter {
+  max-width: 520px;
+}
+
+.customer-common-bom-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: #475569;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.customer-common-bom-drag-handle:active {
+  cursor: grabbing;
+}
+
+.customer-common-bom-drag-handle.is-drop-target {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.customer-common-bom-drag-handle.is-disabled {
+  color: #94a3b8;
+  background: #f8fafc;
+  cursor: not-allowed;
+}
+
+.customer-common-bom-sort-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #475569;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.cell-subtext {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.fixed-format-textarea :deep(textarea) {
+  font-family: Consolas, 'Courier New', monospace;
+  white-space: pre;
+}
+
+.customer-common-bom-batch-preview {
+  display: grid;
+  gap: 10px;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.customer-common-bom-batch-preview p {
+  margin: 0;
+}
+
+.customer-common-bom-batch-preview strong {
+  color: #0f172a;
+}
+
+.customer-common-bom-batch-scope {
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.customer-common-bom-batch-boundary {
+  color: #b45309;
+}
+
+.bom-scope-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bom-scope-cell strong,
+.bom-scope-cell small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bom-scope-cell small {
+  color: #64748b;
+}
+
 .customer-form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -866,6 +1963,12 @@ onBeforeUnmount(clearCheckTimers);
   white-space: nowrap;
 }
 
+.customer-suggestion-more {
+  color: #2563eb;
+  font-size: 13px;
+  font-weight: 500;
+}
+
 :global(.customer-search-popper .el-autocomplete-suggestion__wrap) {
   max-height: 320px;
 }
@@ -894,6 +1997,14 @@ onBeforeUnmount(clearCheckTimers);
   border-radius: 12px;
   color: #334155;
   background: #f1f5f9;
+  font-size: 12px;
+}
+
+.mobile-readonly-note {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  color: #64748b;
   font-size: 12px;
 }
 

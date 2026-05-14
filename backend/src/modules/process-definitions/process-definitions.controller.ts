@@ -21,6 +21,11 @@ export class ProcessDefinitionsController {
     return this.processDefinitionsService.update(id, dto);
   }
 
+  @Patch(':id/restore')
+  restore(@Param('id') id: string) {
+    return this.processDefinitionsService.restore(id);
+  }
+
   @Delete(':id')
   delete(@Param('id') id: string) {
     return this.processDefinitionsService.delete(id);

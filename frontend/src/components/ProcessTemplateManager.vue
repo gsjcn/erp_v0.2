@@ -15,8 +15,20 @@
           @clear="loadTemplates"
         />
         <el-button :loading="loading" @click="loadTemplates">搜索</el-button>
-        <el-button v-if="canCreateFromSource" @click="openCreateFromSourceDialog">保存当前流程</el-button>
-        <el-button type="primary" @click="openCreateDialog">新建流程</el-button>
+        <el-select
+          v-if="showStatusFilter && !readOnly"
+          v-model="statusFilter"
+          class="process-template-status-filter"
+          style="width: 118px"
+          @change="loadTemplates"
+        >
+          <el-option label="启用" value="ENABLED" />
+          <el-option label="停用" value="DISABLED" />
+          <el-option label="全部" value="ALL" />
+        </el-select>
+        <el-button v-if="canCreateFromSource && !readOnly" @click="openCreateFromSourceDialog">保存当前流程</el-button>
+        <el-button v-if="!readOnly" type="primary" @click="openCreateDialog">新建流程</el-button>
+        <span v-else class="mobile-readonly-note">手机端只查看流程记忆</span>
       </div>
     </div>
 
@@ -44,6 +56,7 @@
         <article class="process-template-card" :class="{ expanded: isMobileTemplateExpanded(template.id) }">
           <button class="process-template-main" type="button" @click="handleTemplateMainClick(template)">
             <strong>{{ template.templateName }}</strong>
+            <el-tag v-if="showStatusFilter && template.status === 'DISABLED'" size="small" type="info" effect="plain">已停用</el-tag>
             <small>{{ templateStepSummary(template.steps) }}</small>
             <em v-if="template.remark">{{ template.remark }}</em>
           </button>
@@ -51,11 +64,27 @@
             {{ isMobileTemplateExpanded(template.id) ? '收起' : '详情' }}
           </el-button>
           <div class="process-template-card-actions">
-            <el-button v-if="selectable" link type="primary" :disabled="disabled" @click.stop="applyTemplate(template)">应用</el-button>
+            <el-button v-if="selectable && !readOnly && templateCanApply(template)" link type="primary" :disabled="disabled" @click.stop="applyTemplate(template)">应用</el-button>
             <el-button link type="primary" @click.stop="openPreviewDialog(template)">查看</el-button>
-            <el-button link type="primary" @click.stop="openEditDialog(template)">编辑</el-button>
-            <el-button link type="primary" @click.stop="openCopyDialog(template)">复制</el-button>
-            <el-button link type="danger" @click.stop="openDeleteDialog(template)">删除</el-button>
+            <template v-if="!readOnly">
+              <template v-if="template.status === 'DISABLED'">
+                <el-button
+                  link
+                  type="success"
+                  :loading="restoringTemplateId === template.id"
+                  :disabled="Boolean(restoringTemplateId)"
+                  @click.stop="restoreTemplate(template)"
+                >
+                  恢复启用
+                </el-button>
+              </template>
+              <template v-else>
+                <el-button link type="primary" @click.stop="openEditDialog(template)">编辑</el-button>
+                <el-button link type="primary" @click.stop="openCopyDialog(template)">复制</el-button>
+                <el-button link type="danger" @click.stop="openDeleteDialog(template)">停用</el-button>
+              </template>
+            </template>
+            <span v-else class="mobile-readonly-note">手机端只读</span>
           </div>
         </article>
       </el-tooltip>
@@ -68,6 +97,9 @@
       :title="dialogTitle"
       width="min(760px, calc(100vw - 32px))"
       class="responsive-dialog process-template-dialog"
+      :close-on-click-modal="!templateDialogBusy"
+      :close-on-press-escape="!templateDialogBusy"
+      :before-close="handleTemplateDialogClose"
     >
       <el-form label-width="92px">
         <el-form-item label="流程名称" required>
@@ -166,8 +198,8 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveTemplate">保存流程记忆</el-button>
+        <el-button :disabled="templateDialogBusy" @click="closeTemplateDialog">取消</el-button>
+        <el-button type="primary" :loading="saving" :disabled="templateDialogBusy" @click="saveTemplate">保存流程记忆</el-button>
       </template>
     </el-dialog>
 
@@ -190,28 +222,31 @@
       </div>
       <template #footer>
         <el-button @click="previewVisible = false">关闭</el-button>
-        <el-button v-if="selectable" type="primary" :disabled="disabled || !previewTemplate" @click="applyPreviewTemplate">应用此流程</el-button>
-        <el-button v-if="previewTemplate" type="primary" plain @click="copyPreviewTemplate">复制编辑</el-button>
+        <el-button v-if="selectable && !readOnly && templateCanApply(previewTemplate)" type="primary" :disabled="disabled || !previewTemplate" @click="applyPreviewTemplate">应用此流程</el-button>
+        <el-button v-if="previewTemplate && !readOnly && previewTemplate.status !== 'DISABLED'" type="primary" plain @click="copyPreviewTemplate">复制编辑</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
       v-model="deleteDialogVisible"
-      title="删除流程记忆"
+      title="停用流程记忆"
       width="min(520px, calc(100vw - 32px))"
       class="responsive-dialog"
       append-to-body
+      :close-on-click-modal="!deleting"
+      :close-on-press-escape="!deleting"
+      :before-close="handleDeleteDialogClose"
     >
       <div class="delete-template-summary">
         <p>
           <span>流程名称</span>
           <strong>{{ activeDeleteTemplate?.templateName }}</strong>
         </p>
-        <p class="delete-template-warning">删除后不会影响已经保存到订单零件的流程。</p>
+        <p class="delete-template-warning">停用后不会出现在流程记忆列表，也不会影响已经保存到订单零件的流程。</p>
       </div>
       <template #footer>
-        <el-button :disabled="deleting" @click="deleteDialogVisible = false">取消</el-button>
-        <el-button type="danger" :loading="deleting" @click="deleteTemplate">删除</el-button>
+        <el-button :disabled="deleting" @click="closeDeleteDialog">取消</el-button>
+        <el-button type="danger" :loading="deleting" :disabled="deleting" @click="deleteTemplate">停用</el-button>
       </template>
     </el-dialog>
   </section>
@@ -231,7 +266,9 @@ const props = withDefaults(
     hint?: string;
     selectable?: boolean;
     disabled?: boolean;
+    readOnly?: boolean;
     compact?: boolean;
+    showStatusFilter?: boolean;
     sourceSteps?: ProcessStepDetail[];
     sourceName?: string;
   }>(),
@@ -240,7 +277,9 @@ const props = withDefaults(
     hint: '',
     selectable: false,
     disabled: false,
+    readOnly: false,
     compact: false,
+    showStatusFilter: false,
     sourceSteps: () => [],
     sourceName: ''
   }
@@ -258,9 +297,11 @@ const templateRemarkMaxLength = 300;
 const processRemarkMaxLength = 120;
 const templates = ref<ProcessTemplate[]>([]);
 const keyword = ref('');
+const statusFilter = ref<'ENABLED' | 'DISABLED' | 'ALL'>('ENABLED');
 const loading = ref(false);
 const saving = ref(false);
 const deleting = ref(false);
+const restoringTemplateId = ref('');
 const dialogVisible = ref(false);
 const previewVisible = ref(false);
 const deleteDialogVisible = ref(false);
@@ -293,6 +334,7 @@ const availableNewStepOptions = computed(() =>
 );
 const filteredDynamicProcessOptions = computed(() => filterPinyinSearchOptions(dynamicProcessOptions.value, templateProcessFilterKeyword.value));
 const filteredNewStepOptions = computed(() => filterPinyinSearchOptions(availableNewStepOptions.value, newStepProcessFilterKeyword.value));
+const templateDialogBusy = computed(() => saving.value || creatingProcess.value);
 const canCreateFromSource = computed(() =>
   props.sourceSteps.some((step) => {
     const processKey = normalizeProcessNameKey(step.processName || '');
@@ -306,22 +348,29 @@ async function loadProcessDefinitions() {
     dynamicProcessOptions.value = rows.map((row) => row.processName);
   } catch (error) {
     dynamicProcessOptions.value = [];
-    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败');
+    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败，流程记忆暂不可编辑新工序');
   }
 }
 
 async function loadTemplates() {
   loading.value = true;
   try {
-    templates.value = await erpApi.processTemplates(keyword.value.trim() || undefined);
+    templates.value = await erpApi.processTemplates(keyword.value.trim() || undefined, props.showStatusFilter ? statusFilter.value : 'ENABLED');
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '流程记忆加载失败');
+    templates.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '流程记忆加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
   }
 }
 
 async function createProcessDefinition() {
+  if (creatingProcess.value) {
+    return;
+  }
+  if (guardReadOnlyTemplateMutation('新建标准工序')) {
+    return;
+  }
   const processName = newProcessName.value.trim();
   if (!processName) {
     ElMessage.warning('请填写标准工序名称');
@@ -349,8 +398,16 @@ async function createProcessDefinition() {
 }
 
 function handleTemplateMainClick(template: ProcessTemplate) {
-  if (props.selectable && !props.disabled) {
+  if (template.status === 'DISABLED') {
+    openPreviewDialog(template);
+    return;
+  }
+  if (props.selectable && !props.disabled && !props.readOnly) {
     applyTemplate(template);
+    return;
+  }
+  if (props.readOnly) {
+    openPreviewDialog(template);
     return;
   }
   openEditDialog(template);
@@ -369,6 +426,13 @@ function isMobileTemplateExpanded(templateId: string) {
 }
 
 function applyTemplate(template: ProcessTemplate) {
+  if (guardReadOnlyTemplateMutation('应用流程记忆')) {
+    return;
+  }
+  if (!templateCanApply(template)) {
+    ElMessage.warning('已停用的流程记忆需先恢复启用后再应用');
+    return;
+  }
   if (props.disabled) {
     ElMessage.warning('当前零件不能修改生产流程');
     return;
@@ -376,7 +440,22 @@ function applyTemplate(template: ProcessTemplate) {
   emit('apply', cloneProcessSteps(template.steps));
 }
 
+function templateCanApply(template?: ProcessTemplate | null) {
+  return Boolean(template && template.status !== 'DISABLED');
+}
+
+function guardReadOnlyTemplateMutation(actionLabel: string) {
+  if (!props.readOnly) {
+    return false;
+  }
+  ElMessage.warning(`手机端仅查看流程记忆，${actionLabel}请在电脑端操作`);
+  return true;
+}
+
 function openCreateDialog() {
+  if (guardReadOnlyTemplateMutation('新建流程记忆')) {
+    return;
+  }
   editingTemplateId.value = '';
   templateForm.templateName = '';
   templateForm.remark = '';
@@ -387,6 +466,9 @@ function openCreateDialog() {
 }
 
 function openCreateFromSourceDialog() {
+  if (guardReadOnlyTemplateMutation('保存当前流程')) {
+    return;
+  }
   editingTemplateId.value = '';
   const suggestedName = props.sourceName.trim() || '当前流程';
   templateForm.templateName = nextAvailableName(suggestedName);
@@ -398,6 +480,13 @@ function openCreateFromSourceDialog() {
 }
 
 function openEditDialog(template: ProcessTemplate) {
+  if (guardReadOnlyTemplateMutation('编辑流程记忆')) {
+    return;
+  }
+  if (template.status === 'DISABLED') {
+    ElMessage.warning('已停用的流程记忆需先恢复启用后再编辑');
+    return;
+  }
   editingTemplateId.value = template.id;
   templateForm.templateName = template.templateName;
   templateForm.remark = template.remark || '';
@@ -408,6 +497,13 @@ function openEditDialog(template: ProcessTemplate) {
 }
 
 function openCopyDialog(template: ProcessTemplate) {
+  if (guardReadOnlyTemplateMutation('复制流程记忆')) {
+    return;
+  }
+  if (template.status === 'DISABLED') {
+    ElMessage.warning('已停用的流程记忆需先恢复启用后再复制');
+    return;
+  }
   editingTemplateId.value = '';
   templateForm.templateName = nextAvailableName(`${template.templateName} 副本`);
   templateForm.remark = template.remark || '';
@@ -422,7 +518,30 @@ function openPreviewDialog(template: ProcessTemplate) {
   previewVisible.value = true;
 }
 
+function warnTemplateDialogBusyClose() {
+  ElMessage.warning(creatingProcess.value ? '标准工序正在创建，请等待创建完成' : '流程记忆正在保存，请等待保存完成');
+}
+
+function closeTemplateDialog() {
+  if (templateDialogBusy.value) {
+    warnTemplateDialogBusyClose();
+    return;
+  }
+  dialogVisible.value = false;
+}
+
+function handleTemplateDialogClose(done: () => void) {
+  if (templateDialogBusy.value) {
+    warnTemplateDialogBusyClose();
+    return;
+  }
+  done();
+}
+
 function applyPreviewTemplate() {
+  if (guardReadOnlyTemplateMutation('应用流程记忆')) {
+    return;
+  }
   if (!previewTemplate.value) {
     return;
   }
@@ -433,6 +552,9 @@ function applyPreviewTemplate() {
 }
 
 function copyPreviewTemplate() {
+  if (guardReadOnlyTemplateMutation('复制流程记忆')) {
+    return;
+  }
   if (!previewTemplate.value) {
     return;
   }
@@ -441,6 +563,9 @@ function copyPreviewTemplate() {
 }
 
 function addTemplateStep() {
+  if (guardReadOnlyTemplateMutation('编辑流程步骤')) {
+    return;
+  }
   const processName = newStepName.value.trim();
   if (!processName) {
     ElMessage.warning('请选择标准工序');
@@ -491,10 +616,16 @@ function resetProcessSelectFilters() {
 }
 
 function removeTemplateStep(index: number) {
+  if (guardReadOnlyTemplateMutation('编辑流程步骤')) {
+    return;
+  }
   templateForm.steps.splice(index, 1);
 }
 
 function moveTemplateStep(index: number, offset: number) {
+  if (guardReadOnlyTemplateMutation('调整流程顺序')) {
+    return;
+  }
   const target = index + offset + (offset > 0 ? 1 : 0);
   reorderTemplateStep(index, target);
 }
@@ -510,6 +641,10 @@ function templateStepKey(step: ProcessStepDetail) {
 }
 
 function startTemplateStepDrag(event: DragEvent, index: number) {
+  if (guardReadOnlyTemplateMutation('调整流程顺序')) {
+    event.preventDefault();
+    return;
+  }
   draggedTemplateStepIndex.value = index;
   templateStepDragOverIndex.value = index;
   templateStepDragInsertAfter.value = false;
@@ -555,6 +690,10 @@ function handleTemplateStepListDragOverEnd(event: DragEvent) {
 }
 
 function dropTemplateStep(event: DragEvent, index: number) {
+  if (guardReadOnlyTemplateMutation('调整流程顺序')) {
+    endTemplateStepDrag();
+    return;
+  }
   if (draggedTemplateStepIndex.value === null) {
     endTemplateStepDrag();
     return;
@@ -565,6 +704,10 @@ function dropTemplateStep(event: DragEvent, index: number) {
 }
 
 function dropTemplateStepAtEnd() {
+  if (guardReadOnlyTemplateMutation('调整流程顺序')) {
+    endTemplateStepDrag();
+    return;
+  }
   if (draggedTemplateStepIndex.value === null) {
     endTemplateStepDrag();
     return;
@@ -642,6 +785,12 @@ function normalizeProcessNameKey(processName: string) {
 }
 
 async function saveTemplate() {
+  if (saving.value) {
+    return;
+  }
+  if (guardReadOnlyTemplateMutation('保存流程记忆')) {
+    return;
+  }
   normalizeTemplateSteps();
   const templateName = templateForm.templateName.trim();
   if (!templateName) {
@@ -743,11 +892,40 @@ function normalizeTemplateNameKey(templateName: string) {
 }
 
 function openDeleteDialog(template: ProcessTemplate) {
+  if (guardReadOnlyTemplateMutation('停用流程记忆')) {
+    return;
+  }
   activeDeleteTemplate.value = template;
   deleteDialogVisible.value = true;
 }
 
+function warnTemplateDeletingClose() {
+  ElMessage.warning('流程记忆正在停用，请等待停用完成');
+}
+
+function closeDeleteDialog() {
+  if (deleting.value) {
+    warnTemplateDeletingClose();
+    return;
+  }
+  deleteDialogVisible.value = false;
+}
+
+function handleDeleteDialogClose(done: () => void) {
+  if (deleting.value) {
+    warnTemplateDeletingClose();
+    return;
+  }
+  done();
+}
+
 async function deleteTemplate() {
+  if (deleting.value) {
+    return;
+  }
+  if (guardReadOnlyTemplateMutation('停用流程记忆')) {
+    return;
+  }
   if (!activeDeleteTemplate.value) {
     return;
   }
@@ -755,15 +933,35 @@ async function deleteTemplate() {
   deleting.value = true;
   try {
     await erpApi.deleteProcessTemplate(activeDeleteTemplate.value.id);
-    ElMessage.success('流程记忆已删除');
+    ElMessage.success('流程记忆已停用');
     deleteDialogVisible.value = false;
     activeDeleteTemplate.value = undefined;
     await loadTemplates();
     emit('updated');
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '流程记忆删除失败');
+    ElMessage.error(error instanceof Error ? error.message : '流程记忆停用失败');
   } finally {
     deleting.value = false;
+  }
+}
+
+async function restoreTemplate(template: ProcessTemplate) {
+  if (restoringTemplateId.value) {
+    return;
+  }
+  if (guardReadOnlyTemplateMutation('恢复启用流程记忆')) {
+    return;
+  }
+  restoringTemplateId.value = template.id;
+  try {
+    await erpApi.restoreProcessTemplate(template.id);
+    ElMessage.success('流程记忆已恢复启用');
+    await loadTemplates();
+    emit('updated');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '流程记忆恢复失败，请确认标准工序仍启用且名称未重复');
+  } finally {
+    restoringTemplateId.value = '';
   }
 }
 
@@ -886,6 +1084,13 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 
 .process-template-card-actions .el-button {
   margin-left: 0;
+}
+
+.mobile-readonly-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .process-template-detail-toggle {

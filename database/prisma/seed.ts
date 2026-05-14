@@ -176,6 +176,14 @@ async function resetSeedData() {
   await prisma.orderLine.deleteMany();
   await prisma.customerOrder.deleteMany();
   await prisma.orderNoReservation.deleteMany();
+  await prisma.modelBomDiffReview.deleteMany();
+  await prisma.modelBomCustomerScope.deleteMany();
+  await prisma.modelBomLine.deleteMany();
+  await prisma.modelBom.deleteMany();
+  await prisma.materialTransformRule.deleteMany();
+  await prisma.materialApplicability.deleteMany();
+  await prisma.materialDrawingRevision.deleteMany();
+  await prisma.materialCommonProjectModel.deleteMany();
   await prisma.customerContact.deleteMany();
   await prisma.customer.deleteMany();
   await prisma.warehouseLocation.deleteMany();
@@ -184,6 +192,27 @@ async function resetSeedData() {
   await prisma.processTemplate.deleteMany();
   await prisma.processDefinition.deleteMany();
   await prisma.material.deleteMany();
+}
+
+async function seedCommonProjectModels() {
+  const projectModels = ['B3', 'B5'];
+  for (const [index, projectModel] of projectModels.entries()) {
+    // 常用机型只是零件管理快捷入口默认值，不改变 BOM、适用范围、订单或库存。
+    await prisma.materialCommonProjectModel.upsert({
+      where: { projectModelNormalized: projectModel.toLocaleLowerCase('zh-CN') },
+      update: {
+        projectModel,
+        sortOrder: index + 1,
+        status: 'ENABLED'
+      },
+      create: {
+        projectModel,
+        projectModelNormalized: projectModel.toLocaleLowerCase('zh-CN'),
+        sortOrder: index + 1,
+        status: 'ENABLED'
+      }
+    });
+  }
 }
 
 const processMap: Record<string, SeedProcessStep[]> = {
@@ -472,6 +501,18 @@ async function seedCustomers() {
       contacts: [{ contactName: '王主管', contactPhone: '137****8890', title: '主管' }],
       remark: '当前停用',
       status: 'DISABLED' as const
+    },
+    {
+      customerCode: 'C-004',
+      customerName: '江阴市百胜制冷设备有限公司',
+      regionType: 'CHINA' as const,
+      country: '中国',
+      province: '江苏省',
+      city: '江阴市',
+      detailAddress: '',
+      contacts: [{ contactName: '百胜制冷', contactPhone: '136****0520', title: '业务' }],
+      remark: '百胜全部机型通用零件包所属客户',
+      status: 'ENABLED' as const
     }
   ];
 
@@ -1224,6 +1265,324 @@ async function seedMaterials() {
         defaultChangedBy: isDefault ? 'seed' : null,
         defaultChangedAt: isDefault ? new Date('2026-05-08T00:00:00.000Z') : null,
         remark: '种子数据：从历史订单图纸快照生成零件默认图纸版本',
+        status: 'ENABLED'
+      }
+    });
+  }
+}
+
+async function seedModelBoms() {
+  const customer1 = await prisma.customer.findUniqueOrThrow({ where: { customerCode: 'C-001' } });
+  const customer2 = await prisma.customer.findUniqueOrThrow({ where: { customerCode: 'C-002' } });
+  const baishengCustomer = await prisma.customer.findUniqueOrThrow({ where: { customerCode: 'C-004' } });
+
+  const materialByCode = async (partCode: string) => {
+    const material = await prisma.material.findUniqueOrThrow({
+      where: { partCode },
+      include: {
+        drawingRevisions: {
+          where: { status: 'ENABLED' },
+          orderBy: [{ isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
+        }
+      }
+    });
+    return material;
+  };
+
+  const [b3Assembly, sideBracket, bottomPlate, stiffener, b5Assembly, doorPanel, frameBeam, mountingBase, customPanel] = await Promise.all([
+    materialByCode('B3'),
+    materialByCode('P-1001'),
+    materialByCode('P-1002'),
+    materialByCode('P-1003'),
+    materialByCode('B3-0001'),
+    materialByCode('P-2001'),
+    materialByCode('P-2002'),
+    materialByCode('P-2003'),
+    materialByCode('P-4001')
+  ]);
+
+  const lineData = (
+    material: Awaited<ReturnType<typeof materialByCode>>,
+    options: {
+      lineType?: 'COMPONENT' | 'PART';
+      partCategory: string;
+      componentNo?: string | null;
+      parentComponentNo?: string | null;
+      defaultQuantity: number;
+      sortOrder: number;
+      defaultProcessRoute?: string;
+      remark?: string;
+    }
+  ) => ({
+    materialId: material.id,
+    partCodeSnapshot: material.partCode,
+    partNameSnapshot: material.partName,
+    unitSnapshot: material.unit,
+    partSpecificationSnapshot: material.partSpecification,
+    lineType: options.lineType || 'PART',
+    partCategory: options.partCategory,
+    componentNo: options.lineType === 'COMPONENT' ? options.componentNo || null : null,
+    parentComponentNo: options.lineType === 'COMPONENT' ? null : options.parentComponentNo || null,
+    defaultDrawingRevisionId: material.drawingRevisions[0]?.id || null,
+    defaultProcessRoute: options.defaultProcessRoute || null,
+    defaultQuantity: options.defaultQuantity,
+    sortOrder: options.sortOrder,
+    remark: options.remark || null,
+    status: 'ENABLED' as const
+  });
+
+  await prisma.modelBom.create({
+    data: {
+      bomName: '百胜全部机型通用零件包',
+      customerId: baishengCustomer.id,
+      customerNameSnapshot: baishengCustomer.customerName,
+      projectModel: '',
+      customerScopeMode: 'PRIVATE',
+      customerScopeKey: baishengCustomer.id,
+      projectModelScopeKey: 'ALL',
+      remark: '种子数据：百胜全部机型通用 BOM 已转入江阴市百胜制冷设备有限公司客户下，避免其他客户界面误显示',
+      isCommon: true,
+      commonSortOrder: 1,
+      status: 'ENABLED',
+      // BOM seed 只写基础资料和推荐清单，不生成订单、生产任务或库存流水。
+      lines: {
+        create: [
+          lineData(stiffener, {
+            partCategory: '百胜通用件',
+            defaultQuantity: 1,
+            sortOrder: 1,
+            defaultProcessRoute: '冲压、打磨、包装',
+            remark: '全部机型通用备件'
+          })
+        ]
+      }
+    }
+  });
+
+  const globalB3 = await prisma.modelBom.create({
+    data: {
+      bomName: 'B3 百胜通用零件包',
+      customerId: null,
+      customerNameSnapshot: null,
+      projectModel: 'B3',
+      customerScopeMode: 'ALL',
+      customerScopeKey: 'ALL',
+      projectModelScopeKey: 'B3',
+      remark: '种子数据：百胜通用 BOM，可复制为客户独立 BOM',
+      status: 'ENABLED',
+      // BOM seed 只写基础资料和推荐清单，不生成订单、生产任务或库存流水。
+      lines: {
+        create: [
+          lineData(b3Assembly, {
+            lineType: 'COMPONENT',
+            partCategory: '百胜通用组件',
+            componentNo: 'C001',
+            defaultQuantity: 1,
+            sortOrder: 1,
+            defaultProcessRoute: '装配、包装',
+            remark: 'B3 组件父级'
+          }),
+          lineData(sideBracket, {
+            partCategory: '百胜通用件',
+            parentComponentNo: 'C001',
+            defaultQuantity: 2,
+            sortOrder: 2,
+            defaultProcessRoute: '激光切割、折弯、包装'
+          }),
+          lineData(bottomPlate, {
+            partCategory: '百胜通用件',
+            parentComponentNo: 'C001',
+            defaultQuantity: 1,
+            sortOrder: 3,
+            defaultProcessRoute: '激光切割、折弯、喷涂、包装'
+          }),
+          lineData(stiffener, {
+            partCategory: '百胜通用件',
+            defaultQuantity: 4,
+            sortOrder: 4,
+            defaultProcessRoute: '冲压、打磨、装配、包装'
+          })
+        ]
+      }
+    }
+  });
+
+  await prisma.modelBom.create({
+    data: {
+      bomName: '常州客户通用零件包',
+      customerId: customer1.id,
+      customerNameSnapshot: customer1.customerName,
+      projectModel: '',
+      customerScopeMode: 'PRIVATE',
+      customerScopeKey: customer1.id,
+      projectModelScopeKey: 'ALL',
+      remark: '种子数据：客户全部机型通用 BOM，验证客户通用件和指定机型 BOM 可并存',
+      status: 'ENABLED',
+      lines: {
+        create: [
+          lineData(mountingBase, {
+            partCategory: '客户通用件',
+            defaultQuantity: 1,
+            sortOrder: 1,
+            defaultProcessRoute: '激光切割、喷涂、包装',
+            remark: '客户全部机型通用底座'
+          })
+        ]
+      }
+    }
+  });
+
+  await prisma.modelBom.create({
+    data: {
+      bomName: 'B3 常州客户零件包',
+      customerId: customer1.id,
+      customerNameSnapshot: customer1.customerName,
+      projectModel: 'B3',
+      customerScopeMode: 'PRIVATE',
+      customerScopeKey: customer1.id,
+      projectModelScopeKey: 'B3',
+      sourceBomId: globalB3.id,
+      sourceBomNameSnapshot: globalB3.bomName,
+      remark: '种子数据：从百胜通用 BOM 复制后独立维护，验证客户下拉和差异提示',
+      isCommon: true,
+      commonSortOrder: 2,
+      status: 'ENABLED',
+      lines: {
+        create: [
+          lineData(b3Assembly, {
+            lineType: 'COMPONENT',
+            partCategory: '客户通用组件',
+            componentNo: 'C001',
+            defaultQuantity: 1,
+            sortOrder: 1,
+            defaultProcessRoute: '装配、包装'
+          }),
+          lineData(sideBracket, {
+            partCategory: '客户通用件',
+            parentComponentNo: 'C001',
+            defaultQuantity: 2,
+            sortOrder: 2,
+            defaultProcessRoute: '激光切割、折弯、包装'
+          }),
+          lineData(customPanel, {
+            partCategory: '客户定制件',
+            parentComponentNo: 'C001',
+            defaultQuantity: 1,
+            sortOrder: 3,
+            defaultProcessRoute: '激光切割、折弯、包装',
+            remark: '客户 B3 定制替换件'
+          })
+        ]
+      }
+    }
+  });
+
+  await prisma.modelBom.create({
+    data: {
+      bomName: 'B5 无锡客户零件包',
+      customerId: customer2.id,
+      customerNameSnapshot: customer2.customerName,
+      projectModel: 'B5',
+      customerScopeMode: 'PRIVATE',
+      customerScopeKey: customer2.id,
+      projectModelScopeKey: 'B5',
+      remark: '种子数据：客户指定机型 BOM，验证客户关键字和机型筛选',
+      isCommon: true,
+      commonSortOrder: 3,
+      status: 'ENABLED',
+      lines: {
+        create: [
+          lineData(b5Assembly, {
+            lineType: 'COMPONENT',
+            partCategory: '客户通用组件',
+            componentNo: 'C001',
+            defaultQuantity: 1,
+            sortOrder: 1,
+            defaultProcessRoute: '装配、包装'
+          }),
+          lineData(doorPanel, {
+            partCategory: '客户定制件',
+            parentComponentNo: 'C001',
+            defaultQuantity: 2,
+            sortOrder: 2,
+            defaultProcessRoute: '激光切割、折弯、包装'
+          }),
+          lineData(frameBeam, {
+            partCategory: '客户通用件',
+            parentComponentNo: 'C001',
+            defaultQuantity: 4,
+            sortOrder: 3,
+            defaultProcessRoute: '冲压、焊接、打磨、包装'
+          }),
+          lineData(mountingBase, {
+            partCategory: '客户通用件',
+            defaultQuantity: 1,
+            sortOrder: 4,
+            defaultProcessRoute: '激光切割、喷涂、包装'
+          })
+        ]
+      }
+    }
+  });
+}
+
+async function seedMaterialTransformRules() {
+  const customer1 = await prisma.customer.findUniqueOrThrow({ where: { customerCode: 'C-001' } });
+  const customer2 = await prisma.customer.findUniqueOrThrow({ where: { customerCode: 'C-002' } });
+  const materialByCode = async (partCode: string) =>
+    prisma.material.findUniqueOrThrow({
+      where: { partCode },
+      select: { id: true, partCode: true, partName: true }
+    });
+
+  const [pressCover, frontPanel, weldingBracket, frameBeam] = await Promise.all([
+    materialByCode('P-4101'),
+    materialByCode('P-4001'),
+    materialByCode('P-4102'),
+    materialByCode('P-2002')
+  ]);
+
+  const transformRules = [
+    {
+      source: pressCover,
+      target: frontPanel,
+      customer: customer2,
+      projectModel: 'B3',
+      multiplier: 1,
+      lossRate: 0.03,
+      defaultProcessRoute: '冲压、打磨、包装',
+      conversionDescription: '示例：库存冲压测试盖板可作为前挡板再加工来源，提交生产时仍需人工核对图纸和批次。',
+      remark: '种子数据：验证来源加工关系只作为库存来源建议，不自动扣库存。'
+    },
+    {
+      source: weldingBracket,
+      target: frameBeam,
+      customer: customer2,
+      projectModel: 'B5',
+      multiplier: 1,
+      lossRate: 0.02,
+      defaultProcessRoute: '焊接、打磨、包装',
+      conversionDescription: '示例：焊接测试支架可作为机架横梁的再加工来源，点击查来源库存后仍需逐批确认。',
+      remark: '种子数据：用于库存来源核对弹窗展示来源加工建议。'
+    }
+  ];
+
+  for (const rule of transformRules) {
+    // 来源加工关系只写建议规则，不生成订单、生产任务、库存批次或库存流水。
+    await prisma.materialTransformRule.create({
+      data: {
+        sourceMaterialId: rule.source.id,
+        targetMaterialId: rule.target.id,
+        customerId: rule.customer.id,
+        customerNameSnapshot: rule.customer.customerName,
+        projectModel: rule.projectModel,
+        customerScopeKey: rule.customer.id,
+        projectModelScopeKey: rule.projectModel,
+        conversionDescription: rule.conversionDescription,
+        defaultProcessRoute: rule.defaultProcessRoute,
+        multiplier: rule.multiplier,
+        lossRate: rule.lossRate,
+        remark: rule.remark,
         status: 'ENABLED'
       }
     });
@@ -2216,9 +2575,12 @@ async function main() {
   await seedProductionOperators();
   await seedProcessDefinitions();
   await seedProcessTemplates();
+  await seedCommonProjectModels();
   await seedOrders();
   await seedReplenishmentAndNotices();
   await seedMaterials();
+  await seedModelBoms();
+  await seedMaterialTransformRules();
   await seedInventory();
   await seedInventoryAdjustment();
 }

@@ -195,7 +195,7 @@ export class CreateOrderLineDto {
   drawingFileUrl?: string;
 
   @IsNumber()
-  @Min(0.001)
+  @Min(0)
   partThickness!: number;
 
   @IsOptional()

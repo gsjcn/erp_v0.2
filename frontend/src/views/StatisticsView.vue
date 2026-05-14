@@ -255,6 +255,15 @@ const totals = computed(() => ({
   orderCount: orderRows.value.length
 }));
 
+function emptyStatisticsResponse(): OrderStatisticsResponse {
+  return {
+    period: activePeriod.value,
+    year: year.value,
+    summaryRows: [],
+    orderRows: []
+  };
+}
+
 type QuantitySummaryField = Extract<
   keyof OrderStatisticsSummaryRow,
   | 'customerOrderQuantity'
@@ -318,7 +327,9 @@ async function loadStatistics() {
       customerId: customerId.value || undefined
     });
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '统计数据加载失败');
+    statistics.value = emptyStatisticsResponse();
+    expandedMobileStatisticsCardKeys.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '统计数据加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
   }

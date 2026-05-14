@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { CommonStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { buildPinyinSearchText, normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin-search';
 import { processSnapshotToDetails, type ProcessStepSnapshot } from '../../common/serializers';
@@ -14,7 +14,9 @@ export class ProcessTemplatesService {
   ) {}
 
   async findAll(query: ProcessTemplateQueryDto) {
+    const status = query.status === 'ALL' ? undefined : query.status || CommonStatus.ENABLED;
     const templates = await this.prisma.processTemplate.findMany({
+      where: status ? { status } : undefined,
       orderBy: [{ updatedAt: 'desc' }, { templateName: 'asc' }]
     });
     const keyword = normalizeSearchKeyword(query.keyword);
@@ -52,7 +54,7 @@ export class ProcessTemplatesService {
   }
 
   async update(id: string, dto: UpdateProcessTemplateDto) {
-    const existing = await this.ensureExists(id);
+    const existing = await this.ensureActiveExists(id);
     const templateName = dto.templateName !== undefined ? this.normalizeRequired(dto.templateName, '流程记忆名称不能为空') : existing.templateName;
     const templateNameNormalized = this.normalizeTemplateNameKey(templateName);
     const steps = dto.steps !== undefined ? await this.normalizeSteps(dto.steps, true) : processSnapshotToDetails(existing.steps);
@@ -84,14 +86,50 @@ export class ProcessTemplatesService {
   }
 
   async delete(id: string) {
-    await this.ensureExists(id);
-    await this.prisma.processTemplate.delete({ where: { id } });
-    return { id, deleted: true };
+    const existing = await this.ensureActiveExists(id);
+    // 流程记忆属于可复用基础资料，只软停用并释放名称查重键，不物理删除历史记录。
+    await this.prisma.processTemplate.update({
+      where: { id },
+      data: {
+        status: CommonStatus.DISABLED,
+        templateNameNormalized: this.disabledTemplateNameKey(existing.templateNameNormalized, id),
+        searchText: ''
+      }
+    });
+    return { id, disabled: true };
+  }
+
+  async restore(id: string) {
+    const existing = await this.ensureExists(id);
+    if (existing.status === CommonStatus.ENABLED) {
+      return this.mapTemplate(existing);
+    }
+    const templateNameNormalized = this.normalizeTemplateNameKey(existing.templateName);
+    await this.ensureTemplateNameAvailable(templateNameNormalized, id);
+    const steps = await this.normalizeSteps(processSnapshotToDetails(existing.steps), true);
+    // 恢复流程记忆时重新校验标准工序仍启用，避免把失效工序重新带入订单流程。
+    const restored = await this.prisma.processTemplate.update({
+      where: { id },
+      data: {
+        templateNameNormalized,
+        status: CommonStatus.ENABLED,
+        searchText: this.buildSearchText(existing.templateName, steps, existing.remark)
+      }
+    });
+    return this.mapTemplate(restored);
   }
 
   private async ensureExists(id: string) {
     const template = await this.prisma.processTemplate.findUnique({ where: { id } });
     if (!template) {
+      throw new NotFoundException('流程记忆不存在');
+    }
+    return template;
+  }
+
+  private async ensureActiveExists(id: string) {
+    const template = await this.ensureExists(id);
+    if (template.status !== CommonStatus.ENABLED) {
       throw new NotFoundException('流程记忆不存在');
     }
     return template;
@@ -110,6 +148,10 @@ export class ProcessTemplatesService {
 
   private normalizeTemplateNameKey(templateName: string) {
     return normalizeSearchKeyword(templateName);
+  }
+
+  private disabledTemplateNameKey(templateNameNormalized: string, id: string) {
+    return `disabled:${id}:${templateNameNormalized}`;
   }
 
   private validateRemarkLength(remark?: string | null) {
@@ -172,8 +214,14 @@ export class ProcessTemplatesService {
   }
 
   private async ensureTemplateNameAvailable(templateNameNormalized: string, excludeId?: string) {
-    const existing = await this.prisma.processTemplate.findUnique({ where: { templateNameNormalized } });
-    if (existing && existing.id !== excludeId) {
+    const existing = await this.prisma.processTemplate.findFirst({
+      where: {
+        templateNameNormalized,
+        status: CommonStatus.ENABLED,
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      }
+    });
+    if (existing) {
       throw new BadRequestException(`流程记忆“${existing.templateName}”已存在，请勿重复创建`);
     }
   }
@@ -183,6 +231,7 @@ export class ProcessTemplatesService {
     templateName: string;
     steps: Prisma.JsonValue;
     remark: string | null;
+    status: CommonStatus;
     createdAt: Date;
     updatedAt: Date;
   }) {
@@ -191,6 +240,7 @@ export class ProcessTemplatesService {
       templateName: template.templateName,
       steps: processSnapshotToDetails(template.steps),
       remark: template.remark || undefined,
+      status: template.status,
       createdAt: template.createdAt,
       updatedAt: template.updatedAt
     };

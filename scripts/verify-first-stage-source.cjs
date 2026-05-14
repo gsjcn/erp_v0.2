@@ -241,6 +241,22 @@ function verifyNoNativeBrowserDialogs() {
   }
 }
 
+function verifyNoElementPlusConfirmDialogs() {
+  const frontendDir = resolveProjectPath('frontend/src');
+  if (!fs.existsSync(frontendDir)) {
+    return;
+  }
+
+  for (const filePath of walkFiles(frontendDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    if (source.includes('ElMessageBox.confirm')) {
+      addFailure(
+        `Element Plus confirm is not allowed for key operations; use el-dialog instead: ${toProjectPath(filePath)}`
+      );
+    }
+  }
+}
+
 function verifyResponsiveElementPlusDialogs() {
   const frontendDir = resolveProjectPath('frontend/src');
   if (!fs.existsSync(frontendDir)) {
@@ -272,17 +288,44 @@ function verifyResponsiveElementPlusDialogs() {
   }
 }
 
+function verifyElementPlusChineseLocale() {
+  const mainPath = 'frontend/src/main.ts';
+  if (!fileExists(mainPath)) {
+    addFailure(`Missing frontend entry file: ${mainPath}`);
+    return;
+  }
+
+  const mainSource = readFile(mainPath);
+  const snippets = [
+    "import zhCn from 'element-plus/es/locale/lang/zh-cn';",
+    '.use(ElementPlus, { locale: zhCn })'
+  ];
+  for (const snippet of snippets) {
+    if (!mainSource.includes(snippet)) {
+      addFailure(`frontend/src/main.ts must configure Element Plus zh-cn locale to avoid English default UI text: ${snippet}`);
+    }
+  }
+}
+
 function verifyCustomerSelectOnlyShowsName() {
   const componentPath = 'frontend/src/components/CustomerSelect.vue';
   const customersViewPath = 'frontend/src/views/CustomersView.vue';
+  const ordersListViewPath = 'frontend/src/views/OrdersListView.vue';
+  const productionViewPath = 'frontend/src/views/ProductionView.vue';
   const servicePath = 'backend/src/modules/customers/customers.service.ts';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const typesPath = 'frontend/src/types/erp.ts';
   if (!fileExists(componentPath)) {
     return;
   }
 
   const source = readFile(componentPath);
   const customersViewSource = fileExists(customersViewPath) ? readFile(customersViewPath) : '';
+  const ordersListViewSource = fileExists(ordersListViewPath) ? readFile(ordersListViewPath) : '';
+  const productionViewSource = fileExists(productionViewPath) ? readFile(productionViewPath) : '';
   const serviceSource = readFile(servicePath);
+  const apiSource = readFile(apiPath);
+  const typesSource = readFile(typesPath);
   const forbiddenDetails = ['customerCode', 'contactName', 'phone', 'mobile', 'province', 'city', 'address'];
 
   if (!/function\s+customerLabel\s*\([^)]*\)\s*{[\s\S]*return\s+customer\.customerName\s*;[\s\S]*}/.test(source)) {
@@ -299,7 +342,27 @@ function verifyCustomerSelectOnlyShowsName() {
     }
   }
 
-  const mobileTouchSnippets = ['min-height: 44px', 'class="customer-option"', '.customer-option strong', 'text-overflow: clip'];
+  const mobileTouchSnippets = [
+    'min-height: 44px',
+    'class="customer-option"',
+    '.customer-option strong',
+    'text-overflow: clip',
+    ':no-data-text="customerEmptyText"',
+    ':no-match-text="customerEmptyText"',
+    'loadErrorText',
+    'loadCustomerById',
+    'erpApi.customer(id)',
+    'options.value = [customer, ...options.value.filter',
+    'selected-customer-change',
+    'emitSelectedCustomer',
+    'erpApi.customersPage',
+    'customerPageSummary',
+    'loadMoreCustomers',
+    'customerTotalCount',
+    'customerHasMore',
+    '加载更多客户',
+    '暂无客户，请先在客户模块维护或执行 seed 测试数据'
+  ];
   for (const snippet of mobileTouchSnippets) {
     if (!source.includes(snippet)) {
       addFailure(`CustomerSelect.vue must keep mobile-friendly customer option snippet: ${snippet}`);
@@ -312,6 +375,8 @@ function verifyCustomerSelectOnlyShowsName() {
   }
   const customerSearchRankSnippets = [
     'compareCustomerSearchResults',
+    'async findOne(id: string)',
+    '客户下拉和跨页面跳转按 id 回填客户名称',
     'customerSearchRank',
     'customerCode === keyword',
     'customerName === keyword',
@@ -324,11 +389,68 @@ function verifyCustomerSelectOnlyShowsName() {
       addFailure(`CustomersService must keep ranked customer search snippet: ${snippet}`);
     }
   }
+  const customerPaginationSnippets = [
+    "query.withPage === 'true'",
+    'const totalCount = matchedCustomers.length;',
+    'hasMore: offset + items.length < totalCount',
+    '客户搜索分页必须把总数和是否还有更多返回给前端',
+    'customersPage(',
+    'CustomerListResponse',
+    'customerPagination',
+    'handleCustomerPageChange',
+    '个客户'
+  ];
+  const customerPaginationSources = [serviceSource, apiSource, typesSource, customersViewSource].join('\n');
+  for (const snippet of customerPaginationSnippets) {
+    if (!customerPaginationSources.includes(snippet)) {
+      addFailure(`Customer search pagination must keep visible count/load-more contract snippet: ${snippet}`);
+    }
+  }
   if (!agentsSource.includes('客户搜索结果必须按命中强度排序')) {
     addFailure('AGENTS.md must document ranked customer search behavior.');
   }
   if (customersViewSource.includes('default-first-option')) {
     addFailure('CustomersView.vue customer region selects must not enable default-first-option; city/country require explicit confirmation or typed value.');
+  }
+  const customerSuggestionPaginationSnippets = [
+    'customerSuggestionLimit',
+    'customerSuggestionKeyword',
+    'erpApi.customersPage(',
+    '已显示 ${result.items.length} / ${result.totalCount} 个客户，按 Enter 查询完整列表',
+    'customer.isMoreHint'
+  ];
+  for (const snippet of customerSuggestionPaginationSnippets) {
+    if (!customersViewSource.includes(snippet)) {
+      addFailure(`CustomersView.vue must keep paged customer autocomplete suggestion snippet: ${snippet}`);
+    }
+  }
+  if (/erpApi\.customers\([^)]*queryString/.test(customersViewSource)) {
+    addFailure('CustomersView.vue autocomplete must use customersPage with visible total instead of the legacy customers endpoint.');
+  }
+  const orderCustomerSelectionSnippets = [
+    '订单新增必须由操作员在 CustomerSelect 中明确选择客户',
+    "orderForm.customerId = '';"
+  ];
+  for (const snippet of orderCustomerSelectionSnippets) {
+    if (!ordersListViewSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue must keep explicit customer selection for new orders snippet: ${snippet}`);
+    }
+  }
+  if (ordersListViewSource.includes('activeCustomers.value[0]') || /erpApi\.customers\(\)/.test(ordersListViewSource)) {
+    addFailure('OrdersListView.vue must not default new orders to the first customer or load all customers for selection.');
+  }
+  const productionCustomerNameSnippets = [
+    'selectedCustomerName',
+    '生产页只按当前筛选客户回填名称',
+    'erpApi.customer(customerId)'
+  ];
+  for (const snippet of productionCustomerNameSnippets) {
+    if (!productionViewSource.includes(snippet)) {
+      addFailure(`ProductionView.vue must keep single-customer name lookup snippet: ${snippet}`);
+    }
+  }
+  if (/erpApi\.customers\(\)/.test(productionViewSource)) {
+    addFailure('ProductionView.vue must not load all customers just to render filter labels.');
   }
 }
 
@@ -660,6 +782,12 @@ function verifyProductionOrderSummaryWorkflow() {
     'v-model="batchStartVisible"',
     'v-model="batchStartSupervisorCode"',
     'v-model="batchStartSelectedTaskIds"',
+    ':before-close="handleStartDialogClose"',
+    ':before-close="handleBatchStartDialogClose"',
+    ':before-close="handleFinalConfirmDialogClose"',
+    '开始生产正在保存，请等待保存完成',
+    '批量开始生产正在保存，请等待保存完成',
+    '生产完成确认正在保存，请等待保存完成',
     'openBatchStartForOrder',
     'openBatchStartForCurrentOrder',
     'openBatchStartForSelected',
@@ -853,10 +981,15 @@ function verifyPlannerProcessAndSubmitGuard() {
     'const processEditorCode = ref(\'\');',
     'placeholder="选择下单/计划人员，车间人员只能查看"',
     'const canEditProcessBase = computed(() => order.value?.status === \'DRAFT\'',
-    'const canEditProcess = computed(() => canEditProcessBase.value && Boolean(processEditorCode.value))',
+    'const canEditProcess = computed(() => canEditProcessBase.value && !isMobileLayout.value && Boolean(processEditorCode.value))',
     '请先选择下单/计划流程填写人员，选择后才可编辑工序。',
     'configuredByCode: processEditorCode.value',
     'submittedByCode: submitPlanOperatorCode.value',
+    ':before-close="handleSubmitOrderDialogClose"',
+    'function handleSubmitOrderDialogClose',
+    'if (saving.value) {',
+    'if (submitting.value) {',
+    '订单正在提交生产，请等待提交完成',
     'processEditorOperators.value = operators.filter(isProcessEditorOperator)',
     'submitPlanOperators.value = operators.filter(isSubmitPlanOperator)',
     'function isSubmitPlanOperator(operator: ProductionOperator)',
@@ -874,6 +1007,9 @@ function verifyPlannerProcessAndSubmitGuard() {
   const orderDetailSnippets = [
     'submitPlanOperators.value = operators.filter(isSubmitPlanOperator)',
     'submittedByCode: submitPlanOperatorCode.value',
+    ':before-close="handleSubmitOrderDialogClose"',
+    'function handleSubmitOrderDialogClose',
+    'if (saving.value) {',
     'function isSubmitPlanOperator(operator: ProductionOperator)',
     'return /计划|下单|订单/.test(role) && !/车间|主任|技术|工艺/.test(role);',
     '只有待提交生产订单允许提交生产'
@@ -988,7 +1124,7 @@ function verifyProcessPinyinSearchWorkflow() {
     'const filteredNewStepOptions = computed(() => filterPinyinSearchOptions(availableNewStepOptions.value, newStepProcessFilterKeyword.value))',
     ':filter-method="handleTemplateProcessFilter"',
     ':filter-method="handleNewStepProcessFilter"',
-    'erpApi.processTemplates(keyword.value.trim() || undefined)'
+    'erpApi.processTemplates(keyword.value.trim() || undefined, props.showStatusFilter ? statusFilter.value : \'ENABLED\')'
   ];
   for (const snippet of templateManagerSnippets) {
     if (!templateManagerSource.includes(snippet)) {
@@ -1012,15 +1148,25 @@ function verifyProcessPinyinSearchWorkflow() {
   const processTemplatesSource = readFile(processTemplatesServicePath);
   const processTemplatesSnippets = [
     'import { buildPinyinSearchText, normalizeSearchKeyword, pinyinSearchMatches }',
+    "const status = query.status === 'ALL' ? undefined : query.status || CommonStatus.ENABLED;",
+    'where: status ? { status } : undefined',
     'templates.filter((template) => this.templateMatchesKeyword(template, keyword))',
     'searchText: this.buildSearchText(templateName, steps, remark)',
     '...steps.flatMap((step) => [step.processName, step.processRemark])',
-    'return pinyinSearchMatches('
+    'return pinyinSearchMatches(',
+    'status: CommonStatus.DISABLED',
+    'disabledTemplateNameKey(existing.templateNameNormalized, id)',
+    '流程记忆属于可复用基础资料，只软停用并释放名称查重键，不物理删除历史记录',
+    'async restore(id: string)',
+    '恢复流程记忆时重新校验标准工序仍启用'
   ];
   for (const snippet of processTemplatesSnippets) {
     if (!processTemplatesSource.includes(snippet)) {
       addFailure(`ProcessTemplatesService must keep template pinyin search snippet: ${snippet}`);
     }
+  }
+  if (processTemplatesSource.includes('prisma.processTemplate.delete')) {
+    addFailure('ProcessTemplatesService must soft-disable process templates instead of physically deleting reusable process memory.');
   }
 }
 
@@ -1082,6 +1228,7 @@ function verifyMaterialSuggestionSearchWorkflow() {
 
   const requiredSnippets = [
     { source: dtoSource, file: dtoPath, snippet: 'customerId?: string;' },
+    { source: dtoSource, file: dtoPath, snippet: 'projectModel?: string;' },
     { source: dtoSource, file: dtoPath, snippet: 'export class MaterialQueryDto' },
     { source: dtoSource, file: dtoPath, snippet: 'export class UpdateMaterialDto' },
     { source: orderDtoSource, file: orderDtoPath, snippet: 'materialIdentityConfirmed?: boolean;' },
@@ -1095,7 +1242,11 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: serviceSource, file: servicePath, snippet: "searchMatchText: '编码缩写匹配'" },
     { source: serviceSource, file: servicePath, snippet: "searchMatchText: '名称前缀匹配'" },
     { source: serviceSource, file: servicePath, snippet: "searchMatchText: '名称包含匹配'" },
-    { source: serviceSource, file: servicePath, snippet: 'where: !normalizedKeyword && customerId ? { order: { customerId } } : {}' },
+    { source: serviceSource, file: servicePath, snippet: 'if (!keyword && !customerId && !projectModel)' },
+    { source: serviceSource, file: servicePath, snippet: 'private async findEnabledMaterialMastersByCodes' },
+    { source: serviceSource, file: servicePath, snippet: 'materialId: material.materialId || materialMasterByCode.get(materialKey)?.id' },
+    { source: serviceSource, file: servicePath, snippet: "projectModel: { contains: requestedProjectModel, mode: 'insensitive' }" },
+    { source: serviceSource, file: servicePath, snippet: 'preferredProjectModel = \'\'' },
     { source: serviceSource, file: servicePath, snippet: 'customerUsageCount' },
     { source: serviceSource, file: servicePath, snippet: 'lastCustomerOrderDateDiff' },
     { source: serviceSource, file: servicePath, snippet: 'private sortableDateValue' },
@@ -1143,6 +1294,8 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: serviceSource, file: servicePath, snippet: 'private materialDateSearchValues' },
     { source: serviceSource, file: servicePath, snippet: '...this.materialDateSearchValues(line.drawingDate)' },
     { source: serviceSource, file: servicePath, snippet: '...this.materialDateSearchValues(material.drawingDate)' },
+    { source: serviceSource, file: servicePath, snippet: 'const isoDate = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).toISOString();' },
+    { source: serviceSource, file: servicePath, snippet: 'const looseIsoDate = `${looseDate}T00:00:00.000Z`;' },
     { source: serviceSource, file: servicePath, snippet: 'material.projectModel' },
     { source: serviceSource, file: servicePath, snippet: 'private materialThicknessSearchValues' },
     { source: serviceSource, file: servicePath, snippet: 'for (const precision of [0, 1, 2, 3, 4])' },
@@ -1151,7 +1304,6 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: serviceSource, file: servicePath, snippet: '...this.materialThicknessSearchValues(material.partThickness)' },
     { source: serviceSource, file: servicePath, snippet: "searchMatchText: '图纸资料匹配'" },
     { source: serviceSource, file: servicePath, snippet: "searchMatchText: '历史订单匹配'" },
-    { source: serviceSource, file: servicePath, snippet: 'if (!keyword && !customerId)' },
     { source: serviceSource, file: servicePath, snippet: 'const shouldSeedMaterialMaster = Boolean(keyword);' },
     { source: serviceSource, file: servicePath, snippet: 'disabledMaterialCodes.has(key)' },
     { source: serviceSource, file: servicePath, snippet: 'const suggestionMaterials = [...materialRows.values()].filter' },
@@ -1196,8 +1348,20 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const exactMatches = lastInventorySuggestions.value.filter' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactMatches.length === 1' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactMatches.length > 1' },
-    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '匹配到多个精确物料，请从下拉列表中选择具体零件' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '匹配到多个精确零件，请从下拉列表中选择具体零件' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'sourceSearchManualPickRequired' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'transformRulePanelVisible' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'transformRuleEmptyVisible' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'transformRuleSuggestionSummary' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'erpApi.materialTransformRulesPage' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '加载更多来源加工建议' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '已显示 ${transformRuleSuggestions.value.length} / ${transformRuleSuggestionTotal.value} 条来源加工建议' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '查来源库存不会选中批次、不会扣库存' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '只切换搜索，不自动选用库存' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '系统未自动选用批次，请逐批勾选并人工确认' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'openTransformRulesPage' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: "router.push({ path: '/inventory/material-transforms', query })" },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '本次订单零件暂无匹配的来源加工建议' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactSuggestions.length === 1' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function canAutoSwitchInventorySuggestion' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'return !item.hasIdentityConflict;' },
@@ -1205,10 +1369,14 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function materialIdentityConflictFieldsText' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function keepInventorySuggestionManualPick' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceSearchResultHint = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '@input="handleSourceSearchKeywordInput"' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'sourceSearchSelectedLabel' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function handleSourceSearchKeywordInput' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '手工改动库存来源搜索词后清理旧候选和批次聚焦' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '同编码存在多套历史资料，请点击候选项确认' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '请核对${materialIdentityConflictFieldsText(item)}，并点击候选项人工确认后再切换库存来源' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '已按当前候选切换库存来源，请核对${materialIdentityConflictFieldsText(item)}' },
-    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '找到 1 个相似物料，请点击结果确认后再切换库存来源' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '找到 1 个相似零件，请点击结果确认后再切换库存来源' },
     { source: editorSource, file: editorPath, snippet: 'lineHadDrawingInfo' },
     { source: editorSource, file: editorPath, snippet: 'const autoMaterialSnapshots = new WeakMap<CreateOrderLinePayload, AutoMaterialSnapshot>();' },
     { source: editorSource, file: editorPath, snippet: 'function clearAutoMaterialFieldsWhenMaterialIdentityChanges' },
@@ -1225,6 +1393,8 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: editorSource, file: editorPath, snippet: 'function captureComponentNoBeforeEdit' },
     { source: editorSource, file: editorPath, snippet: 'function syncChildParentComponentNo' },
     { source: editorSource, file: editorPath, snippet: 'function clearChildParentComponentNo' },
+    { source: editorSource, file: editorPath, snippet: '当前订单 C001-C9999 自动组件编号已用完' },
+    { source: editorSource, file: editorPath, snippet: 'line.componentNo = componentNo;' },
     { source: editorSource, file: editorPath, snippet: '@focus="captureComponentNoBeforeEdit(row)"' },
     { source: editorSource, file: editorPath, snippet: '@focus="captureComponentNoBeforeEdit(line)"' },
     { source: editorSource, file: editorPath, snippet: 'line.parentComponentNo = nextComponentNoValue;' },
@@ -1232,14 +1402,74 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: editorSource, file: editorPath, snippet: '@blur="() => fillExactMaterialFromInput(row, \'partCode\')"' },
     { source: editorSource, file: editorPath, snippet: '@blur="() => fillExactMaterialFromInput(row, \'partName\')"' },
     { source: editorSource, file: editorPath, snippet: ':customer-id="customerId"' },
-    { source: inventoryViewSource, file: inventoryViewPath, snippet: '物料基础库' },
-    { source: inventoryViewSource, file: inventoryViewPath, snippet: '删除只停用记忆' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '查看库存使用率、零件库存汇总和逐批库存溯源' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'to="/inventory/materials"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存使用总览' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '查看零件搜索记忆、订单使用和库存参考' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '编辑只改搜索记忆，停用只影响后续搜索推荐' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'materialMemoryPagination' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'handleMaterialMemoryPageChange' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '条零件搜索记忆' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'label="零件编码" min-width="160"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'label="零件名称" min-width="180"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'title="编辑零件搜索记忆"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存使用总览加载失败，请确认后端服务和筛选条件' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '零件库存汇总' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'label="库存来源/图纸" width="140"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '按零件汇总使用率、可用、预占、订单库存、备货库存和仓库分布' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存使用率' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function formatInventoryUsageRate' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'Number(row.usedQuantity || 0) / totalQuantity' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function isZeroInventorySummaryRow' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '当前范围 0 库存' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function summarySourceDetailsButtonText' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function openSummarySourceDetails' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '零件资料详情' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'const sourceDetailsReferenceOnly = ref(false)' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: ':reference-only="sourceDetailsReferenceOnly"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'const inventorySummaryByPartCode = computed' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function formatMaterialMemoryUsageRate' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '无库存记录' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '平均使用率' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'const averageInventoryUsageRateText = computed' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存溯源' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '逐批查看库存来源、占用记录、仓库库位，并进行盘点调整' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存来源/图纸' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '手机端只查看库存来源和预占记录' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'label="生产日期"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'formatDate(row.productionDate)' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'formatDate(batch.productionDate)' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'label="盘点备注"' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "{{ row.remark || '-' }}" },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '编码 / 名称 / 拼音 / 规格 / 客户 / 订单 / 图号' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function disableMaterialMemory' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: "import MaterialSuggestionOption from '../components/MaterialSuggestionOption.vue';" },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'show-available' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: ':available-scope-label="selectedWarehouseName || \'全部仓库\'"' },
+    {
+      source: inventoryViewSource,
+      file: inventoryViewPath,
+      snippet: 'erpApi.inventoryMaterialSuggestions(\n      normalizedKeyword,\n      filters.warehouseId,\n      undefined,\n      undefined,\n      undefined,\n      filters.customerId'
+    },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: "import MaterialSuggestionOption from './MaterialSuggestionOption.vue';" },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: ":title=\"title || '库存来源详情'\"" },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '允许选择可替代零件，但必须逐批确认数量' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'title?: string;' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'referenceOnly?: boolean;' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceGuardAlertTitle = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '当前仅用于核对零件基础资料、图纸和历史来源' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceAvailableSummaryLabel = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '当前范围可用' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceBatchSummaryLabel = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '当前范围批次' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceCompositionSummaryLabel = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '资料状态' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceCompositionSummaryText = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '无可用库存批次' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceKindSummaryVisible = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'const sourceEmptyDescription = computed' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '当前范围没有库存批次，仅展示零件基础资料和历史来源核对结果' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: ':description="sourceEmptyDescription"' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '<MaterialSuggestionOption :item="item" />' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'customerId?: string;' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'props.customerId' },
@@ -1262,6 +1492,9 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: "props.item.hasCurrentCustomerHistory ? '当前客户历史' : ''" },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '最近订单 ${props.item.lastCustomerOrderNo}' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'const historyCustomerText = computed' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'const historyCustomerTitle = computed' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '全部历史客户：${names.join' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: ':title="historyTooltipText"' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'if (visibleNames.length >= 3)' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '历史客户 ${visibleNames.join' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '图号 ${props.item.drawingNo}' },
@@ -1269,15 +1502,21 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '日期 ${props.item.drawingDate}' },
     { source: editorSource, file: editorPath, snippet: 'props.customerId' },
     { source: apiSource, file: apiPath, snippet: 'customerId?: string' },
+    { source: apiSource, file: apiPath, snippet: 'projectModel?: string' },
     { source: apiSource, file: apiPath, snippet: 'materialIdentityConfirmed?: boolean;' },
     { source: apiSource, file: apiPath, snippet: 'inventoryMaterials(filters: MaterialMemoryFilters = {})' },
+    { source: apiSource, file: apiPath, snippet: 'inventoryMaterialsPage(filters: MaterialMemoryFilters = {})' },
+    { source: serviceSource, file: servicePath, snippet: "query.withPage === 'true'" },
+    { source: serviceSource, file: servicePath, snippet: 'serializeMaterialMemoryRow' },
     { source: apiSource, file: apiPath, snippet: 'disableInventoryMaterial(materialId: string)' },
     { source: apiSource, file: apiPath, snippet: 'customerId,' },
     { source: typesSource, file: typesPath, snippet: 'customerUsageCount?: number;' },
+    { source: typesSource, file: typesPath, snippet: 'materialId?: string;' },
     { source: typesSource, file: typesPath, snippet: 'searchMatchText?: string;' },
     { source: typesSource, file: typesPath, snippet: 'matchedCustomerCode?: string;' },
     { source: typesSource, file: typesPath, snippet: 'matchedHistoryOrderNo?: string;' },
     { source: typesSource, file: typesPath, snippet: 'export interface MaterialMemory' },
+    { source: typesSource, file: typesPath, snippet: 'export interface MaterialMemoryListResponse' },
     { source: typesSource, file: typesPath, snippet: 'partThickness?: number | null;' },
     { source: typesSource, file: typesPath, snippet: 'identityConflictFields?: string[];' },
     { source: typesSource, file: typesPath, snippet: 'historyCustomerNames?: string[];' },
@@ -1298,6 +1537,10 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: orderDetailSource, file: orderDetailPath, snippet: 'materialIdentityConfirmed: submitMaterialIdentityConfirmed.value' },
     { source: orderDetailSource, file: orderDetailPath, snippet: '已核对同编码多套历史资料零件的图号、规格、厚度和项目型号' },
     { source: orderDetailSource, file: orderDetailPath, snippet: '请先确认已核对同编码多套历史资料零件' },
+    { source: editorSource, file: editorPath, snippet: '请先选择零件编码' },
+    { source: editorSource, file: editorPath, snippet: '零件编码 ${item.partCode} 存在多套历史资料' },
+    { source: editorSource, file: editorPath, snippet: '精确匹配零件' },
+    { source: editorSource, file: editorPath, snippet: '避免阻断新零件下单' },
     { source: agentsSource, file: agentsPath, snippet: '历史客户名称 / 客户名称片段 / 客户拼音首字母 / `customerCode` / 历史订单' },
     { source: agentsSource, file: agentsPath, snippet: '最近订单、历史客户和当前客户使用次数' },
     { source: agentsSource, file: agentsPath, snippet: '当前客户最近订单日期' },
@@ -1389,11 +1632,39 @@ function verifyMaterialSuggestionSearchWorkflow() {
     }
   }
 
+  const upsertMaterialsStart = orderServiceSource.indexOf('private async upsertMaterials');
+  const upsertMaterialsEnd = orderServiceSource.indexOf('private async generateOrderNo', upsertMaterialsStart);
+  const upsertMaterialsSource =
+    upsertMaterialsStart >= 0 && upsertMaterialsEnd > upsertMaterialsStart
+      ? orderServiceSource.slice(upsertMaterialsStart, upsertMaterialsEnd)
+      : '';
+  if (!upsertMaterialsSource.includes('existingMaterialCodes')) {
+    addFailure('orders.service.ts upsertMaterials must detect existing Material rows by code before syncing order-created parts.');
+  }
+  if (!upsertMaterialsSource.includes('this.isComponentLineType(line.lineType)')) {
+    addFailure('orders.service.ts upsertMaterials must skip COMPONENT rows so parent assemblies do not become global Material search memory.');
+  }
+  if (!upsertMaterialsSource.includes('不能静默覆盖全局 Material 搜索记忆')) {
+    addFailure('orders.service.ts upsertMaterials must document that order lines cannot overwrite global Material search memory.');
+  }
+  if (upsertMaterialsSource.includes('tx.material.update') || upsertMaterialsSource.includes("status: 'ENABLED'")) {
+    addFailure('orders.service.ts upsertMaterials must not update existing Material rows or auto-enable disabled materials from order save/import.');
+  }
+
   if (
     !/function handlePartCodeInput[\s\S]*?clearAutoMaterialFieldsWhenMaterialIdentityChanges\(line\)/.test(editorSource) ||
     !/function handlePartNameInput[\s\S]*?clearAutoMaterialFieldsWhenMaterialIdentityChanges\(line\)/.test(editorSource)
   ) {
     addFailure('OrderLineEditor.vue must clear auto-filled material fields when either partCode or partName is manually changed.');
+  }
+  if (!/snapshot\.autoFields\.partThickness[\s\S]*?line\.partThickness = 0;/.test(editorSource)) {
+    addFailure('OrderLineEditor.vue must clear auto-filled partThickness to 0 after material identity changes so operators re-check thickness.');
+  }
+  if (!editorSource.includes('组件不适用') || !editorSource.includes('父级组件由子零件分别维护厚度')) {
+    addFailure('OrderLineEditor.vue must clearly show COMPONENT thickness as not applicable and explain it is maintained by child parts.');
+  }
+  if (!editorSource.includes('厚度不适用（父级组件由子零件维护）')) {
+    addFailure('OrderLineEditor.vue fixed-format text must explain parent component thickness is maintained by child parts.');
   }
 
   const parentComponentSelectBlocks =
@@ -1498,7 +1769,7 @@ function verifyProcessStepDragSortWorkflow() {
     'class="step-drag-handle"',
     'aria-label="拖拽调整顺序"',
     '<el-icon><Rank /></el-icon>',
-    ':draggable="canEditProcess"',
+    ':draggable="canEditProcess && !isMobileLayout"',
     '@dragstart.stop="startStepDrag($event, index)"',
     '@dragover.self.prevent="handleStepListDragOverEnd"',
     '@dragleave="handleStepListDragLeave"',
@@ -1634,7 +1905,9 @@ function verifyPartComponentStructureWorkflow() {
     'backend/src/modules/inventory/inventory.controller.ts',
     'backend/src/modules/orders/orders.service.ts',
     'backend/src/modules/inventory/inventory.service.ts',
-    'database/prisma/verify-first-stage.ts'
+    'database/prisma/verify-first-stage.ts',
+    'database/prisma/schema.prisma',
+    'database/prisma/seed.ts'
   ];
   for (const projectPath of requiredFiles) {
     if (!fileExists(projectPath)) {
@@ -1662,6 +1935,9 @@ function verifyPartComponentStructureWorkflow() {
   const ordersServiceSource = readFile('backend/src/modules/orders/orders.service.ts');
   const inventoryServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
   const dataVerifierSource = readFile('database/prisma/verify-first-stage.ts');
+  const prismaSchemaSource = readFile('database/prisma/schema.prisma');
+  const seedSource = readFile('database/prisma/seed.ts');
+  const migrationSqlSource = readMigrationSqlSource();
 
   const orderLineSnippets = [
     'class="line-drag-handle"',
@@ -1671,9 +1947,43 @@ function verifyPartComponentStructureWorkflow() {
     '@drop.prevent="dropLineDrag($index)"',
     '<el-icon><Rank /></el-icon>',
     'props.lines.splice(0, props.lines.length, ...ordered);',
+    'buildRootDraggedLineOrder',
+    'buildChildDraggedLineOrder',
+    'isAttachedLocalChildLine',
+    '子零件只能在同一父组件内拖拽排序',
+    '组件和单独零件请拖到顶层行之间排序',
+    'orderLineFixedTextDialogVisible',
+    'orderLineFixedTextLines',
+    'orderLineFixedTextLineCount',
+    'isBlankOrderLineForFixedText',
+    ':disabled="orderLineFixedTextLineCount === 0"',
+    '<el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="openOrderLineFixedTextDialog">固定格式</el-button>',
+    'buildOrderLineDragGroups(orderLineFixedTextLines.value)',
+    'orderLineFixedText',
+    'buildOrderLineFixedText',
+    'openOrderLineFixedTextDialog',
+    'copyOrderLineFixedText',
+    '订单零件固定格式清单',
+    'class="order-line-fixed-textarea"',
+    'hasAvailableComponentNo',
+    'hasSourceComponentNo',
+    'isMissingParentComponentLine',
+    'parentComponentScopeText',
+    '已有订单组件',
+    '当前明细组件',
+    '未匹配父级',
+    '所属组件不存在',
+    'is-structure-orphan',
+    'orderLineStructureLabel',
+    'orderLineStructureHint',
+    'is-order-line-child',
+    '子零件 ->',
+    '单独零件',
     'function syncChildParentComponentNo',
     'function clearChildParentComponentNo',
-    'line.parentComponentNo = inheritedParentComponentNoForLine(line);'
+    'line.parentComponentNo = inheritedParentComponentNoForLine(line);',
+    'isComponentNoOutOfRange',
+    '组件编号只支持 C001-C9999'
   ];
   for (const snippet of orderLineSnippets) {
     if (!orderLineEditorSource.includes(snippet)) {
@@ -1687,20 +1997,631 @@ function verifyPartComponentStructureWorkflow() {
     '@dragstart.stop="startLineDrag($event, index)"',
     '@drop.prevent="dropLineDrag"',
     '@drop.self.prevent="dropLineDragAtEnd"',
+    'buildRootDraggedLineOrder',
+    'buildChildDraggedLineOrder',
+    'isAttachedChildLine',
+    '子零件只能在同一父组件内拖拽排序',
+    '组件和单独零件请拖到顶层行之间排序',
+    'bomStructureTextDialogVisible',
+    'function openBomStructureTextDialog',
+    'BOM 固定格式清单',
+    'class="fixed-format-textarea"',
     'function copyBomStructureText',
+    'formatLineOrderText',
+    'formatLineStatusText',
+    'formatLineThicknessForText',
+    '不适用（父级组件由子零件维护）',
+    'formatModelBomStatusText',
+    ':disabled="!bomStructureText"',
+    '适用范围：客户 ${activeBom.value.customerName',
+    '结构统计：组件 ${summary.componentCount}',
+    '厚度核对 ${summary.missingThicknessCount}',
+    '来源 BOM：${activeBom.value.sourceBomNameSnapshot',
+    '明细：',
+    '暂无明细，仍可查看零件包固定格式头部信息',
+    "lines.push('暂无有效明细')",
+    'class="default-process-drag-handle"',
+    '@dragstart.stop="startDefaultProcessDrag($event, index)"',
+    '@drop.self.prevent="dropDefaultProcessAtEnd"',
+    'function dropDefaultProcessAtEnd',
+    'lineDefaultProcessFilterKeyword.value = \'\'',
+    'normalizeLineDefaultProcessSteps',
+    '默认工艺只作为下单初始建议',
+    'lineStructureHint',
+    'lineStructureTagType',
+    '子零件 ->',
+    '单独零件',
+    'MATERIAL_LATEST',
+    '零件最新',
+    '结构 ${formatLineStructure(row)}',
     '固定格式清单已复制',
     '未匹配父级',
     '单独零件',
+    '暂无包内明细，请添加组件或单独零件',
+    '添加第一个组件',
+    '添加子零件',
+    '添加单独零件',
+    "openLineCreateDialog('CHILD_PART', normalizeComponentNo(group.line.componentNo))",
+    "openLineCreateDialog('CHILD_PART', normalizeComponentNo(row.componentNo))",
+    'bom-structure-actions',
+    'bom-structure-meta',
+    'preferredParentComponentNo',
+    'matchedParent',
+    'empty-line-actions',
     '组件 ${group.line.componentNo',
     'bom-source-diff-panel',
     'sourceBomForDiff',
+    'sourceBomDiffText',
+    'copySourceBomDiffText',
+    'bom-source-diff-actions',
+    'sourceBomReviewDialogVisible',
+    'selectedSourceBomDiffIssue',
+    'sourceBomReviewListDialogVisible',
+    'BOM 差异核对',
+    'BOM 差异核对记录',
+    '点击核对会在当前页面弹出对比窗口',
+    'sourceBomReviewedDiffKeys',
+    'sourceBomDiffReviews',
+    'sourceBomReviewForm',
+    'sourceBomDiffReviewedCount',
+    'sourceBomDiffStatusLabel',
+    'sourceBomDiffStatusTagType',
+    'sourceBomDiffFingerprint',
+    'sourceBomDiffReviewRecordText',
+    'formatSourceBomReviewAt',
+    'modelBomDiffReviews',
+    'confirmModelBomDiffReview',
+    'disableModelBomDiffReview',
+    'confirmSourceBomDiffReviewed',
+    'revokeSourceBomDiffReviewed',
+    'revokeSourceBomDiffReviewRow',
+    '确认保留差异',
+    '撤销核对',
+    '核对人',
+    'BOM 差异核对记录已保存',
+    'BOM 差异核对已撤销',
+    'openSourceBomDiffReviewDialog',
+    'sourceBomReviewLineText',
+    'source-bom-review-table',
+    'bom-source-diff-action-hint',
+    '{{ issue.suggestedAction }}',
+    '建议：${issue.suggestedAction}',
+    '按来源行补入',
+    'createCustomerLineFromSourceBomReview',
+    'editSourceBomReviewTargetLine',
+    'focusSourceBomReviewTargetLine',
+    'openSourceBomFromReview',
+    'suggestedAction',
+    'BomDiffField',
+    'bomLineReviewFields',
+    'source-bom-review-changed',
+    'routeTargetBomId',
+    'routeTargetLineId',
+    'routeTargetMaterialId',
+    'routeTargetMaterialKeyword',
+    'routeTargetMaterialStatus',
+    'routeTargetLineStructure',
+    'routeTargetParentComponentNo',
+    'routeTargetAction',
+    'highlightedBomLineId',
+    'route.query.bomId',
+    'route.query.lineId',
+    'route.query.bomName',
+    'route.query.lineStructure',
+    'route.query.parentComponentNo',
+    'route.query.materialId',
+    'route.query.materialKeyword',
+    'route.query.materialStatus',
+    'route.query.action',
+    'route.query.returnTo',
+    'modelBomReturnPath',
+    'modelBomReturnButtonText',
+    'returnFromModelBom',
+    "routeQueryText(route.query.returnTo) === '/orders' ? '/orders' : '/materials'",
+    "modelBomReturnPath.value === '/orders' ? '返回订单' : '返回零件管理'",
+    '只接受白名单返回路径',
+    "routeTargetAction.value !== 'editLine'",
+    "routeTargetAction.value !== 'createBom'",
+    "routeTargetAction.value !== 'copyBom'",
+    "routeTargetAction.value !== 'createLine'",
+    'openRouteTargetLineEditDialog',
+    'openRouteTargetCreateBomDialog',
+    'openRouteTargetCopyBomDialog',
+    'openRouteTargetCreateLineDialog',
+    'applyRouteTargetMaterialToLineForm',
+    'routeLineStructure',
+    'routeTargetLineStructure.value = routeLineStructure(lineStructure)',
+    'routeTargetParentComponentNo.value = normalizeComponentNo(parentComponentNo)',
+    'routeTargetLineNotice',
+    'routeTargetLineEditNotice',
+    'routeTargetLineStructureLabel',
+    '来自零件管理：已带入',
+    '来自订单 BOM 预览：',
+    '保存后请回到订单页点击“刷新 BOM 预览”',
+    'shouldPromptOrderPreviewRefresh',
+    'BOM 明细已保存，请回到订单页点击“刷新 BOM 预览”后再确认带入草稿',
+    '已定位到指定 BOM 明细',
+    '未找到要核对的 BOM 明细',
+    'route-target-line-alert',
+    'prefillBomCreateFormFromRoute',
+    'prefillBomCreateFormFromCurrentFilters',
+    'routeCreateBomDefaultCommon',
+    'bomForm.bomName = bomName.trim() || defaultRouteBomName',
+    'bomForm.isCommon = defaultCommon',
+    '留空表示全部机型/项目',
+    "return isCustomerBom ? '客户通用零件包' : '百胜通用零件包';",
+    "ElMessage.warning('请填写零件包名称')",
+    'projectModel: payloadProjectModel || undefined',
+    "ElMessage.warning('请填写客户零件包名')",
+    'projectModel: copyForm.projectModel.trim() || undefined',
+    "bomForm.customerScope = filters.customerId ? 'PRIVATE' : 'ALL'",
+    'defaultRouteBomName',
+    'prefillCopyFormFromSourceBom',
+    'await loadModelBoms();',
+    ':data-bom-line-id="row.id"',
+    'appendRouteTargetBom',
+    'focusRouteTargetLine',
+    'focusBomLine',
+    'activeBomHasRouteTargetLine',
+    'routeTargetActionApplied',
+    'ensureModelBomVisible',
+    'syncModelBomFiltersToSavedBom',
+    'modelBomFilterSummaryVisible',
+    'model-bom-filter-summary',
+    '@selected-customer-change="handleSelectedCustomerChange"',
+    'selectedCustomerName',
+    'selectedCustomerFilterLabel',
+    'modelBomKeywordFilterLabel',
+    'modelBomStatusFilterLabel',
+    'model-bom-name-cell',
+    'model-bom-name-tags',
+    '查看明细',
+    '编辑表头',
+    'setBomCommon',
+    'setModelBomCommon',
+    'modelBomOperationSavingKey',
+    'modelBomOperationKey',
+    ':loading="modelBomOperationSavingKey === modelBomOperationKey(row, \'common\')"',
+    ':loading="modelBomOperationSavingKey === modelBomOperationKey(row, \'disable\')"',
+    ':loading="modelBomOperationSavingKey === modelBomOperationKey(row, \'enable\')"',
+    ':loading="modelBomOperationSavingKey === modelBomOperationKey(row, \'delete\')"',
+    'if (modelBomOperationSavingKey.value) {',
+    'modelBomOperationSavingKey.value = operationKey',
+    'modelBomLineOperationSavingKey',
+    'modelBomLineOperationKey',
+    "type ModelBomLineOperationAction = 'disable' | 'enable' | 'reorder'",
+    ':close-on-click-modal="!saving"',
+    ':close-on-press-escape="!saving"',
+    ':before-close="handleSavingDialogClose"',
+    'warnSavingDialogClose',
+    'closeBomDialog',
+    'closeCopyDialog',
+    'closeLineDialog',
+    'BOM 正在保存，请等待保存完成',
+    ':loading="modelBomLineOperationSavingKey === modelBomLineOperationKey(row, \'disable\')"',
+    ':loading="modelBomLineOperationSavingKey === modelBomLineOperationKey(row, \'enable\')"',
+    'if (saving.value || modelBomLineOperationSavingKey.value) {',
+    'modelBomLineOperationKey(operationSource, \'reorder\')',
+    'row.isCommon',
+    'v-model="bomForm.isCommon"',
+    "status === 'DISABLED' && bomForm.isCommon",
+    "isCommon: bomForm.status === 'DISABLED' ? false : bomForm.isCommon",
+    '停用 BOM 会自动取消常用排序',
+    '恢复启用时可重新勾选常用',
+    'v-model="copyForm.isCommon"',
+    'copyForm.isCommon = Boolean(row.isCommon)',
+    'isCommon: copyForm.isCommon',
+    '复制时设为常用只影响目标客户/机型范围内的显示顺序和下单推荐优先级',
+    '常用只影响当前范围内的显示顺序和下单推荐优先级，不修改 BOM 明细、适用客户、订单、生产任务或库存。',
+    '常用说明：常用 BOM 只影响同一客户/机型范围内的显示顺序和下单推荐优先级，不修改 BOM 明细、适用客户、订单、生产任务或库存。',
+    '普通可用说明：非常用 BOM 仍可维护、复制和手动用于下单，只是不参与常用优先排序。',
+    'modelBomCommonDisplayOrder(row)',
+    'common-bom-sort-cell',
+    '常用显示顺序 ${modelBomCommonDisplayOrder(row) || \'-\'}',
+    'filters.commonOnly',
+    'filters.excludeGlobalAllProject',
+    'modelBomCommonFilterLabel',
+    'modelBomGlobalAllProjectFilterLabel',
+    'applyModelBomCommonFilter',
+    'modelBomCommonDragRows',
+    'startCommonBomDrag',
+    'dropCommonBom',
+    'modelBomCommonScopeKey',
+    'modelBomCommonDragRowsForScope',
+    'draggedCommonBomScopeKey',
+    'v-if="row.status === \'ENABLED\' && row.isCommon"',
+    'v-if="!isMobileLayout"',
+    'common-bom-drag-handle',
+    'aria-label="拖拽调整常用 BOM 顺序"',
+    '<el-icon><Rank /></el-icon>',
+    'reorderModelBomCommon',
+    'route.query.commonOnly',
+    'route.query.isCommon',
+    'route.query.excludeGlobalAllProject',
+    "filters.commonOnly = commonOnly === 'true'",
+    "filters.excludeGlobalAllProject = excludeGlobalAllProject === 'true'",
+    'excludeGlobalAllProject: filters.excludeGlobalAllProject || undefined',
+    'modelBomScopeSummaryTotals',
+    'BOM 范围固定格式清单',
+    'modelBomListText',
+    'formatModelBomListLineSummary',
+    '有效推荐行',
+    '停用/基础停用行',
+    '结构统计',
+    '核对项',
+    '停用统计',
+    '只统计启用且基础零件未停用的 BOM 明细；停用内容不参与后续下单推荐。',
+    '基础零件停用 {{ modelBomLineSummary(row).materialDisabledCount }}',
+    'const effectiveCount = (row.lines || []).filter(lineCountsAsActiveBomContent).length;',
+    '厚度已确认 ${confirmedThicknessCount} / 历史参考 ${historyThicknessCount} / 无厚度 ${noThicknessCount} / 需核对 ${summary.missingThicknessCount}',
+    '厚度说明：固定格式中只有“来源 当前BOM明细”表示该厚度已经保存到当前 BOM',
+    '停用 ${summary.disabledCount} / 基础零件停用 ${summary.materialDisabledCount}',
+    'openModelBomListTextDialog',
+    'copyModelBomListText',
+    'modelBomCustomerText',
+    'BOM 范围固定格式清单已复制',
+    '恢复启用',
+    'active-bom-disabled-alert',
+    "activeBom?.status === 'DISABLED'",
+    ":disabled=\"activeBom.status === 'DISABLED'\"",
+    ":disabled=\"activeBom?.status === 'DISABLED' || saving || Boolean(modelBomLineOperationSavingKey)\"",
+    "!lineForm.id && activeBom.value.status === 'DISABLED'",
+    '当前零件包已停用；不会参与下单推荐。恢复启用后才允许新增包内明细，已有明细仍可查看和编辑。',
+    '当前零件包已停用，请先恢复启用后再新增包内明细',
+    'activeBomLineSummary',
+    'enabledComponentNosForLines',
+    'summarizeModelBomLines',
+    'modelBomLineSummary(row).componentCount',
+    'model-bom-structure-tags',
+    '未匹配父级 ->',
+    '所属组件 ${parentComponentNo} 不存在或已停用',
+    'bom-summary-tags',
+    'modelBomConfirmDialogVisible',
+    'openModelBomConfirmDialog',
+    'handleModelBomConfirmDialogClose',
+    'class="model-bom-confirm-panel"',
+    'modelBomConfirmButtonText',
+    'modelBomConfirmButtonType',
+    '@change="searchModelBoms"',
+    '@clear="searchModelBoms"',
+    '<el-option label="全部" value="ALL" />',
+    'status: CommonStatus | \'ALL\'',
+    'status: filters.status',
+    "filters.status === 'ALL'",
+    'confirmCopyBom',
+    '当前阶段只允许从全部客户通用零件包复制为客户私有 BOM',
+    '复制后独立维护',
+    '复制后客户 BOM 独立维护，不会反向修改来源 BOM',
+    'confirmDisableBom',
+    'confirmDisableLine',
+    'enabledChildLinesForComponentLine',
+    '停用只影响后续推荐，不会删除历史订单、客户 BOM 副本或包内明细',
+    '该组件下 ${enabledChildLines.length} 个启用子零件会同步软停用，历史订单不受影响',
+    '该组件下没有启用子零件需要同步停用，历史订单不受影响',
+    '组件 {{ activeBomLineSummary.componentCount }}',
+    '子零件 {{ activeBomLineSummary.childPartCount }}',
+    '单独零件 {{ activeBomLineSummary.standalonePartCount }}',
+    '未匹配父级 {{ activeBomLineSummary.orphanPartCount }}',
+    '厚度核对 {{ activeBomLineSummary.missingThicknessCount }}',
+    '厚度核对 {{ modelBomLineSummary(row).missingThicknessCount }}',
+    'missingThicknessCount',
+    'formatLineThickness',
+    'function formatLineThicknessSourceForText(row: ModelBomLine)',
+    "return '当前BOM明细';",
+    "return '历史订单参考';",
+    '来源 ${formatLineThicknessSourceForText(row)}',
+    'function formatLineThicknessSourceLabel(row: ModelBomLine)',
+    'function lineThicknessSourceTagType(row: ModelBomLine)',
+    'function formatLineThicknessReviewReason(row: ModelBomLine)',
+    'function lineThicknessReviewTitle(row: ModelBomLine)',
+    'const thicknessReviewSummary = computed(() => summarizeThicknessReviewLines(thicknessReviewBom.value?.lines || []));',
+    'const thicknessReviewText = computed(() => {',
+    'BOM 厚度核对清单',
+    '确认厚度只写入当前 BOM 明细，不改历史订单、库存或生产记录。',
+    '序号\\tBOM顺序\\t结构\\t零件编码\\t零件名称\\t当前厚度\\t厚度来源\\t核对原因\\t默认图纸\\t规格',
+    'BOM 顺序与下方明细表连续编号一致',
+    '<el-table-column label="BOM 顺序" width="90">',
+    'displayBomLineOrder(line) || \'-\'',
+    'copyThicknessReviewText',
+    '暂无可复制的厚度核对清单',
+    '厚度核对清单已复制',
+    'function summarizeThicknessReviewLines(lines: ModelBomLine[])',
+    'function formatThicknessReviewBreakdown(lines: ModelBomLine[])',
+    '点击打开当前 BOM 厚度核对：需核对 ${summary.totalCount}，未填写 ${summary.noThicknessCount}，历史参考 ${summary.historyReferenceCount}，来源未确认 ${summary.unconfirmedSourceCount}',
+    'historyReferenceCount',
+    'unconfirmedSourceCount',
+    '需核对 {{ thicknessReviewSummary.totalCount }}',
+    '未填写 {{ thicknessReviewSummary.noThicknessCount }}',
+    '历史参考 {{ thicknessReviewSummary.historyReferenceCount }}',
+    '来源未确认 {{ thicknessReviewSummary.unconfirmedSourceCount }}',
+    '手机端仅查看厚度核对清单，核对并保存厚度请在电脑端操作。',
+    '手机端仅查看厚度核对清单，核对并保存厚度请在电脑端操作',
+    '保存后会继续提示剩余厚度核对项',
+    '当前 BOM 明细未填写厚度，请核对后保存',
+    '当前值来自历史订单，只是预填参考；保存后才写入当前 BOM 明细',
+    '厚度来源未确认，请核对后保存到当前 BOM 明细',
+    '核对原因',
+    "return '不适用（父级组件由子零件维护）';",
+    '@click.stop="openBomThicknessReview(row)"',
+    '@click.stop="openBomThicknessReview(activeBom)"',
+    '<el-button :disabled="!thicknessReviewText" @click="copyThicknessReviewText">复制核对清单</el-button>',
+    '@row-click="handleThicknessReviewLineAction"',
+    ':row-class-name="thicknessReviewRowClassName"',
+    'async function handleThicknessReviewLineAction(row: ModelBomLine)',
+    "guardDesktopOperation('核对并保存 BOM 明细厚度')",
+    'function lineThicknessReviewActionTitle(row: ModelBomLine)',
+    'function thicknessReviewRowClassName({ row }: { row: ModelBomLine })',
+    '!isMobileLayout.value && lineNeedsThicknessReview(row)',
+    'bom-thickness-review-table__row',
+    ':title="formatThicknessReviewBreakdown(row.lines || [])"',
+    ':title="formatThicknessReviewBreakdown(activeBomDisplayLines)"',
+    '@keydown.enter.prevent.stop="openBomThicknessReview(row)"',
+    '@keydown.space.prevent.stop="openBomThicknessReview(activeBom)"',
+    ':class="{ \'clickable-review-tag\': lineNeedsThicknessReview(row) && !isMobileLayout }"',
+    ':role="lineNeedsThicknessReview(row) && !isMobileLayout ? \'button\' : undefined"',
+    'lineThicknessReviewActionTitle(row)',
+    '@click.stop="handleThicknessReviewLineAction(row)"',
+    '@keydown.enter.prevent.stop="handleThicknessReviewLineAction(row)"',
+    '@keydown.space.prevent.stop="handleThicknessReviewLineAction(row)"',
+    'function lineCountsAsActiveBomContent(line: ModelBomLine)',
+    "return line.status === 'ENABLED' && line.materialStatus !== 'DISABLED';",
+    'const activeContentLines = lines.filter(lineCountsAsActiveBomContent);',
+    "line.partThicknessSource !== 'BOM_LINE'",
+    '历史订单厚度也必须人工保存到当前 BOM 后才算已核对',
+    '当前值来自历史订单，只作为预填建议',
+    '历史厚度 ${String(row.partThickness)}（需核对）',
+    'lineFormOriginalPartThicknessSource',
+    '普通编辑保存不会把未改动的历史厚度确认为 BOM 厚度',
+    'function formatLineFormThicknessStatusText()',
+    '历史订单参考厚度 ${lineForm.partThickness}，尚未保存到当前 BOM',
+    '已手工改为 ${lineForm.partThickness}，保存后写入当前 BOM 明细',
+    'function shouldSubmitLinePartThickness(lineThickness: number)',
+    '历史订单厚度只做普通编辑的参考值',
+    'shouldKeepHistoryThicknessPending',
+    '历史厚度仍需核对，点击“厚度核对”后才会写入当前 BOM',
+    'const payloadPartThickness = shouldSubmitPartThickness ? lineThickness : undefined;',
+    '父级组件由子零件拼接不提交厚度',
+    'function buildBomStructureGroups(lines: ModelBomLine[])',
+    'function appendBomStructureTextGroups(lines: string[], groups: BomStructureGroup[])',
+    'const effectiveGroups = buildBomStructureGroups(activeBomDisplayLines.value.filter(lineCountsAsActiveBomContent));',
+    '有效明细（用于后续推荐）',
+    '停用/基础零件停用明细（不参与后续推荐）',
+    '固定格式清单把停用内容单独列出',
+    'await openThicknessReviewLineEdit(lines[0]);',
+    'function remainingThicknessReviewLinesForBom(bomId: string, ignoredLineId = \'\')',
+    'function continueThicknessReviewAfterSave(bomId: string, savedLineId: string)',
+    '当前明细厚度仍未确认，请填写厚度并通过“厚度核对”保存到当前 BOM 明细',
+    '还有 1 条 BOM 厚度核对项，已打开下一条',
+    '还有 ${remainingLines.length} 条 BOM 厚度核对项',
+    'const savedFromThicknessReview = Boolean(lineForm.id && lineForm.id === thicknessReviewLineId.value);',
+    'await continueThicknessReviewAfterSave(thicknessReviewBomIdBeforeSave, savedLine.id);',
+    ':title="lineDialogTitle"',
+    '核对 BOM 明细厚度',
+    'thicknessReviewLineNotice',
+    '正在核对 ${lineForm.materialKeyword || \'当前 BOM 明细\'} 的默认厚度',
+    'await openLineEditDialog(row, { thicknessReview: true });',
+    'thicknessReviewLineId.value = \'\';',
+    '停用 {{ activeBomLineSummary.disabledCount }}',
+    '基础零件停用 {{ activeBomLineSummary.materialDisabledCount }}',
+    'row.materialStatus === \'DISABLED\'',
+    'lineForm.materialStatus',
+    'selectedMaterialKeyword',
+    'clearable',
+    'placeholder="编码 / 名称 / 拼音 / 图号 / 厚度 / 客户 / 订单"',
+    ':trigger-on-focus="true"',
+    ':debounce="250"',
+    '@clear="handleLineMaterialClear"',
+    '@input="handleLineMaterialKeywordInput"',
+    'InventoryMaterialSuggestion',
+    "import MaterialSuggestionOption from '../components/MaterialSuggestionOption.vue';",
+    '<MaterialSuggestionOption :item="item" />',
+    'erpApi.inventoryMaterialSuggestions(',
+    'activeBom.value?.customerId || filters.customerId',
+    'activeBom.value?.projectModel || filters.projectModel.trim()',
+    'resolveSuggestionMaterialId',
+    '该建议未匹配到启用的零件基础资料',
+    'lineFormMaterialSelectionRisk',
+    '请从搜索结果中选择零件，不能只输入关键词',
+    '零件关键词已被修改，请重新从搜索结果中选择零件',
+    'lineFormDuplicateLineRisk',
+    '该零件已经存在于当前零件包的相同结构位置：${structureText}',
+    'ElMessage.warning(lineFormDuplicateLineRisk.value)',
+    'function clearLineMaterialSelection',
+    'function handleLineMaterialKeywordInput',
+    '避免显示新关键词但保存旧 materialId',
+    ':disabled="lineFormEnableStatusDisabled"',
+    '当前基础零件已停用，只能保存为停用 BOM 明细',
+    '当前基础零件已停用，请先在零件管理中启用基础资料，或将 BOM 明细保存为停用',
+    'lineFormParentComponent',
+    'lineFormParentComponentNotice',
+    'lineFormParentComponentRisk',
+    'lineFormEnableStatusDisabled',
+    'lineFormEnableStatusDisabledReason',
+    'lineForm.status = \'DISABLED\'',
+    '所属组件 ${parentComponentNo} 不存在，请先维护组件行',
+    '所属组件 ${parentComponentNo} 已停用，请先启用组件行，或将子零件保存为停用',
+    '所属组件 ${parentComponentNo} 已停用，当前子零件只能保存为停用；如需启用推荐，请先启用组件行',
+    'ElMessage.warning(lineFormParentComponentRisk.value)',
+    ':type="row.materialStatus === \'DISABLED\' ? \'info\' : \'success\'"',
+    ':title="row.materialStatus === \'DISABLED\' ? \'请先启用零件基础资料\' : \'启用包内明细\'"',
+    'bom-line-status-tags',
+    '基础零件停用',
+    '基础零件已停用，请先在零件管理中启用基础资料，再启用 BOM 明细',
+    'placeholder="选择客户" status="ENABLED"',
+    '@click="saveBom(true)"',
+    'saveBom(addFirstLineAfterSave = false)',
+    "routeTargetAction.value === 'createLine' && Boolean(routeTargetMaterialId.value)",
+    'selectRouteCreateLineTargetBom',
+    'isExactRouteCreateLineBom',
+    'routeCreateLineNeedsNewScopedBom',
+    'routeCreateLineNewBomMessage',
+    '当前是客户范围，需先保存客户独立 BOM，避免把客户零件写入百胜通用 BOM',
+    'if (shouldOpenFirstLineDialog)',
+    "openLineCreateDialog(routeTargetMaterialId.value ? routeTargetLineStructure.value : 'COMPONENT', routeTargetParentComponentNo.value);",
+    'currentCustomerBomForSource',
+    'canCopyModelBomToCurrentCustomer',
+    'openCurrentCustomerBom',
+    'findExistingCustomerBomForCopy',
+    'findExistingModelBomForScope',
+    "erpApi.modelBoms({ customerId: customerId || undefined, projectModel, status: 'ALL' })",
+    'guardDuplicateCustomerBomCopy',
+    'guardExistingBomBeforeRouteCreateLine',
+    'guardDuplicateBomScopeBeforeSave',
+    'existing.id === currentBomId',
+    '当前客户/机型范围已存在 BOM，已定位到现有 BOM，请直接维护现有零件包',
+    '当前客户和机型已存在客户 BOM，已定位到现有 BOM，请继续维护，避免重复复制',
+    '当前范围已有停用 BOM，已定位到现有 BOM；请先启用后再添加明细，避免重复新建',
+    '当前范围已存在 BOM，已定位并继续添加当前零件明细',
+    '当前 BOM 已停用，请先启用后再添加明细',
+    '打开客户 BOM',
+    'defaultLinePartCategory',
+    "return '百胜通用件';",
+    "return activeBom.value.projectModel ? '客户定制件' : '客户通用件';",
+    'lineForm.partCategory = defaultLinePartCategory();',
+    '新增零件包已保存，可继续添加包内明细',
+    '机型零件包已保存并已定位到当前筛选',
+    '机型零件包保存失败，请确认后端服务和客户数据',
+    "客户零件包已复制生成${copyForm.isCommon ? '，并已设为常用' : ''}，可继续维护包内明细",
+    '包内零件保存失败，请检查组件关系、默认数量和后端服务',
+    '包内零件启用失败，请确认所属组件和零件基础资料状态',
+    '机型零件包启用失败，请确认客户和机型范围没有冲突',
     'buildSourceBomDiffIssues',
     'sourceActiveLines',
     'targetActiveLines',
+    'modelBomScopeSummaryTotals',
+    'modelBomScopeSummary',
+    'modelBomScopeSummaryVisible',
+    'modelBomPagination',
+    'handleModelBomPageChange',
+    'searchModelBoms',
+    'modelBomsPage',
+    '个零件包',
+    '机型零件包加载失败，请确认后端服务和筛选条件',
+    'sourceBomDiffRequestSeq',
+    'sourceBomDiffReviewRequestSeq',
+    '避免快速切换时旧响应覆盖当前差异',
+    'activeBom.value?.sourceBomId === sourceBomId',
+    'activeBom.value?.id === bom.id',
+    '来源 BOM 差异加载失败，请确认来源 BOM 和后端服务',
+    'BOM 差异核对记录加载失败，请确认当前 BOM 和后端服务',
+    '标准工序加载失败，BOM 行默认工艺暂不可选',
+    '客户选项加载失败，请确认后端服务',
+    'BOM 行图纸版本加载失败，请确认零件基础资料和后端服务',
+    'BomCustomerScope',
+    'originalBomCustomerScope',
+    'originalBomScopeCustomerIds',
+    'confirmedBomCustomerScope',
+    'bomCustomerScopeChangeConfirmed',
+    'bomScopeReviewDialogVisible',
+    'BOM 适用范围核对',
+    'bomScopeReviewRows',
+    'bomScopeReviewAlertText',
+    'openBomScopeChangeReviewDialog',
+    'resolveBomScopeReview',
+    'bomScopeChangeNeedsReview',
+    'bomScopeChangeBroadens',
+    'bomProjectScopeBroadens',
+    'normalizedBomCustomerIds',
+    'bomSelectedCustomerScopeAdds',
+    'bomCustomerScopeExpansionNeedsConfirmation',
+    'addedBomScopeCustomerNames',
+    'removedBomScopeCustomerNames',
+    'bomScopeVisibilityText',
+    'bomScopeNarrowingText',
+    '范围缩小',
+    '不会删除 BOM 明细、历史订单、生产任务或库存记录',
+    '只修改 BOM 后续可见范围和推荐范围',
+    'bom-scope-help--warning',
+    'bom-scope-review',
+    'bomScopeCustomerSelectionText',
+    'bomScopeSelectedCustomerCountText',
+    'bomScopeCustomerKeyword',
+    'customerOptionsLoading',
+    'customerOptionsTotal',
+    'bomScopeCustomerOptionLoadText',
+    '客户选项已加载',
+    'BOM 指定客户范围需要支持全选客户',
+    "erpApi.customersPage(undefined, 'ENABLED', customerOptionBatchLimit, offset)",
+    'bomScopeFilteredCustomerOptions',
+    'bomScopeCustomerDisplayOptions',
+    'customerSearchParts',
+    'pinyinSearchMatches(customerSearchParts(customer), keyword)',
+    ':filter-method="handleBomScopeCustomerSelectFilter"',
+    'handleBomScopeCustomerSelectFilter',
+    'selectFilteredBomScopeCustomers',
+    'removeFilteredBomScopeCustomers',
+    '勾选搜索结果',
+    '移除搜索结果',
+    'bomCustomerScopeBroadens',
+    'scopeChangeConfirmed',
+    '全部客户通用：任意客户下单时都可以看到该 BOM',
+    '已勾选 ${bomForm.customerIds.length} / ${total} 个客户',
+    'class="model-bom-scope-summary"',
+    'class="model-bom-scope-guide"',
+    'BOM 范围筛选或上方统计可直接区分通用 BOM、指定客户可用 BOM 和客户私有 BOM',
+    'modelBomScopeGuideItems',
+    '任意客户下单时都可见，只适合真正标准的百胜通用 BOM。',
+    '只对勾选客户可见，可在编辑表头里单选、多选或一次性全选客户。',
+    '只属于所属客户，不会显示在其他客户界面。',
+    'applyModelBomScopeFilter',
+    '统计基于当前关键字、客户、机型和状态，不受 BOM 范围和常用筛选影响。',
+    'modelBomScopeSummaryTotals.value = result.scopeSummary',
+    'erpApi.modelBomsPage(listFilters)',
     "line.status === 'ENABLED' && line.materialStatus !== 'DISABLED'",
+    'normalizeComponentNo(line.parentComponentNo)',
+    'childrenByParent.get(componentNo) || []',
+    'normalizeComponentNo(line.componentNo));',
+    'componentNo: normalizeComponentNo(row.componentNo) || undefined',
+    'lineFormComponentNoRisk',
+    '组件编号 ${componentNo} 已存在，请换一个编号',
+    'ElMessage.warning(lineFormComponentNoRisk.value)',
+    'lineFormExistingComponentChildLines',
+    'lineFormExistingComponentEnabledChildLines',
+    'formatComponentMutationChildSummary',
+    'lineFormComponentMutationChildSummary',
+    'lineFormComponentDisableChildSummary',
+    'lineFormComponentMutationNotice',
+    'confirmLineComponentMutation',
+    '确认组件结构变更',
+    '涉及子零件：${preview}${remainingCount}',
+    '保存后这些子零件会改为单独零件',
+    '仍指向 ${existingComponentNo} 的子零件会同步改挂到 ${nextComponentNo}',
+    '其中 ${enabledChildCount} 个启用子零件会同步停用',
+    '停用组件会同步停用仍挂靠的启用子零件',
+    'seenComponentNos',
+    ':value="normalizeComponentNo(item.componentNo)"',
+    '当前零件包 C001-C9999 自动组件编号已用完',
+    'isComponentNoOutOfRange',
+    '组件编号只支持 C001-C9999',
+    'Number(matched[1]) < 1 || Number(matched[1]) > 9999',
     '客户 BOM 缺少',
     '后续来源更新只提示差异，不自动覆盖客户 BOM',
     'erpApi.reorderModelBomLines(activeBom.value.id, { items })',
+    'return activeBomLineDisplayOrderMap.value.get(row.id) || row.displayOrder || 0;',
+    'formatLineOrderTitle(row)',
+    'BOM 明细顺序 ${displayBomLineOrder(row) || \'-\'}',
+    '顺序列显示连续编号 1、2、3；拖拽保存后仍按连续编号查看。',
+    'grid-template-columns: minmax(0, 1fr)',
+    'min-width: 2220px',
+    'overflow-wrap: anywhere',
+    'resize: vertical',
+    'scrollbar-gutter: stable both-edges',
+    'confirmSetBomCommon',
+    '常用 BOM 只影响当前范围内的显示顺序和下单推荐优先级',
+    'result.customerScopeCount',
+    'result.diffReviewCount',
+    'useDeviceProfile',
+    'v-if="!isMobileLayout" type="primary" @click="openBomCreateDialog"',
+    "v-if=\"row.status === 'ENABLED' && row.isCommon\"",
+    'common-bom-sort-cell',
+    '常用显示顺序 ${modelBomCommonDisplayOrder(row) || \'-\'}',
+    'v-if="!isMobileLayout && row.status === \'ENABLED\' && !row.isCommon"',
+    "modelBoms.value.filter((row) => row.status === 'ENABLED' && row.isCommon)",
+    "row.status !== 'ENABLED'",
+    '已停用 BOM 不能设为常用，请先恢复启用',
+    ':draggable="!saving && !modelBomLineOperationSavingKey && !isMobileLayout"',
+    'v-if="!isMobileLayout && selectedSourceBomDiffIssue',
+    '手机端只读',
     '手机端仅查看机型零件包，${actionLabel}请在电脑端操作'
   ];
   for (const snippet of modelBomSnippets) {
@@ -1708,25 +2629,335 @@ function verifyPartComponentStructureWorkflow() {
       addFailure(`ModelBomsView.vue must keep BOM component structure snippet: ${snippet}`);
     }
   }
+  if (modelBomSource.includes('↕')) {
+    addFailure('ModelBomsView.vue must use Rank icon buttons for drag handles instead of the text arrow character.');
+  }
+  if (modelBomSource.includes('ElMessageBox.confirm')) {
+    addFailure('ModelBomsView.vue BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
+  }
+  if (modelBomSource.includes('<el-button link type="primary" @click="openThicknessReviewLineEdit(row)">填写厚度</el-button>')) {
+    addFailure('ModelBomsView.vue thickness review should open by clicking the 厚度核对 tag, not by adding a separate 填写厚度 button.');
+  }
+
+  const modelBomSeedSnippets = [
+    'async function seedModelBoms()',
+    'await prisma.modelBomDiffReview.deleteMany()',
+    'await prisma.modelBomCustomerScope.deleteMany()',
+    'await prisma.modelBomLine.deleteMany()',
+    'await prisma.modelBom.deleteMany()',
+    'B3 百胜通用零件包',
+    '百胜全部机型通用零件包',
+    '常州客户通用零件包',
+    "projectModelScopeKey: 'ALL'",
+    'B3 常州客户零件包',
+    'B5 无锡客户零件包',
+    'componentNo: \'C001\'',
+    'parentComponentNo: \'C001\'',
+    'BOM seed 只写基础资料和推荐清单，不生成订单、生产任务或库存流水',
+    'await seedModelBoms();'
+  ];
+  for (const snippet of modelBomSeedSnippets) {
+    if (!seedSource.includes(snippet)) {
+      addFailure(`seed.ts must keep model BOM verification data snippet: ${snippet}`);
+    }
+  }
 
   const dashboardSnippets = [
+    'dashboardTextDialogVisible',
+    'dashboardFixedText',
+    'openDashboardTextDialog',
     'copyDashboardText',
+    'contextBomPanelVisible',
+    'contextBomLoading',
+    'contextBoms',
+    'contextBomScopeText',
+    'contextBomActiveCount',
+    'contextBomVisibleRows',
+    'contextBomCommonCount',
+    'contextBomCommonOnly',
+    'contextBomScopeFilter',
+    'toggleContextBomCommonOnly',
+    'toggleContextBomScopeFilter',
+    'contextBomAllCustomerCount',
+    'contextBomSelectedCustomerCount',
+    'contextBomPrivateCount',
+    'openContextBomMaintainByScope',
+    '维护当前范围',
+    '当前范围暂无匹配的常用 BOM',
+    '全部客户通用 {{ contextBomAllCustomerCount }}',
+    '指定客户可用 {{ contextBomSelectedCustomerCount }}',
+    '客户私有 {{ contextBomPrivateCount }}',
+    'scopeMode: contextBomScopeMode(bom)',
+    'loadContextBoms',
+    'erpApi.modelBoms({',
+    'contextBomSummary',
+    'contextBomPreviewLines',
+    'compareContextBomLinesByStoredOrder',
+    'normalizeContextBomComponentNo',
+    'childrenByParent',
+    'const orderedLines = contextBomActiveLines(bom);',
+    '零件管理当前适用 BOM 预览顺序跟机型 BOM 页一致',
+    'contextBomTotalCount',
+    'contextBomStructureLabel',
+    'context-bom-panel',
+    'context-bom-grid',
+    'openContextBomMaintain',
+    'openContextBomCreate',
+    'openContextCommonBomCreate',
+    'pushContextBomCreate',
+    ':disabled="Boolean(bomOperationSavingKey)" @click="openContextBomCreate"',
+    ':disabled="Boolean(bomOperationSavingKey)" @click="openContextCommonBomCreate"',
+    'openContextBomCopy',
+    'contextCustomerBomForSource',
+    'canCopyContextBomToCustomer',
+    'openContextCustomerBomDetail',
+    '已有客户 BOM',
+    '当前客户和机型已存在客户 BOM，请打开客户 BOM 继续维护，避免重复复制',
+    "status: 'ALL'",
+    "status: bom.status === 'DISABLED' ? 'ALL' : 'ENABLED'",
+    "action: shouldCreateLine ? 'createLine' : undefined",
+    "lineStructure: shouldCreateLine ? 'STANDALONE_PART' : undefined",
+    'targetProjectModel',
+    'bomMaintainProjectOptions',
+    'bomMaintainTargetProjectModel',
+    'normalizeBomScopeText',
+    'rowHasBomLineForCurrentScope',
+    'projectOptions.length === 1 ? projectOptions[0] :',
+    'Boolean(targetProjectModel) && !rowHasBomLineForCurrentScope(row)',
+    'canCreateBomLineForCurrentScope',
+    'bomMaintainActionLabel',
+    'bomCurrentScopeEmptyText',
+    '加入当前范围 BOM',
+    '先选择机型/项目后加入 BOM',
+    '当前客户/机型 BOM 未包含',
+    '当前范围未进 BOM',
+    '选择客户或机型后可加入 BOM',
+    'dashboard-bom-empty',
+    'materialRouteKeyword',
+    'keyword: shouldCreateLine ? undefined : row.partCode',
+    'materialId: shouldCreateLine ? row.id : undefined',
+    "action: 'createBom'",
+    "action: 'copyBom'",
+    'contextBomCreateName',
+    'contextBomCopyName',
+    "const commonText = isCommon ? '常用' : '';",
+    '客户${commonText}通用零件包',
+    '百胜${commonText}通用零件包',
+    '客户${commonText}零件包',
+    "return projectModel ? `${projectModel} 客户零件包` : '客户通用零件包';",
+    'openContextBomDetail',
+    'openProjectBomMaintain',
+    'disableProjectBom',
+    'loadProjectBomsForAction',
+    'exactProjectBomForCurrentScope',
+    'disableContextBom',
+    'deleteProjectBom',
+    'deleteContextBom',
+    'bomOperationSavingKey',
+    'projectBomOperationKey',
+    'contextBomOperationKey',
+    ':loading="bomOperationSavingKey === projectBomOperationKey(item, \'delete\')"',
+    ':loading="bomOperationSavingKey === contextBomOperationKey(bom, \'delete\')"',
+    'BOM 停用失败，请确认后端服务和当前 BOM 状态',
+    '后端会阻断仍被客户副本引用的来源 BOM',
+    'project-quick-item',
+    '查看/编辑BOM',
+    '停用BOM',
+    '删除BOM',
+    '查看/编辑会进入机型零件包页维护表头、明细和拖拽顺序',
+    '误操作创建的无效 BOM 可永久删除',
+    'result.customerScopeCount',
+    'result.diffReviewCount',
+    'erpApi.disableModelBom(bom.id)',
+    'erpApi.deleteModelBom(bom.id)',
+    '@selected-customer-change="handleSelectedCustomerChange"',
+    'selectedCustomerName',
+    'selectedCustomerFilterLabel',
+    'materialProjectScopeValues(row)',
+    '查看固定格式',
     '零件管理固定格式清单',
+    'class="fixed-format-textarea"',
+    'row.drawingSourceLabel',
+    '零件最新图纸',
+    'row.bomStructureLabel',
+    'row.bomStructureLabels',
+    'row.bomStructureDetails',
+    'dashboardBomStructureSummary',
+    'dashboardBomStructureDetailText',
+    'dashboardBomStructureTagType',
+    'openBomStructureDetail',
+    'lineId: detail.lineId',
+    "action: 'editLine'",
+    'dashboard-bom-structure-list',
+    'v-model="filters.drawingSource"',
+    'v-model="filters.bomStructureType"',
+    'v-model="filters.bomPresence"',
+    'v-model="filters.recentOrderPresence"',
+    'v-model="filters.sortBy"',
+    'v-model="filters.sortOrder"',
+    'drawingSourceSummaryItems',
+    'bomStructureSummaryItems',
+    'applyScopeTypeFilter',
+    'applyBomPresenceFilter',
+    'applyRecentOrderPresenceFilter',
+    'handleBomPresenceChange',
+    'handleLastOrderDateRangeChange',
+    'applyDrawingSourceFilter',
+    'applyBomStructureFilter',
+    'activeFilterItems',
+    'clearActiveFilter',
+    'active-filter-bar',
+    'active-filter-chip',
+    '清除全部',
+    'formatRangeText',
+    'summary-filter-chip',
+    'relation-boundary-alert',
+    '订单历史不等于正式适用范围',
+    '不会自动变成全部客户通用、客户私有 BOM 或正式适用范围',
+    "drawingSource: filters.drawingSource || undefined",
+    "bomStructureType: filters.bomStructureType || undefined",
+    "bomPresence: filters.bomPresence || undefined",
+    "recentOrderPresence: filters.recentOrderPresence || undefined",
+    'sortBy: filters.sortBy',
+    'sortOrder: filters.sortOrder',
+    '零件控制面板加载失败，请确认后端服务',
+    '机型 / 项目选项加载失败，请确认客户筛选和后端服务',
+    '当前适用零件包加载失败，请确认客户、机型和后端服务',
+    'drawingSourceFilterLabel',
+    'bomStructureFilterLabel',
+    'bomPresenceFilterLabel',
+    'recentOrderPresenceFilterLabel',
+    'dashboardSortByLabel',
+    'dashboardSortOrderLabel',
+    'BOM 结构',
+    'BOM 状态',
+    'withoutBomCount',
+    '下单记录',
+    'withoutRecentOrderCount',
+    '排序字段',
+    '来源：${row.drawingSourceLabel',
+    '结构：${dashboardBomStructureSummary(row)}',
+    'detail.structureLabel} @ ${detail.bomName}',
     "openMaterialMaintain(row, 'drawing')",
     "openMaterialMaintain(row, 'applicability')",
     'openMaterialDrawingMaintain(row)',
     'openMaterialApplicabilityMaintain(row)',
     'openBomMaintain(row)',
     'openSourceDetails(row)',
+    'sourceDetailsRequestSeq',
+    '库存来源查询失败，请确认零件和后端服务',
     'InventorySourceDetailsDialog',
+    'useDeviceProfile',
     'guardDesktopOperation',
     '手机端仅查看零件管理信息，${actionLabel}请在电脑端操作',
+    'mobile-readonly-note',
+    '手机端只保留库存来源查看入口',
+    '手机端只查看常用机型',
+    '手机端只查看零件包',
     'mobile-pagination-bar',
     'dashboard.hasMore',
     'loadMobileNextPage',
     '继续加载',
-    'quickProjectHiddenCount',
-    '上方下拉搜索',
+    'commonProjectCandidate',
+    'commonProjectSelectOptions',
+    'addCommonProjectFromSelect',
+    'removeCommonProject',
+    'resetCommonProjectsToDefault',
+    'project-quick-drag-handle',
+    'startCommonProjectDrag',
+    'handleCommonProjectDragOver',
+    'dropCommonProject',
+    'buildCommonProjectDragOrder',
+    'aria-label="拖拽调整常用机型顺序"',
+    '常用机型顺序已保存',
+    '拖拽手柄调整顺序',
+    'commonProjectSyncSource',
+    'commonProjectSyncText',
+    'commonProjectSyncTagType',
+    'commonProjectSaving',
+    'commonProjectBusy',
+    ':disabled="commonProjectBusy"',
+    'if (commonProjectBusy.value) {',
+    ':close-on-click-modal="!saving"',
+    ':close-on-press-escape="!saving"',
+    ':before-close="handleMaterialDialogClose"',
+    'closeMaterialDialog',
+    'managementConfirmDialogVisible',
+    'openManagementConfirmDialog',
+    'handleManagementConfirmDialogClose',
+    'class="management-confirm-panel"',
+    '下单前维护零件搜索记忆、适用范围、机型 BOM 和最近历史用料；库存数量由 InventoryBatch 独立计算。',
+    '这里只维护零件搜索记忆，方便后续下单搜索和 0 库存查看；不会修改历史订单、库存批次、库存数量、BOM 明细或生产记录。',
+    '仅搜索记忆',
+    '编辑零件搜索记忆',
+    '新增零件搜索记忆',
+    '零件搜索记忆正在保存，请等待保存完成',
+    '零件搜索记忆已保存',
+    '零件搜索记忆已新增',
+    '停用零件搜索记忆',
+    '零件搜索记忆已停用',
+    '零件搜索记忆已启用',
+    'project-quick-state',
+    '数据库已保存',
+    '本机缓存',
+    'refreshCommonProjects',
+    '常用机型已从数据库刷新',
+    'materialCommonProjectModels',
+    'saveMaterialCommonProjectModels',
+    'setContextBomCommon',
+    'confirmSetContextBomCommon',
+    "contextBomOperationKey(bom, 'common')",
+    'enableProjectBom',
+    'enableContextBom',
+    "exactProjectBomForCurrentScope(rows, targetProjectModel, 'ANY')",
+    '恢复启用',
+    '是否设为常用需要单独人工设置',
+    '不自动恢复常用排序',
+    "bom.status === 'ENABLED' && !bom.isCommon",
+    "v-if=\"bom.status === 'ENABLED' && bom.isCommon && !isMobileLayout\"",
+    "contextBomVisibleRows.value.filter((bom) => bom.status === 'ENABLED' && bom.isCommon)",
+    "bom.status !== 'ENABLED'",
+    '已停用 BOM 不能设为常用，请先恢复启用',
+    '客户零件包也可以设为常用；常用只影响当前范围的显示顺序和下单推荐优先级，不修改 BOM 明细、适用客户、订单、生产任务或库存。',
+    '系统只会停用零件搜索记忆，不会删除历史订单、库存批次、库存数量或生产记录。',
+    '当前适用零件包范围清单',
+    'contextBomFixedText',
+    '常用说明：常用 BOM 只影响同一客户/机型范围内的显示顺序和下单推荐优先级，不修改 BOM 明细、适用客户、订单、生产任务或库存。',
+    '普通可用说明：非常用 BOM 仍可维护、复制和手动用于下单，只是不参与常用优先排序。',
+    'contextBomCommonDisplayOrder(bom)',
+    '常用 {{ contextBomCommonDisplayOrder(bom) }}',
+    '常用显示顺序 ${contextBomCommonDisplayOrder(bom) || \'-\'}',
+    'openContextBomTextDialog',
+    'copyContextBomText',
+    'contextBomCustomerText',
+    '当前适用零件包范围清单已复制',
+    'contextBomCommonDragRows',
+    'contextBomCommonScopeKey',
+    'contextBomCommonDragRowsForScope',
+    'context-bom-common-drag-handle',
+    'aria-label="拖拽调整常用 BOM 顺序"',
+    '<el-icon><Rank /></el-icon>',
+    'startContextBomDrag',
+    'dropContextBom',
+    'reorderModelBomCommon',
+    '当前适用常用 BOM 顺序已保存',
+    'scopeMode: contextBomScopeFilter.value || undefined',
+    "commonOnly: contextBomCommonOnly.value ? 'true' : undefined",
+    "isCommon: createAsCommon ? 'true' : undefined",
+    'const createAsCommon = defaultCommon || contextBomCommonOnly.value',
+    '新建常用零件包仍只维护 BOM 表头和明细',
+    '设为常用',
+    '取消常用',
+    '搜索机型加入常用',
+    'allow-create',
+    '默认 B3/B5',
+    'useRoute',
+    'applyRouteQueryFilters',
+    'routeStatusFilter',
+    'route.query.customerId',
+    'route.query.excludeGlobalAllProject',
+    'customerContextExcludesGlobalAllProject',
+    'excludeGlobalAllProject: Boolean(scopedCustomerId)',
     "openDesktopMaintenancePage('/inventory/materials'",
     "path: '/inventory/materials'",
     "path: '/inventory/model-boms'"
@@ -1736,10 +2967,23 @@ function verifyPartComponentStructureWorkflow() {
       addFailure(`MaterialsManagementView.vue must keep control panel quick action snippet: ${snippet}`);
     }
   }
+  if (materialDashboardSource.includes('↕')) {
+    addFailure('MaterialsManagementView.vue must use Rank icon buttons for drag handles instead of the text arrow character.');
+  }
+  if (materialDashboardSource.includes('ElMessageBox.confirm')) {
+    addFailure('MaterialsManagementView.vue material and BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
+  }
 
   const materialProjectModelSnippets = [
     'scoreByProject',
     '客户常用机型按历史下单和 BOM/适用范围热度排序',
+    "customerScopeMode: 'ALL'",
+    "customerScopeMode: 'SELECTED', customerScopes: { some: { customerId, status: 'ENABLED' } }",
+    'commonProjectModels',
+    'saveCommonProjectModels',
+    'materialCommonProjectModel',
+    "label: '仅搜索记忆'",
+    '仅存在于零件搜索记忆，尚未确认客户适用范围或 BOM，不代表库存可用。',
     'score.orderCount += 1',
     'latestOrderTime',
     'latestMasterTime',
@@ -1751,25 +2995,217 @@ function verifyPartComponentStructureWorkflow() {
     }
   }
 
+  const materialDashboardStructureSnippets = [
+    'dashboardDrawingSource',
+    'dashboardDrawingSourceLabel',
+    'BOM 指定图纸',
+    '零件默认图纸',
+    '零件最新图纸',
+    '历史订单图纸',
+    "return materialDrawing.isDefault ? 'MATERIAL_DEFAULT' : 'MATERIAL_LATEST';",
+    'dashboardBomStructureType',
+    'dashboardBomStructureLabel',
+    'dashboardBomStructureDetails',
+    'dashboardBomOrderedDisplayLines',
+    'normalizeDashboardBomLineType',
+    'normalizeDashboardBomComponentNo',
+    "line.material?.status !== 'DISABLED'",
+    "this.dashboardBomLineDisplayOrder(a) - this.dashboardBomLineDisplayOrder(b)",
+    "lineType: true",
+    "componentNo: true",
+    "parentComponentNo: true",
+    "material: {",
+    'bomLinesMatchingContext',
+    'lineId: line.id',
+    'bomStructureTypes',
+    'bomStructureLabels',
+    'bomStructureDetails',
+    'drawingSourceCounts',
+    'bomStructureCounts',
+    'withoutBomCount',
+    'withoutRecentOrderCount',
+    'dashboardCountMap',
+    'compareDashboardRows',
+    'compareDashboardDefault',
+    'compareDashboardNullableTime',
+    'compareDashboardText',
+    'compareDashboardNumber',
+    'rowMatchesDrawingSource',
+    'rowMatchesBomStructure',
+    'rowMatchesBomPresence',
+    'rowMatchesRecentOrderPresence',
+    'searchParts,',
+    'pinyinSearchMatches(row.searchParts, keyword)',
+    '零件管理关键字搜索必须逐字段匹配',
+    '子零件 ->',
+    'projectScopeEntries',
+    'projectScopeMatchesCustomer',
+    '项目筛选必须按当前客户识别“全部机型/项目”',
+    'hasScopedDashboardContext',
+    'displayHistoryRows',
+    '只代表该客户曾使用，不会自动面向全部客户，也不等于正式适用范围或客户私有 BOM',
+    'displayApplicabilities',
+    'applicabilitiesMatchingContext',
+    'customerScopedBomLines',
+    'bomLineMatchesCustomerScope',
+    'excludeGlobalAllProject',
+    "line.bom.customerScopeMode === 'SELECTED'",
+    'line.bom.customerScopes.some',
+    'bomCustomerScopeIds',
+    'bomLineHasGlobalCustomerScope',
+    'searchParts = this.searchParts(material, displayHistoryRows, displayApplicabilities, displayBomLines)',
+    'BOM 展示只看当前上下文',
+    "line.bom.projectModelScopeKey === 'ALL'"
+  ];
+  for (const snippet of materialDashboardStructureSnippets) {
+    if (!materialsServiceSource.includes(snippet)) {
+      addFailure(`materials.service.ts must keep material dashboard drawing source and BOM structure snippet: ${snippet}`);
+    }
+  }
+
+  const materialDashboardDtoSnippets = [
+    "drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | 'NONE'",
+    "bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE'",
+    "bomPresence?: 'WITH_BOM' | 'WITHOUT_BOM'",
+    "recentOrderPresence?: 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER'",
+    "sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE' | 'UPDATED_AT'",
+    "sortOrder?: 'ASC' | 'DESC'"
+  ];
+  const materialsDtoSource = readFile('backend/src/modules/materials/dto.ts');
+  const frontendTypesSource = readFile('frontend/src/types/erp.ts');
+  const frontendApiSourceForDashboard = readFile('frontend/src/api/erp.ts');
+  for (const snippet of materialDashboardDtoSnippets) {
+    if (!materialsDtoSource.includes(snippet) || !frontendApiSourceForDashboard.includes(snippet)) {
+      addFailure(`Material dashboard filter DTO/API must keep snippet: ${snippet}`);
+    }
+  }
+  if (!frontendTypesSource.includes("drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | null")) {
+    addFailure('MaterialDashboardRow must keep drawingSource response field.');
+  }
+  if (!frontendTypesSource.includes('hasGlobalProjectScope?: boolean')) {
+    addFailure('MaterialDashboardRow must expose global project scope for dashboard display.');
+  }
+  if (!frontendTypesSource.includes("drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST'")) {
+    addFailure('ModelBomLine must distinguish BOM line, material default, and material latest drawing sources.');
+  }
+  if (!frontendTypesSource.includes("bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | null")) {
+    addFailure('MaterialDashboardRow must keep bomStructureType response field.');
+  }
+  if (!frontendTypesSource.includes("bomStructureTypes?: Array<'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART'>")) {
+    addFailure('MaterialDashboardRow must keep bomStructureTypes response field.');
+  }
+  if (!frontendTypesSource.includes('bomStructureLabels?: string[]')) {
+    addFailure('MaterialDashboardRow must keep bomStructureLabels response field.');
+  }
+  if (!frontendTypesSource.includes('export interface MaterialDashboardBomStructureDetail')) {
+    addFailure('MaterialDashboardRow must keep BOM structure detail response type.');
+  }
+  if (!frontendTypesSource.includes('lineId: string')) {
+    addFailure('MaterialDashboardBomStructureDetail must keep lineId for direct BOM line maintenance.');
+  }
+  if (!frontendTypesSource.includes('customerId?: string | null')) {
+    addFailure('MaterialDashboardBomStructureDetail must keep customerId for exact customer BOM scope checks.');
+  }
+  if (!frontendTypesSource.includes('bomStructureDetails?: MaterialDashboardBomStructureDetail[]')) {
+    addFailure('MaterialDashboardRow must keep bomStructureDetails response field.');
+  }
+  if (!materialsServiceSource.includes('customerId: line.bom.customerId')) {
+    addFailure('materials.service.ts must include BOM customerId in dashboard BOM structure details.');
+  }
+  if (!frontendTypesSource.includes("drawingSourceCounts: Partial<Record<'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | 'NONE', number>>")) {
+    addFailure('MaterialDashboardSummary must keep drawingSourceCounts summary field.');
+  }
+  if (!frontendTypesSource.includes("bomStructureCounts: Partial<Record<'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE', number>>")) {
+    addFailure('MaterialDashboardSummary must keep bomStructureCounts summary field.');
+  }
+  if (!frontendTypesSource.includes('withoutBomCount: number')) {
+    addFailure('MaterialDashboardSummary must keep withoutBomCount summary field.');
+  }
+  if (!frontendTypesSource.includes('withoutRecentOrderCount: number')) {
+    addFailure('MaterialDashboardSummary must keep withoutRecentOrderCount summary field.');
+  }
+
   const materialLibraryRouteActionSnippets = [
     'const routeActionApplied = ref(false)',
     'applyRouteActionAfterLoad',
     "action !== 'drawing' && action !== 'applicability'",
     'openDrawingDialog(matchedMaterial)',
     'openApplicabilityDialog(matchedMaterial)',
+    'materialPagination',
+    'handleMaterialPageChange',
+    '条零件基础资料',
+    'erpApi.inventoryMaterialsPage',
     'guardDesktopOperation',
     '手机端仅查看零件基础资料，${actionLabel}请在电脑端操作',
-    "openDesktopMaintenancePage('/inventory/model-boms'"
+    'useDeviceProfile',
+    'mobile-readonly-note',
+    '手机端只展示零件基础资料',
+    "openDesktopMaintenancePage('/inventory/model-boms'",
+    'materialOperationSavingId',
+    ':loading="materialOperationSavingId === row.id"',
+    'if (materialOperationSavingId.value) {',
+    'applicabilityOperationSavingId',
+    ':loading="applicabilityOperationSavingId === row.id"',
+    'if (applicabilityOperationSavingId.value) {',
+    'drawingOperationSavingId',
+    ':loading="drawingOperationSavingId === row.id"',
+    'if (drawingOperationSavingId.value) {',
+    'materialImportBusy',
+    'importRefreshing',
+    'importDiscarding',
+    'importDeletingFileId',
+    ':close-on-click-modal="!saving"',
+    ':close-on-press-escape="!saving"',
+    ':before-close="handleMaterialDialogClose"',
+    'closeMaterialDialog',
+    ':before-close="handleApplicabilityDialogClose"',
+    'applicabilitySaving.value',
+    ':before-close="handleDrawingDialogClose"',
+    'drawingSaving.value',
+    '零件基础库加载失败，请确认后端服务和筛选条件',
+    '零件适用范围加载失败，请确认后端服务和当前零件状态',
+    '零件图纸版本加载失败，请确认后端服务和当前零件状态',
+    '零件基础资料正在保存，请等待保存完成',
+    '零件库导入会话创建失败，请确认后端服务和上传目录配置',
+    '零件库导入预览刷新失败，请确认导入会话和后端服务',
+    'importDialogVisible.value = false;',
+    'materialImportSession.value = undefined;',
+    'materialImportConfirmDialogVisible',
+    'confirmMaterialImportAction',
+    'materialImportCommitSummaryText',
+    'materialStatusDialogVisible',
+    'confirmDisableMaterial',
+    'class="material-confirm-panel"',
+    '写入前仍以后端重新校验和当前 `previewToken` 为准。',
+    '零件库文件上传失败',
+    '导入文件已删除，预览已刷新',
+    '零件库导入写入失败',
+    '零件库导入可预览写入零件基础资料、适用范围和来源加工关系；必须人工确认，不会创建订单、库存或生产任务。',
+    '维护下单可搜索的零件搜索记忆',
+    '库存数量从 InventoryBatch 实时汇总；停用只影响后续搜索和推荐，不删除历史订单、库存批次、库存数量或生产记录。',
+    '这里只维护 `Material` 搜索记忆。库存数量、订单来源、客户/机型适用范围、BOM 和来源加工关系由独立功能维护；保存不会改写历史订单、库存批次或生产记录。',
+    '系统只会停用 `Material` 搜索记忆',
+    '不会删除历史订单、库存批次、库存数量、生产记录或导入追溯。'
   ];
   for (const snippet of materialLibraryRouteActionSnippets) {
     if (!materialsViewSource.includes(snippet)) {
       addFailure(`MaterialsView.vue must keep control-panel route action snippet: ${snippet}`);
     }
   }
+  if (materialsViewSource.includes('ElMessageBox.confirm')) {
+    addFailure('MaterialsView.vue material library key operations must use el-dialog instead of ElMessageBox.confirm');
+  }
 
   const materialTransformMobileSnippets = [
     '手机端仅查看来源加工关系',
     '手机端仅查看来源加工关系，${actionLabel}请在电脑端操作',
+    'mobile-readonly-note',
+    '手机端只保留库存查看入口',
+    'useDeviceProfile',
+    'v-if="!isMobileLayout"',
+    ':loading="prefillLoading"',
+    ':disabled="transformOperationBusy"',
+    '@click="openCreateDialog"',
     'guardDesktopOperation',
     '新增、编辑、停用和启用来源加工关系请在电脑端操作'
   ];
@@ -1781,7 +3217,16 @@ function verifyPartComponentStructureWorkflow() {
 
   const materialTransformProcessSnippets = [
     'defaultProcessRouteSteps',
+    "import { Rank } from '@element-plus/icons-vue'",
+    '<el-icon><Rank /></el-icon>',
     "erpApi.processDefinitions(undefined, 'ENABLED')",
+    'handleDefaultProcessRouteChange',
+    'startTransformProcessDrag',
+    'dropTransformProcess',
+    'reorderTransformProcessStep',
+    'removeTransformProcessStep',
+    'transform-process-drag-handle',
+    '建议工艺只作为下单和库存来源核对的初始建议',
     '.split(/(?:->|→|[、,，;；\\n\\r]+)/)',
     "splitDefaultProcessRoute(row.defaultProcessRoute || '')",
     "defaultProcessRoute: form.defaultProcessRouteSteps.join('、') || undefined"
@@ -1789,6 +3234,142 @@ function verifyPartComponentStructureWorkflow() {
   for (const snippet of materialTransformProcessSnippets) {
     if (!materialTransformsSource.includes(snippet)) {
       addFailure(`MaterialTransformsView.vue must keep standard process selection for transform default route snippet: ${snippet}`);
+    }
+  }
+
+  const materialTransformUsageSnippets = [
+    '来源加工关系使用逻辑',
+    '来源加工关系加载失败，请确认后端服务和筛选条件',
+    '标准工序加载失败，来源加工关系默认工艺暂不可选',
+    '提交生产时提示',
+    '人工选择库存',
+    '不自动影响库存',
+    '不会生成订单、不会创建生产任务、不会扣减来源库存',
+    '保存后仍不会自动扣库存或提交生产',
+    'targetPartCode: filters.targetPartCode.trim() || undefined',
+    'applyRouteFilters',
+    'route.query.targetPartCode',
+    'prefillTargetMaterialFromFilter',
+    "erpApi.inventoryMaterials({ keyword: targetPartCode, status: 'ENABLED' })",
+    'normalizeMaterialCode(item.partCode) === normalizeMaterialCode(targetPartCode)',
+    'handleSourceMaterialKeywordInput',
+    'handleTargetMaterialKeywordInput',
+    'sourceMaterialSelectedLabel',
+    'targetMaterialSelectedLabel',
+    '必须清理旧 id',
+    'watch(',
+    'openTransformSourceDetails',
+    'openTransformTargetDetails',
+    'openTransformInventoryDetails',
+    'sourceDetailsRequestSeq',
+    '库存查询失败，请确认零件和后端服务',
+    'ruleStatusDialogVisible',
+    'ruleStatusTarget',
+    'ruleStatusAction',
+    'ruleStatusActionText',
+    'ruleStatusDialogTitle',
+    'class="transform-status-confirm"',
+    'openRuleStatusDialog',
+    'handleRuleStatusDialogClose',
+    'closeRuleStatusDialog',
+    'confirmRuleStatusChange',
+    '来源加工关系状态正在保存，请等待操作完成',
+    '本操作不会自动扣减来源库存、提交生产或生成订单。',
+    'operationSavingId',
+    'transformOperationBusy',
+    ':disabled="transformOperationBusy"',
+    'if (transformOperationBusy.value) {',
+    ':close-on-click-modal="!saving"',
+    ':close-on-press-escape="!saving"',
+    ':before-close="handleRuleDialogClose"',
+    'closeRuleDialog',
+    '来源加工关系正在保存，请等待保存完成',
+    ':disabled="sourceDetailsLoading"',
+    'operationSavingId.value === row.id',
+    ':loading="operationSavingId === row.id"',
+    '来源加工关系停用失败',
+    '来源加工关系启用失败',
+    '停用只关闭后续建议入口',
+    '启用后只恢复建议展示',
+    '不删除关系记录，也不改订单、生产任务、库存批次或库存流水',
+    '是否使用库存仍必须在库存来源核对中人工确认',
+    'transform-dialog-hint',
+    '这里只保存来源加工建议，用于后续订单选料和库存来源核对提示。',
+    '保存、启用或停用关系都不会生成订单、不会创建生产任务、不会扣减来源库存。',
+    '建议工艺只作为初始建议；订单保存后每个订单零件仍会保留自己的流程快照。',
+    '是否使用目标库存、来源库存再加工或重新生产，仍由提交生产时人工核对确认。',
+    '来源库存',
+    '目标库存',
+    '库存概况',
+    '库存判断',
+    '查看固定格式',
+    '复制当前结果',
+    'transformRulesFixedText',
+    '业务边界：只作为下单和库存来源核对建议；不会自动扣库存、不会自动提交生产、不会自动生成订单或生产任务。',
+    '当前筛选：${filterText}',
+    '库存判断汇总：先核对目标库存 ${decisionSummary.targetStock}；可核对来源再加工 ${decisionSummary.sourceRework}；暂无库存需生产 ${decisionSummary.noStock}',
+    'transformRulesTextDialogVisible',
+    'openTransformRulesTextDialog',
+    '暂无可查看的来源加工关系清单',
+    'class="fixed-format-textarea"',
+    'copyTransformRulesText',
+    '来源加工关系固定格式清单已复制',
+    '来源加工关系当前结果库存判断汇总',
+    'transformDecisionSummary',
+    'transformCustomerFilterLabel',
+    'transformCustomerFilterLabel.value',
+    'setInventoryDecisionFilter',
+    '暂无库存需生产',
+    'transformInventoryDecision',
+    'transformInventoryDecisionReason',
+    '判断依据',
+    '目标零件有 ${formatQuantity(targetQuantity, row.targetUnit)} 可用库存',
+    '目标零件暂无可用库存，来源零件有 ${formatQuantity(sourceQuantity, row.sourceUnit)} 可用库存',
+    '来源零件和目标零件都暂无可用库存，提交生产时仍需人工确认重新生产。',
+    '先核对目标库存',
+    '可核对来源再加工',
+    '暂无库存，考虑生产',
+    '来源库存',
+    '目标库存',
+    '有可用库存',
+    'sourceStockStatus',
+    'targetStockStatus',
+    'inventoryDecision',
+    '<el-option label="全部" value="ALL" />',
+    "status: CommonStatus | 'ALL'",
+    'sourceAvailableQuantity',
+    'sourceAvailableBatchCount',
+    'InventorySourceDetailsDialog',
+    "erpApi.inventoryMaterialSourceDetails(partCode"
+  ];
+  for (const snippet of materialTransformUsageSnippets) {
+    if (!materialTransformsSource.includes(snippet)) {
+      addFailure(`MaterialTransformsView.vue must keep source-transform usage boundary snippet: ${snippet}`);
+    }
+  }
+  if (materialTransformsSource.includes('ElMessageBox.confirm')) {
+    addFailure('MaterialTransformsView.vue source-transform status changes must use el-dialog instead of ElMessageBox.confirm');
+  }
+
+  const materialTransformPaginationSnippets = [
+    ['MaterialTransformsView.vue', materialTransformsSource, 'rulePagination'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'handleRulePageChange'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'searchRules'],
+    ['MaterialTransformsView.vue', materialTransformsSource, '条来源加工关系'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'erpApi.materialTransformRulesPage'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'materialTransformRulesPage(filters: MaterialTransformRuleFilters = {})'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "withPage: 'true'"],
+    ['frontend/src/types/erp.ts', frontendTypesSource, 'export interface MaterialTransformRuleListResponse'],
+    ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'withPage?: string'],
+    ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'limit?: number'],
+    ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'offset?: number'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, "const withPage = query.withPage === 'true'"],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'const totalCount = serialized.length'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'hasMore: offset + items.length < totalCount']
+  ];
+  for (const [file, source, snippet] of materialTransformPaginationSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${file} must keep paginated source-transform rule loading snippet: ${snippet}`);
     }
   }
 
@@ -1805,6 +3386,52 @@ function verifyPartComponentStructureWorkflow() {
       }
     }
   }
+  const orderDetailFixedFormatSnippets = [
+    'orderStructureTextDialogVisible',
+    'openOrderStructureTextDialog',
+    '订单固定格式清单',
+    'class="order-structure-textarea"',
+    'orderStructureText',
+    '`结构 ${orderLineStructureLabel(line)}`',
+    '`父级 ${orderLineStructureHint(line)}`',
+    '`项目 ${line.projectModel || \'-\'}`',
+    '`厚度 ${formatOrderLineThickness(line)}`',
+    '`履约 ${fulfillmentModeLabel(line.fulfillmentMode)}`',
+    '组件不适用',
+    '父级组件由子零件分别维护厚度',
+    '不适用（父级组件由子零件维护）',
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 订单 | 计划 | 交期 | 图纸 | 工艺 | 履约'
+  ];
+  for (const snippet of orderDetailFixedFormatSnippets) {
+    if (!orderDetailSource.includes(snippet)) {
+      addFailure(`OrderDetailView.vue must keep fixed-format order detail dialog snippet: ${snippet}`);
+    }
+  }
+  const processSelectionFixedFormatSnippets = [
+    'processStructureTextDialogVisible',
+    'openProcessStructureTextDialog',
+    '流程固定格式清单',
+    'class="process-structure-textarea"',
+    'processComponentNoSet',
+    'isProcessLineMissingParentComponent',
+    'processLineStructureLabel',
+    'processLineStructureHint',
+    'processLineStructureTagType',
+    'formatProcessStructureTextLine',
+    '`结构 ${processLineStructureLabel(line)}`',
+    '`父级 ${processLineStructureHint(line)}`',
+    '`项目 ${line.projectModel || \'-\'}`',
+    '`厚度 ${formatProcessLineThickness(line)}`',
+    '不适用（父级组件由子零件维护）',
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 订单 | 计划 | 交期 | 图纸 | 履约 | 流程',
+    '未匹配父级',
+    '所属组件不存在'
+  ];
+  for (const snippet of processSelectionFixedFormatSnippets) {
+    if (!processSelectionSource.includes(snippet)) {
+      addFailure(`ProcessSelectionView.vue must keep fixed-format process structure dialog snippet: ${snippet}`);
+    }
+  }
 
   const orderBomRecommendationSnippets = [
     '零件包推荐',
@@ -1815,12 +3442,70 @@ function verifyPartComponentStructureWorkflow() {
     'buildBomComponentNoMap',
     'nextAvailableOrderComponentNo',
     'orderImportableModelBomLines',
+    'modelBomProjectScopeText',
+    'modelBomImportProjectModel',
+    '全部机型/项目（带入 ${importProjectModel}）',
+    'targetProjectModel = modelBomImportProjectModel(bom)',
+    'line.projectModel = targetProjectModel',
+    "line.partThickness = bomLine.lineType === 'COMPONENT' ? 0 : materialThickness > 0 ? materialThickness : 0",
+    'orderLineNeedsThicknessReview',
+    'isModelBomLineMissingThickness',
+    'missingThicknessText',
+    '厚度需核对',
+    '厚度 ${thicknessText}',
+    'lineStructureLabel',
+    'lineStructureHint',
+    'lineStructureTagType',
+    '子零件 ->',
+    '单独零件',
+    'import-line-structure-cell',
+    'childrenByParent.get(normalizeComponentNo(line.componentNo))',
+    'let componentNoMap: Map<string, string>;',
+    'error instanceof Error ? error.message',
     'componentNoMap.get(sourceParentComponentNo)',
+    'MATERIAL_LATEST',
+    '零件最新',
     '组件编号已避让当前草稿',
     '父组件缺失或组件编号无效的 BOM 行',
-    'applyModelBomToOrder',
+    'openModelBomApplyDialog',
+    'modelBomApplyDialogVisible',
+    'modelBomApplyRefreshLoading',
+    'modelBomApplySourceOpened',
+    'modelBomApplyRefreshReminderShown',
+    'modelBomApplyQuantityMultiplier',
+    'modelBomApplyPreviewOrderLines',
+    'modelBomApplyMissingThicknessLines',
+    'modelBomApplyMissingThicknessSourceLines',
+    'modelBomApplySourceBomActionText',
+    'modelBomApplyRequiresRefresh',
+    "line.lineType === 'COMPONENT' ? '不适用（父级组件由子零件维护）'",
+    'buildModelBomApplyPreview',
+    'refreshModelBomApplyPreview',
+    '刷新 BOM 预览',
+    'await erpApi.modelBom(preview.bom.id)',
+    'BOM 预览已刷新，厚度需核对已清除',
+    'handleModelBomApplyWindowFocus',
+    "window.addEventListener('focus', handleModelBomApplyWindowFocus)",
+    "window.removeEventListener('focus', handleModelBomApplyWindowFocus)",
+    '如果已在 BOM 维护页补齐厚度，请点击“刷新 BOM 预览”读取最新 BOM。',
+    '刷新前不会把旧预览带入草稿',
+    'modelBomApplyPreviewOrderLines.length === 0 || modelBomApplyRequiresRefresh',
+    '需核对厚度明细',
+    '打开 BOM 维护补厚度',
+    'openModelBomApplySourceBom',
+    "path: '/inventory/model-boms'",
+    "query.action = 'editLine'",
+    'const routeTarget = router.resolve',
+    "window.open(routeTarget.href, '_blank')",
+    'openedWindow.opener = null',
+    '避免丢失当前未保存的订单草稿',
+    '浏览器阻止了新标签页',
+    'formatModelBomApplyMissingThicknessLine',
+    'confirmApplyModelBomToOrder',
+    '零件包推荐只写入当前未保存的草稿明细',
+    '确认带入草稿',
     'BOM 默认工艺只作为下单初始建议',
-    '已带入 ${importedLines.length} 个零件',
+    '已带入 ${importedLines.length} 行零件包明细',
     '只带入当前草稿明细，不提交生产、不占库存。'
   ];
   for (const snippet of orderBomRecommendationSnippets) {
@@ -1836,10 +3521,24 @@ function verifyPartComponentStructureWorkflow() {
     ['InventorySourceDetailsDialog.vue', inventorySourceDialogSource, 'sourceComponentText']
   ];
   for (const [label, source, functionName] of componentTraceFiles) {
-    const snippets = [functionName, '属于组件', '单独零件'];
+    const snippets = [functionName, '子零件 ->', '单独零件'];
     for (const snippet of snippets) {
       if (!source.includes(snippet)) {
         addFailure(`${label} must keep component traceability display snippet: ${snippet}`);
+      }
+    }
+  }
+
+  const componentThicknessDisplayFiles = [
+    ['ProductionView.vue', productionSource, 'formatProductionTaskThickness'],
+    ['WarehouseView.vue', warehouseSource, 'partThicknessText'],
+    ['InventorySourceDetailsDialog.vue', inventorySourceDialogSource, 'expectedThicknessText']
+  ];
+  for (const [label, source, functionName] of componentThicknessDisplayFiles) {
+    const snippets = [functionName, "return '不适用（父级组件由子零件维护）';"];
+    for (const snippet of snippets) {
+      if (!source.includes(snippet)) {
+        addFailure(`${label} must explain COMPONENT thickness as maintained by child parts: ${snippet}`);
       }
     }
   }
@@ -1848,11 +3547,64 @@ function verifyPartComponentStructureWorkflow() {
     'clearParentComponentNoAfterRemovingLine',
     'const [removedLine] = orderForm.lines.splice(index, 1);',
     'clearParentComponentNoAfterRemovingLine(removedLine);',
-    'normalizeComponentNo(line.parentComponentNo) === removedComponentNo'
+    'normalizeComponentNo(line.parentComponentNo) === removedComponentNo',
+    'validateOrderFormComponentStructure',
+    'componentStructureMessage',
+    'isComponentNoOutOfRange',
+    'componentNos.has(componentNo)',
+    '!componentNos.has(parentComponentNo)',
+    'structureTextDialogVisible',
+    'openStructureTextDialog',
+    'openOrderFormStructureTextDialog',
+    'openImportOrderStructureTextDialog',
+    'openImportFileStructureTextDialog',
+    'copyStructureTextDialogContent',
+    'class="structure-textarea"',
+    'structure-header-actions',
+    '查看固定格式',
+    'groupStructureLabel',
+    'groupStructureHint',
+    'groupStructureTagType',
+    'LineStructureTagType = \'success\' | \'warning\' | \'info\' | \'danger\'',
+    ':type="groupStructureTagType(group.type, group.line)"',
+    ':type="groupStructureTagType(\'standalone\', child)"',
+    'formatOrderFormStructureTextLine',
+    'formatImportStructureTextLine',
+    '`结构 ${groupStructureLabel(type, line)}`',
+    '`父级 ${groupStructureHint(type, line)}`',
+    '`项目 ${line.projectModel || \'-\'}`',
+    '`厚度 ${formatStructureLineThickness(line)}`',
+    '不适用（父级组件由子零件维护）',
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 订单 | 计划 | 交期 | 图纸 | 工艺',
+    '序号 | 结构 | 父级 | 编码 | 名称 | 类型 | 项目 | 厚度 | 规格 | 需求 | 订单 | 单套 | 图纸 | 工艺'
   ];
   for (const snippet of orderFormComponentSnippets) {
     if (!ordersListSource.includes(snippet)) {
       addFailure(`OrdersListView.vue must keep component parent cleanup after deleting a component row snippet: ${snippet}`);
+    }
+  }
+
+  const orderDetailComponentSnippets = [
+    'clearParentComponentNoAfterRemovingLine(editForm.value.lines, removedLine);',
+    'validateEditableComponentStructure(filledLines)',
+    'validateEditableComponentStructure(additionalMaterialLines.value, existingOrderComponentLines.value)',
+    'orderLineStructureLabel',
+    'orderLineStructureHint',
+    'orderLineStructureTagType',
+    'orderComponentNoSet',
+    'isOrderLineMissingParentComponent',
+    '未匹配父级',
+    '所属组件不存在',
+    'import-source-structure-cell',
+    '子零件 ->',
+    '单独零件',
+    'isComponentNoOutOfRange',
+    'componentNos.has(componentNo)',
+    '!componentNos.has(parentComponentNo)'
+  ];
+  for (const snippet of orderDetailComponentSnippets) {
+    if (!orderDetailSource.includes(snippet)) {
+      addFailure(`OrderDetailView.vue must keep edit/additional material component validation snippet: ${snippet}`);
     }
   }
 
@@ -1863,8 +3615,19 @@ function verifyPartComponentStructureWorkflow() {
     '不能填写组件编号；如属于组件，请填写所属组件',
     '所属组件 ${parentComponentNo} 在当前订单内不存在',
     'normalizeEditableOrderLineComponentFields',
+    'normalizeEditableLineType',
+    '只能是 COMPONENT 或 PART',
+    'lineType: this.normalizeEditableLineType(line.lineType)',
     'componentNo: this.normalizeEditableComponentNo(line.componentNo) || null',
-    'parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || null'
+    'parentComponentNo: this.normalizeEditableComponentNo(line.parentComponentNo) || null',
+    'nextAutoImportComponentNo',
+    'COMPONENT_NO_AUTO_RANGE_EXCEEDED',
+    'componentIndex <= 9999',
+    'ensureEditableComponentNoRange',
+    'isEditableComponentNoOutOfRange',
+    '新增补单零件组件编号',
+    'COMPONENT_NO_RANGE_INVALID',
+    '组件编号只支持 C001-C9999'
   ];
   for (const snippet of orderBackendSnippets) {
     if (!ordersServiceSource.includes(snippet)) {
@@ -1880,17 +3643,128 @@ function verifyPartComponentStructureWorkflow() {
     '所属组件不存在，请先维护组件行',
     'sortModelBomRows',
     '客户专属清单优先于百胜通用清单',
+    'async setModelBomCommon',
+    'async setModelBomsCommonBatch',
+    '批量常用状态在事务内保存；只调整显示和推荐优先级，不修改 BOM 明细、适用客户、订单、生产任务或库存。',
+    '批量常用设置包含不存在的 BOM，请刷新后重试',
+    '停用 BOM 同时取消常用优先级',
+    "data: { status: 'DISABLED', isCommon: false, commonSortOrder: null }",
+    '已停用 BOM 不能设为常用 BOM，请先启用后再设置',
+    "if (dto.isCommon && scopeData.status === 'DISABLED')",
+    '已停用 BOM 不能进入常用推荐',
+    'async reorderModelBomCommon',
+    '已停用，不能参与常用排序',
+    'modelBomCommonSaveData',
+    '表头保存常用状态只影响同范围内显示和推荐顺序；停用表头会强制清理常用排序，不生成订单、生产任务或库存数据。',
+    '停用表头会强制清理常用排序',
+    '编辑表头时同步保存常用状态；停用表头会强制清理常用排序，不修改 BOM 明细、订单、生产或库存。',
+    'copiedAsCommon',
+    "const copiedStatus = dto.status || 'ENABLED'",
+    "const copiedAsCommon = dto.isCommon === true && copiedStatus !== 'DISABLED'",
+    'commonSortOrder: copiedCommonSortOrder',
+    '常用排序只影响推荐和列表显示优先级',
+    'customerScopeKey: existing.customerScopeKey',
+    'projectModelScopeKey: existing.projectModelScopeKey',
+    'modelBomCustomerScopeModeFromRow',
+    'modelBomCustomerScopeBroadens',
+    'modelBomProjectScopeBroadens',
+    'modelBomSelectedCustomerScopeAdds',
+    'projectModel: true',
+    'nextScopeCustomerIds',
+    'scopeBroadens',
+    'this.modelBomProjectScopeBroadens(existing.projectModel, scopeData.projectModel)',
+    'dto.scopeChangeConfirmed !== true',
+    'BOM 适用客户范围将被扩大',
+    '后端兜底要求扩大 BOM 可见客户范围前必须人工确认',
+    '常用 BOM 只能在同一客户范围和同一机型/项目范围内拖拽排序',
+    '常用 BOM 只提升同一客户/机型范围内的显示优先级',
+    'commonSortOrder',
+    'isCommon: Boolean(row.isCommon)',
+    "query.commonOnly === 'true'",
+    "query.status === 'ALL' ? undefined : query.status || 'ENABLED'",
+    "const projectModel = String(dto.projectModel || '').trim();",
+    "OR: [{ projectModel: { contains: projectModel, mode: 'insensitive' } }, { projectModelScopeKey: 'ALL' }]",
+    "leftProjectScopeKey === requestedProjectModel ? 0 : leftProjectScopeKey === 'ALL' ? 1 : 2",
+    "const projectModel = String(dto.projectModel ?? source.projectModel).trim();",
+    "const projectScopeLabel = row.projectModel || '全部机型/项目';",
+    'modelBomLinePartCodes',
+    'modelBomThicknessKey',
+    'latestOrderLineThicknessByScopeKey',
+    'order: { select: { customerId: true, orderDate: true } }',
+    '客户/机型匹配优先',
+    'partThicknessByScopeKey.get(this.modelBomThicknessKey(partCode, scope.customerId, scope.projectModel))',
+    'const materialDrawingRevision = line.material?.drawingRevisions?.[0] || null;',
+    "materialDrawingRevision?.isDefault ? 'MATERIAL_DEFAULT' : materialDrawingRevision ? 'MATERIAL_LATEST'",
+    '...(status ? { status } : {})',
     'async reorderModelBomLines(bomId: string',
     'BOM 拖拽排序必须事务化保存',
+    'modelBomLineDisplayOrderMap',
+    'displayOrder 是页面查看用连续序号',
+    'const sortedLines = [...lines].sort(',
+    'return new Map(ordered.map((line, index) => [line.id, index + 1]))',
     'copyableSourceLines',
+    'copyableSourceLines.length === 0',
+    'scopedDuplicate',
+    'handleModelBomScopeUniqueError',
+    'isModelBomScopeUniqueError',
+    "error.code !== 'P2002'",
+    'Prisma.PrismaClientKnownRequestError',
+    'ModelBom_customerScopeKey_projectModelScopeKey_key',
+    'this.handleModelBomScopeUniqueError(error,',
+    '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免重复新建',
+    '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免编辑覆盖其他 BOM 范围',
+    '当前客户和机型/项目已存在客户零件包，请打开现有客户 BOM 继续维护，避免重复复制',
+    "if (line.lineType === 'COMPONENT')",
+    'return !!this.normalizeModelBomComponentNo(line.componentNo);',
+    'if (this.normalizeModelBomComponentNo(line.componentNo))',
+    'const componentNo = this.normalizeModelBomComponentNo(line.componentNo) || null;',
+    'const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo) || null;',
+    "componentNo: line.lineType === 'COMPONENT' ? componentNo : null",
+    "parentComponentNo: line.lineType === 'COMPONENT' ? null : parentComponentNo",
     '复制 BOM 只复制当前启用明细并生成客户独立副本',
     "line.status === 'ENABLED' && line.material.status === 'ENABLED'",
     "status: 'ENABLED'",
+    'const existingComponentNo = this.normalizeModelBomComponentNo(existing.componentNo) ||',
+    'const nextComponentNo = this.normalizeModelBomComponentNo(structure.componentNo) ||',
+    'modelBomComponentNoCandidates',
+    'findModelBomComponentByNo',
+    'maxNo >= 9999',
+    'ensureModelBomComponentNoRange',
+    '当前零件包 C001-C9999 自动组件编号已用完',
+    '组件编号只支持 C001-C9999',
+    'Number(matched[1]) < 1 || Number(matched[1]) > 9999',
+    'this.normalizeModelBomComponentNo(row.componentNo) ||',
+    'const duplicateCandidates = await this.prisma.modelBomLine.findMany',
+    'const componentNoCandidates = this.modelBomComponentNoCandidates(line.componentNo);',
+    'parentComponentNo: { in: existingComponentNoCandidates }',
+    'parentComponentNo: { in: activeComponentNoCandidates }, status: \'ENABLED\'',
+    "parentComponentNo: { in: componentNoCandidates }, status: 'ENABLED'",
     'BOM 组件编号变更时，仅同步仍指向旧组件编号的子零件',
     '组件行改成普通零件后，原子零件不再挂靠已经不存在的组件',
     '所属组件已停用，请先启用组件行再维护子零件',
     '停用组件行时，所属子零件同步软停用',
     '组件停用后子零件也必须停用',
+    "select: { id: true, customerId: true, projectModel: true, status: true }",
+    '停用零件包不能新增 BOM 明细，请先恢复启用后再维护',
+    'const hasBomLinePartThickness = bomLinePartThickness > 0;',
+    'const hasHistoryPartThickness = Number(historyPartThickness || 0) > 0;',
+    '历史订单厚度只作为 BOM 核对预填',
+    "hasBomLinePartThickness ? 'BOM_LINE' : hasHistoryPartThickness ? 'ORDER_HISTORY' : null",
+    'async modelBomDiffReviews',
+    'async confirmModelBomDiffReview',
+    'async disableModelBomDiffReview',
+    'serializeModelBomDiffReview',
+    '只有复制自来源 BOM 的客户 BOM 才需要差异核对',
+    '差异核对来源 BOM 与当前客户 BOM 的复制来源不一致',
+    '只记录人工核对结果；不会自动覆盖来源 BOM 或客户 BOM 明细',
+    '核对记录撤销只停用人工确认，不会删除或覆盖任何 BOM 明细',
+    "where: { sourceBomId: bomId }",
+    '作为来源引用',
+    '永久删除不会自动覆盖客户 BOM',
+    'customerScopes: { select: { id: true } }',
+    'this.prisma.modelBomCustomerScope.deleteMany({ where: { bomId } })',
+    'customerScopeCount: existing.customerScopes.length',
+    '适用客户、包内明细和差异核对记录，不改订单、生产或库存数据',
     'ensureMaterialDrawingRevisionCanBeDisabled',
     "defaultDrawingRevision?.status === 'ENABLED'",
     '该图纸版本已被启用 BOM 行指定为默认图纸',
@@ -1905,14 +3779,61 @@ function verifyPartComponentStructureWorkflow() {
       addFailure(`inventory.service.ts must keep BOM component structure backend validation snippet: ${snippet}`);
     }
   }
+  if (!inventoryDtoSource.includes("@IsIn(['ENABLED', 'DISABLED', 'ALL'])") || !inventoryDtoSource.includes("status?: CommonStatus | 'ALL'")) {
+    addFailure('ModelBomQueryDto must keep explicit ALL status filter for BOM list.');
+  }
+  if (!inventoryDtoSource.includes('commonOnly?: string')) {
+    addFailure('ModelBomQueryDto must keep commonOnly filter for common BOM list.');
+  }
+  if (!frontendApiSource.includes("status?: CommonStatus | 'ALL'")) {
+    addFailure('ModelBomFilters must keep explicit ALL status filter type.');
+  }
+  if (!frontendApiSource.includes('commonOnly?: boolean') || !frontendApiSource.includes("commonOnly: filters.commonOnly ? 'true' : undefined")) {
+    addFailure('ModelBomFilters must keep commonOnly query parameter mapping.');
+  }
 
   const bomDataVerifierSnippets = [
     'checkModelBomData',
+    'checkFirstStageVerificationFixtures',
+    'FIRST_STAGE_SEED_CUSTOMER_COVERAGE_MISSING',
+    'FIRST_STAGE_SEED_GLOBAL_BOM_MISSING',
+    'FIRST_STAGE_SEED_BAISHENG_ALL_PROJECT_BOM_MISSING',
+    'FIRST_STAGE_SEED_CUSTOMER_BOM_MISSING',
+    'FIRST_STAGE_SEED_CUSTOMER_ALL_PROJECT_BOM_MISSING',
+    'FIRST_STAGE_SEED_CUSTOMER_BOM_CUSTOMER_COVERAGE_MISSING',
+    'FIRST_STAGE_SEED_COPIED_CUSTOMER_BOM_MISSING',
+    'FIRST_STAGE_SEED_PROJECT_MODEL_COVERAGE_MISSING',
+    'FIRST_STAGE_SEED_BOM_STRUCTURE_COVERAGE_MISSING',
+    'FIRST_STAGE_SEED_MATERIAL_TRANSFORM_RULE_MISSING',
+    'checkOrderLineComponentStructure',
+    'checkCommittedOrderImportRowComponentStructure',
+    'committedOrderNoSet',
+    'normalizeComponentNo',
+    'isComponentNoRangeInvalid',
     'MODEL_BOM_CHILD_PARENT_DISABLED_OR_MISSING',
+    'MODEL_BOM_CUSTOMER_SCOPE_KEY_MISMATCH',
     'MODEL_BOM_COMPONENT_NO_DUPLICATE',
+    'MODEL_BOM_COMPONENT_NO_RANGE_INVALID',
+    'MODEL_BOM_COMPONENT_THICKNESS_SNAPSHOT_NOT_ALLOWED',
+    'MODEL_BOM_PROJECT_SCOPE_KEY_MISMATCH',
+    'MODEL_BOM_SCOPE_DUPLICATE',
+    '厚度只核对子零件和单独零件',
+    "bom.customerScopeMode === 'SELECTED'",
+    "const expectedProjectModelScopeKey = stringValue(bom.projectModel).toLocaleUpperCase() || 'ALL';",
+    'const bomsByScope = new Map',
+    'ORDER_LINE_COMPONENT_NO_DUPLICATE',
+    'ORDER_LINE_COMPONENT_NO_RANGE_INVALID',
+    'ORDER_LINE_CHILD_PARENT_MISSING',
+    'ORDER_IMPORT_COMMITTED_ROW_HAS_ERROR',
+    'ORDER_IMPORT_COMPONENT_NO_RANGE_INVALID',
+    'ORDER_IMPORT_CHILD_PARENT_MISSING',
     'MODEL_BOM_LINE_DISABLED_MATERIAL_ENABLED',
     'MODEL_BOM_DEFAULT_DRAWING_DISABLED',
     'MODEL_BOM_DEFAULT_DRAWING_MATERIAL_MISMATCH',
+    'MODEL_BOM_DIFF_REVIEW_SOURCE_MISMATCH',
+    'MODEL_BOM_DIFF_REVIEW_SOURCE_LINE_MISMATCH',
+    'MODEL_BOM_DIFF_REVIEW_TARGET_LINE_MISMATCH',
+    'MODEL_BOM_DIFF_REVIEW_FINGERPRINT_MISSING',
     'checkMaterialTransformRuleData',
     'MATERIAL_TRANSFORM_RULE_DISABLED_MATERIAL_ENABLED',
     '启用子零件所属组件 ${parentComponentNo} 不存在或已停用'
@@ -1920,6 +3841,65 @@ function verifyPartComponentStructureWorkflow() {
   for (const snippet of bomDataVerifierSnippets) {
     if (!dataVerifierSource.includes(snippet)) {
       addFailure(`verify-first-stage.ts must keep BOM component data verification snippet: ${snippet}`);
+    }
+  }
+  const bomScopeDatabaseSnippets = [
+    '@@unique([customerScopeKey, projectModelScopeKey])',
+    'model ModelBomDiffReview',
+    'ModelBomDiffReviewTarget',
+    'ModelBomDiffReviewSource',
+    'ModelBomDiffReview_sourceLineId_fkey',
+    'ModelBomDiffReview_targetLineId_fkey',
+    'model MaterialCommonProjectModel',
+    'MaterialCommonProjectModel_projectModelNormalized_key',
+    'isCommon             Boolean      @default(false)',
+    'ModelBom_isCommon_commonSortOrder_idx',
+    'ModelBom_customerScopeKey_projectModelScopeKey_key',
+    'ON "ModelBom"("customerScopeKey", "projectModelScopeKey")',
+    'GROUP BY "customerScopeKey", "projectModelScopeKey"',
+    "RAISE EXCEPTION 'ModelBom has duplicate customerScopeKey/projectModelScopeKey scopes."
+  ];
+  for (const snippet of bomScopeDatabaseSnippets) {
+    if (!prismaSchemaSource.includes(snippet) && !migrationSqlSource.includes(snippet)) {
+      addFailure(`ModelBom scope uniqueness must keep schema/migration snippet: ${snippet}`);
+    }
+  }
+
+  const seedBomFixtureSnippets = [
+    'async function seedCustomers()',
+    "customerCode: 'C-001'",
+    "customerCode: 'C-002'",
+    "customerCode: 'C-004'",
+    'async function seedCommonProjectModels()',
+    'materialCommonProjectModel.upsert',
+    'async function seedModelBoms()',
+    "bomName: 'B3",
+    "bomName: 'B5",
+    "bomName: '百胜全部机型通用零件包'",
+    "bomName: '常州客户通用零件包'",
+    "projectModel: 'B3'",
+    "projectModel: 'B5'",
+    "projectModel: ''",
+    "projectModelScopeKey: 'ALL'",
+    "projectModelScopeKey: 'B3'",
+    "projectModelScopeKey: 'B5'",
+    'isCommon: true',
+    'commonSortOrder:',
+    'sourceBomId: globalB3.id',
+    "lineType: 'COMPONENT'",
+    "lineType: options.lineType || 'PART'",
+    "parentComponentNo: 'C001'",
+    'async function seedMaterialTransformRules()',
+    'await seedMaterialTransformRules();',
+    '来源加工关系只写建议规则，不生成订单、生产任务、库存批次或库存流水',
+    '库存来源核对弹窗展示来源加工建议',
+    'await seedCustomers();',
+    'await seedCommonProjectModels();',
+    'await seedModelBoms();'
+  ];
+  for (const snippet of seedBomFixtureSnippets) {
+    if (!seedSource.includes(snippet)) {
+      addFailure(`seed.ts must keep customer and BOM fixture snippet for model BOM verification: ${snippet}`);
     }
   }
 
@@ -1934,7 +3914,19 @@ function verifyPartComponentStructureWorkflow() {
     "defaultProcessRoute: processNames.length > 0 ? processNames.join('、') : null",
     '来源加工关系启用时，来源零件和目标零件都必须是启用状态',
     "sourceMaterial: { status: 'ENABLED' }",
-    "targetMaterial: { status: 'ENABLED' }"
+    "targetMaterial: { status: 'ENABLED' }",
+    'findTransformMaterialInventorySummary',
+    'sourceAvailableQuantity',
+    'targetAvailableQuantity',
+    "query.sourceStockStatus === 'WITH_STOCK'",
+    "query.sourceStockStatus === 'NO_STOCK'",
+    "query.targetStockStatus === 'WITH_STOCK'",
+    "query.targetStockStatus === 'NO_STOCK'",
+    "query.inventoryDecision === 'TARGET_STOCK'",
+    "query.inventoryDecision === 'SOURCE_REWORK'",
+    "query.inventoryDecision === 'NO_STOCK'",
+    "const and: Prisma.MaterialTransformRuleWhereInput[] = status === 'ALL' ? [] : [{ status }]",
+    '是否使用库存仍由库存来源核对弹窗人工确认'
   ];
   for (const snippet of transformBackendSnippets) {
     if (!inventoryServiceSource.includes(snippet)) {
@@ -1943,12 +3935,29 @@ function verifyPartComponentStructureWorkflow() {
   }
 
   const bomApiSnippets = [
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class SetModelBomsCommonBatchDto'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomCommonDto'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomCommonItemDto'],
     ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomLinesDto'],
     ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomLineItemDto'],
     ["frontend/src/api/erp.ts", frontendApiSource, 'modelBom(bomId: string)'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'modelBomsPage(filters: ModelBomFilters = {})'],
+    ["frontend/src/types/erp.ts", frontendTypesSource, 'export interface ModelBomListResponse'],
+    ["frontend/src/types/erp.ts", frontendTypesSource, 'export interface ModelBomScopeSummary'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'withPage?: string'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, "const withPage = query.withPage === 'true'"],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomScopeSummary(filtered)'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'hasMore: offset + items.length < totalCount'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'customerScopeCount: number'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'setModelBomsCommonBatch(payload: SetModelBomsCommonBatchPayload)'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'reorderModelBomCommon(payload: ReorderModelBomCommonPayload)'],
     ["frontend/src/api/erp.ts", frontendApiSource, 'reorderModelBomLines(bomId: string'],
     ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Get('model-boms/:bomId')"],
     ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, 'return this.inventoryService.modelBom(bomId);'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Patch('model-boms/common/reorder')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Patch('model-boms/common/batch')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, 'return this.inventoryService.setModelBomsCommonBatch(dto);'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, 'return this.inventoryService.reorderModelBomCommon(dto);'],
     ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Patch('model-boms/:bomId/lines/reorder')"],
     ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, 'return this.inventoryService.reorderModelBomLines(bomId, dto);']
   ];
@@ -2086,15 +4095,79 @@ function verifyMobileCompactOrderCards() {
       addFailure(`ProcessSelectionView.vue must keep compact mobile process-order card snippet: ${snippet}`);
     }
   }
+  const processMobileReadonlySnippets = [
+    'useDeviceProfile',
+    'guardDesktopProcessMutation',
+    '手机端仅查看生产流程，${actionLabel}请在电脑端操作',
+    '手机端只查看流程配置',
+    '手机端只查看已保存流程，流程填写、模板维护和标准工序维护请在电脑端操作。',
+    '手机端只查看补单状态',
+    'v-if="!isMobileLayout"',
+    ':disabled="!canEditProcessBase || isMobileLayout"',
+    ':draggable="canEditProcess && !isMobileLayout"',
+    '标准工序加载失败，请确认后端服务',
+    '订单列表加载失败，请确认后端服务和筛选条件',
+    '订单明细加载失败，请确认订单状态和后端服务',
+    '下单/计划操作员加载失败，请确认后端服务',
+    '流程填写人员加载失败，请确认后端服务'
+  ];
+  for (const snippet of processMobileReadonlySnippets) {
+    if (!processSource.includes(snippet)) {
+      addFailure(`ProcessSelectionView.vue must keep mobile read-only process-selection snippet: ${snippet}`);
+    }
+  }
   const ordersMobilePauseSnippets = [
     'orders-page-header-actions',
     'requireDesktopOrderListMutation',
-    '手机端订单列表仅用于查看明细'
+    'useDeviceProfile',
+    'v-if="!isMobileLayout" @click="openImportDialog"',
+    'v-if="!isMobileLayout" type="primary" @click="openCreate"',
+    '手机端订单列表仅用于查看明细',
+    ':before-close="handleOrderSavingDialogClose"',
+    'closeCreateOrderDialog',
+    'closeCancelOrderDialog',
+    'closeDeleteDraftDialog',
+    '订单操作正在保存，请等待保存完成'
   ];
   for (const snippet of ordersMobilePauseSnippets) {
     if (!ordersSource.includes(snippet)) {
       addFailure(`OrdersListView.vue must keep mobile order list read-only snippet: ${snippet}`);
     }
+  }
+  const ordersListLoadFailureSnippets = [
+    '订单新增必须由操作员在 CustomerSelect 中明确选择客户',
+    'orders.value = [];',
+    'expandedMobileOrderIds.value = [];',
+    '订单列表加载失败，请确认后端服务和筛选条件',
+    'inventorySummary.value = [];',
+    '库存汇总加载失败，请确认后端服务和库存状态',
+    'orderOptions.value = [];',
+    '订单选项加载失败，请确认后端服务和筛选条件',
+    'importConfig.value = undefined;',
+    '导入配置读取失败，请确认后端服务和上传配置',
+    'importSessionHistory.value = [];',
+    'importSessionHistoryTotal.value = 0;',
+    'importSessionHistoryHasMore.value = false;',
+    '导入记录加载失败，请确认后端服务和导入记忆',
+    '导入预览刷新失败，请确认导入记忆和后端服务',
+    '订单预览加载失败，请确认导入记忆和后端服务',
+    '上传文件预览失败，请确认导入文件和后端服务',
+    '上传文件预览加载失败，请确认导入文件和后端服务',
+    '删除导入记忆',
+    '正式订单与订单来源文字追溯必须保留',
+    '系统只会删除上传文件、预览行和会话记录，不会删除已经生成的订单',
+    '删除后订单仍保留来源文字，但原 Excel 文件不可再预览',
+    'formatDateInputValue',
+    '订单制单日期必须按本地业务日期生成，避免 UTC 日期在凌晨回退到前一天',
+    'const date = orderDate ? toDateOnly(orderDate) : new Date();'
+  ];
+  for (const snippet of ordersListLoadFailureSnippets) {
+    if (!ordersSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue must clear stale order/import state after load failure: ${snippet}`);
+    }
+  }
+  if (ordersSource.includes('new Date().toISOString().slice(0, 10)')) {
+    addFailure('OrdersListView.vue must not generate order date defaults with UTC toISOString().slice(0, 10); use local business date formatting.');
   }
   const forbiddenMobileOrderListActions = [
     '@click="goShortageDetail(order)"',
@@ -2119,6 +4192,30 @@ function verifyMobileCompactOrderCards() {
     'toggleMobileProductionTaskCard',
     'isMobileProductionTaskExpanded',
     'production-task-header-actions',
+    'useDeviceProfile',
+    'guardDesktopProductionMutation',
+    '手机端仅查看生产进度和通知，${actionLabel}请在电脑端操作',
+    '手机端只查看生产概况',
+    '手机端只查看生产进度',
+    '手机端只查看补单申请',
+    '客户名称加载失败，请确认客户筛选和后端服务',
+    'clearOperatorOptions',
+    '操作人员列表加载失败，请确认后端服务和人员资料',
+    '订单选项加载失败，请确认后端服务和筛选条件',
+    '生产任务加载失败，请确认后端服务和筛选条件',
+    '生产订单汇总加载失败，请确认后端服务和筛选条件',
+    '生产通知加载失败，请确认后端服务',
+    '生产报废补单申请加载失败，请确认后端服务和筛选条件',
+    '补单申请关联任务加载失败，请确认订单、任务和后端服务',
+    'activeReplenishmentApprovalTask.value = undefined;',
+    'activeReplenishmentApprovalCompletion.value = undefined;',
+    '报废统计加载失败，请确认后端服务和筛选条件',
+    '报废统计订单选项加载失败，请确认后端服务和筛选条件',
+    'label="零件编码"',
+    'label="零件名称"',
+    '零件图号',
+    '客户取消零件',
+    '客户新增零件',
     'normalizeDisplayFileName',
     'displayFileName(activeTask.drawingFileName || activeTask.drawingFileUrl)'
   ];
@@ -2137,7 +4234,16 @@ function verifyMobileCompactOrderCards() {
     'warehouseLocationCardKey',
     'transactionCardKey',
     'toggleMobileWarehouseCard',
-    'isMobileWarehouseCardExpanded'
+    'isMobileWarehouseCardExpanded',
+    'useDeviceProfile',
+    'guardDesktopWarehouseMutation',
+    '手机端仅查看仓库、库存和通知，${actionLabel}请在电脑端操作',
+    '手机端只查看待入库信息',
+    '手机端只查看发货信息',
+    '客户变更零件处理',
+    '客户取消零件',
+    '客户新增零件',
+    '零件已转入备货库存'
   ];
   for (const snippet of warehouseSnippets) {
     if (!warehouseSource.includes(snippet)) {
@@ -2151,7 +4257,50 @@ function verifyMobileCompactOrderCards() {
     'summaryCardKey',
     'batchCardKey',
     'toggleMobileInventoryCard',
-    'isMobileInventoryCardExpanded'
+    'isMobileInventoryCardExpanded',
+    'useDeviceProfile',
+    '手机端只查看库存来源和预占记录',
+    '手机端仅查看库存和来源，盘点调整请在电脑端操作',
+    'materialMemoryOperationSavingId',
+    ':loading="materialMemoryDisableSaving && materialMemoryOperationSavingId === row.id"',
+    'if (materialMemoryOperationSavingId.value) {',
+    ':before-close="handleMaterialMemoryDialogBeforeClose"',
+    'closeMaterialMemoryDialog',
+    'materialMemorySaving.value',
+    '编辑搜索记忆',
+    '启用记忆',
+    '保存影响',
+    '只维护下单搜索记忆，用于后续订单选料、库存搜索和 0 库存零件展示。',
+    '不会修改库存数量；库存仍然只从 InventoryBatch 实时计算。',
+    '不会覆盖历史订单、BOM 明细、库存批次、库存流水或生产记录。',
+    '需要修改库存数量时，请到库存溯源里做盘点调整，系统会追加 InventoryTransaction。',
+    '需要维护客户适用范围、机型 BOM 或默认图纸时，请到零件基础库或机型零件包维护。',
+    '0 库存行来自零件搜索记忆匹配，表示当前筛选范围没有可用库存或历史批次。',
+    'materialMemoryDisableDialogVisible',
+    'materialMemoryDisableTarget',
+    '系统只会停用零件搜索记忆，不会删除历史订单、库存批次、库存数量和生产记录。',
+    '停用零件搜索记忆',
+    'confirmDisableMaterialMemory',
+    '零件搜索记忆正在停用，请等待操作完成',
+    '零件搜索记忆正在保存，请等待保存完成',
+    '零件搜索记忆已保存',
+    '零件搜索记忆停用失败',
+    '零件搜索记忆启用失败',
+    '仓库列表加载失败，请确认后端服务',
+    'inventorySummary.value = [];',
+    'inventory.value = [];',
+    'expandedMobileInventoryCardKeys.value = [];',
+    '库存数据加载失败，请确认后端服务和筛选条件',
+    'materialMemory.value = [];',
+    '库存使用总览加载失败，请确认后端服务和筛选条件',
+    'sourceDetails.value = null;',
+    'sourceDetailsRequestSeq',
+    'customerId: filters.customerId',
+    '库存来源查询失败，请确认零件和后端服务',
+    'reservationHistory.value = [];',
+    '预占记录加载失败，请确认库存批次和后端服务',
+    'adjustmentHistory.value = [];',
+    '盘点记录加载失败，请确认库存批次和后端服务'
   ];
   for (const snippet of inventorySnippets) {
     if (!inventorySource.includes(snippet)) {
@@ -2164,12 +4313,123 @@ function verifyMobileCompactOrderCards() {
     'expandedMobileCustomerIds',
     'primaryContactText',
     'toggleMobileCustomerCard',
-    'isMobileCustomerExpanded'
+    'isMobileCustomerExpanded',
+    'useDeviceProfile',
+    'requireDesktopCustomerMutation',
+    '手机端仅查看客户资料，${actionLabel}请在电脑端操作',
+    ':close-on-click-modal="!saving"',
+    ':close-on-press-escape="!saving"',
+    ':before-close="handleCustomerDialogClose"',
+    'closeCustomerDialog',
+    '客户资料正在保存，请等待保存完成',
+    'mobile-readonly-note',
+    '手机端只保留资料和 BOM 查看入口',
+    'openCustomerPrivateBoms',
+    'openCustomerMaterials',
+    'openCustomerAvailableBoms',
+    'openCustomerCommonBoms',
+    'openCustomerBomCreate',
+    'openCustomerCommonBomCreate',
+    'openCustomerCommonSetup',
+    'loadCustomerCommonRows',
+    'setCustomerBomCommon',
+    'bomCommonBusy',
+    ':disabled="bomCommonBusy',
+    'if (bomCommonBusy.value) {',
+    'erpApi.setModelBomCommon',
+    'await loadCustomerCommonRows();',
+    '常用排序由后端按 BOM 所属范围重新计算',
+    'customerBomCommonSummary',
+    'filteredCustomerBomCommonRows',
+    'customerBomCommonFixedText',
+    'customerBomCommonTextDialogVisible',
+    'openCustomerBomCommonTextDialog',
+    'copyCustomerBomCommonText',
+    'customerBomCommonBatchSetRows',
+    'customerBomCommonBatchCancelRows',
+    'customerBomCommonBatchPreviewText',
+    'bomCommonBatchDialogVisible',
+    'bomCommonBatchTargetIsCommon',
+    'bomCommonBatchRows',
+    'bomCommonBatchActionText',
+    'handleBomCommonBatchDialogClose',
+    'confirmFilteredCustomerBomsCommon',
+    '客户常用 BOM 批量设置正在保存，请等待操作完成',
+    'class="customer-common-bom-batch-preview"',
+    '变更预览：',
+    '常用，顺序由后端重新计算',
+    '${beforeText} -> ${afterText}',
+    'setFilteredCustomerBomsCommon',
+    '筛选设为常用',
+    '取消筛选常用',
+    'erpApi.setModelBomsCommonBatch',
+    '批量常用只提交当前筛选结果的 BOM id；后端事务内保存常用状态和顺序',
+    '业务边界：只修改 BOM 常用状态和显示顺序，不修改 BOM 明细、适用范围、订单、生产任务或库存。',
+    '客户常用 BOM 固定格式清单',
+    '查看固定格式',
+    '复制当前筛选',
+    'bomCommonOwnershipFilter',
+    'customerBomOwnershipFilterMatches',
+    '全部归属',
+    'bomCommonKeyword',
+    'customerBomCommonKeywordMatches',
+    '搜索 BOM 名称 / 适用范围 / 机型 / 客户',
+    '客户常用 BOM 弹窗只做本地过滤，不改变后端适用范围',
+    'customer-common-bom-drag-handle',
+    'aria-label="拖拽调整客户常用 BOM 顺序"',
+    '<el-icon><Rank /></el-icon>',
+    'customerBomCommonDisplayOrder(row)',
+    'customer-common-bom-sort-cell',
+    '常用 {{ customerBomCommonDisplayOrder(row) }}',
+    '常用显示顺序 ${customerBomCommonDisplayOrder(row) || \'-\'}',
+    "item.status === 'ENABLED' && item.isCommon",
+    '停用 BOM 不参与常用排序，请先恢复启用',
+    '已停用 BOM 不能设为常用，请先恢复启用',
+    'canDragCustomerCommonBom',
+    'startCustomerCommonBomDrag',
+    'dropCustomerCommonBom',
+    'erpApi.reorderModelBomCommon',
+    '客户页只调整常用 BOM 显示顺序；不会修改 BOM 明细、适用范围、订单、生产任务或库存',
+    'customerBomOwnershipLabel',
+    'customerBomOwnershipTagType',
+    '客户私有 {{ customerBomCommonSummary.private }}',
+    '指定客户可用 {{ customerBomCommonSummary.selected }}',
+    '全部客户机型通用 {{ customerBomCommonSummary.allCustomer }}',
+    'customerBomCommonRows',
+    'bomCommonDialogVisible',
+    '客户私有 BOM 只影响当前客户，全部客户或指定客户可用 BOM 会影响对应可见范围',
+    "requireDesktopCustomerMutation('新建客户 BOM')",
+    "requireDesktopCustomerMutation('设置客户常用 BOM')",
+    "path: '/materials'",
+    "path: '/inventory/model-boms'",
+    "scopeMode: 'PRIVATE'",
+    "commonOnly: 'true'",
+    "isCommon: 'true'",
+    "excludeGlobalAllProject: 'true'",
+    "action: 'createBom'",
+    'class="customer-bom-guide"',
+    '客户零件包：只看客户私有 BOM。',
+    '可用BOM：查看该客户可用的客户私有、指定客户可用和机型级通用 BOM。',
+    '常用BOM：只看当前客户范围内人工设为常用的 BOM。',
+    '新建常用BOM',
+    '新建常用BOM：创建客户私有 BOM，并默认设为常用；不创建订单、生产任务或库存。',
+    '客户页默认排除全部客户 / 全部机型泛用 BOM',
+    '客户界面只进入客户私有 BOM',
+    '客户常用 BOM 包含客户私有、指定客户可用和机型级通用 BOM 中人工设为常用的零件包',
+    '客户资料加载失败，请确认后端服务和筛选条件',
+    '客户可用 BOM 加载失败，请确认客户筛选和后端服务',
+    '客户ID自动生成失败，请手工填写客户ID'
   ];
   for (const snippet of customerSnippets) {
     if (!customersSource.includes(snippet)) {
       addFailure(`CustomersView.vue must keep compact mobile customer card snippet: ${snippet}`);
     }
+  }
+  if (customersSource.includes('ElMessageBox.confirm')) {
+    addFailure('CustomersView.vue customer and customer BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
+  }
+  if (customersSource.includes('↕')) {
+    addFailure('CustomersView.vue must use Rank icon buttons for customer common BOM drag handles instead of the text arrow character.');
   }
   const statisticsSnippets = [
     'mobile-card-compact-summary',
@@ -2178,7 +4438,9 @@ function verifyMobileCompactOrderCards() {
     'summaryMobileCardKey',
     'orderMobileCardKey',
     'toggleMobileStatisticsCard',
-    'isMobileStatisticsCardExpanded'
+    'isMobileStatisticsCardExpanded',
+    'emptyStatisticsResponse',
+    '统计数据加载失败，请确认后端服务和筛选条件'
   ];
   for (const snippet of statisticsSnippets) {
     if (!statisticsSource.includes(snippet)) {
@@ -2205,7 +4467,13 @@ function verifyMobileCompactOrderCards() {
     'v-if="!isMobileLayout && lineNeedsReplenishmentAction(line)"',
     'openImportSourcePreview',
     '来源 Excel 预览',
-    '预览来源Excel'
+    '预览来源Excel',
+    '订单明细加载失败，请确认订单状态和后端服务',
+    '标准工序加载失败，请确认后端服务',
+    '来源 Excel 预览失败，请确认导入记忆和后端服务',
+    '来源 Excel 预览加载失败，请确认导入记忆和后端服务',
+    '库存汇总加载失败，请确认后端服务和库存状态',
+    '下单/计划操作员加载失败，请确认后端服务'
   ];
   for (const snippet of orderDetailSnippets) {
     if (!orderDetailSource.includes(snippet)) {
@@ -2214,6 +4482,11 @@ function verifyMobileCompactOrderCards() {
   }
   const processTemplatesViewSnippets = [
     'process-template-page-section',
+    'useDeviceProfile',
+    ':read-only="isMobileLayout"',
+    ':show-status-filter="true"',
+    '手机端只查看标准工序；新建、编辑和删除请在电脑端操作。',
+    '手机端只查看流程记忆；新建、编辑、复制和停用请在电脑端操作。',
     '@media (max-width: 900px)'
   ];
   for (const snippet of processTemplatesViewSnippets) {
@@ -2274,6 +4547,24 @@ function verifyMobileCompactOrderCards() {
     'toggleMobileDefinitionCard',
     'isMobileDefinitionExpanded',
     'process-definition-detail-toggle',
+    'readOnly?: boolean',
+    'guardReadOnlyDefinitionMutation',
+    '手机端仅查看标准工序，${actionLabel}请在电脑端操作',
+    ':before-close="handleDefinitionDialogClose"',
+    'closeDefinitionDialog',
+    '标准工序正在保存，请等待保存完成',
+    ':before-close="handleDeleteDialogClose"',
+    'closeDeleteDialog',
+    '标准工序正在停用，请等待保存完成',
+    'statusFilter',
+    'restoringDefinitionId',
+    'restoreDefinition',
+    '标准工序已恢复启用',
+    '已停用的标准工序需先恢复启用后再编辑',
+    '停用后不再出现在新增流程、BOM 和来源加工关系的工序下拉中',
+    '工序已停用，历史订单和生产任务不受影响',
+    '手机端只查看标准工序',
+    '标准工序加载失败，请确认后端服务和筛选条件',
     '.process-definition-card.expanded .process-definition-actions'
   ];
   for (const snippet of processDefinitionSnippets) {
@@ -2286,6 +4577,27 @@ function verifyMobileCompactOrderCards() {
     'toggleMobileTemplateCard',
     'isMobileTemplateExpanded',
     'process-template-detail-toggle',
+    'readOnly?: boolean',
+    'guardReadOnlyTemplateMutation',
+    '手机端仅查看流程记忆，${actionLabel}请在电脑端操作',
+    ':before-close="handleTemplateDialogClose"',
+    'closeTemplateDialog',
+    'templateDialogBusy',
+    '流程记忆正在保存，请等待保存完成',
+    '标准工序正在创建，请等待创建完成',
+    ':before-close="handleDeleteDialogClose"',
+    'closeDeleteDialog',
+    '流程记忆正在停用，请等待停用完成',
+    'statusFilter',
+    'restoringTemplateId',
+    'restoreTemplate',
+    '恢复启用',
+    '流程记忆已恢复启用',
+    'templateCanApply',
+    '已停用的流程记忆需先恢复启用后再应用',
+    '手机端只查看流程记忆',
+    '标准工序加载失败，流程记忆暂不可编辑新工序',
+    '流程记忆加载失败，请确认后端服务和筛选条件',
     '.process-template-card.expanded .process-template-card-actions'
   ];
   for (const snippet of processTemplateSnippets) {
@@ -2359,6 +4671,9 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     'return \'请先完成上一道工序\';',
     'function openProcessCompletion(row: ProductionTask, processName: string)',
     'if (!canOpenProcess(row, processName))',
+    ':before-close="handleProcessDialogClose"',
+    'closeProcessDialog',
+    '工序完成表正在保存，请等待保存完成',
     'selectedProcessNamesForSave()',
     'erpApi.completeProcessSteps(activeTask.value.id',
     'erpApi.completeProcessStep(activeTask.value.id',
@@ -2576,14 +4891,23 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'openReplenishmentReject',
     'v-model="replenishmentApprovalVisible"',
     'title="主管确认生产报废补单"',
+    ':before-close="handleReplenishmentApprovalDialogClose"',
+    'closeReplenishmentApprovalDialog',
+    '生产报废补单确认正在保存，请等待保存完成',
     'erpApi.approveProductionReplenishmentRequest',
     '主管已确认，系统已生成生产报废补单任务',
     'v-model="replenishmentRejectVisible"',
     'title="驳回生产报废补单申请"',
+    ':before-close="handleReplenishmentRejectDialogClose"',
+    'closeReplenishmentRejectDialog',
+    '生产报废补单驳回正在保存，请等待保存完成',
     'erpApi.rejectProductionReplenishmentRequest',
     '已驳回生产报废补单申请，并记录为管理确认缺货完成',
     'v-model="withdrawVisible"',
     'title="管理撤回"',
+    ':before-close="handleWithdrawDialogClose"',
+    'closeWithdrawDialog',
+    '生产撤回正在保存，请等待保存完成',
     '撤回会清空当前任务的工序完成记录并退回待确认生产',
     'withdrawForm.managerName',
     'withdrawForm.reason',
@@ -2728,9 +5052,9 @@ function verifyOrderChangeAndCancellationWorkflow() {
     'tx.productionTask.delete({ where: { id: task.id } })',
     '取消补单',
     'async createAdditionalMaterial(orderNo: string, dto: CreateAdditionalMaterialDto)',
-    '待提交生产订单请直接编辑订单，不要创建补单物料',
-    '订单尚未开始生产，不能新增补单物料，请直接修改订单',
-    '新增补单物料必须使用重新生产方式',
+    '待提交生产订单请直接编辑订单，不要创建补单零件',
+    '订单尚未开始生产，不能新增补单零件，请直接修改订单',
+    '新增补单零件必须使用重新生产方式',
     "isReplenishment: true",
     "replenishmentSourceType: 'ORDER_CHANGE'",
     "noticeType: 'MATERIAL_ADDED'",
@@ -2797,7 +5121,11 @@ function verifyOrderChangeAndCancellationWorkflow() {
 
   const detailViewSource = readFile(detailViewPath);
   const detailViewSnippets = [
-    '新增补单物料',
+    '新增补单零件',
+    '生成新增零件补单',
+    '新增零件都会同步通知生产',
+    '请补齐新增零件、厚度、数量等必填信息',
+    '已生产零件转库存或销毁',
     '创建订单补单',
     '取消补单',
     '客户数量变更',
@@ -2821,7 +5149,17 @@ function verifyOrderChangeAndCancellationWorkflow() {
     'erpApi.cancelReplenishment',
     'erpApi.updateLineQuantityAfterProductionStarted',
     'erpApi.cancelOrder',
-    '订单已取消；如有已开工任务，通知已同步生产和仓库'
+    '订单已取消；如有已开工任务，通知已同步生产和仓库',
+    ':before-close="handleOrderDetailSavingDialogClose"',
+    'closeEditDialog',
+    'closeDeleteDraftDialog',
+    'closeAdditionalMaterialDialog',
+    'closeShortageResolutionDialog',
+    'closeReplenishmentDialog',
+    'closeCancelReplenishmentDialog',
+    'closeQuantityChangeDialog',
+    'closeCancelOrderDialog',
+    '订单明细操作正在保存，请等待保存完成'
   ];
   for (const snippet of detailViewSnippets) {
     if (!detailViewSource.includes(snippet)) {
@@ -2831,8 +5169,12 @@ function verifyOrderChangeAndCancellationWorkflow() {
 
   const listViewSource = readFile(listViewPath);
   const listViewSnippets = [
-    '<el-dialog v-model="cancelOrderVisible" title="取消订单"',
+    'v-model="cancelOrderVisible"',
+    ':before-close="handleOrderSavingDialogClose"',
+    '订单操作正在保存，请等待保存完成',
     '正常订单和补单订单都可以取消',
+    '处理已生产零件',
+    '零件包、零件、客户关键字',
     'activeCancelOrderDetail',
     'activeCancelOrderDetail.value = await erpApi.order(row.orderNo)',
     'cancelHandlingPlanRows.value = buildCancelHandlingPlanRows(activeCancelOrderDetail.value)',
@@ -3077,17 +5419,29 @@ function verifyWarehouseWorkflow() {
     'async function confirmBatchShipment()',
     'erpApi.confirmBatchShipment',
     'erpApi.confirmOrderShipment',
+    ':close-on-press-escape="!saving"',
+    ':close-on-press-escape="!stockNoticeSaving"',
+    '仓库业务正在保存，请等待保存完成',
+    '仓库通知正在处理，请等待保存完成',
+    'if (stockNoticeSaving.value) {',
+    '订单选项加载失败，请确认后端服务和筛选条件',
+    '仓库数据加载失败，请确认后端服务和筛选条件',
+    '库存流水加载失败，请确认后端服务和筛选条件',
+    '仓库通知加载失败，请确认后端服务',
     'shipmentSourceFocusBatchId',
+    'shipmentSourceDetailsRequestSeq',
+    '库存来源查询失败，请确认零件和后端服务',
     'DrawingPreviewLink',
     'OrderNoLink',
     ':file-name="activeReceipt.drawingFileName"',
     ':file-url="activeReceipt.drawingFileUrl"',
-    'activeReceipt.partSpecification ||',
+    'partSpecText(activeReceipt)',
     ':file-name="activeShipment.drawingFileName"',
     ':file-url="activeShipment.drawingFileUrl"',
     'activeShipment ? partSpecText(activeShipment) :',
     '@click="openShipmentSourceDetails(activeShipment)"',
-    '<el-table-column label="来源/图纸"',
+    '<el-table-column label="库存来源/图纸"',
+    '库存来源/图纸</el-button>',
     '@click="openShipmentSourceDetails(row)"',
     'function drawingTitle(row',
     'function partSpecText(row',
@@ -3436,6 +5790,10 @@ function verifyPartialShipmentWorkflow() {
     '本次发货超过订单未发货数量或使用备货库存，必须填写销售确认人',
     '本次发货超过订单未发货数量或使用备货库存，必须填写超发说明',
     'appendStockOverShipment',
+    'stockSourceRequestSeq',
+    '备货库存正在查询，请等待当前查询完成',
+    '备货超发只允许把最新查询到的可用备货批次追加到当前发货明细',
+    '备货库存查询失败，请确认零件、客户和后端服务',
     'isStockOverShipment',
     'orderLineId: row.isStockOverShipment ? row.targetOrderLineId || row.orderLineId : row.orderLineId',
     'ElMessage.success(\'本次发货已确认，订单状态已重新计算\')'
@@ -3693,10 +6051,10 @@ function verifyDrawingDuplicateConfirmationWorkflow() {
     '\u56fe\u7eb8\u4e0e\u56fe\u53f7\u4f7f\u7528\u8bf4\u660e',
     '\u56fe\u53f7\u53ef\u80fd\u8de8\u96f6\u4ef6\u590d\u7528',
     '\u4fdd\u5b58\u65f6\u4f1a\u540c\u65f6\u68c0\u67e5\u5f53\u524d\u8ba2\u5355\u548c\u5386\u53f2\u8ba2\u5355\u4e2d\u7684\u56fe\u53f7\u3001\u56fe\u7eb8\u6587\u4ef6\u540d',
-    'confirmDuplicateDrawingNos(orderForm.lines)',
-    'confirmDuplicateDrawingFiles(orderForm.lines)',
-    'confirmExistingDrawingNos(orderForm.lines)',
-    'confirmExistingDrawingFiles(orderForm.lines)'
+    'confirmDuplicateDrawingNos(filledLines)',
+    'confirmDuplicateDrawingFiles(filledLines)',
+    'confirmExistingDrawingNos(filledLines)',
+    'confirmExistingDrawingFiles(filledLines)'
   ];
   for (const snippet of ordersListSnippets) {
     if (!ordersListSource.includes(snippet)) {
@@ -3712,10 +6070,10 @@ function verifyDrawingDuplicateConfirmationWorkflow() {
     '\u56fe\u7eb8\u4e0e\u56fe\u53f7\u4f7f\u7528\u8bf4\u660e',
     '\u56fe\u53f7\u53ef\u80fd\u8de8\u96f6\u4ef6\u590d\u7528',
     '\u4fdd\u5b58\u65f6\u4f1a\u540c\u65f6\u68c0\u67e5\u5f53\u524d\u8ba2\u5355\u548c\u5386\u53f2\u8ba2\u5355\u4e2d\u7684\u56fe\u53f7\u3001\u56fe\u7eb8\u6587\u4ef6\u540d',
-    'confirmDuplicateDrawingNos(editForm.value.lines)',
-    'confirmDuplicateDrawingFiles(editForm.value.lines)',
-    'confirmExistingDrawingNos(editForm.value.lines, order.value.orderNo)',
-    'confirmExistingDrawingFiles(editForm.value.lines, order.value.orderNo)',
+    'confirmDuplicateDrawingNos(filledLines)',
+    'confirmDuplicateDrawingFiles(filledLines)',
+    'confirmExistingDrawingNos(filledLines, order.value.orderNo)',
+    'confirmExistingDrawingFiles(filledLines, order.value.orderNo)',
     'confirmDuplicateDrawingNos([payload])',
     'confirmDuplicateDrawingFiles([payload])',
     'confirmExistingDrawingNos([payload], order.value.orderNo)',
@@ -3752,6 +6110,13 @@ function verifyNoInlineCustomerDropdowns() {
     }
 
     const source = fs.readFileSync(filePath, 'utf8');
+    if (
+      toProjectPath(filePath) === 'frontend/src/views/ModelBomsView.vue' &&
+      source.includes('bom-scope-customer-picker') &&
+      source.includes('selectAllBomScopeCustomers')
+    ) {
+      continue;
+    }
     if (suspiciousPatterns.some((pattern) => pattern.test(source))) {
       addFailure(`Customer dropdowns should reuse CustomerSelect.vue: ${toProjectPath(filePath)}`);
     }
@@ -3983,6 +6348,209 @@ function verifySharedOrderDisplayStatus() {
   }
 }
 
+function verifySharedDateFormattingContract() {
+  const formatPath = 'frontend/src/utils/format.ts';
+  if (!fileExists(formatPath)) {
+    addFailure(`Missing shared date formatting utility: ${formatPath}`);
+    return;
+  }
+  const source = readFile(formatPath);
+  const snippets = [
+    'function dateOnlyBusinessDate(value: string)',
+    'export function formatDateInputText(value?: Date | string | null)',
+    'export function formatDateTime(value?: Date | string)',
+    'export function formatDateTimeInputValue(value: Date)',
+    'datetime-local',
+    'return formatDateInputValue(businessDate);',
+    '业务日期只取日期字段，避免浏览器时区把 UTC 零点显示成前一天',
+    'T00:00:00(?:\\.000)?Z',
+    'Number.isNaN(date.getTime())'
+  ];
+  for (const snippet of snippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`format.ts must keep timezone-safe business date formatting snippet: ${snippet}`);
+    }
+  }
+
+  const orderDetailSource = readFile('frontend/src/views/OrderDetailView.vue');
+  if (!orderDetailSource.includes('drawingDate: formatDateInputText(line.drawingDate) || undefined')) {
+    addFailure('OrderDetailView.vue must normalize drawingDate with formatDateInputText before editing order lines.');
+  }
+  if (orderDetailSource.includes('line.drawingDate ? line.drawingDate.substring(0, 10) : undefined')) {
+    addFailure('OrderDetailView.vue must not prepare drawingDate by substring(0, 10); use formatDateInputText to avoid timezone date shifts.');
+  }
+
+  const inventorySource = readFile('frontend/src/views/InventoryView.vue');
+  if (!inventorySource.includes("import { formatDate, formatDateTime, formatDateTimeInputValue, formatQuantity } from '../utils/format';")) {
+    addFailure('InventoryView.vue must use shared date/time formatting utilities.');
+  }
+  if (!inventorySource.includes('return formatDateTimeInputValue(new Date());')) {
+    addFailure('InventoryView.vue inventory adjustment countedAt default must use local datetime-local formatting.');
+  }
+  if (inventorySource.includes('toISOString().slice(0, 19)')) {
+    addFailure('InventoryView.vue must not generate datetime-local values through toISOString().slice(0, 19).');
+  }
+
+  const warehouseSource = readFile('frontend/src/views/WarehouseView.vue');
+  const ordersListSource = readFile('frontend/src/views/OrdersListView.vue');
+  for (const [viewName, viewSource] of [
+    ['WarehouseView.vue', warehouseSource],
+    ['OrdersListView.vue', ordersListSource],
+    ['OrderDetailView.vue', orderDetailSource]
+  ]) {
+    if (viewSource.includes('formatDateTime(new Date().toISOString())')) {
+      addFailure(`${viewName} must not create local UI timestamps through new Date().toISOString().`);
+    }
+  }
+  for (const [viewName, viewSource] of [
+    ['OrdersListView.vue', ordersListSource],
+    ['OrderDetailView.vue', orderDetailSource]
+  ]) {
+    if (viewSource.includes('Date.now().toString().slice(-4)')) {
+      addFailure(`${viewName} must not generate temporary visible partCode values from Date.now(); require a real selected or typed partCode.`);
+    }
+    if (viewSource.includes('isGeneratedPlaceholderPartCode')) {
+      addFailure(`${viewName} must not keep legacy placeholder partCode recognition; blank new rows should require a real partCode.`);
+    }
+    if (!/function\s+newLine\s*\([^)]*\)\s*:\s*CreateOrderLinePayload\s*{[\s\S]*partCode:\s*''/.test(viewSource)) {
+      addFailure(`${viewName} newLine() must initialize partCode as blank so operators choose or type a real partCode.`);
+    }
+  }
+  if (
+    !ordersListSource.includes('function filledOrderFormLines()') ||
+    !ordersListSource.includes('const orderFormFilledLines = computed(() => filledOrderFormLines());') ||
+    !ordersListSource.includes('const orderFormFilledLineCount = computed(() => orderFormFilledLines.value.length);') ||
+    !ordersListSource.includes(':disabled="orderFormFilledLineCount === 0"') ||
+    !ordersListSource.includes('buildOrderFormStructureGroups(orderFormFilledLines.value)') ||
+    !ordersListSource.includes('if (orderFormStructureGroups.value.length === 0)') ||
+    !ordersListSource.includes('const filledLines = filledOrderFormLines();') ||
+    !ordersListSource.includes('lines: normalizedLines(filledLines)')
+  ) {
+    addFailure('OrdersListView.vue must filter pure blank spare rows before rendering fixed-format preview, validating, and saving a new order.');
+  }
+  if (
+    !orderDetailSource.includes('function isBlankEditableOrderLine') ||
+    !orderDetailSource.includes('function editableOrderLines()') ||
+    !orderDetailSource.includes('const filledLines = editableOrderLines();') ||
+    !orderDetailSource.includes('lines: normalizedLines(filledLines)')
+  ) {
+    addFailure('OrderDetailView.vue must filter pure blank spare rows before validating and saving edited draft order lines.');
+  }
+}
+
+function verifyBackendBusinessDateKeyContract() {
+  const businessDatePath = 'backend/src/common/business-date.ts';
+  if (!fileExists(businessDatePath)) {
+    addFailure(`Missing backend business date utility: ${businessDatePath}`);
+    return;
+  }
+  const businessDateSource = readFile(businessDatePath);
+  const requiredUtilitySnippets = [
+    "process.env.BUSINESS_TIME_ZONE || 'Asia/Shanghai'",
+    '业务编号按公司业务日期生成，避免 Docker / NAS 时区为 UTC 时凌晨编号落到前一天',
+    'export function businessDateTimeKey(value: Date = new Date(), timeZone = defaultBusinessTimeZone)',
+    '盘点等流水编号需要日期和时间都按公司业务时区生成，避免 Docker / NAS 默认 UTC',
+    'formatToParts(value)',
+    'return `${year}${month}${day}`;',
+    'return `${year}${month}${day}${hour}${minute}${second}`;'
+  ];
+  for (const snippet of requiredUtilitySnippets) {
+    if (!businessDateSource.includes(snippet)) {
+      addFailure(`business-date.ts must keep business date key snippet: ${snippet}`);
+    }
+  }
+
+  const services = [
+    'backend/src/modules/orders/orders.service.ts',
+    'backend/src/modules/production/production.service.ts',
+    'backend/src/modules/warehouses/warehouses.service.ts'
+  ];
+  for (const servicePath of services) {
+    const source = readFile(servicePath);
+    if (!source.includes("import { businessDateKey } from '../../common/business-date';")) {
+      addFailure(`${servicePath} must import businessDateKey for date-based business numbers.`);
+    }
+    if (source.includes("new Date().toISOString().slice(0, 10).replace(/-/g, '')")) {
+      addFailure(`${servicePath} must not generate business number date keys from UTC toISOString().slice(0, 10).`);
+    }
+  }
+
+  const ordersSource = readFile('backend/src/modules/orders/orders.service.ts');
+  if (!ordersSource.includes('const dateKey = businessDateKey(orderDate);')) {
+    addFailure('OrdersService.generateOrderNo must use businessDateKey(orderDate).');
+  }
+  if (
+    !ordersSource.includes('deliveryDate: line.deliveryDate ? this.formatDateOnly(line.deliveryDate) || undefined : undefined') ||
+    !ordersSource.includes('drawingDate: line.drawingDate ? this.formatDateOnly(line.drawingDate) || undefined : undefined')
+  ) {
+    addFailure('OrdersService persisted order-line validation DTO must preserve deliveryDate and drawingDate through formatDateOnly.');
+  }
+  if (ordersSource.includes('new Date(line.deliveryDate).toISOString().slice(0, 10)')) {
+    addFailure('OrdersService must not convert order-line deliveryDate through UTC toISOString().slice(0, 10).');
+  }
+  if (ordersSource.includes('new Date(line.drawingDate).toISOString().slice(0, 10)')) {
+    addFailure('OrdersService must not convert order-line drawingDate through UTC toISOString().slice(0, 10).');
+  }
+
+  const uploadControllers = [
+    'backend/src/modules/orders/orders.controller.ts',
+    'backend/src/modules/inventory/inventory.controller.ts'
+  ];
+  for (const controllerPath of uploadControllers) {
+    const source = readFile(controllerPath);
+    if (!source.includes("import { businessDateTimeKey } from '../../common/business-date';")) {
+      addFailure(`${controllerPath} must import businessDateTimeKey for uploaded file names.`);
+    }
+    if (source.includes('Date.now()')) {
+      addFailure(`${controllerPath} must not use Date.now() in uploaded file names; use businessDateTimeKey().`);
+    }
+    if (!source.includes('businessDateTimeKey()')) {
+      addFailure(`${controllerPath} must use businessDateTimeKey() for uploaded file names.`);
+    }
+  }
+
+  const uploadFileNameContracts = [
+    {
+      controllerPath: 'backend/src/modules/orders/orders.controller.ts',
+      functionName: 'safeDrawingFileName',
+      expectedFileName: "`${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'drawing'}${extension}`"
+    },
+    {
+      controllerPath: 'backend/src/modules/orders/orders.controller.ts',
+      functionName: 'safeOrderImportFileName',
+      expectedFileName: "`${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'order-import'}${extension}`"
+    },
+    {
+      controllerPath: 'backend/src/modules/inventory/inventory.controller.ts',
+      functionName: 'safeAdjustmentFileName',
+      expectedFileName:
+        "`${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'inventory-adjustment'}${extension}`"
+    },
+    {
+      controllerPath: 'backend/src/modules/inventory/inventory.controller.ts',
+      functionName: 'safeMaterialImportFileName',
+      expectedFileName: "`${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'material-import'}${extension}`"
+    }
+  ];
+  for (const contract of uploadFileNameContracts) {
+    const source = readFile(contract.controllerPath);
+    const functionStart = source.indexOf(`function ${contract.functionName}`);
+    if (functionStart === -1) {
+      addFailure(`${contract.controllerPath} must keep ${contract.functionName}.`);
+      continue;
+    }
+    const nextFunctionStart = source.indexOf('\nfunction ', functionStart + 1);
+    const functionSource =
+      nextFunctionStart === -1 ? source.slice(functionStart) : source.slice(functionStart, nextFunctionStart);
+    if (!functionSource.includes('const uniqueSuffix = randomUUID().slice(0, 8);')) {
+      addFailure(`${contract.controllerPath} ${contract.functionName} must add randomUUID short suffix.`);
+    }
+    if (!functionSource.includes(contract.expectedFileName)) {
+      addFailure(`${contract.controllerPath} ${contract.functionName} must include business time plus unique suffix.`);
+    }
+  }
+}
+
 function verifyStockSourcePayloadSanitizer() {
   const stockSourceReviewPath = 'frontend/src/utils/stockSourceReview.ts';
   const orderDtoPath = 'backend/src/modules/orders/dto.ts';
@@ -4014,6 +6582,9 @@ function verifyStockSourcePayloadSanitizer() {
   }
   if (!/function\s+findDirectStockSourceBlockedIssue\s*\([^)]*\)\s*{[\s\S]*compatibilityStatus[\s\S]*缺少库存来源核对结果[\s\S]*}/.test(source)) {
     addFailure('stockSourceReview.ts must block stale selectedStockSources that lack compatibilityStatus.');
+  }
+  if (!source.includes('零件编码不同，属于替代库存')) {
+    addFailure('stockSourceReview.ts must describe replacement stock mismatches as 零件编码不同.');
   }
   if (!/class\s+StockSourceSelectionDto[\s\S]*@Min\(0\.001\)[\s\S]*quantity!:\s*number;/.test(orderDtoSource)) {
     addFailure('StockSourceSelectionDto.quantity must require @Min(0.001) so UI queue placeholders cannot be submitted as real stock sources.');
@@ -4072,6 +6643,9 @@ function verifyInventorySourceCurrentOrderReservationUi() {
   const dialogSnippets = [
     'draftReservedSources?: StockSourceSelectionPayload[]',
     'const draftReservedQuantityByBatchId = computed(() => {',
+    'const orderPreviewRequestSeq = ref(0)',
+    '库存查询失败，请确认零件关键字和后端服务',
+    '订单信息查询失败，请确认订单号和后端服务',
     'for (const source of props.draftReservedSources || [])',
     'const adjustedSourceRows = computed<SourceRow[]>(() =>',
     'const backendAvailableQuantity = row.quantity',
@@ -4120,6 +6694,8 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     'function rebalanceCurrentSelectedSourcesByQueue()',
     '@click="rebalanceCurrentSelectedSourcesByQueue"',
     'function moveSelectedSource',
+    '拖动左侧手柄调整扣库顺序；提交生产会按当前顺序消耗库存',
+    '跨零件搜索后选中的批次',
     "import { Rank } from '@element-plus/icons-vue'",
     'class="selected-source-drag-handle"',
     'aria-label="拖拽调整使用顺序"',
@@ -4155,6 +6731,9 @@ function verifyInventorySourceCurrentOrderReservationUi() {
 
   const editorSnippets = [
     ':draft-reserved-sources="otherLineSelectedStockSources"',
+    'const sourceDetailsRequestSeq = ref(0)',
+    '库存来源查询失败，请确认零件和后端服务',
+    'customerId: props.customerId',
     'const otherLineSelectedStockSources = computed(() =>',
     '.filter((line) => line !== currentSourceLine.value)',
     '.flatMap((line) => line.selectedStockSources || [])'
@@ -4357,14 +6936,38 @@ function verifyOrderStockSourceValidationTransaction() {
 
 function verifyInventorySourcePriority() {
   const servicePath = 'backend/src/modules/inventory/inventory.service.ts';
-  if (!fileExists(servicePath)) {
-    addFailure(`Missing inventory service: ${servicePath}`);
-    return;
+  const dtoPath = 'backend/src/modules/inventory/dto.ts';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const editorPath = 'frontend/src/components/OrderLineEditor.vue';
+  for (const projectPath of [servicePath, dtoPath, apiPath, editorPath]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing inventory source priority file: ${projectPath}`);
+      return;
+    }
   }
 
   const source = readFile(servicePath);
+  const dtoSource = readFile(dtoPath);
+  const apiSource = readFile(apiPath);
+  const editorSource = readFile(editorPath);
+  if (!/class\s+InventorySourceDetailQueryDto[\s\S]*customerId\?:\s*string/.test(dtoSource)) {
+    addFailure('InventorySourceDetailQueryDto must accept customerId for stock source context.');
+  }
+  if (!/interface\s+InventorySourceDetailFilters[\s\S]*customerId\?:\s*string/.test(apiSource) || !apiSource.includes('customerId: filters.customerId')) {
+    addFailure('erpApi.inventoryMaterialSourceDetails must send customerId to source-details.');
+  }
+  if (!editorSource.includes('customerId: props.customerId')) {
+    addFailure('OrderLineEditor.vue must pass current customerId into inventory source-details.');
+    return;
+  }
   if (!source.includes('resolveStockReservationPriorityOrder') || !source.includes('stockReservationConsumesAvailability')) {
     addFailure('InventoryService must calculate stock source available quantity by current draft order priority.');
+  }
+  if (!source.includes('inventoryBatchMatchesCustomerScope') || !source.includes('不过滤全局备货，避免新客户无法使用可用库存')) {
+    addFailure('InventoryService source-details must prioritize current-customer stock source batches without hiding global backup stock.');
+  }
+  if (!source.includes('Material 搜索记忆再次过滤')) {
+    addFailure('InventoryService source-details must describe Material filtering as search memory, not master-data stock quantity.');
   }
   if (!/toInventorySourceDetail\s*\([^)]*currentOrder[\s\S]*stockReservationConsumesAvailability\(reservation\.order,\s*currentOrder\)/.test(source)) {
     addFailure('InventoryService source-details must filter reservations by current draft order priority before calculating availableQuantity.');
@@ -4453,6 +7056,9 @@ function verifyInventoryAdjustmentWorkflow() {
     "transactionType: deltaQuantity > 0 ? 'IN' : 'OUT'",
     "sourceRecordType: 'InventoryAdjustment'",
     'sourceRecordId: adjustment.id',
+    "import { businessDateTimeKey } from '../../common/business-date';",
+    'const stamp = businessDateTimeKey();',
+    'IT-ADJ-${stamp}',
     '当前库存批次正在被其他操作修改，请刷新后重新盘点',
     'private validateAdjustmentAttachment',
     "const adjustmentAttachmentPrefix = '/uploads/inventory-adjustments/'",
@@ -4470,6 +7076,9 @@ function verifyInventoryAdjustmentWorkflow() {
     if (!serviceSource.includes(snippet)) {
       addFailure(`InventoryService must keep inventory adjustment transaction/attachment snippet: ${snippet}`);
     }
+  }
+  if (serviceSource.includes('IT-ADJ-${Date.now()}')) {
+    addFailure('InventoryService inventory adjustment transactionNo must use businessDateTimeKey instead of Date.now().');
   }
 
   const apiSource = readFile(apiPath);
@@ -4495,6 +7104,7 @@ function verifyInventoryAdjustmentWorkflow() {
   const viewSnippets = [
     'v-model="adjustDialogVisible"',
     'title="库存盘点调整"',
+    ':close-on-press-escape="!adjustSaving"',
     ':before-close="handleAdjustDialogBeforeClose"',
     'adjustmentReservedQuantity',
     ':min="adjustmentMinQuantity"',
@@ -4515,6 +7125,8 @@ function verifyInventoryAdjustmentWorkflow() {
     '只有可用库存或数量为 0 的历史批次可以盘点调整。',
     'function isAllowedAdjustmentFile(file: File)',
     'genericAdjustmentMimeTypes.includes(file.type)',
+    'function closeAdjustDialog()',
+    '库存盘点正在保存，请等待保存完成',
     'async function submitAdjustment()',
     '请填写清点人',
     '请填写签字人',
@@ -4607,6 +7219,12 @@ function verifyProcessDefinitionReferenceGuard() {
   }
   if (!/async\s+delete\s*\([^)]*\)\s*{[\s\S]*findProcessDefinitionReferences\(existing\.processNameNormalized\)[\s\S]*referencedProcessDefinitionError/.test(source)) {
     addFailure('ProcessDefinitionsService.delete must reject disabling referenced process definitions.');
+  }
+  if (!source.includes('data: { status: CommonStatus.DISABLED }') || source.includes('prisma.processDefinition.delete')) {
+    addFailure('ProcessDefinitionsService.delete must soft-disable unused process definitions instead of physically deleting them.');
+  }
+  if (!source.includes('async restore(id: string)') || !source.includes('恢复标准工序只恢复后续下拉可选')) {
+    addFailure('ProcessDefinitionsService.restore must explicitly restore disabled process definitions without mutating historical orders, BOM, or transform rules.');
   }
 }
 
@@ -4706,13 +7324,44 @@ function verifyRepairDraftReservationPriority() {
   ) {
     addFailure('repair-first-stage.ts must report and block unsafe STOCK allocation-to-order-inventory gaps.');
   }
+  if (!source.includes('collectComponentStructureBlocks') || !source.includes('printComponentStructureBlocks')) {
+    addFailure('repair-first-stage.ts must report component parent-child structure blocks before write mode.');
+  }
+  if (
+    !source.includes('collectModelBomComponentThicknessRepairs') ||
+    !source.includes('printModelBomComponentThicknessRepairs') ||
+    !source.includes('BOM 父级组件厚度快照') ||
+    !source.includes('data: { partThicknessSnapshot: null }')
+  ) {
+    addFailure('repair-first-stage.ts must clean stale ModelBom component thickness snapshots without touching orders, production or inventory.');
+  }
+  if (
+    !source.includes('collectModelBomScopeBlocks') ||
+    !source.includes('printModelBomScopeBlocks') ||
+    !source.includes('ModelBomScopeBlock') ||
+    !source.includes('BOM 范围重复')
+  ) {
+    addFailure('repair-first-stage.ts must report and block duplicate ModelBom customer/project scopes before migration or write mode.');
+  }
+  if (
+    !source.includes('collectModelBomComponentStructureBlocks') ||
+    !source.includes('collectOrderLineComponentStructureBlocks') ||
+    !source.includes('collectCommittedImportComponentStructureBlocks')
+  ) {
+    addFailure('repair-first-stage.ts must block BOM, order line, and committed import component structure issues.');
+  }
+  if (!source.includes('componentLineBlockedReasons') || !source.includes('isComponentNoRangeInvalid')) {
+    addFailure('repair-first-stage.ts must reuse component structure range and blocking helpers.');
+  }
   if (!source.includes('overrideRepairReason') || !source.includes('isSubmitPlanOperatorRole')) {
     addFailure('repair-first-stage.ts must repair invalid production plan override operator snapshots and roles.');
   }
-  if (!source.includes('assertNoBlockedRepairs(stockSourceReviewStatusRepairs, draftReservationSyncRepairs, consumedReservationRepairs, stockAllocationRepairs)')) {
+  const blockedPreflightPattern =
+    /assertNoBlockedRepairs\s*\(\s*stockSourceReviewStatusRepairs\s*,\s*draftReservationSyncRepairs\s*,\s*consumedReservationRepairs\s*,\s*stockAllocationRepairs\s*,\s*componentStructureBlocks\s*,\s*modelBomScopeBlocks\s*\)/;
+  if (!blockedPreflightPattern.test(source)) {
     addFailure('repair-first-stage.ts write mode must run a full blocked-repair preflight before any repair write.');
   }
-  const preflightIndex = source.indexOf('assertNoBlockedRepairs(stockSourceReviewStatusRepairs, draftReservationSyncRepairs, consumedReservationRepairs, stockAllocationRepairs)');
+  const preflightIndex = source.search(blockedPreflightPattern);
   const firstWriteIndex = source.indexOf('if (planRepairs.length > 0)');
   if (preflightIndex === -1 || firstWriteIndex === -1 || preflightIndex > firstWriteIndex) {
     addFailure('repair-first-stage.ts blocked-repair preflight must happen before the first write transaction.');
@@ -4896,6 +7545,15 @@ function verifyOrderExcelImportWorkflow() {
     'Excel 文件必须包含名为 ERP上传净表 的工作表',
     'ERP上传净表必须连续填写',
     'ERP上传净表不允许包含订单头行',
+    "const lineType = parsedLineType || 'PART'",
+    "partThickness: lineType === 'COMPONENT' ? 0 : partThickness && partThickness > 0 ? partThickness : 0",
+    "partThickness: row.lineType === 'COMPONENT' ? 0 : partThickness > 0 ? partThickness : 0",
+    'allowMissingThickness?: boolean',
+    'this.validateOrderLines(lines, { requireStockSources: false, allowMissingThickness: true })',
+    '!allowMissingThickness',
+    '厚度为空，导入草稿保留为待核对，请在 ERP 中补齐后再提交生产',
+    "const isComponentLine = row.lineType === 'COMPONENT'",
+    '!hasThickness && !isOutsourcedPart && !isComponentLine',
     'this.applyOrderImportAutomaticFields(rows)',
     'normalizeImportRowsForSessionPreview',
     'lineType: row.lineType',
@@ -5043,6 +7701,12 @@ function verifyOrderExcelImportWorkflow() {
       addFailure(`Excel import commit must not submit production or create production tasks: ${snippet}`);
     }
   }
+  if (!serviceSource.includes('零件编码不能为空（Excel 物料号列）')) {
+    addFailure('Order import preview issues must use 零件编码 wording while pointing back to the Excel 物料号 column.');
+  }
+  if (serviceSource.includes("message: '物料号不能为空'")) {
+    addFailure('Order import preview issues must not show stale UI wording: 物料号不能为空.');
+  }
 
   const controllerSnippets = [
     "@Post('import-sessions')",
@@ -5123,7 +7787,9 @@ function verifyOrderExcelImportWorkflow() {
     '上传 ERP上传净表',
     '创建全部可导入草稿',
     '不会自动提交生产、不会占用库存、不会生成生产任务',
-    '同步物料基础资料',
+    '只会补建缺失的零件搜索记忆',
+    '不覆盖已存在或已停用零件搜索记忆',
+    '不会创建客户 BOM、全局适用范围或库存数量',
     '台账页不能直接上传',
     'import-drop-zone',
     'is-drag-over',
@@ -5149,6 +7815,10 @@ function verifyOrderExcelImportWorkflow() {
     'allSelectableImportOrderWarnings',
     'syncImportSelectionAgainstSelectableOrders',
     'confirmImportWarnings',
+    'orderConfirmDialogVisible',
+    'openOrderConfirmDialog',
+    'handleOrderConfirmDialogClose',
+    'class="order-confirm-panel"',
     '导入警告复核',
     'visibleSelectableCovered',
     'useAllSelectableCommit ? [] : orderNos',
@@ -5158,11 +7828,12 @@ function verifyOrderExcelImportWorkflow() {
     'result.materialSyncPreview',
     'importPreview.summary.materialSyncCount',
     'importPreview.summary.materialSyncPreview',
-    '预计同步物料',
+    '涉及零件编码',
     'session.materialSyncCount',
     'session.materialSyncPreview',
     'materialSyncPreviewSuffix',
-    '个物料基础资料',
+    '仅补建缺失的零件搜索记忆',
+    '已有零件搜索记忆不会被订单覆盖',
     'commitOrderImportSession(importPreview.value.id, [], previewToken, true)',
     '导入预览已过期，请刷新预览后再创建草稿',
     'importPreview.value.previewToken',
@@ -5197,12 +7868,21 @@ function verifyOrderExcelImportWorkflow() {
   }
   const forbiddenFrontendSnippets = [
     '可导入订单较多，请直接使用“创建全部可导入草稿”',
-    'selectableOrderCount || 0) > 1000'
+    'selectableOrderCount || 0) > 1000',
+    '只会补建缺失的 Material 基础资料',
+    '已有基础资料不会被订单覆盖',
+    '已有 Material 不会被订单覆盖'
   ];
   for (const snippet of forbiddenFrontendSnippets) {
     if (ordersViewSource.includes(snippet)) {
-      addFailure(`Frontend must not add business quantity limits to Excel import selection: ${snippet}`);
+      addFailure(`Frontend must not add stale or misleading Excel import wording: ${snippet}`);
     }
+  }
+  if (ordersViewSource.includes('label="物料号"') || orderDetailSource.includes('label="物料号"')) {
+    addFailure('Order import/source preview tables must show 零件编码 instead of 物料号 in the UI; keep 物料号 only for Excel source/export fields.');
+  }
+  if (ordersViewSource.includes('ElMessageBox.confirm')) {
+    addFailure('OrdersListView.vue order and import key operations must use el-dialog instead of ElMessageBox.confirm.');
   }
 
   const readmeSnippets = [
@@ -5225,9 +7905,9 @@ function verifyOrderExcelImportWorkflow() {
     '手机端订单界面只保留查看入口',
     '预览来源Excel',
     '删除导入记忆后只保留文字追溯',
-    '物料基础库同步',
-    '预计同步物料',
-    '前 5 个物料号示例',
+    '缺失零件搜索记忆补建',
+    '涉及零件编码',
+    '前 5 个零件编码示例',
     '草稿编辑删除',
     '导入记忆删除',
     'API_BODY_LIMIT',
@@ -5305,7 +7985,7 @@ function verifyOrderExcelImportWorkflow() {
     '删除导入记忆后订单明细必须保留来源 Excel 文件名文字追溯',
     '删除导入记忆后订单明细不能继续保留可预览的来源文件 ID',
     'historySession.selectableOrderCount === 4',
-    'historySession.materialSyncCount === 10',
+    'historySession.materialSyncCount === 6',
     'historySession.materialSyncPreview?.includes',
     'assertSelectedCommitSupportsUnloadedOrders',
     'assertAllSelectableCommitSupportsExcludedOrders',
@@ -5341,19 +8021,32 @@ function verifyOrderExcelImportWorkflow() {
     "upload.files?.[0]?.sheetName",
     "upload.files?.[0]?.fileName === fileName",
     "sourceFileName === fileName",
-    'upload.summary.materialSyncCount === 10',
+    'upload.summary.materialSyncCount === 6',
     'upload.summary.materialSyncPreview?.includes',
+    '订单导入父级组件行厚度必须按不适用处理为 0',
+    'THICKNESS_DEFAULTED',
+    '订单导入父级组件行不应产生 THICKNESS_DEFAULTED 厚度待核对警告',
+    'assertImportMissingThicknessDraftRequiresReview',
+    '缺厚度订单应允许导入草稿',
+    '缺厚度草稿提交生产必须被厚度校验拦截',
+    '厚度必须大于 0',
     'commit.skippedBlockedCount === 1',
     'commit.committedOrderNos',
     'materialSyncCount',
     'materialSyncPreview',
-    'commit.materialSyncCount === 10',
+    'commit.materialSyncCount === 6',
     'commit.materialSyncPreview?.includes',
     'committedImportSession.summary.committedOrderCount === 4',
+    '导入订单组件行厚度必须保存为 0',
     'assertImportedMaterialsUpserted',
     'Imported order lines must be upserted into Material library',
     'Blocked import rows must not be upserted into Material library',
     "material.status === 'ENABLED'",
+    'assertOrderImportDoesNotOverwriteExistingMaterial',
+    "material?.status === 'DISABLED'",
+    '订单导入不得覆盖已有 Material',
+    '订单导入不得把已停用 Material 自动恢复启用',
+    '订单行应保留导入快照 partName',
     'renamedImportSession.currentCommittedOrderNos.includes(editableOrderNo)',
     'afterDeleteImportSession.summary.currentCommittedOrderCount === 3',
     'assertSubmitRejectsUnconfirmedMaterialIdentityConflict',
@@ -5369,6 +8062,18 @@ function verifyOrderExcelImportWorkflow() {
   for (const snippet of regressionSnippets) {
     if (!regressionScriptSource.includes(snippet)) {
       addFailure(`verify-order-import-api.cjs must keep regression coverage snippet: ${snippet}`);
+    }
+  }
+  const forbiddenRegressionScriptSnippets = [
+    '预计同步物料',
+    '同步物料',
+    '物料基础资料',
+    '物料示例',
+    '涉及物料号'
+  ];
+  for (const snippet of forbiddenRegressionScriptSnippets) {
+    if (regressionScriptSource.includes(snippet)) {
+      addFailure(`verify-order-import-api.cjs must use 零件搜索记忆 wording instead of stale import wording: ${snippet}`);
     }
   }
 
@@ -5485,12 +8190,32 @@ function verifySeedStockReservationCoverage() {
   }
 }
 
+function verifyRuntimeStorageIgnored() {
+  const ignoreContracts = [
+    { path: '.gitignore', label: 'Git ignore' },
+    { path: '.dockerignore', label: 'Docker ignore' }
+  ];
+
+  for (const contract of ignoreContracts) {
+    if (!fileExists(contract.path)) {
+      addFailure(`Missing ${contract.path}; runtime uploads and exports must not be committed or packaged.`);
+      continue;
+    }
+    const source = readFile(contract.path);
+    if (!/(^|\r?\n)storage\/?(\r?\n|$)/.test(source)) {
+      addFailure(`${contract.label} must ignore the storage runtime directory, including uploads, exports, logs and temp files.`);
+    }
+  }
+}
+
 verifyRequiredFiles();
 verifyNoMojibakeInUserFacingSources();
 verifyNavigation();
 verifyResponsiveMobileBaseline();
 verifyNoNativeBrowserDialogs();
+verifyNoElementPlusConfirmDialogs();
 verifyResponsiveElementPlusDialogs();
+verifyElementPlusChineseLocale();
 verifyCustomerSelectOnlyShowsName();
 verifyOrderSelectDisplayContract();
 verifyOrderFilterOrder();
@@ -5520,6 +8245,8 @@ verifyNoInlineCustomerDropdowns();
 verifyNoSilentSearchResultLimits();
 verifyStatisticsDisplayContract();
 verifySharedOrderDisplayStatus();
+verifySharedDateFormattingContract();
+verifyBackendBusinessDateKeyContract();
 verifyStockSourcePayloadSanitizer();
 verifyInventorySourceDialogReviewGuard();
 verifyInventorySourceCurrentOrderReservationUi();
@@ -5535,6 +8262,7 @@ verifyRepairScriptEntrypoint();
 verifyReadmeRepairSafetyDocs();
 verifyOrderExcelImportWorkflow();
 verifySeedStockReservationCoverage();
+verifyRuntimeStorageIgnored();
 
 if (failures.length > 0) {
   console.error('First-stage source verification failed:');

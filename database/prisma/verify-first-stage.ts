@@ -88,10 +88,13 @@ async function main() {
   await checkMasterDataUniqueness();
   await checkProcessMemoryData();
   await checkModelBomData();
+  await checkFirstStageVerificationFixtures();
   await checkMaterialTransformRuleData();
   await checkProductionOperators();
   await checkCustomerContacts();
   await checkOrderNoReservations();
+  await checkOrderLineComponentStructure();
+  await checkCommittedOrderImportRowComponentStructure();
   await checkOrderLinePlans();
   await checkOrderLineProcessSteps();
   await checkProductionTaskConsistency();
@@ -130,7 +133,45 @@ async function checkModelBomData() {
     orderBy: { bomName: 'asc' }
   });
 
+  const bomsByScope = new Map<string, (typeof boms)[number]>();
+
   for (const bom of boms) {
+    const actualCustomerScopeKey = stringValue(bom.customerScopeKey) || 'ALL';
+    const actualProjectModelScopeKey = stringValue(bom.projectModelScopeKey) || 'ALL';
+    const expectedCustomerScopeKey =
+      bom.customerScopeMode === 'SELECTED'
+        ? actualCustomerScopeKey
+        : bom.customerId || 'ALL';
+    const expectedProjectModelScopeKey = stringValue(bom.projectModel).toLocaleUpperCase() || 'ALL';
+
+    if (actualCustomerScopeKey !== expectedCustomerScopeKey) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_CUSTOMER_SCOPE_KEY_MISMATCH',
+        `BOM ${bom.bomName} customerScopeKey=${actualCustomerScopeKey} 与 customerId=${expectedCustomerScopeKey} 不一致`
+      );
+    }
+    if (actualProjectModelScopeKey !== expectedProjectModelScopeKey) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_PROJECT_SCOPE_KEY_MISMATCH',
+        `BOM ${bom.bomName} projectModelScopeKey=${actualProjectModelScopeKey} 与 projectModel=${expectedProjectModelScopeKey} 不一致`
+      );
+    }
+
+    // BOM 范围必须唯一，避免同一客户 / 机型出现多套可变清单互相覆盖。
+    const bomScopeKey = `${actualCustomerScopeKey}|${actualProjectModelScopeKey.toLocaleUpperCase()}`;
+    const existingScopeBom = bomsByScope.get(bomScopeKey);
+    if (existingScopeBom) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_SCOPE_DUPLICATE',
+        `BOM ${existingScopeBom.bomName} 和 ${bom.bomName} 使用相同客户 / 机型范围 ${bomScopeKey}，请合并后保留一套独立清单`
+      );
+    } else {
+      bomsByScope.set(bomScopeKey, bom);
+    }
+
     const enabledComponentsByNo = new Map<string, (typeof bom.lines)[number]>();
     const seenEnabledComponentNos = new Set<string>();
 
@@ -181,6 +222,16 @@ async function checkModelBomData() {
         if (!componentNo) {
           addIssue('ERROR', 'MODEL_BOM_COMPONENT_NO_MISSING', `${label} 是组件行但缺少 componentNo`);
         }
+        if (line.partThicknessSnapshot !== null) {
+          addIssue(
+            'ERROR',
+            'MODEL_BOM_COMPONENT_THICKNESS_SNAPSHOT_NOT_ALLOWED',
+            `${label} 是父级组件，不能保存 partThicknessSnapshot=${decimalToNumber(line.partThicknessSnapshot)}；厚度只核对子零件和单独零件`
+          );
+        }
+        if (componentNo && isComponentNoRangeInvalid(componentNo)) {
+          addIssue('ERROR', 'MODEL_BOM_COMPONENT_NO_RANGE_INVALID', `${label} 组件编号 ${componentNo} 超出 C001-C9999 范围`);
+        }
         if (parentComponentNo) {
           addIssue('ERROR', 'MODEL_BOM_COMPONENT_HAS_PARENT', `${label} 是组件行但填写了 parentComponentNo=${parentComponentNo}`);
         }
@@ -200,6 +251,353 @@ async function checkModelBomData() {
           'MODEL_BOM_CHILD_PARENT_DISABLED_OR_MISSING',
           `${label} 启用子零件所属组件 ${parentComponentNo} 不存在或已停用`
         );
+      }
+    }
+  }
+
+  const diffReviews = await prisma.modelBomDiffReview.findMany({
+    include: {
+      targetBom: { select: { id: true, bomName: true, sourceBomId: true } },
+      sourceBom: { select: { id: true, bomName: true } },
+      sourceLine: { select: { id: true, bomId: true, partCodeSnapshot: true } },
+      targetLine: { select: { id: true, bomId: true, partCodeSnapshot: true } }
+    }
+  });
+
+  for (const review of diffReviews) {
+    const label = `BOM 差异核对 ${review.issueTitle || review.reviewKey}`;
+    if (review.targetBom.sourceBomId !== review.sourceBomId) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_DIFF_REVIEW_SOURCE_MISMATCH',
+        `${label} 的 sourceBomId=${review.sourceBomId} 与客户 BOM ${review.targetBom.bomName} 的 sourceBomId=${review.targetBom.sourceBomId || '-'} 不一致`
+      );
+    }
+    if (review.sourceLine && review.sourceLine.bomId !== review.sourceBomId) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_DIFF_REVIEW_SOURCE_LINE_MISMATCH',
+        `${label} 的来源行 ${review.sourceLine.partCodeSnapshot} 不属于来源 BOM ${review.sourceBom.bomName}`
+      );
+    }
+    if (review.targetLine && review.targetLine.bomId !== review.targetBomId) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_DIFF_REVIEW_TARGET_LINE_MISMATCH',
+        `${label} 的客户行 ${review.targetLine.partCodeSnapshot} 不属于客户 BOM ${review.targetBom.bomName}`
+      );
+    }
+    if (!stringValue(review.diffFingerprint)) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_FINGERPRINT_MISSING', `${label} 缺少 diffFingerprint，无法判断后续差异是否已经变化`);
+    }
+  }
+}
+
+async function checkFirstStageVerificationFixtures() {
+  const [
+    enabledCustomerCount,
+    enabledGlobalBomCount,
+    enabledGlobalAllProjectBomCount,
+    enabledCustomerBomCount,
+    enabledCustomerAllProjectBomCount,
+    enabledCustomerBomGroups,
+    copiedCustomerBomCount,
+    enabledBomLineCount,
+    enabledComponentLineCount,
+    enabledChildLineCount,
+    enabledStandaloneLineCount,
+    enabledTransformRuleCount,
+    projectModels
+  ] = await Promise.all([
+    prisma.customer.count({ where: { status: CommonStatus.ENABLED } }),
+    prisma.modelBom.count({ where: { status: CommonStatus.ENABLED, customerId: null } }),
+    prisma.modelBom.count({
+      where: {
+        status: CommonStatus.ENABLED,
+        bomName: '百胜全部机型通用零件包',
+        customer: { customerCode: 'C-004' },
+        projectModelScopeKey: 'ALL'
+      }
+    }),
+    prisma.modelBom.count({ where: { status: CommonStatus.ENABLED, customerId: { not: null } } }),
+    prisma.modelBom.count({ where: { status: CommonStatus.ENABLED, customerId: { not: null }, projectModelScopeKey: 'ALL' } }),
+    prisma.modelBom.groupBy({
+      by: ['customerId'],
+      where: { status: CommonStatus.ENABLED, customerId: { not: null } },
+      _count: { _all: true }
+    }),
+    prisma.modelBom.count({ where: { status: CommonStatus.ENABLED, customerId: { not: null }, sourceBomId: { not: null } } }),
+    prisma.modelBomLine.count({ where: { status: CommonStatus.ENABLED, material: { status: CommonStatus.ENABLED } } }),
+    prisma.modelBomLine.count({ where: { status: CommonStatus.ENABLED, lineType: 'COMPONENT', material: { status: CommonStatus.ENABLED } } }),
+    prisma.modelBomLine.count({
+      where: {
+        status: CommonStatus.ENABLED,
+        lineType: 'PART',
+        parentComponentNo: { not: null },
+        material: { status: CommonStatus.ENABLED }
+      }
+    }),
+    prisma.modelBomLine.count({
+      where: {
+        status: CommonStatus.ENABLED,
+        lineType: 'PART',
+        parentComponentNo: null,
+        material: { status: CommonStatus.ENABLED }
+      }
+    }),
+    prisma.materialTransformRule.count({
+      where: {
+        status: CommonStatus.ENABLED,
+        sourceMaterial: { status: CommonStatus.ENABLED },
+        targetMaterial: { status: CommonStatus.ENABLED }
+      }
+    }),
+    prisma.modelBom.findMany({
+      where: { status: CommonStatus.ENABLED },
+      select: { projectModelScopeKey: true },
+      distinct: ['projectModelScopeKey']
+    })
+  ]);
+
+  if (enabledCustomerCount < 2) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_CUSTOMER_COVERAGE_MISSING',
+      `第一阶段验证至少需要 2 个启用客户用于客户下拉和关键字搜索，目前只有 ${enabledCustomerCount} 个；请重新执行 seed。`
+    );
+  }
+  if (enabledGlobalBomCount < 1) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_GLOBAL_BOM_MISSING',
+      '第一阶段验证至少需要 1 个启用的百胜通用 BOM，用于验证复制客户 BOM。'
+    );
+  }
+  if (enabledGlobalAllProjectBomCount < 1) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_BAISHENG_ALL_PROJECT_BOM_MISSING',
+      '第一阶段验证至少需要 1 个转入江阴市百胜制冷设备有限公司名下的百胜全部机型通用 BOM，避免其他客户界面误显示。'
+    );
+  }
+  if (enabledCustomerBomCount < 2) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_CUSTOMER_BOM_MISSING',
+      `第一阶段验证至少需要 2 个启用客户 BOM，用于验证客户/机型筛选和下拉搜索，目前只有 ${enabledCustomerBomCount} 个。`
+    );
+  }
+  if (enabledCustomerAllProjectBomCount < 1) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_CUSTOMER_ALL_PROJECT_BOM_MISSING',
+      '第一阶段验证至少需要 1 个客户全部机型通用 BOM，用于验证客户通用 BOM 和客户指定机型 BOM 可并存。'
+    );
+  }
+  if (enabledCustomerBomGroups.length < 2) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_CUSTOMER_BOM_CUSTOMER_COVERAGE_MISSING',
+      `第一阶段验证至少需要 2 个不同客户拥有启用客户 BOM，用于验证客户下拉、关键字搜索和客户/机型联动，目前只有 ${enabledCustomerBomGroups.length} 个客户。`
+    );
+  }
+  if (copiedCustomerBomCount < 1) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_COPIED_CUSTOMER_BOM_MISSING',
+      '第一阶段验证至少需要 1 个带 sourceBomId 的客户 BOM，用于验证从百胜通用 BOM 复制后的独立维护关系。'
+    );
+  }
+  if (projectModels.length < 2) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_PROJECT_MODEL_COVERAGE_MISSING',
+      `第一阶段验证至少需要 2 个启用机型/项目 BOM，用于验证机型筛选，目前只有 ${projectModels.length} 个。`
+    );
+  }
+  if (enabledBomLineCount < 3 || enabledComponentLineCount < 1 || enabledChildLineCount < 1 || enabledStandaloneLineCount < 1) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_BOM_STRUCTURE_COVERAGE_MISSING',
+      `第一阶段验证需要组件、子零件和单独零件结构；当前启用明细 ${enabledBomLineCount}，组件 ${enabledComponentLineCount}，子零件 ${enabledChildLineCount}，单独零件 ${enabledStandaloneLineCount}。`
+    );
+  }
+  if (enabledTransformRuleCount < 1) {
+    addIssue(
+      'ERROR',
+      'FIRST_STAGE_SEED_MATERIAL_TRANSFORM_RULE_MISSING',
+      '第一阶段验证至少需要 1 条启用来源加工关系，用于验证来源加工关系只作为下单和库存来源核对建议，不会自动扣库存、生成订单或创建生产任务。'
+    );
+  }
+}
+
+async function checkOrderLineComponentStructure() {
+  const orders = await prisma.customerOrder.findMany({
+    select: {
+      id: true,
+      orderNo: true,
+      lines: {
+        select: {
+          id: true,
+          lineNo: true,
+          lineType: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCode: true
+        },
+        orderBy: [{ lineNo: 'asc' }, { createdAt: 'asc' }]
+      }
+    },
+    orderBy: { orderNo: 'asc' }
+  });
+
+  for (const order of orders) {
+    const componentNos = new Map<string, (typeof order.lines)[number]>();
+    const duplicateComponentNos = new Set<string>();
+
+    for (const line of order.lines) {
+      const lineType = stringValue(line.lineType) || 'PART';
+      const componentNo = normalizeComponentNo(line.componentNo);
+      const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+      const label = `订单 ${order.orderNo} / line ${line.lineNo || '-'} / ${line.partCode}`;
+
+      if (lineType !== 'COMPONENT' && lineType !== 'PART') {
+        addIssue('ERROR', 'ORDER_LINE_TYPE_INVALID', `${label} lineType=${lineType} 不在 COMPONENT / PART 范围内`);
+      }
+
+      if (lineType === 'COMPONENT') {
+        if (!componentNo) {
+          addIssue('ERROR', 'ORDER_LINE_COMPONENT_NO_MISSING', `${label} 是组件行但缺少 componentNo`);
+          continue;
+        }
+        if (isComponentNoRangeInvalid(componentNo)) {
+          addIssue('ERROR', 'ORDER_LINE_COMPONENT_NO_RANGE_INVALID', `${label} 组件编号 ${componentNo} 超出 C001-C9999 范围`);
+        }
+        if (parentComponentNo) {
+          addIssue('ERROR', 'ORDER_LINE_COMPONENT_HAS_PARENT', `${label} 是组件行但填写了 parentComponentNo=${parentComponentNo}`);
+        }
+        if (componentNos.has(componentNo)) {
+          duplicateComponentNos.add(componentNo);
+        }
+        componentNos.set(componentNo, line);
+        continue;
+      }
+
+      if (componentNo) {
+        addIssue('ERROR', 'ORDER_LINE_PART_COMPONENT_NO_NOT_ALLOWED', `${label} 是零件行，不能填写 componentNo=${componentNo}`);
+      }
+    }
+
+    for (const duplicateComponentNo of duplicateComponentNos) {
+      addIssue('ERROR', 'ORDER_LINE_COMPONENT_NO_DUPLICATE', `订单 ${order.orderNo} 存在重复组件编号 ${duplicateComponentNo}`);
+    }
+
+    for (const line of order.lines) {
+      const lineType = stringValue(line.lineType) || 'PART';
+      const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+      if (lineType === 'PART' && parentComponentNo && !componentNos.has(parentComponentNo)) {
+        addIssue(
+          'ERROR',
+          'ORDER_LINE_CHILD_PARENT_MISSING',
+          `订单 ${order.orderNo} / line ${line.lineNo || '-'} / ${line.partCode} 所属组件 ${parentComponentNo} 在当前订单内不存在`
+        );
+      }
+    }
+  }
+}
+
+async function checkCommittedOrderImportRowComponentStructure() {
+  const sessions = await prisma.orderImportSession.findMany({
+    where: { status: 'COMMITTED' },
+    select: {
+      id: true,
+      committedOrderNos: true,
+      rows: {
+        select: {
+          id: true,
+          orderNo: true,
+          sourceRowNo: true,
+          lineType: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCode: true,
+          errorCount: true
+        },
+        orderBy: [{ orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+      }
+    },
+    orderBy: { committedAt: 'asc' }
+  });
+
+  for (const session of sessions) {
+    const committedOrderNos = committedOrderNoSet(session.committedOrderNos);
+    if (committedOrderNos.size === 0) {
+      continue;
+    }
+    const rowsByOrderNo = new Map<string, typeof session.rows>();
+    for (const row of session.rows) {
+      const orderNo = normalizeOrderNo(row.orderNo);
+      if (!committedOrderNos.has(orderNo)) {
+        continue;
+      }
+      rowsByOrderNo.set(orderNo, [...(rowsByOrderNo.get(orderNo) || []), row]);
+      if (row.errorCount > 0) {
+        addIssue(
+          'ERROR',
+          'ORDER_IMPORT_COMMITTED_ROW_HAS_ERROR',
+          `导入会话 ${session.id} / 订单 ${row.orderNo} / Excel 行 ${row.sourceRowNo || '-'} 已提交但仍保留 errorCount=${row.errorCount}`
+        );
+      }
+    }
+
+    for (const [orderNo, rows] of rowsByOrderNo.entries()) {
+      const componentNos = new Set<string>();
+      const duplicateComponentNos = new Set<string>();
+      for (const row of rows) {
+        const lineType = stringValue(row.lineType) || 'PART';
+        const componentNo = normalizeComponentNo(row.componentNo);
+        const parentComponentNo = normalizeComponentNo(row.parentComponentNo);
+        const label = `导入会话 ${session.id} / 订单 ${orderNo} / Excel 行 ${row.sourceRowNo || '-'} / ${row.partCode}`;
+
+        if (lineType !== 'COMPONENT' && lineType !== 'PART') {
+          addIssue('ERROR', 'ORDER_IMPORT_LINE_TYPE_INVALID', `${label} lineType=${lineType} 不在 COMPONENT / PART 范围内`);
+        }
+        if (lineType === 'COMPONENT') {
+          if (!componentNo) {
+            addIssue('ERROR', 'ORDER_IMPORT_COMPONENT_NO_MISSING', `${label} 是组件行但缺少 componentNo`);
+            continue;
+          }
+          if (isComponentNoRangeInvalid(componentNo)) {
+            addIssue('ERROR', 'ORDER_IMPORT_COMPONENT_NO_RANGE_INVALID', `${label} 组件编号 ${componentNo} 超出 C001-C9999 范围`);
+          }
+          if (parentComponentNo) {
+            addIssue('ERROR', 'ORDER_IMPORT_COMPONENT_HAS_PARENT', `${label} 是组件行但填写了 parentComponentNo=${parentComponentNo}`);
+          }
+          if (componentNos.has(componentNo)) {
+            duplicateComponentNos.add(componentNo);
+          }
+          componentNos.add(componentNo);
+          continue;
+        }
+        if (componentNo) {
+          addIssue('ERROR', 'ORDER_IMPORT_PART_COMPONENT_NO_NOT_ALLOWED', `${label} 是零件行，不能填写 componentNo=${componentNo}`);
+        }
+      }
+
+      for (const duplicateComponentNo of duplicateComponentNos) {
+        addIssue('ERROR', 'ORDER_IMPORT_COMPONENT_NO_DUPLICATE', `导入会话 ${session.id} / 订单 ${orderNo} 存在重复组件编号 ${duplicateComponentNo}`);
+      }
+
+      for (const row of rows) {
+        const lineType = stringValue(row.lineType) || 'PART';
+        const parentComponentNo = normalizeComponentNo(row.parentComponentNo);
+        if (lineType === 'PART' && parentComponentNo && !componentNos.has(parentComponentNo)) {
+          addIssue(
+            'ERROR',
+            'ORDER_IMPORT_CHILD_PARENT_MISSING',
+            `导入会话 ${session.id} / 订单 ${orderNo} / Excel 行 ${row.sourceRowNo || '-'} / ${row.partCode} 所属组件 ${parentComponentNo} 在当前导入订单内不存在`
+          );
+        }
       }
     }
   }
@@ -297,8 +695,28 @@ function normalizeOrderNo(orderNo: string) {
   return orderNo.trim().toUpperCase();
 }
 
+function committedOrderNoSet(value: Prisma.JsonValue | null | undefined) {
+  if (!Array.isArray(value)) {
+    return new Set<string>();
+  }
+  return new Set(
+    value
+      .map((item) => (typeof item === 'string' ? normalizeOrderNo(item) : ''))
+      .filter(Boolean)
+  );
+}
+
 function normalizeCaseInsensitiveKey(value: string | null | undefined) {
   return value?.trim().toLowerCase() || '';
+}
+
+function normalizeComponentNo(value: string | null | undefined) {
+  return value?.trim().toUpperCase() || '';
+}
+
+function isComponentNoRangeInvalid(value: string | null | undefined) {
+  const matched = /^C(\d+)$/i.exec(normalizeComponentNo(value));
+  return !!matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999);
 }
 
 function sameText(left: string | null | undefined, right: string | null | undefined) {
@@ -575,7 +993,7 @@ function stockSourceMissingOrderInfo(line: any) {
     !String(line.drawingNo || '').trim() ? '图号' : '',
     !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
     !String(line.partSpecification || '').trim() ? '成品规格' : '',
-    decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
+    line.lineType !== 'COMPONENT' && decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
   ].filter(Boolean);
 }
 

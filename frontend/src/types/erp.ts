@@ -50,6 +50,7 @@ export interface ProcessTemplate {
   templateName: string;
   steps: ProcessStepDetail[];
   remark?: string;
+  status: CommonStatus;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +87,14 @@ export interface Customer {
   remark?: string;
   status: CommonStatus;
   contacts: CustomerContact[];
+}
+
+export interface CustomerListResponse {
+  items: Customer[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface CustomerContact {
@@ -731,6 +740,7 @@ export interface InventorySummaryRow {
 
 export interface InventoryMaterialSuggestion {
   value: string;
+  materialId?: string;
   partCode: string;
   partName: string;
   unit: string;
@@ -783,6 +793,29 @@ export interface MaterialMemory {
   updatedAt: string;
 }
 
+export interface MaterialMemoryListResponse {
+  items: MaterialMemory[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface MaterialDashboardBomStructureDetail {
+  lineId: string;
+  bomId: string;
+  bomName: string;
+  customerId?: string | null;
+  customerName?: string | null;
+  projectModel?: string | null;
+  structureType: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | null;
+  structureLabel: string;
+  componentNo?: string | null;
+  parentComponentNo?: string | null;
+  displayOrder?: number | null;
+  sortOrder: number;
+}
+
 export interface MaterialDashboardRow {
   id: string;
   partCode: string;
@@ -793,8 +826,12 @@ export interface MaterialDashboardRow {
   status: CommonStatus;
   scopeType: 'COMMON' | 'CUSTOM';
   scopeLabel: string;
+  currentRelationType?: 'BOM' | 'APPLICABILITY' | 'ORDER_HISTORY' | 'MATERIAL_ONLY';
+  currentRelationLabel?: string;
+  currentRelationDescription?: string;
   customerNames: string[];
   projectModels: string[];
+  hasGlobalProjectScope?: boolean;
   applicabilityCount: number;
   bomLineCount: number;
   bomNames: string[];
@@ -805,8 +842,15 @@ export interface MaterialDashboardRow {
   drawingVersion?: string | null;
   drawingDate?: string | null;
   drawingStatus?: string | null;
+  drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | null;
+  drawingSourceLabel?: string | null;
   partThickness?: number | null;
   projectModel?: string | null;
+  bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | null;
+  bomStructureLabel?: string | null;
+  bomStructureTypes?: Array<'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART'>;
+  bomStructureLabels?: string[];
+  bomStructureDetails?: MaterialDashboardBomStructureDetail[];
   lastOrderNo?: string | null;
   lastOrderDate?: string | null;
   lastCustomerName?: string | null;
@@ -826,7 +870,12 @@ export interface MaterialDashboardSummary {
   commonCount: number;
   customCount: number;
   withBomCount: number;
+  withoutBomCount: number;
   withRecentOrderCount: number;
+  withoutRecentOrderCount: number;
+  relationCounts: Partial<Record<'BOM' | 'APPLICABILITY' | 'ORDER_HISTORY' | 'MATERIAL_ONLY', number>>;
+  drawingSourceCounts: Partial<Record<'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | 'NONE', number>>;
+  bomStructureCounts: Partial<Record<'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE', number>>;
 }
 
 export interface MaterialDashboardResponse {
@@ -1031,6 +1080,8 @@ export interface ModelBomLine {
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  partThickness?: number | null;
+  partThicknessSource?: 'BOM_LINE' | 'ORDER_HISTORY' | null;
   lineType: 'PART' | 'COMPONENT';
   partCategory?: string | null;
   componentNo?: string | null;
@@ -1046,10 +1097,11 @@ export interface ModelBomLine {
   drawingStatus?: string | null;
   drawingFileName?: string | null;
   drawingFileUrl?: string | null;
-  drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT';
+  drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST';
   defaultProcessRoute?: string | null;
   defaultQuantity: number;
   remark?: string | null;
+  displayOrder?: number | null;
   sortOrder: number;
   status: CommonStatus;
   materialStatus?: CommonStatus;
@@ -1064,15 +1116,62 @@ export interface ModelBom {
   customerCode?: string;
   customerName?: string;
   projectModel: string;
+  customerScopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
+  scopeTypeLabel?: string;
+  scopeCustomerIds?: string[];
+  scopeCustomers?: Array<{
+    customerId: string;
+    customerCode?: string;
+    customerName: string;
+  }>;
   customerScopeKey: string;
   projectModelScopeKey: string;
   scopeLabel: string;
   sourceBomId?: string | null;
   sourceBomNameSnapshot?: string | null;
+  isCommon?: boolean;
+  commonSortOrder?: number | null;
   remark?: string | null;
   status: CommonStatus;
   lineCount: number;
   lines: ModelBomLine[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelBomScopeSummary {
+  totalCount: number;
+  allCustomerCount: number;
+  selectedCustomerCount: number;
+  privateCount: number;
+  commonCount: number;
+}
+
+export interface ModelBomListResponse {
+  items: ModelBom[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  scopeSummary: ModelBomScopeSummary;
+}
+
+export interface ModelBomDiffReview {
+  id: string;
+  targetBomId: string;
+  sourceBomId: string;
+  reviewKey: string;
+  issueKind: string;
+  sourceLineId?: string | null;
+  targetLineId?: string | null;
+  issueTitle: string;
+  issueDetail?: string | null;
+  diffFingerprint: string;
+  fieldsJson?: unknown;
+  reviewedBy?: string | null;
+  reviewRemark?: string | null;
+  status: CommonStatus;
+  reviewedAt: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1085,12 +1184,16 @@ export interface MaterialTransformRule {
   sourceUnit: string;
   sourcePartSpecification?: string | null;
   sourceMaterialStatus?: CommonStatus;
+  sourceAvailableQuantity: number;
+  sourceAvailableBatchCount: number;
   targetMaterialId: string;
   targetPartCode: string;
   targetPartName: string;
   targetUnit: string;
   targetPartSpecification?: string | null;
   targetMaterialStatus?: CommonStatus;
+  targetAvailableQuantity: number;
+  targetAvailableBatchCount: number;
   customerId?: string | null;
   customerCode?: string;
   customerName?: string;
@@ -1106,6 +1209,14 @@ export interface MaterialTransformRule {
   status: CommonStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MaterialTransformRuleListResponse {
+  items: MaterialTransformRule[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface InventorySourceBatchDetail {
@@ -1200,6 +1311,7 @@ export interface InventorySourceDetailResponse {
 }
 
 export interface InventorySourceExpected {
+  lineType?: 'PART' | 'COMPONENT';
   partCode?: string;
   partName?: string;
   drawingNo?: string;

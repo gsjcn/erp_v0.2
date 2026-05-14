@@ -1,5 +1,5 @@
-import { Controller, Get, Query } from '@nestjs/common';
-import { MaterialDashboardQueryDto, MaterialProjectOptionsQueryDto } from './dto';
+import { Body, Controller, Get, Patch, Query } from '@nestjs/common';
+import { MaterialDashboardQueryDto, MaterialProjectOptionsQueryDto, SaveCommonProjectModelsDto } from './dto';
 import { MaterialsService } from './materials.service';
 
 @Controller('materials')
@@ -14,5 +14,15 @@ export class MaterialsController {
   @Get('project-models')
   projectModels(@Query() query: MaterialProjectOptionsQueryDto) {
     return this.materialsService.projectModels(query);
+  }
+
+  @Get('common-project-models')
+  commonProjectModels() {
+    return this.materialsService.commonProjectModels();
+  }
+
+  @Patch('common-project-models')
+  saveCommonProjectModels(@Body() dto: SaveCommonProjectModelsDto) {
+    return this.materialsService.saveCommonProjectModels(dto);
   }
 }

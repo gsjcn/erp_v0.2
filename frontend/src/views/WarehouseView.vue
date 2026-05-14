@@ -6,8 +6,8 @@
         <el-badge :value="pendingNoticeCount" :hidden="pendingNoticeCount === 0" class="notice-badge">
           <el-button :icon="Bell" @click="openWarehouseNotices">通知</el-button>
         </el-badge>
-        <el-button @click="openWarehouseDialog">新增仓库</el-button>
-        <el-button @click="openLocationDialog">新增库位</el-button>
+        <el-button v-if="!isMobileLayout" @click="openWarehouseDialog">新增仓库</el-button>
+        <el-button v-if="!isMobileLayout" @click="openLocationDialog">新增库位</el-button>
         <el-button :loading="loading" @click="queryWarehouseWork">刷新</el-button>
       </div>
     </div>
@@ -97,7 +97,7 @@
         <el-table-column label="规格 / 厚度" min-width="150">
           <template #default="{ row }">
             <div>{{ row.partSpecification || '-' }}</div>
-            <div class="cell-subtext">{{ row.partThickness ? `${row.partThickness} mm` : '-' }}</div>
+            <div class="cell-subtext">{{ partThicknessText(row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="完成 / 生产计划" width="150">
@@ -179,7 +179,7 @@
           </div>
           <div class="mobile-field">
             <label>规格 / 厚度</label>
-            <span>{{ receipt.partSpecification || '-' }} / {{ receipt.partThickness ? `${receipt.partThickness} mm` : '-' }}</span>
+            <span>{{ partSpecText(receipt) }}</span>
           </div>
           <div class="mobile-field">
             <label>订单日期</label>
@@ -222,7 +222,7 @@
             link-text="打开图纸"
             :title="`${receipt.partName} 入库图纸`"
           />
-          <el-button link type="primary" @click="openConfirm(receipt)">确认入库</el-button>
+          <span class="mobile-readonly-note">手机端只查看待入库信息</span>
         </div>
       </article>
       <div v-if="!receipts.length && !loading" class="mobile-empty">暂无待入库任务</div>
@@ -308,7 +308,7 @@
         <el-table-column label="规格 / 厚度" min-width="150">
           <template #default="{ row }">
             <div>{{ row.partSpecification || '-' }}</div>
-            <div class="cell-subtext">{{ row.partThickness ? `${row.partThickness} mm` : '-' }}</div>
+            <div class="cell-subtext">{{ partThicknessText(row) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="数量" width="100">
@@ -331,7 +331,7 @@
           <template #default="{ row }">
             <el-button link type="primary" @click="selectShipmentOrder(row)">选中订单</el-button>
             <el-button link type="primary" :disabled="!canShipWarehouseShipment(row)" :title="shipmentLockedText(row)" @click="openOrderShipmentConfirm(row)">订单发货</el-button>
-            <el-button link type="primary" @click="openShipmentSourceDetails(row)">来源/图纸</el-button>
+            <el-button link type="primary" @click="openShipmentSourceDetails(row)">库存来源/图纸</el-button>
             <el-button
               link
               type="primary"
@@ -394,9 +394,7 @@
             </div>
           </div>
           <div class="mobile-card-actions">
-            <el-button size="small" type="primary" plain :disabled="!canShipWarehouseShipment(group.rows[0])" :title="shipmentLockedText(group.rows[0])" @click="openOrderShipmentConfirm(group.rows[0])">
-              订单发货
-            </el-button>
+            <span class="mobile-readonly-note">手机端只查看待发货汇总</span>
           </div>
         </article>
       </div>
@@ -481,17 +479,8 @@
             link-text="打开图纸"
             :title="`${shipment.partName} 发货图纸`"
           />
-          <el-button link type="primary" @click="openShipmentSourceDetails(shipment)">来源/图纸</el-button>
-          <el-button
-            link
-            type="primary"
-            :disabled="!canShipWarehouseShipment(shipment) || Boolean(shipmentShortageText(shipment))"
-            :title="shipmentLockedText(shipment) || shipmentShortageText(shipment)"
-            @click="openShipmentConfirm(shipment)"
-          >
-            确认发货
-          </el-button>
-          <el-button link type="primary" :disabled="!canShipWarehouseShipment(shipment)" :title="shipmentLockedText(shipment)" @click="openOrderShipmentConfirm(shipment)">订单发货</el-button>
+          <el-button link type="primary" @click="openShipmentSourceDetails(shipment)">库存来源/图纸</el-button>
+          <span class="mobile-readonly-note">手机端只查看发货信息</span>
         </div>
       </article>
       <div v-if="!shipments.length && !loading" class="mobile-empty">暂无待发货库存</div>
@@ -699,6 +688,7 @@
       width="min(440px, calc(100vw - 32px))"
       class="responsive-dialog"
       :close-on-click-modal="false"
+      :close-on-press-escape="!saving"
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetReceiptDialog"
     >
@@ -721,7 +711,7 @@
         <el-form-item label="规格/厚度">
           {{
             activeReceipt
-              ? `${activeReceipt.partSpecification || '-'} / ${activeReceipt.partThickness ? `${activeReceipt.partThickness} mm` : '-'}`
+              ? partSpecText(activeReceipt)
               : '-'
           }}
         </el-form-item>
@@ -790,6 +780,7 @@
       width="min(460px, calc(100vw - 32px))"
       class="responsive-dialog"
       :close-on-click-modal="false"
+      :close-on-press-escape="!saving"
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetShipmentDialog"
     >
@@ -916,6 +907,7 @@
       width="min(760px, calc(100vw - 32px))"
       class="responsive-dialog"
       :close-on-click-modal="false"
+      :close-on-press-escape="!saving"
       :before-close="handleSavingDialogBeforeClose"
       @closed="resetBatchShipmentDialog"
     >
@@ -1037,7 +1029,7 @@
           <el-table-column label="仓库 / 库位" min-width="160">
             <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
           </el-table-column>
-          <el-table-column label="来源/图纸" width="100">
+          <el-table-column label="库存来源/图纸" width="120">
             <template #default="{ row }">
               <el-button link type="primary" @click="openShipmentSourceDetails(row)">查看</el-button>
             </template>
@@ -1087,6 +1079,8 @@
       title="新增仓库"
       width="min(420px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
       :before-close="handleSavingDialogBeforeClose"
     >
       <el-form label-width="92px">
@@ -1108,6 +1102,8 @@
       title="新增库位"
       width="min(420px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
       :before-close="handleSavingDialogBeforeClose"
     >
       <el-form label-width="92px">
@@ -1142,7 +1138,7 @@
             </small>
           </div>
           <el-button
-            v-if="notice.status === 'PENDING'"
+            v-if="notice.status === 'PENDING' && !isMobileLayout"
             size="small"
             type="primary"
             @click="acknowledgeWarehouseNotice(notice)"
@@ -1176,6 +1172,7 @@
       class="responsive-dialog"
       append-to-body
       :close-on-click-modal="false"
+      :close-on-press-escape="!stockNoticeSaving"
       :before-close="handleStockNoticeBeforeClose"
     >
       <div v-if="activeWarehouseNotice" class="notice-stock-panel">
@@ -1267,6 +1264,7 @@ import OrderSelect from '../components/OrderSelect.vue';
 import OrderNoLink from '../components/OrderNoLink.vue';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import StatusTag from '../components/StatusTag.vue';
+import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
   InventorySourceBatchDetail,
   InventorySourceDetailResponse,
@@ -1287,6 +1285,7 @@ type EditableWarehouseShipment = WarehouseShipment & {
 
 const route = useRoute();
 const router = useRouter();
+const { isMobileLayout } = useDeviceProfile();
 const orderOptions = ref<OrderSummary[]>([]);
 const warehouses = ref<Warehouse[]>([]);
 const receipts = ref<WarehouseReceipt[]>([]);
@@ -1304,6 +1303,7 @@ const acknowledgeSaving = ref(false);
 const stockNoticeVisible = ref(false);
 const stockNoticeSaving = ref(false);
 const stockSourceLoading = ref(false);
+const stockSourceRequestSeq = ref(0);
 const stockNoticeConfirmTime = ref('');
 const saving = ref(false);
 const noticeVisible = ref(false);
@@ -1311,6 +1311,7 @@ const confirmVisible = ref(false);
 const shipmentVisible = ref(false);
 const shipmentSourceDetailsVisible = ref(false);
 const shipmentSourceDetailsLoading = ref(false);
+const shipmentSourceDetailsRequestSeq = ref(0);
 const batchShipmentVisible = ref(false);
 const batchShipmentIsOrderMode = ref(false);
 const warehouseVisible = ref(false);
@@ -1395,7 +1396,7 @@ const stockNoticeNeedsWarehouse = computed(
 const showStockMergeConfirm = computed(
   () => showCustomerChangeHandlingFields.value && stockNoticeForm.handlingMode === 'STOCK'
 );
-const stockNoticeDialogTitle = computed(() => (activeStockNoticeIsWithdraw.value ? '撤回零件转库存确认' : '客户变更物料处理'));
+const stockNoticeDialogTitle = computed(() => (activeStockNoticeIsWithdraw.value ? '撤回零件转库存确认' : '客户变更零件处理'));
 const stockNoticeAlertTitle = computed(() =>
   activeStockNoticeIsWithdraw.value
     ? '该通知来自生产管理撤回，确认后会生成备货库存批次和入库流水。请先选择仓库和库位，避免只确认通知但库存没有增加。'
@@ -1410,7 +1411,7 @@ const stockNoticeConfirmText = computed(() => {
   }
   return '确认无实物处理';
 });
-const stockNoticeConfirmTimeText = computed(() => stockNoticeConfirmTime.value || formatDateTime(new Date().toISOString()));
+const stockNoticeConfirmTimeText = computed(() => stockNoticeConfirmTime.value || formatDateTime(new Date()));
 const selectedShipmentOrderNo = computed(() => {
   const orderNos = Array.from(new Set(selectedShipments.value.map((item) => item.orderNo).filter(Boolean)));
   return orderNos.length === 1 ? orderNos[0] : '';
@@ -1561,7 +1562,8 @@ async function loadOrderOptions() {
       filters.orderNo = undefined;
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败');
+    orderOptions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '订单选项加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -1582,7 +1584,16 @@ async function loadData() {
     warehouseNotices.value = noticeResult;
     await loadTransactions();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '仓库数据加载失败');
+    warehouses.value = [];
+    receipts.value = [];
+    shipments.value = [];
+    selectedShipments.value = [];
+    batchShipmentRows.value = [];
+    transactions.value = [];
+    warehouseNotices.value = [];
+    expandedMobileWarehouseCardKeys.value = [];
+    shipmentTableRef.value?.clearSelection();
+    ElMessage.error(error instanceof Error ? error.message : '仓库数据加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
   }
@@ -1617,7 +1628,8 @@ async function loadTransactions() {
       transactionType: transactionType.value === 'ALL' ? undefined : transactionType.value
     });
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '库存流水加载失败');
+    transactions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '库存流水加载失败，请确认后端服务和筛选条件');
   }
 }
 
@@ -1638,7 +1650,8 @@ async function loadWarehouseNotices() {
   try {
     warehouseNotices.value = await erpApi.warehouseNotices();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '仓库通知加载失败');
+    warehouseNotices.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '仓库通知加载失败，请确认后端服务');
   } finally {
     noticeLoading.value = false;
   }
@@ -1656,19 +1669,22 @@ function warehouseNoticeTitle(notice: ProductionNotice) {
   const typeMap: Record<string, string> = {
     QUANTITY_INCREASE: '客户数量增加',
     QUANTITY_DECREASE: '客户数量减少',
-    ORDER_CANCELLED: '客户取消物料',
-    MATERIAL_ADDED: '客户新增物料',
+    ORDER_CANCELLED: '客户取消零件',
+    MATERIAL_ADDED: '客户新增零件',
     TASK_WITHDRAWN: '管理撤回'
   };
   return `${typeMap[notice.noticeType] || notice.noticeType}：${partText}${quantityText}`;
 }
 
 function acknowledgeWarehouseNotice(notice: ProductionNotice) {
+  if (guardDesktopWarehouseMutation('确认仓库通知')) {
+    return;
+  }
   activeWarehouseNotice.value = notice;
   if (requiresWithdrawStockReceipt(notice) || requiresCustomerChangeHandling(notice)) {
     const handlingPlan = notice.handlingPlan;
     stockNoticeForm.acknowledgedBy = '';
-    stockNoticeConfirmTime.value = formatDateTime(new Date().toISOString());
+    stockNoticeConfirmTime.value = formatDateTime(new Date());
     stockNoticeForm.handlingMode = requiresWithdrawStockReceipt(notice)
       ? 'STOCK'
       : handlingPlan?.handlingMode || 'NONE';
@@ -1684,6 +1700,9 @@ function acknowledgeWarehouseNotice(notice: ProductionNotice) {
 }
 
 async function saveWarehouseNoticeAcknowledge(acknowledgedBy: string) {
+  if (guardDesktopWarehouseMutation('确认仓库通知')) {
+    return;
+  }
   const notice = activeWarehouseNotice.value;
   if (!notice) {
     return;
@@ -1731,6 +1750,7 @@ function resetStockNoticeLocation() {
 
 function handleSavingDialogBeforeClose(done: () => void) {
   if (saving.value) {
+    ElMessage.warning('仓库业务正在保存，请等待保存完成');
     return;
   }
   done();
@@ -1738,6 +1758,7 @@ function handleSavingDialogBeforeClose(done: () => void) {
 
 function handleStockNoticeBeforeClose(done: () => void) {
   if (stockNoticeSaving.value) {
+    ElMessage.warning('仓库通知正在处理，请等待保存完成');
     return;
   }
   done();
@@ -1758,6 +1779,12 @@ function handleStockNoticeModeChange() {
 }
 
 async function saveWithdrawStockNotice() {
+  if (guardDesktopWarehouseMutation('确认仓库通知')) {
+    return;
+  }
+  if (stockNoticeSaving.value) {
+    return;
+  }
   const notice = activeWarehouseNotice.value;
   if (!notice) {
     return;
@@ -1794,7 +1821,7 @@ async function saveWithdrawStockNotice() {
       mergeConfirmed: showStockMergeConfirm.value ? stockNoticeForm.mergeConfirmed : undefined,
       remark: stockNoticeForm.remark.trim() || undefined
     });
-    ElMessage.success(activeStockNoticeIsWithdraw.value || stockNoticeForm.handlingMode === 'STOCK' ? '物料已转入备货库存' : '仓库处理结果已记录');
+    ElMessage.success(activeStockNoticeIsWithdraw.value || stockNoticeForm.handlingMode === 'STOCK' ? '零件已转入备货库存' : '仓库处理结果已记录');
     stockNoticeVisible.value = false;
     await queryWarehouseWork();
     await loadWarehouseNotices();
@@ -1806,6 +1833,9 @@ async function saveWithdrawStockNotice() {
 }
 
 function openConfirm(row: WarehouseReceipt) {
+  if (guardDesktopWarehouseMutation('确认入库')) {
+    return;
+  }
   activeReceipt.value = row;
   receiptForm.warehouseId = warehouses.value[0]?.id || '';
   receiptForm.remark = '';
@@ -1878,17 +1908,29 @@ async function appendStockOverShipment(row: EditableWarehouseShipment) {
   if (!batchShipmentIsOrderMode.value) {
     return;
   }
+  if (stockSourceLoading.value) {
+    ElMessage.info('备货库存正在查询，请等待当前查询完成');
+    return;
+  }
   if (!row.partCode?.trim()) {
     ElMessage.warning('该零件缺少零件编码，无法查询备货库存');
     return;
   }
+  const requestId = ++stockSourceRequestSeq.value;
+  const requestedPartCode = row.partCode.trim();
+  const requestedOrderNo = batchShipmentOrderNo.value || row.orderNo;
   stockSourceLoading.value = true;
   try {
-    const detail = await erpApi.inventoryMaterialSourceDetails(row.partCode.trim(), {
+    const detail = await erpApi.inventoryMaterialSourceDetails(requestedPartCode, {
       unit: row.unit,
       sourceType: 'STOCK',
-      excludeOrderNo: batchShipmentOrderNo.value || row.orderNo
+      customerId: row.customerId,
+      excludeOrderNo: requestedOrderNo
     });
+    if (requestId !== stockSourceRequestSeq.value || !batchShipmentIsOrderMode.value || !batchShipmentRows.value.includes(row)) {
+      return;
+    }
+    // 备货超发只允许把最新查询到的可用备货批次追加到当前发货明细，避免慢请求把旧订单库存插入当前发货单。
     const existingIds = new Set(batchShipmentRows.value.map((item) => item.id));
     const source = detail.sources
       .filter((item) => item.inventorySourceType === 'STOCK' && Number(item.quantity || 0) > 0 && !existingIds.has(item.id))
@@ -1904,9 +1946,13 @@ async function appendStockOverShipment(row: EditableWarehouseShipment) {
     batchShipmentRows.value.push(toStockOverShipmentRow(source, row));
     ElMessage.success('已加入备货库存，请填写本次发货数量、销售确认人和超发说明');
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '备货库存查询失败');
+    if (requestId === stockSourceRequestSeq.value) {
+      ElMessage.error(error instanceof Error ? error.message : '备货库存查询失败，请确认零件、客户和后端服务');
+    }
   } finally {
-    stockSourceLoading.value = false;
+    if (requestId === stockSourceRequestSeq.value) {
+      stockSourceLoading.value = false;
+    }
   }
 }
 
@@ -1915,6 +1961,9 @@ function removeStockOverShipment(row: EditableWarehouseShipment) {
 }
 
 function openShipmentConfirm(row: WarehouseShipment) {
+  if (guardDesktopWarehouseMutation('确认发货')) {
+    return;
+  }
   const lockedText = shipmentLockedText(row);
   if (lockedText) {
     ElMessage.warning(lockedText);
@@ -1940,16 +1989,26 @@ async function openShipmentSourceDetails(row: WarehouseShipment) {
   shipmentSourceDetails.value = null;
   shipmentSourceFocusBatchId.value = row.id;
   shipmentSourceFocusBatchNo.value = row.batchNo;
+  const requestId = ++shipmentSourceDetailsRequestSeq.value;
   try {
-    shipmentSourceDetails.value = await erpApi.inventoryMaterialSourceDetails(row.partCode.trim(), {
+    const detail = await erpApi.inventoryMaterialSourceDetails(row.partCode.trim(), {
       unit: row.unit,
       warehouseId: row.warehouseId,
-      sourceType: 'ALL'
+      sourceType: 'ALL',
+      customerId: row.customerId
     });
+    if (requestId === shipmentSourceDetailsRequestSeq.value) {
+      shipmentSourceDetails.value = detail;
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败');
+    if (requestId === shipmentSourceDetailsRequestSeq.value) {
+      shipmentSourceDetails.value = null;
+      ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败，请确认零件和后端服务');
+    }
   } finally {
-    shipmentSourceDetailsLoading.value = false;
+    if (requestId === shipmentSourceDetailsRequestSeq.value) {
+      shipmentSourceDetailsLoading.value = false;
+    }
   }
 }
 
@@ -1976,6 +2035,9 @@ async function selectShipmentOrder(row: WarehouseShipment) {
 }
 
 function openOrderShipmentConfirm(row: WarehouseShipment) {
+  if (guardDesktopWarehouseMutation('订单发货')) {
+    return;
+  }
   if (!row.orderNo) {
     ElMessage.warning('该库存没有来源订单，不能按订单批量发货');
     return;
@@ -2003,6 +2065,9 @@ function openBatchShipmentConfirmFromSelection() {
 }
 
 function openBatchShipmentConfirm(rows: WarehouseShipment[]) {
+  if (guardDesktopWarehouseMutation('批量确认发货')) {
+    return;
+  }
   if (rows.length === 0) {
     ElMessage.warning('请先选择待发货库存');
     return;
@@ -2120,10 +2185,10 @@ function taskRelationText(
 
 function warehouseComponentText(row: { lineType?: string; componentNo?: string; parentComponentNo?: string }) {
   if (row.lineType === 'COMPONENT' && row.componentNo) {
-    return `组件 ${row.componentNo}`;
+    return `组件 ${String(row.componentNo || '').trim().toUpperCase() || '未编号'}`;
   }
   if (row.parentComponentNo) {
-    return `属于组件 ${row.parentComponentNo}`;
+    return `子零件 -> ${String(row.parentComponentNo || '').trim().toUpperCase()}`;
   }
   if (row.lineType === 'PART') {
     return '单独零件';
@@ -2137,30 +2202,50 @@ function drawingTitle(row: Pick<WarehouseReceipt | WarehouseShipment, 'drawingNo
   return `${drawingNo}${version}`;
 }
 
-function partSpecText(row: Pick<WarehouseReceipt | WarehouseShipment, 'partSpecification' | 'partThickness'>) {
+function partThicknessText(row: Pick<WarehouseReceipt | WarehouseShipment, 'lineType' | 'partThickness'>) {
+  if (row.lineType === 'COMPONENT') {
+    return '不适用（父级组件由子零件维护）';
+  }
+  return row.partThickness ? `${row.partThickness} mm` : '-';
+}
+
+function partSpecText(row: Pick<WarehouseReceipt | WarehouseShipment, 'lineType' | 'partSpecification' | 'partThickness'>) {
   const specification = row.partSpecification || '-';
-  const thickness = row.partThickness ? `${row.partThickness} mm` : '-';
-  return `${specification} / ${thickness}`;
+  return `${specification} / ${partThicknessText(row)}`;
 }
 
 function transactionSourceOrderNo(row: WarehouseTransaction) {
   return row.sourceOrderNo || row.orderNo || '';
 }
 
-function formatDateTime(value?: string) {
+function formatDateTime(value?: Date | string) {
   if (!value) {
     return '-';
   }
   return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
+function guardDesktopWarehouseMutation(actionLabel: string) {
+  if (!isMobileLayout.value) {
+    return false;
+  }
+  ElMessage.warning(`手机端仅查看仓库、库存和通知，${actionLabel}请在电脑端操作`);
+  return true;
+}
+
 function openWarehouseDialog() {
+  if (guardDesktopWarehouseMutation('新增仓库')) {
+    return;
+  }
   warehouseForm.warehouseCode = '';
   warehouseForm.warehouseName = '';
   warehouseVisible.value = true;
 }
 
 function openLocationDialog() {
+  if (guardDesktopWarehouseMutation('新增库位')) {
+    return;
+  }
   locationForm.warehouseId = warehouses.value[0]?.id || '';
   locationForm.locationCode = '';
   locationForm.locationName = '';
@@ -2168,6 +2253,12 @@ function openLocationDialog() {
 }
 
 async function saveWarehouse() {
+  if (guardDesktopWarehouseMutation('新增仓库')) {
+    return;
+  }
+  if (saving.value) {
+    return;
+  }
   if (!warehouseForm.warehouseName.trim()) {
     ElMessage.warning('请填写仓库名称');
     return;
@@ -2190,6 +2281,12 @@ async function saveWarehouse() {
 }
 
 async function saveLocation() {
+  if (guardDesktopWarehouseMutation('新增库位')) {
+    return;
+  }
+  if (saving.value) {
+    return;
+  }
   if (!locationForm.warehouseId || !locationForm.locationCode.trim()) {
     ElMessage.warning('请选择仓库并填写库位编码');
     return;
@@ -2212,6 +2309,12 @@ async function saveLocation() {
 }
 
 async function confirmReceipt() {
+  if (guardDesktopWarehouseMutation('确认入库')) {
+    return;
+  }
+  if (saving.value) {
+    return;
+  }
   if (!activeReceipt.value) {
     return;
   }
@@ -2242,6 +2345,12 @@ async function confirmReceipt() {
 }
 
 async function confirmShipment() {
+  if (guardDesktopWarehouseMutation('确认发货')) {
+    return;
+  }
+  if (saving.value) {
+    return;
+  }
   if (!activeShipment.value) {
     return;
   }
@@ -2294,6 +2403,12 @@ async function confirmShipment() {
 }
 
 async function confirmBatchShipment() {
+  if (guardDesktopWarehouseMutation(batchShipmentIsOrderMode.value ? '订单发货' : '批量确认发货')) {
+    return;
+  }
+  if (saving.value) {
+    return;
+  }
   if (batchShipmentRows.value.length === 0) {
     return;
   }
@@ -2732,6 +2847,14 @@ onMounted(async () => {
 .shipment-mobile-order-card {
   border-color: #bfdbfe;
   background: #f8fbff;
+}
+
+.mobile-readonly-note {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  color: #64748b;
+  font-size: 12px;
 }
 
 @media (max-width: 900px) {

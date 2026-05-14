@@ -1,4 +1,4 @@
-import { IsEnum, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { CommonStatus } from '@prisma/client';
 
 export class ProcessDefinitionQueryDto {
@@ -7,8 +7,8 @@ export class ProcessDefinitionQueryDto {
   keyword?: string;
 
   @IsOptional()
-  @IsEnum(CommonStatus)
-  status?: CommonStatus;
+  @IsIn(['ENABLED', 'DISABLED', 'ALL'])
+  status?: CommonStatus | 'ALL';
 }
 
 export class CreateProcessDefinitionDto {

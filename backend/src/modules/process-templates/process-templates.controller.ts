@@ -21,6 +21,11 @@ export class ProcessTemplatesController {
     return this.processTemplatesService.update(id, dto);
   }
 
+  @Patch(':id/restore')
+  restore(@Param('id') id: string) {
+    return this.processTemplatesService.restore(id);
+  }
+
   @Delete(':id')
   delete(@Param('id') id: string) {
     return this.processTemplatesService.delete(id);

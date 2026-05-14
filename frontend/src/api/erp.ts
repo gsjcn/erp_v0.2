@@ -2,6 +2,7 @@ import { apiBaseUrl, request } from './http';
 import type {
   CommonStatus,
   Customer,
+  CustomerListResponse,
   InventoryBatch,
   InventoryAdjustment,
   InventoryMaterialSuggestion,
@@ -14,8 +15,12 @@ import type {
   DiscardMaterialImportSessionResponse,
   MaterialImportSessionPreview,
   MaterialTransformRule,
+  MaterialTransformRuleListResponse,
   MaterialMemory,
+  MaterialMemoryListResponse,
   ModelBom,
+  ModelBomDiffReview,
+  ModelBomListResponse,
   ModelBomLine,
   InventoryReservationAudit,
   InventorySourceDetailResponse,
@@ -131,6 +136,8 @@ export interface SaveProcessDefinitionPayload {
 export interface MaterialMemoryFilters {
   keyword?: string;
   status?: CommonStatus;
+  limit?: number;
+  offset?: number;
 }
 
 export interface MaterialDashboardFilters {
@@ -138,13 +145,20 @@ export interface MaterialDashboardFilters {
   customerId?: string;
   projectModel?: string;
   scopeType?: 'COMMON' | 'CUSTOM';
+  relationType?: 'BOM' | 'APPLICABILITY' | 'ORDER_HISTORY' | 'MATERIAL_ONLY';
   drawingNo?: string;
   drawingStatus?: string;
+  drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | 'NONE';
+  bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE';
+  bomPresence?: 'WITH_BOM' | 'WITHOUT_BOM';
+  recentOrderPresence?: 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER';
   drawingDateFrom?: string;
   drawingDateTo?: string;
   lastOrderDateFrom?: string;
   lastOrderDateTo?: string;
   status?: CommonStatus;
+  sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE' | 'UPDATED_AT';
+  sortOrder?: 'ASC' | 'DESC';
   limit?: number;
   offset?: number;
 }
@@ -176,15 +190,24 @@ export interface ModelBomFilters {
   keyword?: string;
   customerId?: string;
   projectModel?: string;
-  status?: CommonStatus;
+  scopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
+  excludeGlobalAllProject?: boolean;
+  commonOnly?: boolean;
+  status?: CommonStatus | 'ALL';
+  limit?: number;
+  offset?: number;
 }
 
 export interface SaveModelBomPayload {
   bomName: string;
   customerId?: string;
-  projectModel: string;
+  customerScopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
+  customerIds?: string[];
+  projectModel?: string;
   remark?: string;
   status?: CommonStatus;
+  isCommon?: boolean;
+  scopeChangeConfirmed?: boolean;
 }
 
 export interface CopyModelBomPayload {
@@ -193,6 +216,7 @@ export interface CopyModelBomPayload {
   projectModel?: string;
   remark?: string;
   status?: CommonStatus;
+  isCommon?: boolean;
 }
 
 export interface SaveMaterialDrawingRevisionPayload {
@@ -216,6 +240,7 @@ export interface SaveModelBomLinePayload {
   parentComponentNo?: string;
   defaultDrawingRevisionId?: string;
   defaultProcessRoute?: string;
+  partThickness?: number;
   defaultQuantity: number;
   remark?: string;
   sortOrder?: number;
@@ -229,6 +254,32 @@ export interface ReorderModelBomLinesPayload {
   }>;
 }
 
+export interface ReorderModelBomCommonPayload {
+  items: Array<{
+    bomId: string;
+    commonSortOrder: number;
+  }>;
+}
+
+export interface SetModelBomsCommonBatchPayload {
+  bomIds: string[];
+  isCommon: boolean;
+}
+
+export interface ConfirmModelBomDiffReviewPayload {
+  sourceBomId: string;
+  reviewKey: string;
+  issueKind: string;
+  sourceLineId?: string;
+  targetLineId?: string;
+  issueTitle: string;
+  issueDetail?: string;
+  diffFingerprint: string;
+  fieldsJson?: Record<string, unknown>;
+  reviewedBy?: string;
+  reviewRemark?: string;
+}
+
 export interface MaterialTransformRuleFilters {
   keyword?: string;
   customerId?: string;
@@ -237,7 +288,12 @@ export interface MaterialTransformRuleFilters {
   sourcePartCode?: string;
   targetMaterialId?: string;
   targetPartCode?: string;
-  status?: CommonStatus;
+  status?: CommonStatus | 'ALL';
+  sourceStockStatus?: 'ALL' | 'WITH_STOCK' | 'NO_STOCK';
+  targetStockStatus?: 'ALL' | 'WITH_STOCK' | 'NO_STOCK';
+  inventoryDecision?: 'ALL' | 'TARGET_STOCK' | 'SOURCE_REWORK' | 'NO_STOCK';
+  limit?: number;
+  offset?: number;
 }
 
 export interface SaveMaterialTransformRulePayload {
@@ -558,6 +614,7 @@ export interface InventorySourceDetailFilters {
   unit?: string;
   warehouseId?: string;
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
+  customerId?: string;
   excludeOrderNo?: string;
   excludeOrderId?: string;
 }
@@ -806,6 +863,20 @@ export const erpApi = {
   customers(keyword?: string, status?: CommonStatus) {
     return request<Customer[]>(`/customers${toQuery({ keyword, status })}`);
   },
+  customersPage(keyword?: string, status?: CommonStatus, limit = 50, offset = 0) {
+    return request<CustomerListResponse>(
+      `/customers${toQuery({
+        keyword,
+        status,
+        limit: String(limit),
+        offset: String(offset),
+        withPage: 'true'
+      })}`
+    );
+  },
+  customer(id: string) {
+    return request<Customer>(`/customers/${id}`);
+  },
   checkCustomerName(customerName: string, excludeId?: string) {
     return request<{ customerName: string; exists: boolean; available: boolean }>(
       `/customers/check-name${toQuery({ customerName, excludeId })}`
@@ -989,7 +1060,7 @@ export const erpApi = {
       body: JSON.stringify(payload)
     });
   },
-  processDefinitions(keyword?: string, status?: CommonStatus) {
+  processDefinitions(keyword?: string, status?: CommonStatus | 'ALL') {
     return request<ProcessDefinition[]>(`/process-definitions${toQuery({ keyword, status })}`);
   },
   createProcessDefinition(payload: SaveProcessDefinitionPayload) {
@@ -1001,8 +1072,11 @@ export const erpApi = {
   deleteProcessDefinition(id: string) {
     return request<ProcessDefinition>(`/process-definitions/${id}`, { method: 'DELETE' });
   },
-  processTemplates(keyword?: string) {
-    return request<ProcessTemplate[]>(`/process-templates${toQuery({ keyword })}`);
+  restoreProcessDefinition(id: string) {
+    return request<ProcessDefinition>(`/process-definitions/${id}/restore`, { method: 'PATCH' });
+  },
+  processTemplates(keyword?: string, status?: CommonStatus | 'ALL') {
+    return request<ProcessTemplate[]>(`/process-templates${toQuery({ keyword, status })}`);
   },
   createProcessTemplate(payload: SaveProcessTemplatePayload) {
     return request<ProcessTemplate>('/process-templates', { method: 'POST', body: JSON.stringify(payload) });
@@ -1011,7 +1085,10 @@ export const erpApi = {
     return request<ProcessTemplate>(`/process-templates/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
   },
   deleteProcessTemplate(id: string) {
-    return request<{ id: string; deleted: boolean }>(`/process-templates/${id}`, { method: 'DELETE' });
+    return request<{ id: string; disabled: boolean }>(`/process-templates/${id}`, { method: 'DELETE' });
+  },
+  restoreProcessTemplate(id: string) {
+    return request<ProcessTemplate>(`/process-templates/${id}/restore`, { method: 'PATCH' });
   },
   createLineReplenishment(orderNo: string, lineId: string, payload: CreateLineReplenishmentPayload) {
     return request<OrderDetail>(`/orders/${orderNo}/lines/${lineId}/replenishments`, {
@@ -1281,12 +1358,14 @@ export const erpApi = {
     sourceType?: 'ALL' | 'ORDER' | 'STOCK',
     excludeOrderNo?: string,
     excludeOrderId?: string,
-    customerId?: string
+    customerId?: string,
+    projectModel?: string
   ) {
     return request<InventoryMaterialSuggestion[]>(
       `/inventory/materials/suggestions${toQuery({
         keyword,
         customerId,
+        projectModel,
         warehouseId,
         sourceType,
         excludeOrderNo,
@@ -1302,6 +1381,17 @@ export const erpApi = {
       })}`
     );
   },
+  inventoryMaterialsPage(filters: MaterialMemoryFilters = {}) {
+    return request<MaterialMemoryListResponse>(
+      `/inventory/materials${toQuery({
+        keyword: filters.keyword,
+        status: filters.status,
+        limit: filters.limit ? String(filters.limit) : undefined,
+        offset: filters.offset ? String(filters.offset) : undefined,
+        withPage: 'true'
+      })}`
+    );
+  },
   materialDashboard(filters: MaterialDashboardFilters = {}) {
     return request<MaterialDashboardResponse>(
       `/materials/dashboard${toQuery({
@@ -1309,13 +1399,20 @@ export const erpApi = {
         customerId: filters.customerId,
         projectModel: filters.projectModel,
         scopeType: filters.scopeType,
+        relationType: filters.relationType,
         drawingNo: filters.drawingNo,
         drawingStatus: filters.drawingStatus,
+        drawingSource: filters.drawingSource,
+        bomStructureType: filters.bomStructureType,
+        bomPresence: filters.bomPresence,
+        recentOrderPresence: filters.recentOrderPresence,
         drawingDateFrom: filters.drawingDateFrom,
         drawingDateTo: filters.drawingDateTo,
         lastOrderDateFrom: filters.lastOrderDateFrom,
         lastOrderDateTo: filters.lastOrderDateTo,
         status: filters.status,
+        sortBy: filters.sortBy,
+        sortOrder: filters.sortOrder,
         limit: filters.limit ? String(filters.limit) : undefined,
         offset: filters.offset ? String(filters.offset) : undefined
       })}`
@@ -1323,6 +1420,15 @@ export const erpApi = {
   },
   materialProjectModels(customerId?: string) {
     return request<string[]>(`/materials/project-models${toQuery({ customerId })}`);
+  },
+  materialCommonProjectModels() {
+    return request<string[]>('/materials/common-project-models');
+  },
+  saveMaterialCommonProjectModels(projectModels: string[]) {
+    return request<string[]>('/materials/common-project-models', {
+      method: 'PATCH',
+      body: JSON.stringify({ projectModels })
+    });
   },
   createMaterialImportSession(createdBy?: string) {
     return request<MaterialImportSessionPreview>('/inventory/material-import-sessions', {
@@ -1443,12 +1549,43 @@ export const erpApi = {
         keyword: filters.keyword,
         customerId: filters.customerId,
         projectModel: filters.projectModel,
+        scopeMode: filters.scopeMode,
+        excludeGlobalAllProject: filters.excludeGlobalAllProject ? 'true' : undefined,
+        commonOnly: filters.commonOnly ? 'true' : undefined,
         status: filters.status
+      })}`
+    );
+  },
+  modelBomsPage(filters: ModelBomFilters = {}) {
+    return request<ModelBomListResponse>(
+      `/inventory/model-boms${toQuery({
+        keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
+        scopeMode: filters.scopeMode,
+        excludeGlobalAllProject: filters.excludeGlobalAllProject ? 'true' : undefined,
+        commonOnly: filters.commonOnly ? 'true' : undefined,
+        status: filters.status,
+        limit: filters.limit ? String(filters.limit) : undefined,
+        offset: filters.offset !== undefined ? String(filters.offset) : undefined,
+        withPage: 'true'
       })}`
     );
   },
   modelBom(bomId: string) {
     return request<ModelBom>(`/inventory/model-boms/${bomId}`);
+  },
+  modelBomDiffReviews(bomId: string, sourceBomId?: string) {
+    return request<ModelBomDiffReview[]>(`/inventory/model-boms/${bomId}/diff-reviews${toQuery({ sourceBomId })}`);
+  },
+  confirmModelBomDiffReview(bomId: string, payload: ConfirmModelBomDiffReviewPayload) {
+    return request<ModelBomDiffReview>(`/inventory/model-boms/${bomId}/diff-reviews`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  },
+  disableModelBomDiffReview(reviewId: string) {
+    return request<ModelBomDiffReview>(`/inventory/model-bom-diff-reviews/${reviewId}`, { method: 'DELETE' });
   },
   createModelBom(payload: SaveModelBomPayload) {
     return request<ModelBom>('/inventory/model-boms', { method: 'POST', body: JSON.stringify(payload) });
@@ -1459,8 +1596,26 @@ export const erpApi = {
   updateModelBom(bomId: string, payload: SaveModelBomPayload) {
     return request<ModelBom>(`/inventory/model-boms/${bomId}`, { method: 'PATCH', body: JSON.stringify(payload) });
   },
+  setModelBomCommon(bomId: string, isCommon: boolean) {
+    return request<ModelBom>(`/inventory/model-boms/${bomId}/common`, { method: 'PATCH', body: JSON.stringify({ isCommon }) });
+  },
+  setModelBomsCommonBatch(payload: SetModelBomsCommonBatchPayload) {
+    return request<{ updatedCount: number; isCommon: boolean }>('/inventory/model-boms/common/batch', {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  reorderModelBomCommon(payload: ReorderModelBomCommonPayload) {
+    return request<{ updatedCount: number }>('/inventory/model-boms/common/reorder', { method: 'PATCH', body: JSON.stringify(payload) });
+  },
   disableModelBom(bomId: string) {
     return request<ModelBom>(`/inventory/model-boms/${bomId}`, { method: 'DELETE' });
+  },
+  deleteModelBom(bomId: string) {
+    return request<{ id: string; bomName: string; lineCount: number; customerScopeCount: number; diffReviewCount: number; deleted: true }>(
+      `/inventory/model-boms/${bomId}/permanent`,
+      { method: 'DELETE' }
+    );
   },
   saveModelBomLine(bomId: string, payload: SaveModelBomLinePayload) {
     return request<ModelBomLine>(`/inventory/model-boms/${bomId}/lines`, { method: 'POST', body: JSON.stringify(payload) });
@@ -1484,7 +1639,30 @@ export const erpApi = {
         sourcePartCode: filters.sourcePartCode,
         targetMaterialId: filters.targetMaterialId,
         targetPartCode: filters.targetPartCode,
-        status: filters.status
+        status: filters.status,
+        sourceStockStatus: filters.sourceStockStatus && filters.sourceStockStatus !== 'ALL' ? filters.sourceStockStatus : undefined,
+        targetStockStatus: filters.targetStockStatus && filters.targetStockStatus !== 'ALL' ? filters.targetStockStatus : undefined,
+        inventoryDecision: filters.inventoryDecision && filters.inventoryDecision !== 'ALL' ? filters.inventoryDecision : undefined
+      })}`
+    );
+  },
+  materialTransformRulesPage(filters: MaterialTransformRuleFilters = {}) {
+    return request<MaterialTransformRuleListResponse>(
+      `/inventory/material-transform-rules${toQuery({
+        keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
+        sourceMaterialId: filters.sourceMaterialId,
+        sourcePartCode: filters.sourcePartCode,
+        targetMaterialId: filters.targetMaterialId,
+        targetPartCode: filters.targetPartCode,
+        status: filters.status,
+        sourceStockStatus: filters.sourceStockStatus && filters.sourceStockStatus !== 'ALL' ? filters.sourceStockStatus : undefined,
+        targetStockStatus: filters.targetStockStatus && filters.targetStockStatus !== 'ALL' ? filters.targetStockStatus : undefined,
+        inventoryDecision: filters.inventoryDecision && filters.inventoryDecision !== 'ALL' ? filters.inventoryDecision : undefined,
+        limit: filters.limit ? String(filters.limit) : undefined,
+        offset: filters.offset !== undefined ? String(filters.offset) : undefined,
+        withPage: 'true'
       })}`
     );
   },
@@ -1522,6 +1700,7 @@ export const erpApi = {
         unit: filters.unit,
         warehouseId: filters.warehouseId,
         sourceType: filters.sourceType,
+        customerId: filters.customerId,
         excludeOrderNo: filters.excludeOrderNo,
         excludeOrderId: filters.excludeOrderId
       })}`

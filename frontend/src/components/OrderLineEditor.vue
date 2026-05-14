@@ -1,4 +1,15 @@
 <template>
+  <div class="desktop-table order-line-fixed-toolbar">
+    <div>
+      <strong>订单零件清单</strong>
+      <span>已填写 {{ orderLineFixedTextLineCount }} 行 / 当前 {{ lines.length }} 行</span>
+    </div>
+    <div>
+      <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="openOrderLineFixedTextDialog">查看固定格式</el-button>
+      <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="copyOrderLineFixedText">复制清单</el-button>
+    </div>
+  </div>
+
   <el-table class="desktop-table order-line-table" :data="lines" border :row-class-name="orderLineRowClassName">
     <el-table-column label="顺序" width="72" fixed="left" align="center">
       <template #default="{ $index }">
@@ -16,6 +27,16 @@
         >
           <el-icon><Rank /></el-icon>
         </el-button>
+      </template>
+    </el-table-column>
+    <el-table-column label="结构" width="140" fixed="left">
+      <template #default="{ row }">
+        <div class="order-line-structure-cell" :class="orderLineStructureClass(row)">
+          <el-tag :type="orderLineStructureTagType(row)" effect="plain">
+            {{ orderLineStructureLabel(row) }}
+          </el-tag>
+          <small>{{ orderLineStructureHint(row) }}</small>
+        </div>
       </template>
     </el-table-column>
     <el-table-column label="行类型" width="104">
@@ -144,9 +165,11 @@
         </div>
       </template>
     </el-table-column>
-    <el-table-column label="厚度(mm)*" width="120">
+    <el-table-column label="厚度(mm)" width="120">
       <template #default="{ row }">
+        <el-tag v-if="!orderLineRequiresThickness(row)" type="info" effect="plain" title="父级组件由子零件分别维护厚度">组件不适用</el-tag>
         <el-input-number
+          v-else
           v-model="row.partThickness"
           :min="0.001"
           :precision="3"
@@ -250,8 +273,9 @@
 
   <div class="mobile-section order-line-mobile">
     <div class="order-line-mobile-toolbar">
-      <span>订单零件 {{ lines.length }} 项</span>
+      <span>订单零件已填写 {{ orderLineFixedTextLineCount }} / 当前 {{ lines.length }} 项</span>
       <div>
+        <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="openOrderLineFixedTextDialog">固定格式</el-button>
         <el-button size="small" @click="expandAllMobileLineCards">全部展开</el-button>
         <el-button size="small" @click="collapseAllMobileLineCards">全部收起</el-button>
       </div>
@@ -265,6 +289,9 @@
       <div class="mobile-card-header">
         <div class="mobile-card-title">
           <strong>零件 {{ index + 1 }}</strong>
+          <el-tag :type="orderLineStructureTagType(line)" effect="plain" size="small">
+            {{ orderLineStructureLabel(line) }}
+          </el-tag>
           <small>{{ line.partName || line.partCode || '未填写零件资料' }}</small>
         </div>
         <div class="mobile-card-header-actions">
@@ -278,6 +305,7 @@
       </div>
 
       <div class="mobile-card-compact-summary order-line-compact-summary">
+        <span>{{ orderLineStructureHint(line) }}</span>
         <span>{{ line.partCode || '未填编码' }}</span>
         <span>{{ fulfillmentModeText(line) }}</span>
         <span>订单 {{ formatQuantity(line.quantity || 0, line.unit || '件') }}</span>
@@ -418,8 +446,10 @@
           <el-input v-model="line.drawingVersion" placeholder="A" @input="handleStockComparableChange(line)" />
         </label>
         <label>
-          <span>零件厚度(mm)*</span>
+          <span>零件厚度(mm)</span>
+          <el-tag v-if="!orderLineRequiresThickness(line)" type="info" effect="plain" title="父级组件由子零件分别维护厚度">组件不适用</el-tag>
           <el-input-number
+            v-else
             v-model="line.partThickness"
             :min="0.001"
             :precision="3"
@@ -507,6 +537,20 @@
     @selection-change="handleStockSourceSelectionChange"
     @confirm-reviewed="handleStockSourceReviewed"
   />
+
+  <el-dialog v-model="orderLineFixedTextDialogVisible" class="responsive-dialog" title="订单零件固定格式清单" width="900px">
+    <el-input
+      class="order-line-fixed-textarea"
+      :model-value="orderLineFixedText"
+      type="textarea"
+      :rows="22"
+      readonly
+    />
+    <template #footer>
+      <el-button @click="orderLineFixedTextDialogVisible = false">关闭</el-button>
+      <el-button type="primary" :disabled="!orderLineFixedText" @click="copyOrderLineFixedText">复制清单</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -565,6 +609,8 @@ const sourceDetailsLoading = ref(false);
 const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
 const sourceExpected = ref<InventorySourceExpected | null>(null);
 const currentSourceLine = ref<CreateOrderLinePayload | null>(null);
+const sourceDetailsRequestSeq = ref(0);
+const orderLineFixedTextDialogVisible = ref(false);
 const stockCoverAutoSyncedLines = new WeakSet<CreateOrderLinePayload>();
 const materialSuggestionRequestSeq = ref(0);
 const expandedMobileLineIndexes = ref<number[]>([]);
@@ -582,10 +628,11 @@ const otherLineSelectedStockSources = computed(() =>
 const componentOptions = computed(() => {
   const seen = new Set<string>();
   return [...props.componentSourceLines, ...props.lines]
-    .map((line) => ({
+    .map((line, index) => ({
       lineType: line.lineType,
       value: normalizeComponentNo(line.componentNo),
-      labelText: line.partName || line.partCode || ''
+      labelText: line.partName || line.partCode || '',
+      sourceLabel: index < props.componentSourceLines.length ? '已有订单组件' : '当前明细组件'
     }))
     .filter((line) => {
       if (line.lineType !== 'COMPONENT' || !line.value || seen.has(line.value)) {
@@ -596,9 +643,12 @@ const componentOptions = computed(() => {
     })
     .map((line) => ({
       value: line.value,
-      label: line.labelText ? `${line.value} | ${line.labelText}` : line.value
+      label: line.labelText ? `${line.value} | ${line.sourceLabel} | ${line.labelText}` : `${line.value} | ${line.sourceLabel}`
     }));
 });
+const orderLineFixedTextLines = computed(() => props.lines.filter((line) => !isBlankOrderLineForFixedText(line)));
+const orderLineFixedTextLineCount = computed(() => orderLineFixedTextLines.value.length);
+const orderLineFixedText = computed(() => buildOrderLineFixedText());
 
 const emit = defineEmits<{
   remove: [index: number];
@@ -627,6 +677,11 @@ type MaterialIdentityWarning = {
   partName: string;
   text: string;
 };
+type OrderLineDragGroup = {
+  line: CreateOrderLinePayload;
+  children: CreateOrderLinePayload[];
+};
+type OrderLineStructureTagType = 'success' | 'warning' | 'info' | 'danger';
 const autoMaterialSnapshots = new WeakMap<CreateOrderLinePayload, AutoMaterialSnapshot>();
 const materialIdentityWarnings = new WeakMap<CreateOrderLinePayload, MaterialIdentityWarning>();
 const materialIdentityWarningVersion = ref(0);
@@ -699,21 +754,286 @@ function handleLineDragOver(event: DragEvent, index: number) {
   }
 }
 
-function buildDraggedLineOrder(targetIndex: number, insertAfter: boolean) {
-  if (draggedLineIndex.value === null) {
+function componentNoForOrderLine(line?: Pick<CreateOrderLinePayload, 'lineType' | 'componentNo'> | null) {
+  return line?.lineType === 'COMPONENT' ? normalizeComponentNo(line.componentNo) : '';
+}
+
+function parentComponentNoForOrderLine(line?: Pick<CreateOrderLinePayload, 'lineType' | 'parentComponentNo'> | null) {
+  return line?.lineType !== 'COMPONENT' ? normalizeComponentNo(line?.parentComponentNo) : '';
+}
+
+function hasAvailableComponentNo(componentNo: string) {
+  return [...props.componentSourceLines, ...props.lines].some((line) => componentNoForOrderLine(line) === componentNo);
+}
+
+function hasSourceComponentNo(componentNo: string) {
+  return props.componentSourceLines.some((line) => componentNoForOrderLine(line) === componentNo);
+}
+
+function isMissingParentComponentLine(line: CreateOrderLinePayload) {
+  const parentComponentNo = parentComponentNoForOrderLine(line);
+  return Boolean(parentComponentNo && !hasAvailableComponentNo(parentComponentNo));
+}
+
+function parentComponentScopeText(line: CreateOrderLinePayload) {
+  const parentComponentNo = parentComponentNoForOrderLine(line);
+  if (!parentComponentNo) {
+    return '不属于组件';
+  }
+  if (isMissingParentComponentLine(line)) {
+    return `所属组件不存在 ${parentComponentNo}`;
+  }
+  return hasSourceComponentNo(parentComponentNo) && !hasLocalComponentNo(parentComponentNo)
+    ? `所属已有订单组件 ${parentComponentNo}`
+    : `所属当前明细组件 ${parentComponentNo}`;
+}
+
+function orderLineStructureLabel(line: CreateOrderLinePayload) {
+  if (line.lineType === 'COMPONENT') {
+    return `组件 ${normalizeComponentNo(line.componentNo) || '未编号'}`;
+  }
+  const parentComponentNo = parentComponentNoForOrderLine(line);
+  if (parentComponentNo && isMissingParentComponentLine(line)) {
+    return `未匹配父级 ${parentComponentNo}`;
+  }
+  return parentComponentNo ? `子零件 -> ${parentComponentNo}` : '单独零件';
+}
+
+function orderLineStructureHint(line: CreateOrderLinePayload) {
+  if (line.lineType === 'COMPONENT') {
+    return '父级组件';
+  }
+  const parentComponentNo = parentComponentNoForOrderLine(line);
+  return parentComponentNo ? parentComponentScopeText(line) : '不属于组件';
+}
+
+function orderLineStructureClass(line: CreateOrderLinePayload) {
+  if (line.lineType === 'COMPONENT') {
+    return 'is-structure-component';
+  }
+  if (isMissingParentComponentLine(line)) {
+    return 'is-structure-orphan';
+  }
+  return parentComponentNoForOrderLine(line) ? 'is-structure-child' : 'is-structure-standalone';
+}
+
+function orderLineStructureTagType(line: CreateOrderLinePayload): OrderLineStructureTagType {
+  if (line.lineType === 'COMPONENT') {
+    return 'success';
+  }
+  if (isMissingParentComponentLine(line)) {
+    return 'danger';
+  }
+  return parentComponentNoForOrderLine(line) ? 'warning' : 'info';
+}
+
+function orderLineRequiresThickness(line: Pick<CreateOrderLinePayload, 'lineType'>) {
+  return line.lineType !== 'COMPONENT';
+}
+
+function isBlankOrderLineForFixedText(line: CreateOrderLinePayload) {
+  // 固定格式清单只展示操作员已录入的有效行；默认数量、单位和厚度不应让备用空行进入清单。
+  return (
+    !line.partCode?.trim() &&
+    !line.partName?.trim() &&
+    !line.componentNo?.trim() &&
+    !line.parentComponentNo?.trim() &&
+    !line.importSequence?.trim() &&
+    !line.drawingNo?.trim() &&
+    !line.drawingFileName?.trim() &&
+    !line.drawingFileUrl?.trim() &&
+    !line.partSpecification?.trim() &&
+    (!line.processSteps || line.processSteps.length === 0) &&
+    (!line.selectedStockSources || line.selectedStockSources.length === 0)
+  );
+}
+
+function orderLineStatusText(line: CreateOrderLinePayload) {
+  const fulfillmentText = fulfillmentModeText(line);
+  const stockText = selectedStockSourceQuantity(line) > 0 ? `已选库存 ${formatQuantity(selectedStockSourceQuantity(line), line.unit || '件')}` : '未选库存';
+  const reviewText = stockSourceReviewRequired(line) ? (isStockSourceReviewed(line) ? '已核对来源' : '未核对来源') : '无需来源核对';
+  return `${fulfillmentText} | ${stockText} | ${reviewText}`;
+}
+
+function formatOrderLineFixedTextLine(line: CreateOrderLinePayload, prefix: string) {
+  const orderQuantity = formatQuantity(line.quantity || 0, line.unit || '件');
+  const planQuantity = formatQuantity(line.productionPlanQuantity ?? suggestedProductionPlanQuantity(line), line.unit || '件');
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const thicknessText = orderLineRequiresThickness(line) ? (line.partThickness ? `${line.partThickness}mm` : '厚度需核对') : '厚度不适用（父级组件由子零件维护）';
+  const specificationText = [thicknessText, line.partSpecification || ''].filter(Boolean).join(' / ') || '-';
+  return `${prefix} | 结构 ${orderLineStructureLabel(line)} | 父级 ${parentComponentScopeText(line)} | ${line.partCode || '-'} | ${line.partName || '-'} | ${line.partCategory || '-'} | 订单 ${orderQuantity} | 计划 ${planQuantity} | 单位 ${line.unit || '-'} | 交期 ${line.deliveryDate || defaultDeliveryDate.value || '-'} | 图纸 ${drawingText} | 规格 ${specificationText} | ${orderLineStatusText(line)}`;
+}
+
+function buildOrderLineFixedText() {
+  if (!orderLineFixedTextLines.value.length) {
+    return '';
+  }
+  const linesForText = ['订单零件固定格式清单'];
+  buildOrderLineDragGroups(orderLineFixedTextLines.value).forEach((group, groupIndex) => {
+    const prefix = group.line.lineType === 'COMPONENT'
+      ? `${groupIndex + 1}. 组件 ${componentNoForOrderLine(group.line) || '未编号'}`
+      : isMissingParentComponentLine(group.line)
+        ? `${groupIndex + 1}. 未匹配父级 ${parentComponentNoForOrderLine(group.line)}`
+        : parentComponentNoForOrderLine(group.line) && hasSourceComponentNo(parentComponentNoForOrderLine(group.line)) && !hasLocalComponentNo(parentComponentNoForOrderLine(group.line))
+          ? `${groupIndex + 1}. 子零件 -> ${parentComponentNoForOrderLine(group.line)}（已有订单组件）`
+        : parentComponentNoForOrderLine(group.line)
+        ? `${groupIndex + 1}. 子零件 -> ${parentComponentNoForOrderLine(group.line)}`
+        : `${groupIndex + 1}. 单独零件`;
+    linesForText.push(formatOrderLineFixedTextLine(group.line, prefix));
+    group.children.forEach((child, childIndex) => {
+      linesForText.push(formatOrderLineFixedTextLine(child, `  ${groupIndex + 1}.${childIndex + 1} 子零件`));
+    });
+  });
+  return linesForText.join('\n');
+}
+
+function openOrderLineFixedTextDialog() {
+  if (!orderLineFixedText.value.trim()) {
+    ElMessage.warning('暂无可查看的订单零件清单');
+    return;
+  }
+  orderLineFixedTextDialogVisible.value = true;
+}
+
+async function copyOrderLineFixedText() {
+  const text = orderLineFixedText.value.trim();
+  if (!text) {
+    ElMessage.warning('暂无可复制的订单零件清单');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('订单零件固定格式清单已复制');
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
+}
+
+function hasLocalComponentNo(componentNo: string) {
+  return props.lines.some((line) => componentNoForOrderLine(line) === componentNo);
+}
+
+function isAttachedLocalChildLine(line?: CreateOrderLinePayload | null) {
+  const parentComponentNo = parentComponentNoForOrderLine(line);
+  return Boolean(parentComponentNo && hasLocalComponentNo(parentComponentNo));
+}
+
+function buildOrderLineDragGroups(linesToGroup = props.lines): OrderLineDragGroup[] {
+  const firstComponentByNo = new Map<string, CreateOrderLinePayload>();
+  for (const line of linesToGroup) {
+    const componentNo = componentNoForOrderLine(line);
+    if (componentNo && !firstComponentByNo.has(componentNo)) {
+      firstComponentByNo.set(componentNo, line);
+    }
+  }
+
+  const childrenByParent = new Map<string, CreateOrderLinePayload[]>();
+  const attachedChildren = new Set<CreateOrderLinePayload>();
+  for (const line of linesToGroup) {
+    const parentComponentNo = parentComponentNoForOrderLine(line);
+    if (!parentComponentNo || !firstComponentByNo.has(parentComponentNo)) {
+      continue;
+    }
+    const children = childrenByParent.get(parentComponentNo) || [];
+    children.push(line);
+    childrenByParent.set(parentComponentNo, children);
+    attachedChildren.add(line);
+  }
+
+  return linesToGroup
+    .filter((line) => !attachedChildren.has(line))
+    .map((line) => {
+      const componentNo = componentNoForOrderLine(line);
+      const children =
+        componentNo && firstComponentByNo.get(componentNo) === line ? childrenByParent.get(componentNo) || [] : [];
+      return { line, children };
+    });
+}
+
+function flattenOrderLineDragGroups(groups: OrderLineDragGroup[]) {
+  return groups.flatMap((group) => [group.line, ...group.children]);
+}
+
+function buildChildDraggedLineOrder(dragged: CreateOrderLinePayload, targetIndex: number, insertAfter: boolean) {
+  const parentComponentNo = parentComponentNoForOrderLine(dragged);
+  const target = props.lines[targetIndex];
+  const targetParentComponentNo = parentComponentNoForOrderLine(target);
+  const targetComponentNo = componentNoForOrderLine(target);
+  if (targetComponentNo === parentComponentNo && !insertAfter) {
+    ElMessage.warning('子零件不能拖到父组件前面；请拖到父组件下方子零件区域');
+    return null;
+  }
+  if (targetComponentNo !== parentComponentNo && targetParentComponentNo !== parentComponentNo) {
+    ElMessage.warning('子零件只能在同一父组件内拖拽排序；如需换父级，请编辑所属组件');
+    return null;
+  }
+
+  const groups = buildOrderLineDragGroups();
+  const parentGroup = groups.find(
+    (group) => componentNoForOrderLine(group.line) === parentComponentNo && group.children.includes(dragged)
+  );
+  if (!parentGroup) {
     return props.lines;
   }
-  const ordered = [...props.lines];
-  const [dragged] = ordered.splice(draggedLineIndex.value, 1);
+
+  const children = [...parentGroup.children];
+  const sourceIndex = children.indexOf(dragged);
+  if (sourceIndex < 0) {
+    return props.lines;
+  }
+  children.splice(sourceIndex, 1);
+
+  let insertionIndex = 0;
+  if (target !== parentGroup.line) {
+    insertionIndex = parentGroup.children.indexOf(target) + (insertAfter ? 1 : 0);
+    if (sourceIndex < insertionIndex) {
+      insertionIndex -= 1;
+    }
+  }
+  children.splice(Math.max(0, Math.min(insertionIndex, children.length)), 0, dragged);
+  parentGroup.children = children;
+  return flattenOrderLineDragGroups(groups);
+}
+
+function buildRootDraggedLineOrder(dragged: CreateOrderLinePayload, targetIndex: number, insertAfter: boolean) {
+  const target = props.lines[targetIndex];
+  if (isAttachedLocalChildLine(target)) {
+    ElMessage.warning('组件和单独零件请拖到顶层行之间排序，不要拖入子零件区域');
+    return null;
+  }
+
+  const groups = buildOrderLineDragGroups();
+  const sourceGroupIndex = groups.findIndex((group) => group.line === dragged);
+  const targetGroupIndex = groups.findIndex((group) => group.line === target);
+  if (sourceGroupIndex < 0 || targetGroupIndex < 0) {
+    return props.lines;
+  }
+
+  const [movedGroup] = groups.splice(sourceGroupIndex, 1);
+  if (!movedGroup) {
+    return props.lines;
+  }
+  let insertionIndex = targetGroupIndex + (insertAfter ? 1 : 0);
+  if (sourceGroupIndex < insertionIndex) {
+    insertionIndex -= 1;
+  }
+  groups.splice(Math.max(0, Math.min(insertionIndex, groups.length)), 0, movedGroup);
+  return flattenOrderLineDragGroups(groups);
+}
+
+function buildDraggedLineOrder(targetIndex: number, insertAfter: boolean): CreateOrderLinePayload[] | null {
+  const sourceIndex = draggedLineIndex.value;
+  if (sourceIndex === null) {
+    return props.lines;
+  }
+  const dragged = props.lines[sourceIndex];
   if (!dragged) {
     return props.lines;
   }
-  let insertionIndex = targetIndex + (insertAfter ? 1 : 0);
-  if (draggedLineIndex.value < insertionIndex) {
-    insertionIndex -= 1;
+  if (isAttachedLocalChildLine(dragged)) {
+    return buildChildDraggedLineOrder(dragged, targetIndex, insertAfter);
   }
-  ordered.splice(Math.max(0, Math.min(insertionIndex, ordered.length)), 0, dragged);
-  return ordered;
+  return buildRootDraggedLineOrder(dragged, targetIndex, insertAfter);
 }
 
 function dropLineDrag(index: number) {
@@ -721,6 +1041,10 @@ function dropLineDrag(index: number) {
     return;
   }
   const ordered = buildDraggedLineOrder(index, dragOverLineInsertAfter.value);
+  if (!ordered) {
+    endLineDrag();
+    return;
+  }
   props.lines.splice(0, props.lines.length, ...ordered);
   endLineDrag();
 }
@@ -731,8 +1055,15 @@ function endLineDrag() {
   dragOverLineInsertAfter.value = false;
 }
 
-function orderLineRowClassName({ rowIndex }: { rowIndex: number }) {
+function orderLineRowClassName({ row, rowIndex }: { row: CreateOrderLinePayload; rowIndex: number }) {
   const classes: string[] = [];
+  if (row.lineType === 'COMPONENT') {
+    classes.push('is-order-line-component');
+  } else if (parentComponentNoForOrderLine(row)) {
+    classes.push('is-order-line-child');
+  } else {
+    classes.push('is-order-line-standalone');
+  }
   if (draggedLineIndex.value === rowIndex) {
     classes.push('is-order-line-dragging');
   }
@@ -789,6 +1120,11 @@ function normalizeComponentNo(value?: string) {
   return value?.trim().toUpperCase() || '';
 }
 
+function isComponentNoOutOfRange(value?: string) {
+  const matched = /^C(\d+)$/.exec(normalizeComponentNo(value));
+  return !!matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999);
+}
+
 function captureComponentNoBeforeEdit(line: CreateOrderLinePayload) {
   componentNoEditSnapshots.set(line, normalizeComponentNo(line.componentNo));
 }
@@ -797,6 +1133,9 @@ function normalizeComponentFields(line: CreateOrderLinePayload) {
   const previousComponentNo = componentNoEditSnapshots.get(line) || normalizeComponentNo(line.componentNo);
   line.componentNo = normalizeComponentNo(line.componentNo);
   line.parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+  if (line.lineType === 'COMPONENT' && isComponentNoOutOfRange(line.componentNo)) {
+    ElMessage.warning('组件编号只支持 C001-C9999；自定义编号请不要使用 C 开头的非 C001-C9999 数字格式');
+  }
   syncChildParentComponentNo(line, previousComponentNo);
   componentNoEditSnapshots.delete(line);
 }
@@ -843,8 +1182,14 @@ function handleLineTypeChange(line: CreateOrderLinePayload) {
   normalizeComponentFields(line);
   if (line.lineType === 'COMPONENT') {
     line.parentComponentNo = '';
+    line.partThickness = 0;
     if (!line.componentNo) {
-      line.componentNo = nextComponentNo();
+      const componentNo = nextComponentNo();
+      if (!componentNo) {
+        ElMessage.warning('当前订单 C001-C9999 自动组件编号已用完，请手工填写当前订单内唯一组件编号');
+        return;
+      }
+      line.componentNo = componentNo;
     }
     return;
   }
@@ -1206,7 +1551,7 @@ function selectedSourceReplenishmentText(source: ReturnType<typeof normalizeSele
 
 async function openStockDetails(line: CreateOrderLinePayload) {
   if (!line.partCode?.trim()) {
-    ElMessage.warning('请先选择物料编码');
+    ElMessage.warning('请先选择零件编码');
     return;
   }
   currentSourceLine.value = line;
@@ -1214,6 +1559,7 @@ async function openStockDetails(line: CreateOrderLinePayload) {
   sourceDetailsLoading.value = true;
   sourceDetails.value = null;
   sourceExpected.value = {
+    lineType: line.lineType,
     partCode: line.partCode,
     partName: line.partName,
     drawingNo: line.drawingNo,
@@ -1231,22 +1577,34 @@ async function openStockDetails(line: CreateOrderLinePayload) {
 }
 
 async function loadStockDetailsForPart(partCode: string) {
-  if (!currentSourceLine.value || !partCode.trim()) {
+  const normalizedPartCode = partCode.trim();
+  const sourceLine = currentSourceLine.value;
+  if (!sourceLine || !normalizedPartCode) {
     return;
   }
+  const requestId = ++sourceDetailsRequestSeq.value;
   sourceDetailsLoading.value = true;
   sourceDetails.value = null;
   try {
-    sourceDetails.value = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
-      unit: currentSourceLine.value.unit,
+    const detail = await erpApi.inventoryMaterialSourceDetails(normalizedPartCode, {
+      unit: sourceLine.unit,
       sourceType: 'STOCK',
+      customerId: props.customerId,
       excludeOrderNo: props.excludeOrderNo,
       excludeOrderId: props.excludeOrderId
     });
+    if (requestId === sourceDetailsRequestSeq.value && currentSourceLine.value === sourceLine) {
+      sourceDetails.value = detail;
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败');
+    if (requestId === sourceDetailsRequestSeq.value) {
+      sourceDetails.value = null;
+      ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败，请确认零件和后端服务');
+    }
   } finally {
-    sourceDetailsLoading.value = false;
+    if (requestId === sourceDetailsRequestSeq.value) {
+      sourceDetailsLoading.value = false;
+    }
   }
 }
 
@@ -1317,7 +1675,7 @@ function canAutoFillMaterialSuggestion(item: InventoryMaterialSuggestion) {
 
 function warnMaterialSuggestionNeedsManualPick(item: InventoryMaterialSuggestion) {
   if (item.hasIdentityConflict) {
-    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，请核对${materialIdentityConflictFieldsText(item)}，并从下拉候选中人工确认后再套用`);
+    ElMessage.warning(`零件编码 ${item.partCode} 存在多套历史资料，请核对${materialIdentityConflictFieldsText(item)}，并从下拉候选中人工确认后再套用`);
   }
 }
 
@@ -1375,16 +1733,16 @@ async function fillExactMaterialFromInput(line: CreateOrderLinePayload, field: M
         selectMaterialSuggestion(line, exactPartCodeMatches[0]);
         return;
       }
-      ElMessage.warning(`找到 ${exactMatches.length} 个精确匹配物料，请从下拉列表选择具体零件`);
+      ElMessage.warning(`找到 ${exactMatches.length} 个精确匹配零件，请从下拉列表选择具体零件`);
     }
   } catch {
-    // 查询失败时保留手工输入值，避免阻断新物料下单。
+    // 查询失败时保留手工输入值，避免阻断新零件下单。
   }
 }
 
 function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryMaterialSuggestion) {
   if (item.hasIdentityConflict) {
-    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，已按当前候选套用，请核对${materialIdentityConflictFieldsText(item)}`);
+    ElMessage.warning(`零件编码 ${item.partCode} 存在多套历史资料，已按当前候选套用，请核对${materialIdentityConflictFieldsText(item)}`);
   }
   setMaterialIdentityWarning(line, item);
   const lineHadDrawingInfo = Boolean(
@@ -1429,7 +1787,7 @@ function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryM
     line.projectModel = item.projectModel;
     autoFields.projectModel = item.projectModel;
   }
-  if (!lineHadDrawingInfo && item.partThickness && Number(item.partThickness) > 0) {
+  if (orderLineRequiresThickness(line) && !lineHadDrawingInfo && item.partThickness && Number(item.partThickness) > 0) {
     line.partThickness = item.partThickness;
     autoFields.partThickness = item.partThickness;
   }
@@ -1516,7 +1874,7 @@ function clearAutoMaterialFieldsWhenMaterialIdentityChanges(line: CreateOrderLin
     snapshot.autoFields.partThickness !== undefined &&
     Math.abs(Number(line.partThickness || 0) - Number(snapshot.autoFields.partThickness || 0)) <= 0.0001
   ) {
-    line.partThickness = 1;
+    line.partThickness = 0;
   }
   autoMaterialSnapshots.delete(line);
   clearMaterialIdentityWarning(line);
@@ -1550,6 +1908,37 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
 </script>
 
 <style scoped>
+.order-line-fixed-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.order-line-fixed-toolbar > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.order-line-fixed-toolbar span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.order-line-fixed-textarea :deep(textarea) {
+  min-height: 460px;
+  font-family: Consolas, 'Courier New', monospace;
+  line-height: 1.55;
+  white-space: pre;
+}
+
 .order-line-mobile {
   margin-top: 0;
 }
@@ -1560,6 +1949,45 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
 
 .order-line-table :deep(.el-table__fixed-right .el-table__cell) {
   background: #ffffff;
+}
+
+.order-line-structure-cell {
+  display: grid;
+  gap: 4px;
+  align-items: center;
+}
+
+.order-line-structure-cell small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.order-line-structure-cell.is-structure-child {
+  padding-left: 12px;
+  border-left: 3px solid #f59e0b;
+}
+
+.order-line-structure-cell.is-structure-orphan {
+  padding-left: 12px;
+  border-left: 3px solid #dc2626;
+}
+
+.order-line-structure-cell.is-structure-component {
+  border-left: 3px solid #16a34a;
+  padding-left: 8px;
+}
+
+.order-line-table :deep(.is-order-line-component > td) {
+  background: #f8fafc;
+}
+
+.order-line-table :deep(.is-order-line-child > td:first-child) {
+  border-left: 4px solid #f59e0b;
+}
+
+.order-line-table :deep(.is-order-line-standalone > td:first-child) {
+  border-left: 4px solid #cbd5e1;
 }
 
 .line-drag-handle {
@@ -1599,6 +2027,21 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
 
 .order-line-card {
   padding: 12px;
+}
+
+.order-line-card .mobile-card-title {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.order-line-card .mobile-card-title small {
+  flex-basis: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .order-line-mobile-toolbar {

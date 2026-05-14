@@ -15,7 +15,19 @@
           @clear="loadDefinitions"
         />
         <el-button :loading="loading" @click="loadDefinitions">搜索</el-button>
-        <el-button type="primary" @click="openCreateDialog">新建工序</el-button>
+        <el-select
+          v-if="showStatusFilter && !readOnly"
+          v-model="statusFilter"
+          class="process-definition-status-filter"
+          style="width: 118px"
+          @change="loadDefinitions"
+        >
+          <el-option label="启用" value="ENABLED" />
+          <el-option label="停用" value="DISABLED" />
+          <el-option label="全部" value="ALL" />
+        </el-select>
+        <el-button v-if="!readOnly" type="primary" @click="openCreateDialog">新建工序</el-button>
+        <span v-else class="mobile-readonly-note">手机端只查看标准工序</span>
       </div>
     </div>
 
@@ -39,16 +51,31 @@
         <article class="process-definition-card" :class="{ expanded: isMobileDefinitionExpanded(definition.id) }">
           <div class="process-definition-main">
             <strong>{{ definition.processName }}</strong>
+            <el-tag v-if="showStatusFilter && definition.status === 'DISABLED'" size="small" type="info" effect="plain">已停用</el-tag>
             <small v-if="definition.remark">{{ definition.remark }}</small>
             <small v-else>暂无备注</small>
           </div>
           <el-button class="process-definition-detail-toggle" link type="primary" @click.stop="toggleMobileDefinitionCard(definition.id)">
             {{ isMobileDefinitionExpanded(definition.id) ? '收起' : '详情' }}
           </el-button>
-          <div class="process-definition-actions">
-            <el-button link type="primary" @click="openEditDialog(definition)">编辑</el-button>
-            <el-button link type="danger" @click="openDeleteDialog(definition)">删除</el-button>
+          <div v-if="!readOnly" class="process-definition-actions">
+            <template v-if="definition.status === 'DISABLED'">
+              <el-button
+                link
+                type="success"
+                :loading="restoringDefinitionId === definition.id"
+                :disabled="Boolean(restoringDefinitionId)"
+                @click="restoreDefinition(definition)"
+              >
+                恢复启用
+              </el-button>
+            </template>
+            <template v-else>
+              <el-button link type="primary" @click="openEditDialog(definition)">编辑</el-button>
+              <el-button link type="danger" @click="openDeleteDialog(definition)">停用</el-button>
+            </template>
           </div>
+          <span v-else class="mobile-readonly-note process-definition-readonly">手机端只读</span>
         </article>
       </el-tooltip>
 
@@ -60,6 +87,9 @@
       :title="editingDefinitionId ? '编辑工序' : '新建工序'"
       width="min(520px, calc(100vw - 32px))"
       class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleDefinitionDialogClose"
     >
       <el-form label-width="86px">
         <el-form-item label="工序名称" required>
@@ -77,28 +107,31 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveDefinition">保存工序</el-button>
+        <el-button :disabled="saving" @click="closeDefinitionDialog">取消</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveDefinition">保存工序</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
       v-model="deleteDialogVisible"
-      title="删除工序"
+      title="停用工序"
       width="min(500px, calc(100vw - 32px))"
       class="responsive-dialog"
       append-to-body
+      :close-on-click-modal="!deleting"
+      :close-on-press-escape="!deleting"
+      :before-close="handleDeleteDialogClose"
     >
       <div class="delete-definition-summary">
         <p>
           <span>工序名称</span>
           <strong>{{ activeDeleteDefinition?.processName }}</strong>
         </p>
-        <p class="delete-definition-warning">已保存到订单和生产任务中的历史工序不会被删除。</p>
+        <p class="delete-definition-warning">停用后不再出现在新增流程、BOM 和来源加工关系的工序下拉中；历史订单和生产任务中的已保存工序不会被删除。</p>
       </div>
       <template #footer>
-        <el-button :disabled="deleting" @click="deleteDialogVisible = false">取消</el-button>
-        <el-button type="danger" :loading="deleting" @click="deleteDefinition">删除</el-button>
+        <el-button :disabled="deleting" @click="closeDeleteDialog">取消</el-button>
+        <el-button type="danger" :loading="deleting" :disabled="deleting" @click="deleteDefinition">停用工序</el-button>
       </template>
     </el-dialog>
   </section>
@@ -110,14 +143,18 @@ import { ElMessage } from 'element-plus';
 import { erpApi } from '../api/erp';
 import type { ProcessDefinition } from '../types/erp';
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     title?: string;
     hint?: string;
+    readOnly?: boolean;
+    showStatusFilter?: boolean;
   }>(),
   {
     title: '标准工序',
-    hint: ''
+    hint: '',
+    readOnly: false,
+    showStatusFilter: false
   }
 );
 
@@ -127,9 +164,11 @@ const emit = defineEmits<{
 
 const definitions = ref<ProcessDefinition[]>([]);
 const keyword = ref('');
+const statusFilter = ref<'ENABLED' | 'DISABLED' | 'ALL'>('ENABLED');
 const loading = ref(false);
 const saving = ref(false);
 const deleting = ref(false);
+const restoringDefinitionId = ref('');
 const dialogVisible = ref(false);
 const deleteDialogVisible = ref(false);
 const editingDefinitionId = ref('');
@@ -144,15 +183,27 @@ const form = reactive({
 async function loadDefinitions() {
   loading.value = true;
   try {
-    definitions.value = await erpApi.processDefinitions(keyword.value.trim() || undefined, 'ENABLED');
+    definitions.value = await erpApi.processDefinitions(keyword.value.trim() || undefined, props.showStatusFilter ? statusFilter.value : 'ENABLED');
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '工序加载失败');
+    definitions.value = [];
+    ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
   }
 }
 
+function guardReadOnlyDefinitionMutation(actionLabel: string) {
+  if (!props.readOnly) {
+    return false;
+  }
+  ElMessage.warning(`手机端仅查看标准工序，${actionLabel}请在电脑端操作`);
+  return true;
+}
+
 function openCreateDialog() {
+  if (guardReadOnlyDefinitionMutation('新建工序')) {
+    return;
+  }
   editingDefinitionId.value = '';
   form.processName = '';
   form.remark = '';
@@ -160,13 +211,46 @@ function openCreateDialog() {
 }
 
 function openEditDialog(definition: ProcessDefinition) {
+  if (guardReadOnlyDefinitionMutation('编辑工序')) {
+    return;
+  }
+  if (definition.status === 'DISABLED') {
+    ElMessage.warning('已停用的标准工序需先恢复启用后再编辑');
+    return;
+  }
   editingDefinitionId.value = definition.id;
   form.processName = definition.processName;
   form.remark = definition.remark || '';
   dialogVisible.value = true;
 }
 
+function warnDefinitionSavingClose() {
+  ElMessage.warning('标准工序正在保存，请等待保存完成');
+}
+
+function closeDefinitionDialog() {
+  if (saving.value) {
+    warnDefinitionSavingClose();
+    return;
+  }
+  dialogVisible.value = false;
+}
+
+function handleDefinitionDialogClose(done: () => void) {
+  if (saving.value) {
+    warnDefinitionSavingClose();
+    return;
+  }
+  done();
+}
+
 async function saveDefinition() {
+  if (saving.value) {
+    return;
+  }
+  if (guardReadOnlyDefinitionMutation('保存工序')) {
+    return;
+  }
   const processName = form.processName.trim();
   if (!processName) {
     ElMessage.warning('请填写工序名称');
@@ -224,11 +308,44 @@ function isMobileDefinitionExpanded(definitionId: string) {
 }
 
 function openDeleteDialog(definition: ProcessDefinition) {
+  if (guardReadOnlyDefinitionMutation('停用工序')) {
+    return;
+  }
+  if (definition.status === 'DISABLED') {
+    ElMessage.warning('该标准工序已停用');
+    return;
+  }
   activeDeleteDefinition.value = definition;
   deleteDialogVisible.value = true;
 }
 
+function warnDefinitionDeletingClose() {
+  ElMessage.warning('标准工序正在停用，请等待保存完成');
+}
+
+function closeDeleteDialog() {
+  if (deleting.value) {
+    warnDefinitionDeletingClose();
+    return;
+  }
+  deleteDialogVisible.value = false;
+}
+
+function handleDeleteDialogClose(done: () => void) {
+  if (deleting.value) {
+    warnDefinitionDeletingClose();
+    return;
+  }
+  done();
+}
+
 async function deleteDefinition() {
+  if (deleting.value) {
+    return;
+  }
+  if (guardReadOnlyDefinitionMutation('停用工序')) {
+    return;
+  }
   if (!activeDeleteDefinition.value) {
     return;
   }
@@ -236,15 +353,35 @@ async function deleteDefinition() {
   deleting.value = true;
   try {
     await erpApi.deleteProcessDefinition(activeDeleteDefinition.value.id);
-    ElMessage.success('工序已删除');
+    ElMessage.success('工序已停用，历史订单和生产任务不受影响');
     deleteDialogVisible.value = false;
     activeDeleteDefinition.value = undefined;
     await loadDefinitions();
     emit('updated');
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '工序删除失败');
+    ElMessage.error(error instanceof Error ? error.message : '工序停用失败');
   } finally {
     deleting.value = false;
+  }
+}
+
+async function restoreDefinition(definition: ProcessDefinition) {
+  if (restoringDefinitionId.value) {
+    return;
+  }
+  if (guardReadOnlyDefinitionMutation('恢复启用标准工序')) {
+    return;
+  }
+  restoringDefinitionId.value = definition.id;
+  try {
+    await erpApi.restoreProcessDefinition(definition.id);
+    ElMessage.success('标准工序已恢复启用');
+    await loadDefinitions();
+    emit('updated');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '标准工序恢复失败，请确认名称未重复');
+  } finally {
+    restoringDefinitionId.value = '';
   }
 }
 
@@ -333,6 +470,17 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 
 .process-definition-actions .el-button {
   margin-left: 0;
+}
+
+.mobile-readonly-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.process-definition-readonly {
+  flex-shrink: 0;
 }
 
 .process-definition-detail-toggle {

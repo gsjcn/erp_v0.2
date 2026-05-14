@@ -91,6 +91,7 @@ model Customer {
   orders       CustomerOrder[]
   materialApplicabilities MaterialApplicability[]
   modelBoms    ModelBom[]
+  modelBomCustomerScopes ModelBomCustomerScope[]
   materialTransformRules MaterialTransformRule[]
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
@@ -135,6 +136,20 @@ model Material {
   @@index([status])
 }
 
+/// 零件管理常用机型快捷入口。只保存显示顺序，不改变 BOM、零件适用范围、订单或库存。
+model MaterialCommonProjectModel {
+  id                     String       @id @default(uuid())
+  projectModel           String
+  projectModelNormalized String       @unique
+  sortOrder              Int
+  status                 CommonStatus @default(ENABLED)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@index([sortOrder])
+  @@index([status])
+}
+
 /// 零件图纸版本。历史图纸不覆盖旧订单，订单行只保存下单时的图纸快照。
 model MaterialDrawingRevision {
   id                String       @id @default(uuid())
@@ -170,21 +185,45 @@ model ModelBom {
   customer             Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
   customerNameSnapshot String?
   projectModel         String
+  customerScopeMode    String       @default("ALL")
   customerScopeKey     String       @default("ALL")
   projectModelScopeKey String
   sourceBomId          String?
   sourceBomNameSnapshot String?
+  isCommon             Boolean      @default(false)
+  commonSortOrder      Int?
   remark               String?
   status               CommonStatus @default(ENABLED)
+  customerScopes       ModelBomCustomerScope[]
   lines                ModelBomLine[]
+  diffReviewsAsTarget  ModelBomDiffReview[] @relation("ModelBomDiffReviewTarget")
+  diffReviewsAsSource  ModelBomDiffReview[] @relation("ModelBomDiffReviewSource")
   createdAt            DateTime     @default(now())
   updatedAt            DateTime     @updatedAt
 
   @@unique([bomName, customerScopeKey, projectModelScopeKey])
+  @@unique([customerScopeKey, projectModelScopeKey])
   @@index([customerId])
   @@index([sourceBomId])
   @@index([projectModelScopeKey])
+  @@index([isCommon, commonSortOrder])
   @@index([status])
+}
+
+/// BOM 客户适用范围。用于表达“全部客户通用”和“勾选指定客户可用”，不自动生成订单或库存。
+model ModelBomCustomerScope {
+  id                   String       @id @default(uuid())
+  bomId                String
+  bom                  ModelBom     @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  customerId           String
+  customer             Customer     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  customerNameSnapshot String?
+  status               CommonStatus @default(ENABLED)
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  @@unique([bomId, customerId])
+  @@index([customerId, status])
 }
 
 model ModelBomLine {
@@ -197,12 +236,15 @@ model ModelBomLine {
   partNameSnapshot      String
   unitSnapshot          String
   partSpecificationSnapshot String?
+  partThicknessSnapshot Decimal?     @db.Decimal(18, 3)
   lineType              String       @default("PART")
   partCategory          String?
   componentNo           String?
   parentComponentNo     String?
   defaultDrawingRevisionId String?
   defaultDrawingRevision MaterialDrawingRevision? @relation(fields: [defaultDrawingRevisionId], references: [id], onDelete: SetNull)
+  diffReviewsAsSourceLine ModelBomDiffReview[] @relation("ModelBomDiffReviewSourceLine")
+  diffReviewsAsTargetLine ModelBomDiffReview[] @relation("ModelBomDiffReviewTargetLine")
   defaultProcessRoute   String?
   defaultQuantity       Decimal      @default(1) @db.Decimal(18, 3)
   remark                String?
@@ -218,6 +260,38 @@ model ModelBomLine {
   @@index([defaultDrawingRevisionId])
   @@index([materialId])
   @@index([status])
+}
+
+/// 客户 BOM 与来源 BOM 的人工差异核对记录；只记录人工确认，不自动覆盖 BOM 明细。
+model ModelBomDiffReview {
+  id              String       @id @default(uuid())
+  targetBomId     String
+  targetBom       ModelBom     @relation("ModelBomDiffReviewTarget", fields: [targetBomId], references: [id], onDelete: Cascade)
+  sourceBomId     String
+  sourceBom       ModelBom     @relation("ModelBomDiffReviewSource", fields: [sourceBomId], references: [id], onDelete: Cascade)
+  reviewKey       String       @unique
+  issueKind       String
+  sourceLineId    String?
+  sourceLine      ModelBomLine? @relation("ModelBomDiffReviewSourceLine", fields: [sourceLineId], references: [id], onDelete: SetNull)
+  targetLineId    String?
+  targetLine      ModelBomLine? @relation("ModelBomDiffReviewTargetLine", fields: [targetLineId], references: [id], onDelete: SetNull)
+  issueTitle      String
+  issueDetail     String?
+  diffFingerprint String
+  fieldsJson      Json?
+  reviewedBy      String?
+  reviewRemark    String?
+  status          CommonStatus @default(ENABLED)
+  reviewedAt      DateTime     @default(now())
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([targetBomId, sourceBomId])
+  @@index([targetBomId, status])
+  @@index([sourceBomId])
+  @@index([sourceLineId])
+  @@index([targetLineId])
+  @@index([reviewedAt])
 }
 
 /// 零件适用范围。customerScopeKey / projectModelScopeKey 用于避免 PostgreSQL NULL 唯一约束失效。
@@ -257,17 +331,19 @@ model ProcessDefinition {
 }
 
 model ProcessTemplate {
-  id                     String   @id @default(uuid())
+  id                     String       @id @default(uuid())
   templateName           String
-  templateNameNormalized String   @unique
+  templateNameNormalized String       @unique
   steps                  Json
   remark                 String?
-  searchText             String   @default("")
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  searchText             String       @default("")
+  status                 CommonStatus @default(ENABLED)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
 
   @@index([templateName])
   @@index([searchText])
+  @@index([status, updatedAt])
 }
 
 /// 订单号永久占用表。订单取消、归档或未来迁移后，订单号仍然不能被其他订单复用。

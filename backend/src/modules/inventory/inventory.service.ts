@@ -8,6 +8,7 @@ import { normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin
 import { normalizeMultipartFileName } from '../../common/upload-filenames';
 import { decimalToNumber } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
+import { businessDateTimeKey } from '../../common/business-date';
 import { PrismaService } from '../../prisma/prisma.service';
 import { inventoryAdjustmentUploadPath, materialImportUploadPath } from '../../storage/upload-paths';
 import { ProcessDefinitionsService } from '../process-definitions/process-definitions.service';
@@ -15,6 +16,7 @@ import * as ExcelJS from 'exceljs';
 import {
   AdjustInventoryBatchDto,
   CommitMaterialImportSessionDto,
+  ConfirmModelBomDiffReviewDto,
   CopyModelBomDto,
   CreateMaterialDto,
   CreateMaterialImportSessionDto,
@@ -24,11 +26,15 @@ import {
   MaterialQueryDto,
   MaterialSuggestionQueryDto,
   MaterialTransformRuleQueryDto,
+  ModelBomDiffReviewQueryDto,
   ModelBomQueryDto,
+  ReorderModelBomCommonDto,
   ReorderModelBomLinesDto,
   SaveMaterialDrawingRevisionDto,
   SaveMaterialApplicabilityDto,
   SaveMaterialTransformRuleDto,
+  SetModelBomCommonDto,
+  SetModelBomsCommonBatchDto,
   SaveModelBomDto,
   SaveModelBomLineDto,
   UpdateMaterialDto
@@ -63,6 +69,7 @@ type InventorySummaryAccumulator = {
 };
 
 type MaterialSuggestionBase = {
+  materialId?: string;
   partCode: string;
   partName: string;
   unit: string;
@@ -73,6 +80,30 @@ type MaterialSuggestionBase = {
   drawingStatus?: string | null;
   partThickness?: number | null;
   projectModel?: string | null;
+};
+
+type ModelBomCustomerScopeMode = 'ALL' | 'PRIVATE' | 'SELECTED';
+
+type ModelBomSortableRow = {
+  customerId: string | null;
+  customerScopeMode?: string | null;
+  customerScopes?: Array<{ customerId: string; status: CommonStatus }>;
+  projectModel: string;
+  isCommon?: boolean | null;
+  commonSortOrder?: number | null;
+  updatedAt: Date;
+  bomName: string;
+};
+
+type ModelBomDisplayOrderLine = {
+  id: string;
+  sortOrder: number;
+  createdAt: Date;
+  status: CommonStatus;
+  lineType: string;
+  componentNo: string | null;
+  parentComponentNo: string | null;
+  material?: { status: CommonStatus } | null;
 };
 
 type MaterialSuggestionHistory = {
@@ -103,6 +134,17 @@ type MaterialSuggestionHistory = {
   identityFieldValues: Map<string, Set<string>>;
   identityVariantCount?: number;
   historyCustomerNames: Set<string>;
+};
+
+type ModelBomThicknessSnapshot = {
+  partThickness: number;
+  orderTime: number;
+  lineTime: number;
+};
+
+type ModelBomThicknessScope = {
+  customerId?: string | null;
+  projectModel?: string | null;
 };
 
 const materialSuggestionIdentityFieldLabels: Record<string, string> = {
@@ -292,6 +334,19 @@ export class InventoryService {
     };
   }
 
+  private inventoryBatchMatchesCustomerScope(batch: any, customerScope: InventoryCustomerScope) {
+    const orderNoSet = new Set(customerScope.orderNos);
+    const taskNoSet = new Set(customerScope.productionTaskNos);
+    const sourceCustomerName = String(batch.sourceCustomerName || '').trim();
+    return Boolean(
+      batch.sourceOrder?.customerId === customerScope.customerId ||
+        batch.productionTask?.order?.customerId === customerScope.customerId ||
+        (batch.sourceOrderNo && orderNoSet.has(batch.sourceOrderNo)) ||
+        (batch.sourceProductionTaskNo && taskNoSet.has(batch.sourceProductionTaskNo)) ||
+        (customerScope.customerName && sourceCustomerName === customerScope.customerName)
+    );
+  }
+
   private async buildInventoryWhere(query: InventoryQueryDto) {
     const where: Prisma.InventoryBatchWhereInput = {};
     const andConditions: Prisma.InventoryBatchWhereInput[] = [];
@@ -409,6 +464,24 @@ export class InventoryService {
     return materials.filter((material) => this.materialMatchesKeyword(material, normalizedKeyword));
   }
 
+  private async findEnabledMaterialMastersByCodes(partCodes: string[]) {
+    const uniquePartCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
+    const rows: Array<{ id: string; partCode: string }> = [];
+    for (let index = 0; index < uniquePartCodes.length; index += 500) {
+      const chunk = uniquePartCodes.slice(index, index + 500);
+      rows.push(
+        ...(await this.prisma.material.findMany({
+          where: {
+            status: 'ENABLED',
+            OR: chunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } }))
+          },
+          select: { id: true, partCode: true }
+        }))
+      );
+    }
+    return new Map(rows.map((row) => [row.partCode.trim().toLocaleLowerCase(), row]));
+  }
+
   private materialMatchesKeyword(material: { partCode?: string | null; partName?: string | null; unit?: string | null; partSpecification?: string | null }, keyword: string) {
     return pinyinSearchMatches([material.partCode, material.partName, material.unit, material.partSpecification], keyword);
   }
@@ -458,7 +531,7 @@ export class InventoryService {
       select: { id: true }
     });
     if (existing) {
-      throw new BadRequestException(`物料编码 ${partCode} 已存在，请勿重复维护`);
+      throw new BadRequestException(`零件编码 ${partCode} 已存在，请勿重复维护`);
     }
   }
 
@@ -473,6 +546,9 @@ export class InventoryService {
   async materials(query: MaterialQueryDto) {
     const status = query.status || 'ENABLED';
     const normalizedKeyword = normalizeSearchKeyword(query.keyword);
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
     const historyByCode = normalizedKeyword
       ? await this.findMaterialSuggestionHistory({ keyword: query.keyword }, query.keyword)
       : new Map<string, MaterialSuggestionHistory>();
@@ -484,12 +560,23 @@ export class InventoryService {
       (material) =>
         this.materialMemoryMatchesKeyword(material, query.keyword) || historyByCode.has(material.partCode.trim().toLocaleLowerCase())
     );
-    if (materials.length === 0) {
-      return [];
+    const totalCount = materials.length;
+    const pageMaterials = withPage ? materials.slice(offset, offset + limit) : materials;
+    if (pageMaterials.length === 0) {
+      const emptyItems: never[] = [];
+      return withPage
+        ? {
+            items: emptyItems,
+            totalCount,
+            limit,
+            offset,
+            hasMore: false
+          }
+        : emptyItems;
     }
 
-    const materialByCode = new Map(materials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
-    const partCodeConditions = materials.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }));
+    const materialByCode = new Map(pageMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+    const partCodeConditions = pageMaterials.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }));
     const [batches, orderLines] = await Promise.all([
       this.prisma.inventoryBatch.findMany({
         where: {
@@ -572,35 +659,65 @@ export class InventoryService {
       usageByCode.set(key, current);
     }
 
-    return materials.map((material) => {
-      const key = material.partCode.trim().toLocaleLowerCase();
-      const quantity = quantityByCode.get(key) || {
-        availableQuantity: 0,
-        orderInventoryQuantity: 0,
-        stockInventoryQuantity: 0
-      };
-      const usage = usageByCode.get(key) || { orderLineUsageCount: 0 };
-      return {
-        id: material.id,
-        partCode: material.partCode,
-        partName: material.partName,
-        unit: material.unit,
-        partSpecification: material.partSpecification,
-        status: material.status,
-        ...quantity,
-        orderLineUsageCount: usage.orderLineUsageCount,
-        lastOrderNo: usage.lastOrderNo,
-        lastCustomerName: usage.lastCustomerName,
-        lastOrderDate: this.formatDateOnly(usage.lastOrderDate),
-        createdAt: material.createdAt,
-        updatedAt: material.updatedAt
-      };
-    });
+    const items = pageMaterials.map((material) => this.serializeMaterialMemoryRow(material, quantityByCode, usageByCode));
+    return withPage
+      ? {
+          items,
+          totalCount,
+          limit,
+          offset,
+          hasMore: offset + items.length < totalCount
+        }
+      : items;
+  }
+
+  private serializeMaterialMemoryRow(
+    material: MaterialMemoryRow,
+    quantityByCode: Map<
+      string,
+      {
+        availableQuantity: number;
+        orderInventoryQuantity: number;
+        stockInventoryQuantity: number;
+      }
+    >,
+    usageByCode: Map<
+      string,
+      {
+        orderLineUsageCount: number;
+        lastOrderNo?: string;
+        lastCustomerName?: string;
+        lastOrderDate?: Date | null;
+      }
+    >
+  ) {
+    const key = material.partCode.trim().toLocaleLowerCase();
+    const quantity = quantityByCode.get(key) || {
+      availableQuantity: 0,
+      orderInventoryQuantity: 0,
+      stockInventoryQuantity: 0
+    };
+    const usage = usageByCode.get(key) || { orderLineUsageCount: 0 };
+    return {
+      id: material.id,
+      partCode: material.partCode,
+      partName: material.partName,
+      unit: material.unit,
+      partSpecification: material.partSpecification,
+      status: material.status,
+      ...quantity,
+      orderLineUsageCount: usage.orderLineUsageCount,
+      lastOrderNo: usage.lastOrderNo,
+      lastCustomerName: usage.lastCustomerName,
+      lastOrderDate: this.formatDateOnly(usage.lastOrderDate),
+      createdAt: material.createdAt,
+      updatedAt: material.updatedAt
+    };
   }
 
   async createMaterial(dto: CreateMaterialDto) {
-    const partCode = this.normalizeMaterialRequired(dto.partCode, '物料编码');
-    const partName = this.normalizeMaterialRequired(dto.partName, '物料名称');
+    const partCode = this.normalizeMaterialRequired(dto.partCode, '零件编码');
+    const partName = this.normalizeMaterialRequired(dto.partName, '零件名称');
     const unit = this.normalizeMaterialRequired(dto.unit, '单位');
     await this.ensureMaterialCodeAvailable(partCode);
 
@@ -619,10 +736,10 @@ export class InventoryService {
   async updateMaterial(materialId: string, dto: UpdateMaterialDto) {
     const existing = await this.prisma.material.findUnique({ where: { id: materialId } });
     if (!existing) {
-      throw new NotFoundException('物料基础资料不存在');
+      throw new NotFoundException('零件基础资料不存在');
     }
-    const partCode = dto.partCode !== undefined ? this.normalizeMaterialRequired(dto.partCode, '物料编码') : existing.partCode;
-    const partName = dto.partName !== undefined ? this.normalizeMaterialRequired(dto.partName, '物料名称') : existing.partName;
+    const partCode = dto.partCode !== undefined ? this.normalizeMaterialRequired(dto.partCode, '零件编码') : existing.partCode;
+    const partName = dto.partName !== undefined ? this.normalizeMaterialRequired(dto.partName, '零件名称') : existing.partName;
     const unit = dto.unit !== undefined ? this.normalizeMaterialRequired(dto.unit, '单位') : existing.unit;
     if (partCode.toLocaleLowerCase() !== existing.partCode.toLocaleLowerCase()) {
       await this.ensureMaterialCodeAvailable(partCode, materialId);
@@ -655,7 +772,7 @@ export class InventoryService {
   async disableMaterial(materialId: string) {
     const existing = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
     if (!existing) {
-      throw new NotFoundException('物料基础资料不存在');
+      throw new NotFoundException('零件基础资料不存在');
     }
     return this.prisma.$transaction(async (tx) => {
       const row = await tx.material.update({
@@ -688,8 +805,9 @@ export class InventoryService {
       data: { status: 'DISABLED' }
     });
     for (const line of componentLines) {
+      const componentNoCandidates = this.modelBomComponentNoCandidates(line.componentNo);
       await tx.modelBomLine.updateMany({
-        where: { bomId: line.bomId, parentComponentNo: line.componentNo, status: 'ENABLED' },
+        where: { bomId: line.bomId, parentComponentNo: { in: componentNoCandidates }, status: 'ENABLED' },
         data: { status: 'DISABLED' }
       });
     }
@@ -776,7 +894,7 @@ export class InventoryService {
   async materialDrawingRevisions(materialId: string) {
     const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
     if (!material) {
-      throw new NotFoundException('物料基础资料不存在');
+      throw new NotFoundException('零件基础资料不存在');
     }
     const rows = await this.prisma.materialDrawingRevision.findMany({
       where: { materialId },
@@ -788,7 +906,7 @@ export class InventoryService {
   async saveMaterialDrawingRevision(materialId: string, dto: SaveMaterialDrawingRevisionDto) {
     const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
     if (!material) {
-      throw new NotFoundException('物料基础资料不存在');
+      throw new NotFoundException('零件基础资料不存在');
     }
     const data = this.resolveMaterialDrawingRevisionData(dto);
     await this.ensureMaterialDrawingRevisionAvailable(materialId, data.drawingNo, data.drawingVersion);
@@ -925,7 +1043,7 @@ export class InventoryService {
         partCode: 'RS1071123',
         partName: '风机支架组件',
         unit: '套',
-        drawingNo: 'B5机型物料号-10-30',
+        drawingNo: 'B5机型图号-10-30',
         drawingStatus: '旧图',
         partThickness: 2,
         projectModel: 'B型5P',
@@ -1715,7 +1833,7 @@ export class InventoryService {
       }
     });
     if (!material) {
-      throw new NotFoundException('物料基础资料不存在');
+      throw new NotFoundException('零件基础资料不存在');
     }
     return {
       material: {
@@ -1730,7 +1848,7 @@ export class InventoryService {
   async saveMaterialApplicability(materialId: string, dto: SaveMaterialApplicabilityDto) {
     const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
     if (!material) {
-      throw new NotFoundException('物料基础资料不存在');
+      throw new NotFoundException('零件基础资料不存在');
     }
     const scope = await this.resolveMaterialApplicabilityScope(dto);
     const existing = await this.prisma.materialApplicability.findUnique({
@@ -1838,26 +1956,184 @@ export class InventoryService {
 
   private async resolveModelBomScope(dto: SaveModelBomDto) {
     const bomName = this.normalizeMaterialRequired(dto.bomName, '零件包名称');
-    const projectModel = this.normalizeMaterialRequired(dto.projectModel, '机型/项目');
-    const customerId = String(dto.customerId || '').trim() || null;
-    const customer = customerId
-      ? await this.prisma.customer.findUnique({
-          where: { id: customerId },
-          select: { id: true, customerName: true }
-        })
-      : null;
-    if (customerId && !customer) {
-      throw new BadRequestException('零件包适用客户不存在');
+    const projectModel = String(dto.projectModel || '').trim();
+    const status = dto.status || 'ENABLED';
+    const selectedCustomerIds = [
+      ...new Set((dto.customerIds || []).map((id) => String(id || '').trim()).filter(Boolean))
+    ].sort();
+    const requestedMode = (dto.customerScopeMode || (selectedCustomerIds.length > 0 ? 'SELECTED' : dto.customerId ? 'PRIVATE' : 'ALL')) as ModelBomCustomerScopeMode;
+    const projectModelScopeKey = this.normalizeMaterialScopeKey(projectModel);
+
+    if (requestedMode === 'SELECTED') {
+      if (selectedCustomerIds.length === 0) {
+        throw new BadRequestException('请选择至少一个可使用该 BOM 的客户');
+      }
+      const selectedCustomers = await this.prisma.customer.findMany({
+        where: { id: { in: selectedCustomerIds }, status: 'ENABLED' },
+        select: { id: true, customerName: true, customerCode: true }
+      });
+      if (selectedCustomers.length !== selectedCustomerIds.length) {
+        throw new BadRequestException('BOM 指定客户范围包含不存在或已停用的客户');
+      }
+      const selectedCustomerMap = new Map(selectedCustomers.map((customer) => [customer.id, customer]));
+      const orderedCustomers = selectedCustomerIds.map((id) => selectedCustomerMap.get(id)).filter(Boolean) as typeof selectedCustomers;
+      return {
+        data: {
+          bomName,
+          customerId: null,
+          customerNameSnapshot: null,
+          projectModel,
+          customerScopeMode: 'SELECTED',
+          customerScopeKey: `SELECTED:${selectedCustomerIds.join(',')}`,
+          projectModelScopeKey,
+          remark: String(dto.remark || '').trim() || null,
+          status
+        },
+        selectedCustomers: orderedCustomers
+      };
     }
+
+    if (requestedMode === 'PRIVATE') {
+      const customerId = String(dto.customerId || '').trim();
+      if (!customerId) {
+        throw new BadRequestException('请选择客户私有 BOM 的所属客户');
+      }
+      const customer = await this.prisma.customer.findUnique({
+        where: { id: customerId },
+        select: { id: true, customerName: true }
+      });
+      if (!customer) {
+        throw new BadRequestException('零件包适用客户不存在');
+      }
+      return {
+        data: {
+          bomName,
+          customerId: customer.id,
+          customerNameSnapshot: customer.customerName,
+          projectModel,
+          customerScopeMode: 'PRIVATE',
+          customerScopeKey: customer.id,
+          projectModelScopeKey,
+          remark: String(dto.remark || '').trim() || null,
+          status
+        },
+        selectedCustomers: []
+      };
+    }
+
     return {
-      bomName,
-      customerId: customer?.id || null,
-      customerNameSnapshot: customer?.customerName || null,
-      projectModel,
-      customerScopeKey: customer?.id || 'ALL',
-      projectModelScopeKey: this.normalizeMaterialScopeKey(projectModel),
-      remark: String(dto.remark || '').trim() || null,
-      status: dto.status || 'ENABLED'
+      data: {
+        bomName,
+        customerId: null,
+        customerNameSnapshot: null,
+        projectModel,
+        customerScopeMode: 'ALL',
+        customerScopeKey: 'ALL',
+        projectModelScopeKey,
+        remark: String(dto.remark || '').trim() || null,
+        status
+      },
+      selectedCustomers: []
+    };
+  }
+
+  private modelBomCustomerScopeCreateData(scope: Awaited<ReturnType<InventoryService['resolveModelBomScope']>>) {
+    return scope.selectedCustomers.map((customer) => ({
+      customerId: customer.id,
+      customerNameSnapshot: customer.customerName,
+      status: 'ENABLED' as CommonStatus
+    }));
+  }
+
+  private modelBomCustomerScopeModeFromRow(row: { customerId?: string | null; customerScopeMode?: string | null }) {
+    return row.customerId ? 'PRIVATE' : row.customerScopeMode === 'SELECTED' ? 'SELECTED' : 'ALL';
+  }
+
+  private modelBomCustomerScopeBroadens(previousMode: ModelBomCustomerScopeMode, nextMode: ModelBomCustomerScopeMode) {
+    const rank: Record<ModelBomCustomerScopeMode, number> = {
+      PRIVATE: 1,
+      SELECTED: 2,
+      ALL: 3
+    };
+    return rank[nextMode] > rank[previousMode];
+  }
+
+  private modelBomProjectScopeBroadens(previousProjectModel?: string | null, nextProjectModel?: string | null) {
+    return Boolean(String(previousProjectModel || '').trim()) && !String(nextProjectModel || '').trim();
+  }
+
+  private modelBomSelectedCustomerScopeAdds(
+    row: { customerId?: string | null; customerScopeMode?: string | null; customerScopes?: Array<{ customerId: string; status?: CommonStatus }> },
+    nextMode: ModelBomCustomerScopeMode,
+    nextCustomerIds: string[]
+  ) {
+    if (this.modelBomCustomerScopeModeFromRow(row) !== 'SELECTED' || nextMode !== 'SELECTED') {
+      return false;
+    }
+    const previousCustomerIds = new Set(
+      (row.customerScopes || [])
+        .filter((scope) => !scope.status || scope.status === 'ENABLED')
+        .map((scope) => scope.customerId)
+    );
+    return nextCustomerIds.some((customerId) => !previousCustomerIds.has(customerId));
+  }
+
+  private modelBomInclude(
+    orderBy: Prisma.ModelBomLineOrderByWithRelationInput[] = [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
+  ): Prisma.ModelBomInclude {
+    return {
+      customer: { select: { id: true, customerName: true, customerCode: true } },
+      customerScopes: {
+        where: { status: 'ENABLED' },
+        include: { customer: { select: { id: true, customerName: true, customerCode: true } } },
+        orderBy: [{ customerNameSnapshot: 'asc' }]
+      },
+      lines: {
+        include: this.modelBomLineInclude(),
+        orderBy
+      }
+    };
+  }
+
+  private async nextModelBomCommonSortOrder(customerScopeKey: string, projectModelScopeKey: string) {
+    const maxCommon = await this.prisma.modelBom.aggregate({
+      _max: { commonSortOrder: true },
+      where: {
+        isCommon: true,
+        customerScopeKey,
+        projectModelScopeKey
+      }
+    });
+    return (maxCommon._max.commonSortOrder || 0) + 1;
+  }
+
+  private async modelBomCommonSaveData(args: {
+    isCommon?: boolean;
+    customerScopeKey: string;
+    projectModelScopeKey: string;
+    existing?: { isCommon: boolean; commonSortOrder: number | null; customerScopeKey: string; projectModelScopeKey: string } | null;
+  }) {
+    if (typeof args.isCommon !== 'boolean') {
+      return {};
+    }
+    if (!args.isCommon) {
+      return { isCommon: false, commonSortOrder: null };
+    }
+    if (
+      args.existing?.isCommon &&
+      args.existing.commonSortOrder &&
+      args.existing.customerScopeKey === args.customerScopeKey &&
+      args.existing.projectModelScopeKey === args.projectModelScopeKey
+    ) {
+      return {
+        isCommon: true,
+        commonSortOrder: args.existing.commonSortOrder
+      };
+    }
+    const commonSortOrder = await this.nextModelBomCommonSortOrder(args.customerScopeKey, args.projectModelScopeKey);
+    return {
+      isCommon: true,
+      commonSortOrder
     };
   }
 
@@ -1881,31 +2157,110 @@ export class InventoryService {
     };
   }
 
+  private modelBomLinePartCodes(lines: Array<{ partCodeSnapshot: string; material?: { partCode: string } | null }>) {
+    return [
+      ...new Set(
+        lines
+          .map((line) => String(line.material?.partCode || line.partCodeSnapshot || '').trim())
+          .filter(Boolean)
+      )
+    ];
+  }
+
+  private modelBomThicknessKey(partCode: string, customerId?: string | null, projectModel?: string | null) {
+    const codeKey = String(partCode || '').trim().toLocaleLowerCase();
+    const customerScopeKey = String(customerId || '').trim() || 'ALL';
+    const projectScopeKey = this.normalizeMaterialScopeKey(projectModel);
+    return `${codeKey}__${customerScopeKey}__${projectScopeKey}`;
+  }
+
+  private setLatestModelBomThickness(
+    latestByScopeKey: Map<string, ModelBomThicknessSnapshot>,
+    key: string,
+    snapshot: ModelBomThicknessSnapshot
+  ) {
+    const existing = latestByScopeKey.get(key);
+    if (!existing || snapshot.orderTime > existing.orderTime || (snapshot.orderTime === existing.orderTime && snapshot.lineTime > existing.lineTime)) {
+      latestByScopeKey.set(key, snapshot);
+    }
+  }
+
+  private async latestOrderLineThicknessByScopeKey(partCodes: string[]) {
+    const uniquePartCodes = [...new Set(partCodes.map((partCode) => String(partCode || '').trim()).filter(Boolean))];
+    const latestByScopeKey = new Map<string, ModelBomThicknessSnapshot>();
+    for (let index = 0; index < uniquePartCodes.length; index += 200) {
+      const chunk = uniquePartCodes.slice(index, index + 200);
+      const rows = await this.prisma.orderLine.findMany({
+        where: { OR: chunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } })) },
+        select: {
+          partCode: true,
+          projectModel: true,
+          partThickness: true,
+          createdAt: true,
+          order: { select: { customerId: true, orderDate: true } }
+        },
+        orderBy: [{ order: { orderDate: 'desc' } }, { createdAt: 'desc' }]
+      });
+      for (const row of rows) {
+        const partCode = row.partCode.trim();
+        if (!partCode) {
+          continue;
+        }
+        const orderTime = row.order.orderDate.getTime();
+        const lineTime = row.createdAt.getTime();
+        const snapshot = { partThickness: decimalToNumber(row.partThickness), orderTime, lineTime };
+        // BOM 厚度来自历史订单快照；客户/机型匹配优先，避免同编码跨客户厚度被误用。
+        const keys = new Set([
+          this.modelBomThicknessKey(partCode, row.order.customerId, row.projectModel),
+          this.modelBomThicknessKey(partCode, row.order.customerId, null),
+          this.modelBomThicknessKey(partCode, null, row.projectModel),
+          this.modelBomThicknessKey(partCode, null, null)
+        ]);
+        for (const key of keys) {
+          this.setLatestModelBomThickness(latestByScopeKey, key, snapshot);
+        }
+      }
+    }
+    return new Map([...latestByScopeKey].map(([key, value]) => [key, value.partThickness]));
+  }
+
   async modelBoms(query: ModelBomQueryDto) {
-    const status = query.status || 'ENABLED';
+    const status = query.status === 'ALL' ? undefined : query.status || 'ENABLED';
     const projectModel = query.projectModel?.trim();
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
     const where: Prisma.ModelBomWhereInput = {
-      status,
-      ...(projectModel ? { projectModel: { contains: projectModel, mode: 'insensitive' } } : {})
+      ...(status ? { status } : {}),
+      ...(projectModel
+        ? {
+            OR: [{ projectModel: { contains: projectModel, mode: 'insensitive' } }, { projectModelScopeKey: 'ALL' }]
+          }
+        : {})
     };
     const customerId = query.customerId?.trim();
     if (customerId) {
-      where.OR = [{ customerId }, { customerId: null }];
+      const projectScopeOr = where.OR;
+      const customerScopeOr: Prisma.ModelBomWhereInput[] = [
+        { customerId },
+        { customerId: null, customerScopeMode: 'ALL' },
+        { customerId: null, customerScopeMode: 'SELECTED', customerScopes: { some: { customerId, status: 'ENABLED' } } }
+      ];
+      where.AND = [{ OR: customerScopeOr }, ...(projectScopeOr ? [{ OR: projectScopeOr }] : [])];
+      delete where.OR;
     }
     const rows = await this.prisma.modelBom.findMany({
       where,
-      include: {
-        customer: { select: { id: true, customerName: true, customerCode: true } },
-        lines: {
-          include: this.modelBomLineInclude(),
-          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
-        }
-      },
+      include: this.modelBomInclude(),
       orderBy: [{ updatedAt: 'desc' }, { projectModel: 'asc' }, { bomName: 'asc' }]
     });
+    const visibleRows =
+      customerId && query.excludeGlobalAllProject === 'true'
+        ? rows.filter((row) => !(row.customerScopeMode === 'ALL' && row.projectModelScopeKey === 'ALL'))
+        : rows;
     const normalizedKeyword = normalizeSearchKeyword(query.keyword);
     const filtered = normalizedKeyword
-      ? rows.filter((row) =>
+      ? visibleRows.filter((row) =>
           pinyinSearchMatches(
             [
               row.bomName,
@@ -1913,16 +2268,54 @@ export class InventoryService {
               row.customer?.customerName,
               row.customer?.customerCode,
               row.customerNameSnapshot,
+              ...row.customerScopes.map((scope) => scope.customerNameSnapshot),
               ...row.lines.flatMap((line) => [line.partCodeSnapshot, line.partNameSnapshot])
             ],
             normalizedKeyword
           )
         )
-      : rows;
-    return this.sortModelBomRows(filtered, query).map((row) => this.serializeModelBom(row));
+      : visibleRows;
+    const scopeSummary = this.modelBomScopeSummary(filtered);
+    const scopedRows = query.scopeMode ? filtered.filter((row) => this.modelBomCustomerScopeModeForRow(row) === query.scopeMode) : filtered;
+    const commonRows = query.commonOnly === 'true' ? scopedRows.filter((row) => row.isCommon) : scopedRows;
+    const sortedRows = this.sortModelBomRows(commonRows, query);
+    const totalCount = sortedRows.length;
+    const pageRows = withPage ? sortedRows.slice(offset, offset + limit) : sortedRows;
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(pageRows.flatMap((row) => row.lines)));
+    const items = pageRows.map((row) => this.serializeModelBom(row, partThicknessByScopeKey));
+    return withPage
+      ? {
+          items,
+          totalCount,
+          limit,
+          offset,
+          hasMore: offset + items.length < totalCount,
+          scopeSummary
+        }
+      : items;
   }
 
-  private sortModelBomRows<T extends { customerId: string | null; projectModel: string; updatedAt: Date; bomName: string }>(
+  private modelBomCustomerScopeModeForRow(row: ModelBomSortableRow): ModelBomCustomerScopeMode {
+    if (row.customerScopeMode === 'SELECTED') {
+      return 'SELECTED';
+    }
+    if (row.customerId) {
+      return 'PRIVATE';
+    }
+    return 'ALL';
+  }
+
+  private modelBomScopeSummary(rows: ModelBomSortableRow[]) {
+    return {
+      totalCount: rows.length,
+      allCustomerCount: rows.filter((row) => this.modelBomCustomerScopeModeForRow(row) === 'ALL').length,
+      selectedCustomerCount: rows.filter((row) => this.modelBomCustomerScopeModeForRow(row) === 'SELECTED').length,
+      privateCount: rows.filter((row) => this.modelBomCustomerScopeModeForRow(row) === 'PRIVATE').length,
+      commonCount: rows.filter((row) => row.isCommon).length
+    };
+  }
+
+  private sortModelBomRows<T extends ModelBomSortableRow>(
     rows: T[],
     query: ModelBomQueryDto
   ) {
@@ -1930,16 +2323,31 @@ export class InventoryService {
     const requestedProjectModel = this.normalizeMaterialScopeKey(query.projectModel);
     return [...rows].sort((left, right) => {
       // 订单推荐 BOM 时，客户专属清单优先于百胜通用清单；通用清单只作为兜底建议。
-      const leftCustomerScore = requestedCustomerId ? (left.customerId === requestedCustomerId ? 0 : left.customerId ? 2 : 1) : left.customerId ? 1 : 0;
-      const rightCustomerScore = requestedCustomerId ? (right.customerId === requestedCustomerId ? 0 : right.customerId ? 2 : 1) : right.customerId ? 1 : 0;
+      const leftCustomerScore = this.modelBomCustomerScopeSortScore(left, requestedCustomerId);
+      const rightCustomerScore = this.modelBomCustomerScopeSortScore(right, requestedCustomerId);
       if (leftCustomerScore !== rightCustomerScore) {
         return leftCustomerScore - rightCustomerScore;
       }
 
-      const leftProjectScore = requestedProjectModel === 'ALL' ? 1 : this.normalizeMaterialScopeKey(left.projectModel) === requestedProjectModel ? 0 : 1;
-      const rightProjectScore = requestedProjectModel === 'ALL' ? 1 : this.normalizeMaterialScopeKey(right.projectModel) === requestedProjectModel ? 0 : 1;
+      const leftProjectScopeKey = this.normalizeMaterialScopeKey(left.projectModel);
+      const rightProjectScopeKey = this.normalizeMaterialScopeKey(right.projectModel);
+      const leftProjectScore = requestedProjectModel === 'ALL' ? 0 : leftProjectScopeKey === requestedProjectModel ? 0 : leftProjectScopeKey === 'ALL' ? 1 : 2;
+      const rightProjectScore =
+        requestedProjectModel === 'ALL' ? 0 : rightProjectScopeKey === requestedProjectModel ? 0 : rightProjectScopeKey === 'ALL' ? 1 : 2;
       if (leftProjectScore !== rightProjectScore) {
         return leftProjectScore - rightProjectScore;
+      }
+
+      // 常用 BOM 只提升同一客户/机型范围内的显示优先级，不改变适用范围或自动带入订单。
+      if (Boolean(left.isCommon) !== Boolean(right.isCommon)) {
+        return left.isCommon ? -1 : 1;
+      }
+      if (left.isCommon && right.isCommon) {
+        const leftOrder = left.commonSortOrder ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = right.commonSortOrder ?? Number.MAX_SAFE_INTEGER;
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
       }
 
       const updatedDiff = right.updatedAt.getTime() - left.updatedAt.getTime();
@@ -1950,31 +2358,139 @@ export class InventoryService {
     });
   }
 
+  private modelBomCustomerScopeSortScore(row: ModelBomSortableRow, requestedCustomerId: string) {
+    if (!requestedCustomerId) {
+      if (row.customerScopeMode === 'ALL' || (!row.customerScopeMode && !row.customerId)) {
+        return 0;
+      }
+      return row.customerScopeMode === 'SELECTED' ? 1 : 2;
+    }
+    if (row.customerId === requestedCustomerId) {
+      return 0;
+    }
+    if (row.customerScopeMode === 'SELECTED' && row.customerScopes?.some((scope) => scope.customerId === requestedCustomerId && scope.status === 'ENABLED')) {
+      return 1;
+    }
+    if (!row.customerId && (row.customerScopeMode === 'ALL' || !row.customerScopeMode)) {
+      return 2;
+    }
+    return 3;
+  }
+
   async modelBom(bomId: string) {
     const row = await this.prisma.modelBom.findUnique({
       where: { id: bomId },
-      include: {
-        customer: { select: { id: true, customerName: true, customerCode: true } },
-        lines: {
-          include: this.modelBomLineInclude(),
-          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
-        }
-      }
+      include: this.modelBomInclude()
     });
     if (!row) {
       throw new NotFoundException('机型零件包不存在');
     }
-    return this.serializeModelBom(row);
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+    return this.serializeModelBom(row, partThicknessByScopeKey);
+  }
+
+  async modelBomDiffReviews(bomId: string, query: ModelBomDiffReviewQueryDto) {
+    const bom = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true, sourceBomId: true } });
+    if (!bom) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const sourceBomId = query.sourceBomId?.trim() || bom.sourceBomId || undefined;
+    const rows = await this.prisma.modelBomDiffReview.findMany({
+      where: {
+        targetBomId: bomId,
+        ...(sourceBomId ? { sourceBomId } : {}),
+        status: 'ENABLED'
+      },
+      orderBy: [{ reviewedAt: 'desc' }, { updatedAt: 'desc' }]
+    });
+    return rows.map((row) => this.serializeModelBomDiffReview(row));
+  }
+
+  async confirmModelBomDiffReview(bomId: string, dto: ConfirmModelBomDiffReviewDto) {
+    const bom = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true, sourceBomId: true } });
+    if (!bom) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    if (!bom.sourceBomId) {
+      throw new BadRequestException('只有复制自来源 BOM 的客户 BOM 才需要差异核对');
+    }
+    if (dto.sourceBomId.trim() !== bom.sourceBomId) {
+      throw new BadRequestException('差异核对来源 BOM 与当前客户 BOM 的复制来源不一致');
+    }
+    const reviewKey = dto.reviewKey.trim();
+    const diffFingerprint = dto.diffFingerprint.trim();
+    if (!reviewKey || !diffFingerprint) {
+      throw new BadRequestException('差异核对记录缺少 reviewKey 或 diffFingerprint');
+    }
+    const fieldsJson = dto.fieldsJson ? (dto.fieldsJson as Prisma.InputJsonValue) : Prisma.JsonNull;
+    // 只记录人工核对结果；不会自动覆盖来源 BOM 或客户 BOM 明细。
+    const row = await this.prisma.modelBomDiffReview.upsert({
+      where: { reviewKey },
+      create: {
+        targetBomId: bom.id,
+        sourceBomId: bom.sourceBomId,
+        reviewKey,
+        issueKind: dto.issueKind.trim(),
+        sourceLineId: dto.sourceLineId?.trim() || null,
+        targetLineId: dto.targetLineId?.trim() || null,
+        issueTitle: dto.issueTitle.trim(),
+        issueDetail: dto.issueDetail?.trim() || null,
+        diffFingerprint,
+        fieldsJson,
+        reviewedBy: dto.reviewedBy?.trim() || null,
+        reviewRemark: dto.reviewRemark?.trim() || null,
+        status: 'ENABLED',
+        reviewedAt: new Date()
+      },
+      update: {
+        issueKind: dto.issueKind.trim(),
+        sourceLineId: dto.sourceLineId?.trim() || null,
+        targetLineId: dto.targetLineId?.trim() || null,
+        issueTitle: dto.issueTitle.trim(),
+        issueDetail: dto.issueDetail?.trim() || null,
+        diffFingerprint,
+        fieldsJson,
+        reviewedBy: dto.reviewedBy?.trim() || null,
+        reviewRemark: dto.reviewRemark?.trim() || null,
+        status: 'ENABLED',
+        reviewedAt: new Date()
+      }
+    });
+    return this.serializeModelBomDiffReview(row);
+  }
+
+  async disableModelBomDiffReview(reviewId: string) {
+    const existing = await this.prisma.modelBomDiffReview.findUnique({ where: { id: reviewId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('BOM 差异核对记录不存在');
+    }
+    // 核对记录撤销只停用人工确认，不会删除或覆盖任何 BOM 明细。
+    const row = await this.prisma.modelBomDiffReview.update({
+      where: { id: reviewId },
+      data: { status: 'DISABLED' }
+    });
+    return this.serializeModelBomDiffReview(row);
   }
 
   async createModelBom(dto: SaveModelBomDto) {
     const scope = await this.resolveModelBomScope(dto);
+    const scopeData = scope.data;
+    const scopedDuplicate = await this.prisma.modelBom.findFirst({
+      where: {
+        customerScopeKey: scopeData.customerScopeKey,
+        projectModelScopeKey: scopeData.projectModelScopeKey
+      },
+      select: { id: true }
+    });
+    if (scopedDuplicate) {
+      throw new BadRequestException('当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免重复新建');
+    }
     const existing = await this.prisma.modelBom.findUnique({
       where: {
         bomName_customerScopeKey_projectModelScopeKey: {
-          bomName: scope.bomName,
-          customerScopeKey: scope.customerScopeKey,
-          projectModelScopeKey: scope.projectModelScopeKey
+          bomName: scopeData.bomName,
+          customerScopeKey: scopeData.customerScopeKey,
+          projectModelScopeKey: scopeData.projectModelScopeKey
         }
       },
       select: { id: true }
@@ -1982,14 +2498,37 @@ export class InventoryService {
     if (existing) {
       throw new BadRequestException('相同名称、客户范围和机型/项目的零件包已存在');
     }
-    const row = await this.prisma.modelBom.create({
-      data: scope,
-      include: {
-        customer: { select: { id: true, customerName: true, customerCode: true } },
-        lines: { include: this.modelBomLineInclude(), orderBy: [{ sortOrder: 'asc' }] }
-      }
-    });
-    return this.serializeModelBom(row);
+    if (dto.isCommon && scopeData.status === 'DISABLED') {
+      throw new BadRequestException('已停用 BOM 不能设为常用 BOM，请先启用后再设置');
+    }
+    const commonSaveData =
+      scopeData.status === 'DISABLED'
+        ? { isCommon: false, commonSortOrder: null }
+        : await this.modelBomCommonSaveData({
+            isCommon: dto.isCommon,
+            customerScopeKey: scopeData.customerScopeKey,
+            projectModelScopeKey: scopeData.projectModelScopeKey
+          });
+    try {
+      const row = await this.prisma.modelBom.create({
+        data: {
+          ...scopeData,
+          // 表头保存常用状态只影响同范围内显示和推荐顺序；停用表头会强制清理常用排序，不生成订单、生产任务或库存数据。
+          ...commonSaveData,
+          customerScopes:
+            scope.selectedCustomers.length > 0
+              ? {
+                  create: this.modelBomCustomerScopeCreateData(scope)
+                }
+              : undefined
+        },
+        include: this.modelBomInclude([{ sortOrder: 'asc' }])
+      });
+      const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+      return this.serializeModelBom(row, partThicknessByScopeKey);
+    } catch (error) {
+      this.handleModelBomScopeUniqueError(error, '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免重复新建');
+    }
   }
 
   async copyModelBom(sourceBomId: string, dto: CopyModelBomDto) {
@@ -2020,13 +2559,17 @@ export class InventoryService {
     if (!customer) {
       throw new BadRequestException('请选择复制目标客户');
     }
-    const projectModel = String(dto.projectModel || source.projectModel).trim();
-    if (!projectModel) {
-      throw new BadRequestException('机型/项目不能为空');
-    }
+    const projectModel = String(dto.projectModel ?? source.projectModel).trim();
     const bomName = String(dto.bomName || `${source.bomName}-${customer.customerName}`).trim();
     const customerScopeKey = customer.id;
     const projectModelScopeKey = this.normalizeMaterialScopeKey(projectModel);
+    const scopedDuplicate = await this.prisma.modelBom.findFirst({
+      where: { customerScopeKey, projectModelScopeKey },
+      select: { id: true }
+    });
+    if (scopedDuplicate) {
+      throw new BadRequestException('当前客户和机型/项目已存在客户零件包，请打开现有客户 BOM 继续维护，避免重复复制');
+    }
     const duplicate = await this.prisma.modelBom.findUnique({
       where: {
         bomName_customerScopeKey_projectModelScopeKey: {
@@ -2050,66 +2593,136 @@ export class InventoryService {
       if (line.status !== 'ENABLED' || line.material.status !== 'ENABLED') {
         return false;
       }
+      if (line.lineType === 'COMPONENT') {
+        return !!this.normalizeModelBomComponentNo(line.componentNo);
+      }
+      if (this.normalizeModelBomComponentNo(line.componentNo)) {
+        return false;
+      }
       const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
       return !parentComponentNo || enabledComponentNos.has(parentComponentNo);
     });
+    if (copyableSourceLines.length === 0) {
+      throw new BadRequestException('来源零件包没有可复制的启用明细');
+    }
+    const copiedStatus = dto.status || 'ENABLED';
+    // 复制时设为常用只影响目标客户 / 机型范围内的显示顺序；停用副本强制非常用，不修改来源 BOM、订单、生产或库存。
+    const copiedAsCommon = dto.isCommon === true && copiedStatus !== 'DISABLED';
+    const copiedCommonSortOrder = copiedAsCommon
+      ? (
+          (
+            await this.prisma.modelBom.aggregate({
+              _max: { commonSortOrder: true },
+              where: {
+                isCommon: true,
+                customerScopeKey,
+                projectModelScopeKey
+              }
+            })
+          )._max.commonSortOrder || 0
+        ) + 1
+      : null;
 
-    const row = await this.prisma.modelBom.create({
+    try {
+      const row = await this.prisma.modelBom.create({
       data: {
         bomName,
         customerId: customer.id,
         customerNameSnapshot: customer.customerName,
         projectModel,
+        customerScopeMode: 'PRIVATE',
         customerScopeKey,
         projectModelScopeKey,
         sourceBomId: source.id,
         sourceBomNameSnapshot: source.bomName,
         remark: String(dto.remark || `从 ${source.bomName} 复制生成`).trim() || null,
-        status: dto.status || 'ENABLED',
+        status: copiedStatus,
+        isCommon: copiedAsCommon,
+        commonSortOrder: copiedCommonSortOrder,
         // 复制 BOM 只复制当前启用明细并生成客户独立副本，不反向修改百胜通用 BOM，也不生成订单、生产或库存数据。
         lines: {
-          create: copyableSourceLines.map((line) => ({
-            materialId: line.materialId,
-            partCodeSnapshot: line.partCodeSnapshot,
-            partNameSnapshot: line.partNameSnapshot,
-            unitSnapshot: line.unitSnapshot,
-            partSpecificationSnapshot: line.partSpecificationSnapshot,
-            lineType: line.lineType,
-            partCategory: line.partCategory,
-            componentNo: line.componentNo,
-            parentComponentNo: line.parentComponentNo,
-            defaultDrawingRevisionId: line.defaultDrawingRevisionId,
-            defaultProcessRoute: line.defaultProcessRoute,
-            defaultQuantity: line.defaultQuantity,
-            remark: line.remark,
-            sortOrder: line.sortOrder,
-            status: 'ENABLED'
-          }))
+          create: copyableSourceLines.map((line) => {
+            const componentNo = this.normalizeModelBomComponentNo(line.componentNo) || null;
+            const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo) || null;
+            return {
+              materialId: line.materialId,
+              partCodeSnapshot: line.partCodeSnapshot,
+              partNameSnapshot: line.partNameSnapshot,
+              unitSnapshot: line.unitSnapshot,
+              partSpecificationSnapshot: line.partSpecificationSnapshot,
+              partThicknessSnapshot: line.lineType === 'COMPONENT' ? null : line.partThicknessSnapshot,
+              lineType: line.lineType,
+              partCategory: line.partCategory,
+              componentNo: line.lineType === 'COMPONENT' ? componentNo : null,
+              parentComponentNo: line.lineType === 'COMPONENT' ? null : parentComponentNo,
+              defaultDrawingRevisionId: line.defaultDrawingRevisionId,
+              defaultProcessRoute: line.defaultProcessRoute,
+              defaultQuantity: line.defaultQuantity,
+              remark: line.remark,
+              sortOrder: line.sortOrder,
+              status: 'ENABLED'
+            };
+          })
         }
       },
-      include: {
-        customer: { select: { id: true, customerName: true, customerCode: true } },
-        lines: {
-          include: this.modelBomLineInclude(),
-          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
-        }
-      }
+      include: this.modelBomInclude()
     });
-    return this.serializeModelBom(row);
+      const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+      return this.serializeModelBom(row, partThicknessByScopeKey);
+    } catch (error) {
+      this.handleModelBomScopeUniqueError(error, '当前客户和机型/项目已存在客户零件包，请打开现有客户 BOM 继续维护，避免重复复制');
+    }
   }
 
   async updateModelBom(bomId: string, dto: SaveModelBomDto) {
-    const existing = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } });
+    const existing = await this.prisma.modelBom.findUnique({
+      where: { id: bomId },
+      select: {
+        id: true,
+        customerId: true,
+        customerScopeMode: true,
+        projectModel: true,
+        customerScopeKey: true,
+        projectModelScopeKey: true,
+        status: true,
+        isCommon: true,
+        commonSortOrder: true,
+        customerScopes: { select: { customerId: true, status: true } }
+      }
+    });
     if (!existing) {
       throw new NotFoundException('机型零件包不存在');
     }
     const scope = await this.resolveModelBomScope(dto);
+    const scopeData = scope.data;
+    const previousScopeMode = this.modelBomCustomerScopeModeFromRow(existing);
+    const nextScopeMode = scopeData.customerScopeMode as ModelBomCustomerScopeMode;
+    const nextScopeCustomerIds = scope.selectedCustomers.map((customer) => customer.id);
+    const scopeBroadens =
+      this.modelBomCustomerScopeBroadens(previousScopeMode, nextScopeMode) ||
+      this.modelBomSelectedCustomerScopeAdds(existing, nextScopeMode, nextScopeCustomerIds) ||
+      this.modelBomProjectScopeBroadens(existing.projectModel, scopeData.projectModel);
+    if (scopeBroadens && dto.scopeChangeConfirmed !== true) {
+      // 后端兜底要求扩大 BOM 可见客户范围前必须人工确认；不生成订单、生产任务或库存流水。
+      throw new BadRequestException('BOM 适用客户范围将被扩大，请在前端确认后再保存');
+    }
+    const scopedDuplicate = await this.prisma.modelBom.findFirst({
+      where: {
+        customerScopeKey: scopeData.customerScopeKey,
+        projectModelScopeKey: scopeData.projectModelScopeKey,
+        id: { not: bomId }
+      },
+      select: { id: true }
+    });
+    if (scopedDuplicate) {
+      throw new BadRequestException('当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免编辑覆盖其他 BOM 范围');
+    }
     const duplicate = await this.prisma.modelBom.findUnique({
       where: {
         bomName_customerScopeKey_projectModelScopeKey: {
-          bomName: scope.bomName,
-          customerScopeKey: scope.customerScopeKey,
-          projectModelScopeKey: scope.projectModelScopeKey
+          bomName: scopeData.bomName,
+          customerScopeKey: scopeData.customerScopeKey,
+          projectModelScopeKey: scopeData.projectModelScopeKey
         }
       },
       select: { id: true }
@@ -2117,18 +2730,182 @@ export class InventoryService {
     if (duplicate && duplicate.id !== bomId) {
       throw new BadRequestException('相同名称、客户范围和机型/项目的零件包已存在');
     }
+    if (dto.isCommon && scopeData.status === 'DISABLED') {
+      throw new BadRequestException('已停用 BOM 不能设为常用 BOM，请先启用后再设置');
+    }
+    const commonSaveData =
+      scopeData.status === 'DISABLED'
+        ? { isCommon: false, commonSortOrder: null }
+        : await this.modelBomCommonSaveData({
+            isCommon: dto.isCommon,
+            customerScopeKey: scopeData.customerScopeKey,
+            projectModelScopeKey: scopeData.projectModelScopeKey,
+            existing
+          });
+    try {
+      const row = await this.prisma.modelBom.update({
+        where: { id: bomId },
+        data: {
+          ...scopeData,
+          // 编辑表头时同步保存常用状态；停用表头会强制清理常用排序，不修改 BOM 明细、订单、生产或库存。
+          ...commonSaveData,
+          customerScopes: {
+            deleteMany: {},
+            create: this.modelBomCustomerScopeCreateData(scope)
+          }
+        },
+        include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+      });
+      const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+      return this.serializeModelBom(row, partThicknessByScopeKey);
+    } catch (error) {
+      this.handleModelBomScopeUniqueError(error, '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免编辑覆盖其他 BOM 范围');
+    }
+  }
+
+  async setModelBomCommon(bomId: string, dto: SetModelBomCommonDto) {
+    const existing = await this.prisma.modelBom.findUnique({
+      where: { id: bomId },
+      select: { id: true, status: true, isCommon: true, commonSortOrder: true, customerScopeKey: true, projectModelScopeKey: true }
+    });
+    if (!existing) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    if (dto.isCommon && existing.status === 'DISABLED') {
+      // 已停用 BOM 不能进入常用推荐；只允许启用后再人工设为常用，不自动恢复 BOM 状态。
+      throw new BadRequestException('已停用 BOM 不能设为常用 BOM，请先启用后再设置');
+    }
+
     const row = await this.prisma.modelBom.update({
       where: { id: bomId },
-      data: scope,
-      include: {
-        customer: { select: { id: true, customerName: true, customerCode: true } },
-        lines: {
-          include: this.modelBomLineInclude(),
-          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }]
-        }
+      // 常用零件包只影响显示优先级；不会修改 BOM 明细、适用客户、订单、生产或库存。
+      data: await this.modelBomCommonSaveData({
+        isCommon: dto.isCommon,
+        customerScopeKey: existing.customerScopeKey,
+        projectModelScopeKey: existing.projectModelScopeKey,
+        existing
+      }),
+      include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+    });
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+    return this.serializeModelBom(row, partThicknessByScopeKey);
+  }
+
+  async setModelBomsCommonBatch(dto: SetModelBomsCommonBatchDto) {
+    const bomIds = [...new Set((dto.bomIds || []).map((bomId) => String(bomId || '').trim()).filter(Boolean))];
+    if (bomIds.length === 0) {
+      throw new BadRequestException('请提供需要批量设置常用状态的 BOM');
+    }
+    const rows = await this.prisma.modelBom.findMany({
+      where: { id: { in: bomIds } },
+      select: {
+        id: true,
+        bomName: true,
+        status: true,
+        isCommon: true,
+        commonSortOrder: true,
+        customerScopeKey: true,
+        projectModelScopeKey: true
       }
     });
-    return this.serializeModelBom(row);
+    if (rows.length !== bomIds.length) {
+      throw new BadRequestException('批量常用设置包含不存在的 BOM，请刷新后重试');
+    }
+    if (dto.isCommon) {
+      const disabledRow = rows.find((row) => row.status === 'DISABLED');
+      if (disabledRow) {
+        throw new BadRequestException(`${disabledRow.bomName} 已停用，不能设为常用 BOM`);
+      }
+    }
+    const rowsById = new Map(rows.map((row) => [row.id, row]));
+    const orderedRows = bomIds.map((bomId) => rowsById.get(bomId)).filter((row): row is (typeof rows)[number] => Boolean(row));
+    // 批量常用状态在事务内保存；只调整显示和推荐优先级，不修改 BOM 明细、适用客户、订单、生产任务或库存。
+    return this.prisma.$transaction(async (tx) => {
+      if (!dto.isCommon) {
+        const updated = await tx.modelBom.updateMany({
+          where: { id: { in: bomIds } },
+          data: { isCommon: false, commonSortOrder: null }
+        });
+        return { updatedCount: updated.count, isCommon: false };
+      }
+
+      const groups = new Map<string, typeof orderedRows>();
+      for (const row of orderedRows) {
+        const scopeKey = `${row.customerScopeKey}__${row.projectModelScopeKey}`;
+        groups.set(scopeKey, [...(groups.get(scopeKey) || []), row]);
+      }
+      let updatedCount = 0;
+      for (const groupRows of groups.values()) {
+        const firstRow = groupRows[0];
+        if (!firstRow) {
+          continue;
+        }
+        const maxCommon = await tx.modelBom.aggregate({
+          _max: { commonSortOrder: true },
+          where: {
+            isCommon: true,
+            customerScopeKey: firstRow.customerScopeKey,
+            projectModelScopeKey: firstRow.projectModelScopeKey
+          }
+        });
+        let nextSortOrder = maxCommon._max.commonSortOrder || 0;
+        for (const row of groupRows) {
+          const commonSortOrder = row.isCommon && row.commonSortOrder ? row.commonSortOrder : ++nextSortOrder;
+          await tx.modelBom.update({
+            where: { id: row.id },
+            data: { isCommon: true, commonSortOrder }
+          });
+          updatedCount += 1;
+        }
+      }
+      return { updatedCount, isCommon: true };
+    });
+  }
+
+  async reorderModelBomCommon(dto: ReorderModelBomCommonDto) {
+    const items = dto.items
+      .map((item) => ({ bomId: String(item.bomId || '').trim(), commonSortOrder: Number(item.commonSortOrder) }))
+      .filter((item) => item.bomId);
+    if (items.length === 0) {
+      throw new BadRequestException('请提供需要排序的常用 BOM');
+    }
+    const uniqueIds = new Set(items.map((item) => item.bomId));
+    if (uniqueIds.size !== items.length) {
+      throw new BadRequestException('常用 BOM 排序列表包含重复 BOM');
+    }
+    const rows = await this.prisma.modelBom.findMany({
+      where: { id: { in: [...uniqueIds] } },
+      select: { id: true, bomName: true, status: true, isCommon: true, customerScopeKey: true, projectModelScopeKey: true }
+    });
+    if (rows.length !== uniqueIds.size) {
+      throw new BadRequestException('常用 BOM 排序列表包含不存在的 BOM');
+    }
+    const disabledRow = rows.find((row) => row.status === 'DISABLED');
+    if (disabledRow) {
+      throw new BadRequestException(`${disabledRow.bomName} 已停用，不能参与常用排序`);
+    }
+    const nonCommon = rows.find((row) => !row.isCommon);
+    if (nonCommon) {
+      throw new BadRequestException(`${nonCommon.bomName} 不是常用 BOM，不能参与常用排序`);
+    }
+    const firstRow = rows[0];
+    if (!firstRow) {
+      throw new BadRequestException('请提供需要排序的常用 BOM');
+    }
+    const mixedScope = rows.some((row) => row.customerScopeKey !== firstRow.customerScopeKey || row.projectModelScopeKey !== firstRow.projectModelScopeKey);
+    if (mixedScope) {
+      throw new BadRequestException('常用 BOM 只能在同一客户范围和同一机型/项目范围内拖拽排序');
+    }
+    await this.prisma.$transaction(
+      items.map((item, index) =>
+        this.prisma.modelBom.update({
+          where: { id: item.bomId },
+          // 常用排序只影响推荐和列表显示优先级，不修改 BOM 明细、适用范围、订单、生产或库存。
+          data: { commonSortOrder: item.commonSortOrder > 0 ? item.commonSortOrder : index + 1 }
+        })
+      )
+    );
+    return { updatedCount: items.length };
   }
 
   async disableModelBom(bomId: string) {
@@ -2138,16 +2915,86 @@ export class InventoryService {
     }
     const row = await this.prisma.modelBom.update({
       where: { id: bomId },
-      data: { status: 'DISABLED' },
-      include: {
-        customer: { select: { id: true, customerName: true, customerCode: true } },
-        lines: {
-          include: this.modelBomLineInclude(),
-          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }]
-        }
+      // 停用 BOM 同时取消常用优先级；只影响后续推荐显示，不删除明细、订单、生产或库存。
+      data: { status: 'DISABLED', isCommon: false, commonSortOrder: null },
+      include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+    });
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+    return this.serializeModelBom(row, partThicknessByScopeKey);
+  }
+
+  async deleteModelBom(bomId: string) {
+    const existing = await this.prisma.modelBom.findUnique({
+      where: { id: bomId },
+      select: {
+        id: true,
+        bomName: true,
+        lines: { select: { id: true } },
+        customerScopes: { select: { id: true } },
+        diffReviewsAsSource: { select: { id: true } },
+        diffReviewsAsTarget: { select: { id: true } }
       }
     });
-    return this.serializeModelBom(row);
+    if (!existing) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const copiedCustomerBoms = await this.prisma.modelBom.findMany({
+      where: { sourceBomId: bomId },
+      select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true },
+      orderBy: [{ updatedAt: 'desc' }]
+    });
+    if (copiedCustomerBoms.length > 0) {
+      const previewRows: string[] = [];
+      for (const bom of copiedCustomerBoms) {
+        if (previewRows.length >= 3) {
+          break;
+        }
+        previewRows.push(`${bom.bomName}${bom.customerNameSnapshot ? ` / ${bom.customerNameSnapshot}` : ''}${bom.projectModel ? ` / ${bom.projectModel}` : ''}`);
+      }
+      const preview = previewRows.join('、');
+      const remaining = copiedCustomerBoms.length > 3 ? ` 等 ${copiedCustomerBoms.length} 个客户 BOM` : '';
+      throw new BadRequestException(
+        `该 BOM 已被${copiedCustomerBoms.length} 个客户 BOM 作为来源引用：${preview}${remaining}。请先确认并删除这些客户 BOM，或改为停用来源 BOM；永久删除不会自动覆盖客户 BOM。`
+      );
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.modelBomDiffReview.deleteMany({
+        where: { OR: [{ sourceBomId: bomId }, { targetBomId: bomId }] }
+      }),
+      this.prisma.modelBomCustomerScope.deleteMany({ where: { bomId } }),
+      // 无效 BOM 物理删除只清理 BOM 配置、适用客户、包内明细和差异核对记录，不改订单、生产或库存数据。
+      this.prisma.modelBomLine.deleteMany({ where: { bomId } }),
+      this.prisma.modelBom.delete({ where: { id: bomId } })
+    ]);
+
+    return {
+      id: existing.id,
+      bomName: existing.bomName,
+      lineCount: existing.lines.length,
+      customerScopeCount: existing.customerScopes.length,
+      diffReviewCount: existing.diffReviewsAsSource.length + existing.diffReviewsAsTarget.length,
+      deleted: true
+    };
+  }
+
+  private handleModelBomScopeUniqueError(error: unknown, message: string): never {
+    if (this.isModelBomScopeUniqueError(error)) {
+      throw new BadRequestException(message);
+    }
+    throw error;
+  }
+
+  private isModelBomScopeUniqueError(error: unknown) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      return false;
+    }
+    const target = error.meta?.target;
+    const targetText = Array.isArray(target) ? target.join(',') : String(target || '');
+    return (
+      targetText.includes('ModelBom_customerScopeKey_projectModelScopeKey_key') ||
+      (targetText.includes('customerScopeKey') && targetText.includes('projectModelScopeKey'))
+    );
   }
 
   private normalizeModelBomLineType(value?: string | null) {
@@ -2159,6 +3006,21 @@ export class InventoryService {
     return normalized || null;
   }
 
+  private modelBomComponentNoCandidates(...values: Array<string | null | undefined>) {
+    const candidates = new Set<string>();
+    for (const value of values) {
+      const raw = String(value || '');
+      if (raw) {
+        candidates.add(raw);
+      }
+      const normalized = this.normalizeModelBomComponentNo(raw);
+      if (normalized) {
+        candidates.add(normalized);
+      }
+    }
+    return [...candidates];
+  }
+
   private async nextModelBomComponentNo(bomId: string) {
     const rows = await this.prisma.modelBomLine.findMany({
       where: { bomId, lineType: 'COMPONENT' },
@@ -2166,12 +3028,38 @@ export class InventoryService {
     });
     let maxNo = 0;
     for (const row of rows) {
-      const matched = /^C(\d+)$/i.exec(row.componentNo || '');
+      const matched = /^C(\d+)$/i.exec(this.normalizeModelBomComponentNo(row.componentNo) || '');
       if (matched) {
         maxNo = Math.max(maxNo, Number(matched[1]) || 0);
       }
     }
+    if (maxNo >= 9999) {
+      throw new BadRequestException('当前零件包 C001-C9999 自动组件编号已用完，请手工填写当前零件包内唯一组件编号');
+    }
     return `C${String(maxNo + 1).padStart(3, '0')}`;
+  }
+
+  private ensureModelBomComponentNoRange(componentNo?: string | null) {
+    const matched = /^C(\d+)$/i.exec(this.normalizeModelBomComponentNo(componentNo) || '');
+    if (matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999)) {
+      throw new BadRequestException('组件编号只支持 C001-C9999；自定义编号请不要使用 C 开头的非 C001-C9999 数字格式');
+    }
+  }
+
+  private async findModelBomComponentByNo(bomId: string, componentNo?: string | null, excludeId?: string) {
+    const normalizedComponentNo = this.normalizeModelBomComponentNo(componentNo);
+    if (!normalizedComponentNo) {
+      return null;
+    }
+    const components = await this.prisma.modelBomLine.findMany({
+      where: {
+        bomId,
+        lineType: 'COMPONENT',
+        ...(excludeId ? { id: { not: excludeId } } : {})
+      },
+      select: { id: true, status: true, componentNo: true }
+    });
+    return components.find((line) => this.normalizeModelBomComponentNo(line.componentNo) === normalizedComponentNo) || null;
   }
 
   private async resolveModelBomLineStructure(bomId: string, dto: SaveModelBomLineDto, excludeId?: string) {
@@ -2183,25 +3071,15 @@ export class InventoryService {
     if (lineType === 'COMPONENT') {
       parentComponentNo = null;
       componentNo = componentNo || (await this.nextModelBomComponentNo(bomId));
-      const duplicateComponent = await this.prisma.modelBomLine.findFirst({
-        where: {
-          bomId,
-          lineType: 'COMPONENT',
-          componentNo,
-          ...(excludeId ? { id: { not: excludeId } } : {})
-        },
-        select: { id: true }
-      });
+      this.ensureModelBomComponentNoRange(componentNo);
+      const duplicateComponent = await this.findModelBomComponentByNo(bomId, componentNo, excludeId);
       if (duplicateComponent) {
         throw new BadRequestException('当前零件包内组件编号已存在');
       }
     } else {
       componentNo = null;
       if (parentComponentNo) {
-        const parent = await this.prisma.modelBomLine.findFirst({
-          where: { bomId, lineType: 'COMPONENT', componentNo: parentComponentNo },
-          select: { id: true, status: true }
-        });
+        const parent = await this.findModelBomComponentByNo(bomId, parentComponentNo);
         if (!parent) {
           throw new BadRequestException('所属组件不存在，请先维护组件行');
         }
@@ -2225,17 +3103,22 @@ export class InventoryService {
     structure: Awaited<ReturnType<InventoryService['resolveModelBomLineStructure']>>,
     excludeId?: string
   ) {
-    const duplicate = await this.prisma.modelBomLine.findFirst({
+    const duplicateCandidates = await this.prisma.modelBomLine.findMany({
       where: {
         bomId,
         materialId,
         lineType: structure.lineType,
-        componentNo: structure.componentNo,
-        parentComponentNo: structure.parentComponentNo,
         ...(excludeId ? { id: { not: excludeId } } : {})
       },
-      select: { id: true }
+      select: { id: true, componentNo: true, parentComponentNo: true }
     });
+    const componentNo = this.normalizeModelBomComponentNo(structure.componentNo);
+    const parentComponentNo = this.normalizeModelBomComponentNo(structure.parentComponentNo);
+    const duplicate = duplicateCandidates.find(
+      (line) =>
+        this.normalizeModelBomComponentNo(line.componentNo) === componentNo &&
+        this.normalizeModelBomComponentNo(line.parentComponentNo) === parentComponentNo
+    );
     if (duplicate) {
       throw new BadRequestException('该零件已经存在于当前零件包的相同结构位置');
     }
@@ -2272,13 +3155,39 @@ export class InventoryService {
     };
   }
 
+  private normalizeModelBomLineThickness(value?: number | null) {
+    const thickness = Number(value ?? 0);
+    if (!Number.isFinite(thickness) || thickness < 0) {
+      throw new BadRequestException('BOM 行厚度不能小于 0');
+    }
+    return thickness > 0 ? new Prisma.Decimal(thickness) : null;
+  }
+
+  private resolveModelBomLineThicknessSnapshot(
+    lineType: string,
+    value: number | null | undefined,
+    existing?: Prisma.Decimal | number | null
+  ) {
+    // 父级组件由多个子零件拼接，不维护自身厚度；厚度只核对子零件和单独零件。
+    if (lineType === 'COMPONENT') {
+      return null;
+    }
+    if (value === undefined) {
+      return existing ?? null;
+    }
+    return this.normalizeModelBomLineThickness(value);
+  }
+
   async saveModelBomLine(bomId: string, dto: SaveModelBomLineDto) {
     const [bom, material] = await Promise.all([
-      this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } }),
+      this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true, customerId: true, projectModel: true, status: true } }),
       this.prisma.material.findUnique({ where: { id: dto.materialId }, select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } })
     ]);
     if (!bom) {
       throw new NotFoundException('机型零件包不存在');
+    }
+    if (bom.status === 'DISABLED') {
+      throw new BadRequestException('停用零件包不能新增 BOM 明细，请先恢复启用后再维护');
     }
     if (!material) {
       throw new BadRequestException('零件基础资料不存在');
@@ -2305,6 +3214,7 @@ export class InventoryService {
       partNameSnapshot: material.partName,
       unitSnapshot: material.unit,
       partSpecificationSnapshot: material.partSpecification,
+      partThicknessSnapshot: this.resolveModelBomLineThicknessSnapshot(structure.lineType, dto.partThickness),
       lineType: structure.lineType,
       partCategory: structure.partCategory,
       componentNo: structure.componentNo,
@@ -2320,13 +3230,15 @@ export class InventoryService {
       data: { bomId, ...data },
       include: this.modelBomLineInclude()
     });
-    return this.serializeModelBomLine(row);
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes([row]));
+    const displayOrder = await this.modelBomLineDisplayOrderForLine(bomId, row.id);
+    return this.serializeModelBomLine(row, partThicknessByScopeKey, bom, displayOrder);
   }
 
   async updateModelBomLine(lineId: string, dto: SaveModelBomLineDto) {
     const existing = await this.prisma.modelBomLine.findUnique({
       where: { id: lineId },
-      select: { id: true, bomId: true, lineType: true, componentNo: true }
+      select: { id: true, bomId: true, lineType: true, componentNo: true, partThicknessSnapshot: true, bom: { select: { customerId: true, projectModel: true } } }
     });
     if (!existing) {
       throw new NotFoundException('机型零件包明细不存在');
@@ -2348,14 +3260,18 @@ export class InventoryService {
     const structure = await this.resolveModelBomLineStructure(existing.bomId, dto, existing.id);
     await this.ensureModelBomLineUnique(existing.bomId, material.id, structure, existing.id);
     const defaults = await this.resolveModelBomLineDefaults(material.id, dto);
+    const existingComponentNo = this.normalizeModelBomComponentNo(existing.componentNo) || '';
+    const nextComponentNo = this.normalizeModelBomComponentNo(structure.componentNo) || '';
+    const existingComponentNoCandidates = this.modelBomComponentNoCandidates(existing.componentNo, existingComponentNo);
+    const activeComponentNoCandidates = this.modelBomComponentNoCandidates(existing.componentNo, existingComponentNo, structure.componentNo, nextComponentNo);
     const shouldSyncChildren =
       existing.lineType === 'COMPONENT' &&
-      existing.componentNo &&
+      existingComponentNo &&
       structure.lineType === 'COMPONENT' &&
-      structure.componentNo &&
-      existing.componentNo !== structure.componentNo;
-    const shouldClearChildren = existing.lineType === 'COMPONENT' && existing.componentNo && structure.lineType !== 'COMPONENT';
-    const shouldDisableChildren = structure.lineType === 'COMPONENT' && structure.componentNo && (dto.status || 'ENABLED') === 'DISABLED';
+      nextComponentNo &&
+      existingComponentNo !== nextComponentNo;
+    const shouldClearChildren = existing.lineType === 'COMPONENT' && existingComponentNo && structure.lineType !== 'COMPONENT';
+    const shouldDisableChildren = structure.lineType === 'COMPONENT' && nextComponentNo && (dto.status || 'ENABLED') === 'DISABLED';
 
     const row = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.modelBomLine.update({
@@ -2366,6 +3282,7 @@ export class InventoryService {
           partNameSnapshot: material.partName,
           unitSnapshot: material.unit,
           partSpecificationSnapshot: material.partSpecification,
+          partThicknessSnapshot: this.resolveModelBomLineThicknessSnapshot(structure.lineType, dto.partThickness, existing.partThicknessSnapshot),
           lineType: structure.lineType,
           partCategory: structure.partCategory,
           componentNo: structure.componentNo,
@@ -2382,27 +3299,29 @@ export class InventoryService {
       if (shouldSyncChildren) {
         // BOM 组件编号变更时，仅同步仍指向旧组件编号的子零件，保留人工改到其他组件的关系。
         await tx.modelBomLine.updateMany({
-          where: { bomId: existing.bomId, parentComponentNo: existing.componentNo },
-          data: { parentComponentNo: structure.componentNo }
+          where: { bomId: existing.bomId, parentComponentNo: { in: existingComponentNoCandidates } },
+          data: { parentComponentNo: nextComponentNo }
         });
       }
       if (shouldClearChildren) {
         // 组件行改成普通零件后，原子零件不再挂靠已经不存在的组件。
         await tx.modelBomLine.updateMany({
-          where: { bomId: existing.bomId, parentComponentNo: existing.componentNo },
+          where: { bomId: existing.bomId, parentComponentNo: { in: existingComponentNoCandidates } },
           data: { parentComponentNo: null }
         });
       }
       if (shouldDisableChildren) {
         // 停用组件行时，所属子零件同步软停用，避免启用子零件继续挂在停用父组件下。
         await tx.modelBomLine.updateMany({
-          where: { bomId: existing.bomId, parentComponentNo: structure.componentNo, status: 'ENABLED' },
+          where: { bomId: existing.bomId, parentComponentNo: { in: activeComponentNoCandidates }, status: 'ENABLED' },
           data: { status: 'DISABLED' }
         });
       }
       return updated;
     });
-    return this.serializeModelBomLine(row);
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes([row]));
+    const displayOrder = await this.modelBomLineDisplayOrderForLine(existing.bomId, row.id);
+    return this.serializeModelBomLine(row, partThicknessByScopeKey, existing.bom, displayOrder);
   }
 
   async reorderModelBomLines(bomId: string, dto: ReorderModelBomLinesDto) {
@@ -2454,27 +3373,31 @@ export class InventoryService {
   async disableModelBomLine(lineId: string) {
     const existing = await this.prisma.modelBomLine.findUnique({
       where: { id: lineId },
-      select: { id: true, bomId: true, lineType: true, componentNo: true }
+      select: { id: true, bomId: true, lineType: true, componentNo: true, bom: { select: { customerId: true, projectModel: true } } }
     });
     if (!existing) {
       throw new NotFoundException('机型零件包明细不存在');
     }
+    const componentNo = this.normalizeModelBomComponentNo(existing.componentNo) || '';
+    const componentNoCandidates = this.modelBomComponentNoCandidates(existing.componentNo, componentNo);
     const row = await this.prisma.$transaction(async (tx) => {
       const disabled = await tx.modelBomLine.update({
         where: { id: lineId },
         data: { status: 'DISABLED' },
         include: this.modelBomLineInclude()
       });
-      if (existing.lineType === 'COMPONENT' && existing.componentNo) {
+      if (existing.lineType === 'COMPONENT' && componentNo) {
         // BOM 行只能软停用；组件停用后子零件也必须停用，避免后续推荐出不完整结构。
         await tx.modelBomLine.updateMany({
-          where: { bomId: existing.bomId, parentComponentNo: existing.componentNo, status: 'ENABLED' },
+          where: { bomId: existing.bomId, parentComponentNo: { in: componentNoCandidates }, status: 'ENABLED' },
           data: { status: 'DISABLED' }
         });
       }
       return disabled;
     });
-    return this.serializeModelBomLine(row);
+    const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes([row]));
+    const displayOrder = await this.modelBomLineDisplayOrderForLine(existing.bomId, row.id);
+    return this.serializeModelBomLine(row, partThicknessByScopeKey, existing.bom, displayOrder);
   }
 
   private async resolveMaterialTransformRuleData(dto: SaveMaterialTransformRuleDto) {
@@ -2565,7 +3488,10 @@ export class InventoryService {
 
   async materialTransformRules(query: MaterialTransformRuleQueryDto) {
     const status = query.status || 'ENABLED';
-    const and: Prisma.MaterialTransformRuleWhereInput[] = [{ status }];
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const and: Prisma.MaterialTransformRuleWhereInput[] = status === 'ALL' ? [] : [{ status }];
     if (status === 'ENABLED') {
       and.push({ sourceMaterial: { status: 'ENABLED' }, targetMaterial: { status: 'ENABLED' } });
     }
@@ -2619,7 +3545,38 @@ export class InventoryService {
           )
         )
       : rows;
-    return filtered.map((row) => this.serializeMaterialTransformRule(row));
+    const inventorySummary = await this.findTransformMaterialInventorySummary(
+      filtered.flatMap((row) => [row.sourceMaterial.partCode, row.targetMaterial.partCode])
+    );
+    let serialized = filtered.map((row) => this.serializeMaterialTransformRule(row, inventorySummary));
+    if (query.sourceStockStatus === 'WITH_STOCK') {
+      serialized = serialized.filter((row) => row.sourceAvailableQuantity > 0);
+    } else if (query.sourceStockStatus === 'NO_STOCK') {
+      serialized = serialized.filter((row) => row.sourceAvailableQuantity <= 0);
+    }
+    if (query.targetStockStatus === 'WITH_STOCK') {
+      serialized = serialized.filter((row) => row.targetAvailableQuantity > 0);
+    } else if (query.targetStockStatus === 'NO_STOCK') {
+      serialized = serialized.filter((row) => row.targetAvailableQuantity <= 0);
+    }
+    if (query.inventoryDecision === 'TARGET_STOCK') {
+      serialized = serialized.filter((row) => row.targetAvailableQuantity > 0);
+    } else if (query.inventoryDecision === 'SOURCE_REWORK') {
+      serialized = serialized.filter((row) => row.targetAvailableQuantity <= 0 && row.sourceAvailableQuantity > 0);
+    } else if (query.inventoryDecision === 'NO_STOCK') {
+      serialized = serialized.filter((row) => row.targetAvailableQuantity <= 0 && row.sourceAvailableQuantity <= 0);
+    }
+    const totalCount = serialized.length;
+    const items = withPage ? serialized.slice(offset, offset + limit) : serialized;
+    return withPage
+      ? {
+          items,
+          totalCount,
+          limit,
+          offset,
+          hasMore: offset + items.length < totalCount
+        }
+      : items;
   }
 
   async createMaterialTransformRule(dto: SaveMaterialTransformRuleDto) {
@@ -2633,7 +3590,8 @@ export class InventoryService {
         targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
       }
     });
-    return this.serializeMaterialTransformRule(row);
+    const inventorySummary = await this.findTransformMaterialInventorySummary([row.sourceMaterial.partCode, row.targetMaterial.partCode]);
+    return this.serializeMaterialTransformRule(row, inventorySummary);
   }
 
   async updateMaterialTransformRule(ruleId: string, dto: SaveMaterialTransformRuleDto) {
@@ -2652,7 +3610,8 @@ export class InventoryService {
         targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
       }
     });
-    return this.serializeMaterialTransformRule(row);
+    const inventorySummary = await this.findTransformMaterialInventorySummary([row.sourceMaterial.partCode, row.targetMaterial.partCode]);
+    return this.serializeMaterialTransformRule(row, inventorySummary);
   }
 
   async disableMaterialTransformRule(ruleId: string) {
@@ -2669,7 +3628,55 @@ export class InventoryService {
         targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
       }
     });
-    return this.serializeMaterialTransformRule(row);
+    const inventorySummary = await this.findTransformMaterialInventorySummary([row.sourceMaterial.partCode, row.targetMaterial.partCode]);
+    return this.serializeMaterialTransformRule(row, inventorySummary);
+  }
+
+  private async findTransformMaterialInventorySummary(partCodes: string[]) {
+    const normalizedCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
+    const summary = new Map<string, { availableQuantity: number; batchCount: number }>();
+    normalizedCodes.forEach((partCode) => summary.set(partCode.toLocaleLowerCase(), { availableQuantity: 0, batchCount: 0 }));
+    if (normalizedCodes.length === 0) {
+      return summary;
+    }
+
+    const batches = await this.prisma.inventoryBatch.findMany({
+      where: {
+        status: 'AVAILABLE',
+        quantity: { gt: 0 },
+        ...(normalizedCodes.length <= 500
+          ? { OR: normalizedCodes.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' as const } })) }
+          : {})
+      },
+      select: {
+        id: true,
+        partCode: true,
+        quantity: true,
+        sourceOrderId: true
+      }
+    });
+    const normalizedCodeSet = new Set(normalizedCodes.map((partCode) => partCode.toLocaleLowerCase()));
+    const matchedBatches = batches.filter((batch) => normalizedCodeSet.has(batch.partCode.trim().toLocaleLowerCase()));
+    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(
+      matchedBatches.filter((batch) => !batch.sourceOrderId).map((batch) => batch.id)
+    );
+
+    for (const batch of matchedBatches) {
+      const key = batch.partCode.trim().toLocaleLowerCase();
+      const row = summary.get(key) || { availableQuantity: 0, batchCount: 0 };
+      const physicalQuantity = decimalToNumber(batch.quantity);
+      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const availableQuantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
+      if (availableQuantity <= 0) {
+        continue;
+      }
+      // 来源加工关系只显示可核对库存摘要，是否使用库存仍由库存来源核对弹窗人工确认。
+      row.availableQuantity = Math.round((row.availableQuantity + availableQuantity + Number.EPSILON) * 1000) / 1000;
+      row.batchCount += 1;
+      summary.set(key, row);
+    }
+
+    return summary;
   }
 
   private serializeMaterialTransformRule(row: {
@@ -2692,10 +3699,12 @@ export class InventoryService {
     customer?: { id: string; customerName: string; customerCode: string } | null;
     sourceMaterial: { id: string; partCode: string; partName: string; unit: string; partSpecification: string | null; status: CommonStatus };
     targetMaterial: { id: string; partCode: string; partName: string; unit: string; partSpecification: string | null; status: CommonStatus };
-  }) {
+  }, inventorySummary: Map<string, { availableQuantity: number; batchCount: number }> = new Map()) {
     const customerName = row.customer?.customerName || row.customerNameSnapshot || '';
     const customerScopeLabel = row.customerId ? customerName || '指定客户' : '全部客户';
     const projectScopeLabel = row.projectModel || '全部机型/项目';
+    const sourceInventory = inventorySummary.get(row.sourceMaterial.partCode.trim().toLocaleLowerCase()) || { availableQuantity: 0, batchCount: 0 };
+    const targetInventory = inventorySummary.get(row.targetMaterial.partCode.trim().toLocaleLowerCase()) || { availableQuantity: 0, batchCount: 0 };
     return {
       id: row.id,
       sourceMaterialId: row.sourceMaterialId,
@@ -2704,12 +3713,16 @@ export class InventoryService {
       sourceUnit: row.sourceMaterial.unit,
       sourcePartSpecification: row.sourceMaterial.partSpecification,
       sourceMaterialStatus: row.sourceMaterial.status,
+      sourceAvailableQuantity: sourceInventory.availableQuantity,
+      sourceAvailableBatchCount: sourceInventory.batchCount,
       targetMaterialId: row.targetMaterialId,
       targetPartCode: row.targetMaterial.partCode,
       targetPartName: row.targetMaterial.partName,
       targetUnit: row.targetMaterial.unit,
       targetPartSpecification: row.targetMaterial.partSpecification,
       targetMaterialStatus: row.targetMaterial.status,
+      targetAvailableQuantity: targetInventory.availableQuantity,
+      targetAvailableBatchCount: targetInventory.batchCount,
       customerId: row.customerId,
       customerCode: row.customer?.customerCode,
       customerName,
@@ -2728,24 +3741,91 @@ export class InventoryService {
     };
   }
 
-  private serializeModelBom(row: {
+  private serializeModelBomDiffReview(row: {
+    id: string;
+    targetBomId: string;
+    sourceBomId: string;
+    reviewKey: string;
+    issueKind: string;
+    sourceLineId: string | null;
+    targetLineId: string | null;
+    issueTitle: string;
+    issueDetail: string | null;
+    diffFingerprint: string;
+    fieldsJson: Prisma.JsonValue | null;
+    reviewedBy: string | null;
+    reviewRemark: string | null;
+    status: CommonStatus;
+    reviewedAt: Date;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return {
+      id: row.id,
+      targetBomId: row.targetBomId,
+      sourceBomId: row.sourceBomId,
+      reviewKey: row.reviewKey,
+      issueKind: row.issueKind,
+      sourceLineId: row.sourceLineId,
+      targetLineId: row.targetLineId,
+      issueTitle: row.issueTitle,
+      issueDetail: row.issueDetail,
+      diffFingerprint: row.diffFingerprint,
+      fieldsJson: row.fieldsJson,
+      reviewedBy: row.reviewedBy,
+      reviewRemark: row.reviewRemark,
+      status: row.status,
+      reviewedAt: row.reviewedAt,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt
+    };
+  }
+
+  private serializeModelBom(
+    row: {
     id: string;
     bomName: string;
     customerId: string | null;
     customerNameSnapshot: string | null;
     projectModel: string;
+    customerScopeMode?: string | null;
     customerScopeKey: string;
     projectModelScopeKey: string;
     sourceBomId: string | null;
     sourceBomNameSnapshot: string | null;
+    isCommon?: boolean | null;
+    commonSortOrder?: number | null;
     remark: string | null;
     status: CommonStatus;
     createdAt: Date;
     updatedAt: Date;
     customer?: { id: string; customerName: string; customerCode: string } | null;
-    lines: Array<Parameters<InventoryService['serializeModelBomLine']>[0]>;
-  }) {
+    customerScopes?: Array<{
+      customerId: string;
+      customerNameSnapshot: string | null;
+      status: CommonStatus;
+      customer?: { id: string; customerName: string; customerCode: string } | null;
+    }>;
+      lines: Array<Parameters<InventoryService['serializeModelBomLine']>[0]>;
+    },
+    partThicknessByScopeKey = new Map<string, number>()
+  ) {
     const customerName = row.customer?.customerName || row.customerNameSnapshot || '';
+    const projectScopeLabel = row.projectModel || '全部机型/项目';
+    const customerScopeMode: ModelBomCustomerScopeMode = row.customerId ? 'PRIVATE' : row.customerScopeMode === 'SELECTED' ? 'SELECTED' : 'ALL';
+    const scopeCustomers = (row.customerScopes || []).map((scope) => ({
+      customerId: scope.customerId,
+      customerCode: scope.customer?.customerCode,
+      customerName: scope.customer?.customerName || scope.customerNameSnapshot || ''
+    }));
+    const customerScopeLabel =
+      customerScopeMode === 'PRIVATE'
+        ? customerName || '指定客户'
+        : customerScopeMode === 'SELECTED'
+          ? scopeCustomers.map((scope) => scope.customerName).filter(Boolean).join('、') || '指定客户'
+          : '全部客户';
+    const scopeTypeLabel =
+      customerScopeMode === 'PRIVATE' ? '客户私有' : customerScopeMode === 'SELECTED' ? '指定客户可用' : '全部客户通用';
     return {
       id: row.id,
       bomName: row.bomName,
@@ -2753,21 +3833,38 @@ export class InventoryService {
       customerCode: row.customer?.customerCode,
       customerName,
       projectModel: row.projectModel,
+      customerScopeMode,
+      scopeTypeLabel,
+      scopeCustomerIds: scopeCustomers.map((scope) => scope.customerId),
+      scopeCustomers,
       customerScopeKey: row.customerScopeKey,
       projectModelScopeKey: row.projectModelScopeKey,
-      scopeLabel: `${customerName || '全部客户'} / ${row.projectModel}`,
+      scopeLabel: `${customerScopeLabel} / ${projectScopeLabel}`,
       sourceBomId: row.sourceBomId,
       sourceBomNameSnapshot: row.sourceBomNameSnapshot,
+      isCommon: Boolean(row.isCommon),
+      commonSortOrder: row.commonSortOrder,
       remark: row.remark,
       status: row.status,
       lineCount: row.lines.filter((line) => line.status === 'ENABLED' && line.material?.status !== 'DISABLED').length,
-      lines: row.lines.map((line) => this.serializeModelBomLine(line)),
+      lines: (() => {
+        const displayOrderByLineId = this.modelBomLineDisplayOrderMap(row.lines);
+        return row.lines.map((line) =>
+          this.serializeModelBomLine(
+            line,
+            partThicknessByScopeKey,
+            { customerId: row.customerId, projectModel: row.projectModel },
+            displayOrderByLineId.get(line.id)
+          )
+        );
+      })(),
       createdAt: row.createdAt,
       updatedAt: row.updatedAt
     };
   }
 
-  private serializeModelBomLine(line: {
+  private serializeModelBomLine(
+    line: {
     id: string;
     bomId: string;
     materialId: string;
@@ -2775,6 +3872,7 @@ export class InventoryService {
     partNameSnapshot: string;
     unitSnapshot: string;
     partSpecificationSnapshot: string | null;
+    partThicknessSnapshot?: Prisma.Decimal | number | null;
     lineType: string;
     partCategory: string | null;
     componentNo: string | null;
@@ -2829,19 +3927,40 @@ export class InventoryService {
         updatedAt: Date;
       }>;
     } | null;
-  }) {
+  },
+    partThicknessByScopeKey = new Map<string, number>(),
+    scope: ModelBomThicknessScope = {},
+    displayOrder?: number
+  ) {
     const lineType = this.normalizeModelBomLineType(line.lineType);
     const componentNo = this.normalizeModelBomComponentNo(line.componentNo);
     const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
     const structureType = lineType === 'COMPONENT' ? 'COMPONENT' : parentComponentNo ? 'CHILD_PART' : 'STANDALONE_PART';
     const structureLabel =
       structureType === 'COMPONENT'
-        ? `组件 ${componentNo || '-'}`
+        ? `组件 ${componentNo || '未编号'}`
         : structureType === 'CHILD_PART'
-          ? `属于 ${parentComponentNo}`
+          ? `子零件 -> ${parentComponentNo || '-'}`
           : '单独零件';
     const defaultDrawingRevision = line.defaultDrawingRevision?.status === 'ENABLED' ? line.defaultDrawingRevision : null;
-    const drawingRevision = defaultDrawingRevision || line.material?.drawingRevisions?.[0] || null;
+    const materialDrawingRevision = line.material?.drawingRevisions?.[0] || null;
+    const drawingRevision = defaultDrawingRevision || materialDrawingRevision;
+    const partCode = String(line.material?.partCode || line.partCodeSnapshot || '').trim();
+    const bomLinePartThickness = decimalToNumber(line.partThicknessSnapshot);
+    const historyPartThickness =
+      partThicknessByScopeKey.get(this.modelBomThicknessKey(partCode, scope.customerId, scope.projectModel)) ??
+      partThicknessByScopeKey.get(this.modelBomThicknessKey(partCode, scope.customerId, null)) ??
+      partThicknessByScopeKey.get(this.modelBomThicknessKey(partCode, null, scope.projectModel)) ??
+      partThicknessByScopeKey.get(this.modelBomThicknessKey(partCode, null, null)) ??
+      null;
+    const hasBomLinePartThickness = bomLinePartThickness > 0;
+    const hasHistoryPartThickness = Number(historyPartThickness || 0) > 0;
+    // 历史订单厚度只作为 BOM 核对预填，不代表当前 BOM 行已确认；前端必须继续根据 partThicknessSource 提示待核对。
+    const partThickness = lineType === 'COMPONENT' ? null : hasBomLinePartThickness ? bomLinePartThickness : historyPartThickness;
+    const partThicknessSource =
+      lineType === 'COMPONENT' ? null : hasBomLinePartThickness ? 'BOM_LINE' : hasHistoryPartThickness ? 'ORDER_HISTORY' : null;
+    // BOM 行图纸优先，其次零件默认图纸；没有默认图纸时才使用当前启用最新图纸。
+    const drawingSource = defaultDrawingRevision ? 'BOM_LINE' : materialDrawingRevision?.isDefault ? 'MATERIAL_DEFAULT' : materialDrawingRevision ? 'MATERIAL_LATEST' : undefined;
     return {
       id: line.id,
       bomId: line.bomId,
@@ -2850,6 +3969,8 @@ export class InventoryService {
       partName: line.material?.partName || line.partNameSnapshot,
       unit: line.material?.unit || line.unitSnapshot,
       partSpecification: line.material?.partSpecification ?? line.partSpecificationSnapshot,
+      partThickness,
+      partThicknessSource,
       lineType,
       partCategory: line.partCategory,
       componentNo,
@@ -2857,6 +3978,7 @@ export class InventoryService {
       structureType,
       structureLabel,
       level: structureType === 'CHILD_PART' ? 1 : 0,
+      displayOrder: displayOrder ?? null,
       defaultDrawingRevisionId: line.defaultDrawingRevisionId,
       resolvedDrawingRevisionId: drawingRevision?.id,
       drawingNo: drawingRevision?.drawingNo,
@@ -2865,7 +3987,7 @@ export class InventoryService {
       drawingStatus: drawingRevision?.drawingStatus,
       drawingFileName: drawingRevision?.drawingFileName,
       drawingFileUrl: drawingRevision?.drawingFileUrl,
-      drawingSource: defaultDrawingRevision ? 'BOM_LINE' : drawingRevision ? 'MATERIAL_DEFAULT' : undefined,
+      drawingSource,
       defaultProcessRoute: line.defaultProcessRoute,
       defaultQuantity: decimalToNumber(line.defaultQuantity),
       remark: line.remark,
@@ -2875,6 +3997,68 @@ export class InventoryService {
       createdAt: line.createdAt,
       updatedAt: line.updatedAt
     };
+  }
+
+  private modelBomLineDisplayOrderMap(lines: ModelBomDisplayOrderLine[]) {
+    // displayOrder 是页面查看用连续序号，必须包含当前 BOM 明细里所有可见行；sortOrder 仍只是拖拽持久化的内部间隔值。
+    const sortedLines = [...lines].sort(
+      (left, right) =>
+        (left.sortOrder || 0) - (right.sortOrder || 0) ||
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id)
+    );
+    const childrenByParent = new Map<string, typeof sortedLines>();
+    const enabledComponentNos = new Set(
+      sortedLines
+        .filter((line) => this.normalizeModelBomLineType(line.lineType) === 'COMPONENT' && line.status === 'ENABLED')
+        .map((line) => this.normalizeModelBomComponentNo(line.componentNo))
+        .filter(Boolean) as string[]
+    );
+    const rootLines: typeof sortedLines = [];
+    for (const line of sortedLines) {
+      const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
+      if (this.normalizeModelBomLineType(line.lineType) === 'PART' && parentComponentNo) {
+        childrenByParent.set(parentComponentNo, [...(childrenByParent.get(parentComponentNo) || []), line]);
+      } else {
+        rootLines.push(line);
+      }
+    }
+    const ordered: typeof sortedLines = [];
+    const attachedIds = new Set<string>();
+    for (const line of rootLines) {
+      ordered.push(line);
+      const componentNo = this.normalizeModelBomComponentNo(line.componentNo);
+      if (this.normalizeModelBomLineType(line.lineType) === 'COMPONENT' && componentNo && enabledComponentNos.has(componentNo)) {
+        for (const child of childrenByParent.get(componentNo) || []) {
+          ordered.push(child);
+          attachedIds.add(child.id);
+        }
+      }
+    }
+    for (const line of sortedLines) {
+      if (this.normalizeModelBomLineType(line.lineType) === 'PART' && line.parentComponentNo && !attachedIds.has(line.id)) {
+        ordered.push(line);
+      }
+    }
+    return new Map(ordered.map((line, index) => [line.id, index + 1]));
+  }
+
+  private async modelBomLineDisplayOrderForLine(bomId: string, lineId: string) {
+    const lines = await this.prisma.modelBomLine.findMany({
+      where: { bomId },
+      select: {
+        id: true,
+        sortOrder: true,
+        createdAt: true,
+        status: true,
+        lineType: true,
+        componentNo: true,
+        parentComponentNo: true,
+        material: { select: { status: true } }
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+    });
+    return this.modelBomLineDisplayOrderMap(lines).get(lineId);
   }
 
   private inventoryBatchMatchesKeyword(
@@ -2965,7 +4149,7 @@ export class InventoryService {
     if (!keyword || query.status === 'USED') {
       return [];
     }
-    // 关键字查到物料但没有库存批次时，也要返回 0 库存行，方便仓库确认“数据库有此物料、当前仓库无库存”。
+    // 关键字查到零件但没有库存批次时，也要返回 0 库存行，方便仓库确认“数据库有此零件、当前仓库无库存”。
     return this.findMaterialsByKeyword(keyword);
   }
 
@@ -3244,7 +4428,7 @@ export class InventoryService {
       }
       const row = this.createSummaryAccumulator(material);
       if (selectedWarehouse) {
-        // 查询指定仓库但该物料无库存时，只展示“该仓库 0 件”，不能把它计入有库存仓库数。
+        // 查询指定仓库但该零件无库存时，只展示“该仓库 0 件”，不能把它计入有库存仓库数。
         row.warehouses.set(selectedWarehouse.warehouseId, {
           warehouseId: selectedWarehouse.warehouseId,
           warehouseName: selectedWarehouse.warehouseName,
@@ -3280,7 +4464,8 @@ export class InventoryService {
   async materialSuggestions(query: MaterialSuggestionQueryDto) {
     const keyword = query.keyword?.trim();
     const customerId = query.customerId?.trim();
-    if (!keyword && !customerId) {
+    const projectModel = query.projectModel?.trim();
+    if (!keyword && !customerId && !projectModel) {
       return [];
     }
     const sourceType = query.sourceType || 'ALL';
@@ -3390,6 +4575,7 @@ export class InventoryService {
     }
 
     const partCodes = suggestionMaterials.map((material) => material.partCode);
+    const materialMasterByCode = await this.findEnabledMaterialMastersByCodes(partCodes);
     const materialCodeSet = new Set(partCodes.map((partCode) => partCode.toLocaleLowerCase()));
     const batches = await this.prisma.inventoryBatch.findMany({
       where: {
@@ -3397,7 +4583,7 @@ export class InventoryService {
         quantity: { gt: 0 },
         ...(sourceType === 'STOCK' ? { sourceOrderId: null } : {}),
         ...(sourceType === 'ORDER' ? { sourceOrderId: { not: null } } : {}),
-        // 物料下拉允许空关键字查看完整物料清单；批次数量在内存中按物料主数据再次过滤，避免数据库结果被条数限制误导。
+        // 零件下拉允许空关键字查看完整零件清单；批次数量在内存中按 Material 搜索记忆再次过滤，避免数据库结果被条数限制误导。
         ...(partCodes.length <= 500
           ? { OR: partCodes.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } })) }
           : {}),
@@ -3445,13 +4631,14 @@ export class InventoryService {
     }
 
     return suggestionMaterials.map((material) => {
-      const quantity = quantityMap.get(material.partCode.toLocaleLowerCase()) ?? {
+      const materialKey = material.partCode.toLocaleLowerCase();
+      const quantity = quantityMap.get(materialKey) ?? {
         availableQuantity: 0,
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
-      const matchHint = matchHints.get(material.partCode.toLocaleLowerCase()) || {};
-      const history = historyByCode.get(material.partCode.toLocaleLowerCase());
+      const matchHint = matchHints.get(materialKey) || {};
+      const history = historyByCode.get(materialKey);
       const searchMatch = this.materialSuggestionSearchMatch(material, keyword, history, matchHint);
       const useQueryCustomerSnapshot = Boolean(customerId && history?.hasQueryCustomerHistory);
       const partName = useQueryCustomerSnapshot ? history?.partName || material.partName : material.partName;
@@ -3479,6 +4666,7 @@ export class InventoryService {
         : material.projectModel || history?.projectModel;
       return {
         value: `${material.partCode} ${partName}`,
+        materialId: material.materialId || materialMasterByCode.get(materialKey)?.id,
         partCode: material.partCode,
         partName,
         unit,
@@ -3508,19 +4696,26 @@ export class InventoryService {
         ...quantity
       };
     }).filter((item) => sourceType === 'ALL' || item.availableQuantity > 0)
-      .sort((a, b) => this.compareMaterialSuggestions(a, b, Boolean(customerId)));
+      .sort((a, b) => this.compareMaterialSuggestions(a, b, Boolean(customerId), normalizeSearchKeyword(projectModel)));
   }
 
   private async findMaterialSuggestionHistory(query: MaterialSuggestionQueryDto, keyword?: string) {
     const customerId = query.customerId?.trim();
     const normalizedKeyword = normalizeSearchKeyword(keyword);
+    const requestedProjectModel = query.projectModel?.trim();
+    const projectModel = normalizeSearchKeyword(requestedProjectModel);
     const historyByCode = new Map<string, MaterialSuggestionHistory>();
-    if (!customerId && !normalizedKeyword) {
+    if (!customerId && !normalizedKeyword && !projectModel) {
       return historyByCode;
     }
 
     const lines = await this.prisma.orderLine.findMany({
-      where: !normalizedKeyword && customerId ? { order: { customerId } } : {},
+      where: !normalizedKeyword
+        ? {
+            ...(customerId ? { order: { customerId } } : {}),
+            ...(requestedProjectModel ? { projectModel: { contains: requestedProjectModel, mode: 'insensitive' } } : {})
+          }
+        : {},
       select: {
         partCode: true,
         partName: true,
@@ -3548,6 +4743,9 @@ export class InventoryService {
 
     for (const line of lines) {
       if (normalizedKeyword && !this.materialHistoryLineMatchesKeyword(line, normalizedKeyword)) {
+        continue;
+      }
+      if (projectModel && !pinyinSearchMatches([line.projectModel], projectModel)) {
         continue;
       }
 
@@ -3876,7 +5074,10 @@ export class InventoryService {
     const [year, month, day] = formatted.split('-');
     const compactDate = `${year}${month}${day}`;
     const looseDate = `${year}-${Number(month)}-${Number(day)}`;
-    return [formatted, compactDate, looseDate];
+    // 订单详情接口可能返回 ISO 日期字符串，搜索时也要能直接命中历史图纸日期。
+    const isoDate = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))).toISOString();
+    const looseIsoDate = `${looseDate}T00:00:00.000Z`;
+    return [formatted, compactDate, looseDate, isoDate, looseIsoDate];
   }
 
   private compareMaterialSuggestions(
@@ -3887,6 +5088,7 @@ export class InventoryService {
       historyUsageCount?: number;
       availableQuantity?: number;
       lastCustomerOrderDate?: string;
+      projectModel?: string | null;
     },
     right: {
       partCode: string;
@@ -3895,8 +5097,10 @@ export class InventoryService {
       historyUsageCount?: number;
       availableQuantity?: number;
       lastCustomerOrderDate?: string;
+      projectModel?: string | null;
     },
-    preferCustomerHistory: boolean
+    preferCustomerHistory: boolean,
+    preferredProjectModel = ''
   ) {
     const searchRankDiff = (right.searchMatchRank || 0) - (left.searchMatchRank || 0);
     if (searchRankDiff !== 0) {
@@ -3904,15 +5108,25 @@ export class InventoryService {
     }
 
     if (preferCustomerHistory) {
-      const customerUsageDiff = (right.customerUsageCount || 0) - (left.customerUsageCount || 0);
-      if (customerUsageDiff !== 0) {
-        return customerUsageDiff;
-      }
-
+      // 当前客户空关键字下拉优先展示最近使用过的零件；使用次数作为次级排序，避免旧高频零件压过刚下单的客户用料。
       const lastCustomerOrderDateDiff =
         this.sortableDateValue(right.lastCustomerOrderDate) - this.sortableDateValue(left.lastCustomerOrderDate);
       if (lastCustomerOrderDateDiff !== 0) {
         return lastCustomerOrderDateDiff;
+      }
+
+      const customerUsageDiff = (right.customerUsageCount || 0) - (left.customerUsageCount || 0);
+      if (customerUsageDiff !== 0) {
+        return customerUsageDiff;
+      }
+    }
+
+    if (preferredProjectModel) {
+      const leftProjectRank = normalizeSearchKeyword(left.projectModel) === preferredProjectModel ? 1 : 0;
+      const rightProjectRank = normalizeSearchKeyword(right.projectModel) === preferredProjectModel ? 1 : 0;
+      const projectRankDiff = rightProjectRank - leftProjectRank;
+      if (projectRankDiff !== 0) {
+        return projectRankDiff;
       }
     }
 
@@ -3958,6 +5172,7 @@ export class InventoryService {
     }
 
     const sourceType = query.sourceType || 'ALL';
+    const customerScope = await this.resolveInventoryCustomerScope(query.customerId);
     const where: Prisma.InventoryBatchWhereInput = {
       partCode: { equals: normalizedPartCode, mode: 'insensitive' },
       quantity: { gt: 0 },
@@ -3996,14 +5211,27 @@ export class InventoryService {
       orderBy: [{ quantity: 'asc' }, { createdAt: 'asc' }, { batchNo: 'asc' }]
     });
 
-    const sourceTaskMap = await this.findSourceTaskMap(batches.map((batch) => batch.sourceProductionTaskNo));
+    const orderedBatches = customerScope
+      ? [...batches].sort((left, right) => {
+          // 库存来源核对只调整当前客户来源的展示优先级，不过滤全局备货，避免新客户无法使用可用库存。
+          const leftCustomerRank = this.inventoryBatchMatchesCustomerScope(left, customerScope) ? 0 : 1;
+          const rightCustomerRank = this.inventoryBatchMatchesCustomerScope(right, customerScope) ? 0 : 1;
+          return (
+            leftCustomerRank - rightCustomerRank ||
+            decimalToNumber(left.quantity) - decimalToNumber(right.quantity) ||
+            String(left.createdAt || '').localeCompare(String(right.createdAt || ''), 'zh-Hans-CN') ||
+            String(left.batchNo || '').localeCompare(String(right.batchNo || ''), 'zh-Hans-CN')
+          );
+        })
+      : batches;
+    const sourceTaskMap = await this.findSourceTaskMap(orderedBatches.map((batch) => batch.sourceProductionTaskNo));
     const material = await this.prisma.material.findFirst({
       where: { partCode: { equals: normalizedPartCode, mode: 'insensitive' } }
     });
-    const firstBatch = batches[0];
+    const firstBatch = orderedBatches[0];
     const unit = query.unit?.trim() || firstBatch?.unit || material?.unit || '件';
 
-    const sources = batches.map((batch) => this.toInventorySourceDetail(batch, sourceTaskMap, currentOrder));
+    const sources = orderedBatches.map((batch) => this.toInventorySourceDetail(batch, sourceTaskMap, currentOrder));
     return {
       partCode: firstBatch?.partCode || material?.partCode || normalizedPartCode,
       partName: firstBatch?.partName || material?.partName || '',
@@ -5575,20 +6803,13 @@ export class InventoryService {
   }
 
   private buildAdjustmentNo() {
-    const now = new Date();
-    const stamp = [
-      now.getFullYear(),
-      String(now.getMonth() + 1).padStart(2, '0'),
-      String(now.getDate()).padStart(2, '0'),
-      String(now.getHours()).padStart(2, '0'),
-      String(now.getMinutes()).padStart(2, '0'),
-      String(now.getSeconds()).padStart(2, '0')
-    ].join('');
+    const stamp = businessDateTimeKey();
     return `IA-${stamp}-${randomUUID().slice(0, 8).toUpperCase()}`;
   }
 
   private buildAdjustmentTransactionNo() {
-    return `IT-ADJ-${Date.now()}-${randomUUID().slice(0, 6).toUpperCase()}`;
+    const stamp = businessDateTimeKey();
+    return `IT-ADJ-${stamp}-${randomUUID().slice(0, 6).toUpperCase()}`;
   }
 
   private validateAdjustmentAttachment(fileUrl: string, originalFileName: string, mimeType?: string) {

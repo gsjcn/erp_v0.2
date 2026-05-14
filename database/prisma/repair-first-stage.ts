@@ -134,6 +134,26 @@ type StockAllocationRepair = {
   blockedReasons: string[];
 };
 
+type ComponentStructureBlock = {
+  scope: string;
+  label: string;
+  blockedReasons: string[];
+};
+
+type ModelBomScopeBlock = {
+  scopeKey: string;
+  customerScopeKey: string;
+  projectModelScopeKey: string;
+  bomNames: string[];
+};
+
+type ModelBomComponentThicknessRepair = {
+  id: string;
+  bomName: string;
+  partCode: string;
+  previousThickness: number;
+};
+
 const quantityTolerance = 0.0001;
 const serializableRepairRetryCount = 3;
 const volatileStockSourceFields = ['availableQuantity', 'reservedQuantity', 'currentQuantity', 'physicalQuantity'];
@@ -237,6 +257,9 @@ async function main() {
   const productionOperatorRepairs = await collectProductionOperatorRepairs();
   const consumedReservationRepairs = await collectConsumedReservationRepairs();
   const stockAllocationRepairs = await collectStockAllocationRepairs();
+  const componentStructureBlocks = await collectComponentStructureBlocks();
+  const modelBomScopeBlocks = await collectModelBomScopeBlocks();
+  const modelBomComponentThicknessRepairs = await collectModelBomComponentThicknessRepairs();
 
   printPlanRepairs(planRepairs);
   printStockSourceVolatileFieldRepairs(stockSourceVolatileFieldRepairs);
@@ -248,13 +271,23 @@ async function main() {
   printProductionOperatorRepairs(productionOperatorRepairs);
   printConsumedReservationRepairs(consumedReservationRepairs);
   printStockAllocationRepairs(stockAllocationRepairs);
+  printComponentStructureBlocks(componentStructureBlocks);
+  printModelBomScopeBlocks(modelBomScopeBlocks);
+  printModelBomComponentThicknessRepairs(modelBomComponentThicknessRepairs);
 
   if (!writeMode) {
     console.log('当前为 dry-run，只报告将修复的记录。确认后执行：npm run backend:repair:first-stage -- --write');
     return;
   }
 
-  assertNoBlockedRepairs(stockSourceReviewStatusRepairs, draftReservationSyncRepairs, consumedReservationRepairs, stockAllocationRepairs);
+  assertNoBlockedRepairs(
+    stockSourceReviewStatusRepairs,
+    draftReservationSyncRepairs,
+    consumedReservationRepairs,
+    stockAllocationRepairs,
+    componentStructureBlocks,
+    modelBomScopeBlocks
+  );
 
   await runSerializableRepairWrite(() =>
     prisma.$transaction(
@@ -377,6 +410,16 @@ async function main() {
         }
       }
 
+      if (modelBomComponentThicknessRepairs.length > 0) {
+        for (const repair of modelBomComponentThicknessRepairs) {
+          // 父级组件由子零件拼接，不维护自身厚度；这里只清理历史错误快照，不影响 BOM 明细、订单、生产或库存数量。
+          await tx.modelBomLine.update({
+            where: { id: repair.id },
+            data: { partThicknessSnapshot: null }
+          });
+        }
+      }
+
       if (consumedReservationRepairs.length > 0) {
         for (const repair of consumedReservationRepairs) {
           if (repair.quantity <= quantityTolerance) {
@@ -405,7 +448,7 @@ async function main() {
   );
 
   console.log(
-    `第一阶段历史数据修复完成：已写入 ${planRepairs.length} 条订单零件生产计划记录，${stockSourceVolatileFieldRepairs.length} 条库存来源临时字段清理记录，${draftReservationSyncRepairs.length} 条草稿库存预占同步记录，${shipmentStatusRepairs.length} 条订单发货状态记录，${processSearchRepairs.length} 条流程搜索记录，${missingProcessDefinitionRepairs.length} 条标准工序补录记录，${productionOperatorRepairs.length} 条生产操作人员记录，${consumedReservationRepairs.length} 条库存消费预占记录。`
+    `第一阶段历史数据修复完成：已写入 ${planRepairs.length} 条订单零件生产计划记录，${stockSourceVolatileFieldRepairs.length} 条库存来源临时字段清理记录，${draftReservationSyncRepairs.length} 条草稿库存预占同步记录，${shipmentStatusRepairs.length} 条订单发货状态记录，${processSearchRepairs.length} 条流程搜索记录，${missingProcessDefinitionRepairs.length} 条标准工序补录记录，${productionOperatorRepairs.length} 条生产操作人员记录，${modelBomComponentThicknessRepairs.length} 条 BOM 父级组件厚度快照清理记录，${consumedReservationRepairs.length} 条库存消费预占记录。`
   );
 }
 
@@ -443,9 +486,24 @@ function assertNoBlockedRepairs(
   stockSourceReviewStatusRepairs: StockSourceReviewStatusRepair[],
   draftReservationSyncRepairs: DraftReservationSyncRepair[],
   consumedReservationRepairs: ConsumedReservationRepair[],
-  stockAllocationRepairs: StockAllocationRepair[]
+  stockAllocationRepairs: StockAllocationRepair[],
+  componentStructureBlocks: ComponentStructureBlock[],
+  modelBomScopeBlocks: ModelBomScopeBlock[]
 ) {
   const messages: string[] = [];
+  if (modelBomScopeBlocks.length > 0) {
+    messages.push(
+      `BOM 范围重复 ${modelBomScopeBlocks.length} 组：` +
+        modelBomScopeBlocks.map((block) => `${block.scopeKey} ${block.bomNames.join(' / ')}`).join(' | ')
+    );
+  }
+  if (componentStructureBlocks.length > 0) {
+    messages.push(
+      `组件父子结构 ${componentStructureBlocks.length} 条：` +
+        componentStructureBlocks.map((block) => `${block.scope} ${block.label} ${block.blockedReasons.join('；')}`).join(' | ')
+    );
+  }
+
   const blockedStockSourceReviewRepairs = stockSourceReviewStatusRepairs.filter((repair) => repair.blockedReasons.length > 0);
   if (blockedStockSourceReviewRepairs.length > 0) {
     messages.push(
@@ -1652,6 +1710,283 @@ function printStockAllocationRepairs(repairs: StockAllocationRepair[]) {
   }
 }
 
+async function collectComponentStructureBlocks(): Promise<ComponentStructureBlock[]> {
+  const blocks: ComponentStructureBlock[] = [];
+  await collectModelBomComponentStructureBlocks(blocks);
+  await collectOrderLineComponentStructureBlocks(blocks);
+  await collectCommittedImportComponentStructureBlocks(blocks);
+  return blocks;
+}
+
+async function collectModelBomComponentStructureBlocks(blocks: ComponentStructureBlock[]) {
+  const boms = await prisma.modelBom.findMany({
+    select: {
+      bomName: true,
+      lines: {
+        select: {
+          lineType: true,
+          status: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCodeSnapshot: true
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+      }
+    },
+    orderBy: { bomName: 'asc' }
+  });
+
+  for (const bom of boms) {
+    const enabledComponentNos = new Set<string>();
+    const duplicateComponentNos = new Set<string>();
+    for (const line of bom.lines) {
+      if (line.status !== CommonStatus.ENABLED || normalizeComponentLineType(line.lineType) !== 'COMPONENT') {
+        continue;
+      }
+      const componentNo = normalizeComponentNo(line.componentNo);
+      if (componentNo && enabledComponentNos.has(componentNo)) {
+        duplicateComponentNos.add(componentNo);
+      }
+      if (componentNo) {
+        enabledComponentNos.add(componentNo);
+      }
+    }
+
+    for (const line of bom.lines) {
+      const lineType = normalizeComponentLineType(line.lineType);
+      const componentNo = normalizeComponentNo(line.componentNo);
+      const parentComponentNo = normalizeComponentNo(line.parentComponentNo);
+      const reasons: string[] = [];
+      if (lineType !== 'COMPONENT' && lineType !== 'PART') {
+        reasons.push(`lineType=${line.lineType} 不在 COMPONENT / PART 范围内`);
+      }
+      if (lineType === 'COMPONENT' && line.status === CommonStatus.ENABLED) {
+        if (!componentNo) {
+          reasons.push('组件行缺少 componentNo');
+        }
+        if (isComponentNoRangeInvalid(componentNo)) {
+          reasons.push(`组件编号 ${componentNo} 超出 C001-C9999 范围`);
+        }
+        if (parentComponentNo) {
+          reasons.push(`组件行不能填写 parentComponentNo=${parentComponentNo}`);
+        }
+        if (duplicateComponentNos.has(componentNo)) {
+          reasons.push(`组件编号 ${componentNo} 重复`);
+        }
+      }
+      if (lineType === 'PART') {
+        if (componentNo) {
+          reasons.push(`零件行不能填写 componentNo=${componentNo}`);
+        }
+        if (line.status === CommonStatus.ENABLED && parentComponentNo && !enabledComponentNos.has(parentComponentNo)) {
+          reasons.push(`所属组件 ${parentComponentNo} 不存在或已停用`);
+        }
+      }
+      if (reasons.length > 0) {
+        blocks.push({ scope: 'BOM', label: `${bom.bomName} / ${line.partCodeSnapshot}`, blockedReasons: reasons });
+      }
+    }
+  }
+}
+
+async function collectOrderLineComponentStructureBlocks(blocks: ComponentStructureBlock[]) {
+  const orders = await prisma.customerOrder.findMany({
+    select: {
+      orderNo: true,
+      lines: {
+        select: {
+          lineNo: true,
+          lineType: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCode: true
+        },
+        orderBy: [{ lineNo: 'asc' }, { createdAt: 'asc' }]
+      }
+    },
+    orderBy: { orderNo: 'asc' }
+  });
+
+  for (const order of orders) {
+    const componentNos = new Set<string>();
+    const duplicateComponentNos = new Set<string>();
+    for (const line of order.lines) {
+      if (normalizeComponentLineType(line.lineType) !== 'COMPONENT') {
+        continue;
+      }
+      const componentNo = normalizeComponentNo(line.componentNo);
+      if (componentNo && componentNos.has(componentNo)) {
+        duplicateComponentNos.add(componentNo);
+      }
+      if (componentNo) {
+        componentNos.add(componentNo);
+      }
+    }
+
+    for (const line of order.lines) {
+      const reasons = componentLineBlockedReasons(line.lineType, line.componentNo, line.parentComponentNo, componentNos, duplicateComponentNos);
+      if (reasons.length > 0) {
+        blocks.push({
+          scope: '订单',
+          label: `${order.orderNo} / line ${line.lineNo || '-'} / ${line.partCode}`,
+          blockedReasons: reasons
+        });
+      }
+    }
+  }
+}
+
+async function collectCommittedImportComponentStructureBlocks(blocks: ComponentStructureBlock[]) {
+  const sessions = await prisma.orderImportSession.findMany({
+    where: { status: 'COMMITTED' },
+    select: {
+      id: true,
+      committedOrderNos: true,
+      rows: {
+        select: {
+          orderNo: true,
+          sourceRowNo: true,
+          lineType: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCode: true,
+          errorCount: true
+        },
+        orderBy: [{ orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+      }
+    },
+    orderBy: { committedAt: 'asc' }
+  });
+
+  for (const session of sessions) {
+    const committedOrderNos = committedOrderNoSet(session.committedOrderNos);
+    const rowsByOrderNo = new Map<string, typeof session.rows>();
+    for (const row of session.rows) {
+      const orderNo = normalizeOrderNo(row.orderNo);
+      if (!committedOrderNos.has(orderNo)) {
+        continue;
+      }
+      rowsByOrderNo.set(orderNo, [...(rowsByOrderNo.get(orderNo) || []), row]);
+    }
+
+    for (const [orderNo, rows] of rowsByOrderNo.entries()) {
+      const componentNos = new Set<string>();
+      const duplicateComponentNos = new Set<string>();
+      for (const row of rows) {
+        if (normalizeComponentLineType(row.lineType) !== 'COMPONENT') {
+          continue;
+        }
+        const componentNo = normalizeComponentNo(row.componentNo);
+        if (componentNo && componentNos.has(componentNo)) {
+          duplicateComponentNos.add(componentNo);
+        }
+        if (componentNo) {
+          componentNos.add(componentNo);
+        }
+      }
+
+      for (const row of rows) {
+        const reasons = componentLineBlockedReasons(row.lineType, row.componentNo, row.parentComponentNo, componentNos, duplicateComponentNos);
+        if (row.errorCount > 0) {
+          reasons.push(`已提交导入行仍保留 errorCount=${row.errorCount}`);
+        }
+        if (reasons.length > 0) {
+          blocks.push({
+            scope: '已提交导入',
+            label: `${session.id} / ${orderNo} / Excel 行 ${row.sourceRowNo || '-'} / ${row.partCode}`,
+            blockedReasons: reasons
+          });
+        }
+      }
+    }
+  }
+}
+
+function printComponentStructureBlocks(blocks: ComponentStructureBlock[]) {
+  console.log(`第一阶段历史数据修复检查：组件父子结构 ${blocks.length} 条需要人工处理。`);
+  for (const block of blocks) {
+    console.log(`[blocked] ${block.scope} ${block.label}: ${block.blockedReasons.join('；')}`);
+  }
+}
+
+async function collectModelBomScopeBlocks(): Promise<ModelBomScopeBlock[]> {
+  const boms = await prisma.modelBom.findMany({
+    select: {
+      bomName: true,
+      customerScopeKey: true,
+      projectModelScopeKey: true,
+      status: true
+    },
+    orderBy: [{ customerScopeKey: 'asc' }, { projectModelScopeKey: 'asc' }, { bomName: 'asc' }]
+  });
+  const groups = new Map<string, typeof boms>();
+  for (const bom of boms) {
+    const customerScopeKey = stringValue(bom.customerScopeKey) || 'ALL';
+    const projectModelScopeKey = stringValue(bom.projectModelScopeKey).toUpperCase() || 'ALL';
+    const scopeKey = `${customerScopeKey}|${projectModelScopeKey}`;
+    groups.set(scopeKey, [...(groups.get(scopeKey) || []), bom]);
+  }
+
+  return [...groups.entries()]
+    .filter(([, rows]) => rows.length > 1)
+    .map(([scopeKey, rows]) => {
+      const [customerScopeKey, projectModelScopeKey] = scopeKey.split('|');
+      return {
+        scopeKey,
+        customerScopeKey,
+        projectModelScopeKey,
+        bomNames: rows.map((row) => `${row.bomName}(${row.status})`)
+      };
+    });
+}
+
+function printModelBomScopeBlocks(blocks: ModelBomScopeBlock[]) {
+  console.log(`第一阶段历史数据修复检查：BOM 范围重复 ${blocks.length} 组需要人工合并。`);
+  for (const block of blocks) {
+    console.log(
+      `[blocked] BOM scope ${block.scopeKey}: customerScopeKey=${block.customerScopeKey}, ` +
+        `projectModelScopeKey=${block.projectModelScopeKey}, BOM=${block.bomNames.join(' / ')}`
+    );
+  }
+}
+
+async function collectModelBomComponentThicknessRepairs(): Promise<ModelBomComponentThicknessRepair[]> {
+  const lines = await prisma.modelBomLine.findMany({
+    where: {
+      lineType: 'COMPONENT',
+      partThicknessSnapshot: { not: null }
+    },
+    select: {
+      id: true,
+      partCodeSnapshot: true,
+      partThicknessSnapshot: true,
+      bom: { select: { bomName: true } }
+    },
+    orderBy: [{ bom: { bomName: 'asc' } }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
+  });
+
+  return lines.map((line) => ({
+    id: line.id,
+    bomName: line.bom.bomName,
+    partCode: line.partCodeSnapshot,
+    previousThickness: decimalToNumber(line.partThicknessSnapshot)
+  }));
+}
+
+function printModelBomComponentThicknessRepairs(repairs: ModelBomComponentThicknessRepair[]) {
+  console.log(`第一阶段历史数据修复检查：BOM 父级组件厚度快照 ${repairs.length} 条需要清理。`);
+  for (const repair of repairs) {
+    console.log(
+      `[${writeMode ? 'write' : 'dry-run'}] BOM ${repair.bomName} / ${repair.partCode}: ` +
+        `父级组件 partThicknessSnapshot=${repair.previousThickness} -> null`
+    );
+  }
+}
+
+function stringValue(value: unknown) {
+  return value === null || value === undefined ? '' : String(value).trim();
+}
+
 function normalizeStockSourceSelections(value: Prisma.JsonValue | null | undefined): StockSourceSelection[] {
   if (!Array.isArray(value)) {
     return [];
@@ -1693,6 +2028,69 @@ function splitDefaultProcessRoute(value?: string | null) {
 
 function sourceKey(orderLineId: string | null | undefined, batchId: string) {
   return `${orderLineId || 'NO_LINE'}__${batchId}`;
+}
+
+function normalizeOrderNo(orderNo: string | null | undefined) {
+  return String(orderNo || '').trim().toUpperCase();
+}
+
+function committedOrderNoSet(value: Prisma.JsonValue | null | undefined) {
+  if (!Array.isArray(value)) {
+    return new Set<string>();
+  }
+  return new Set(value.map((item) => (typeof item === 'string' ? normalizeOrderNo(item) : '')).filter(Boolean));
+}
+
+function normalizeComponentNo(value: string | null | undefined) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function normalizeComponentLineType(value: string | null | undefined) {
+  return String(value || 'PART').trim().toUpperCase();
+}
+
+function isComponentNoRangeInvalid(value: string | null | undefined) {
+  const matched = /^C(\d+)$/i.exec(normalizeComponentNo(value));
+  return !!matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999);
+}
+
+function componentLineBlockedReasons(
+  lineTypeValue: string | null | undefined,
+  componentNoValue: string | null | undefined,
+  parentComponentNoValue: string | null | undefined,
+  componentNos: Set<string>,
+  duplicateComponentNos: Set<string>
+) {
+  const reasons: string[] = [];
+  const lineType = normalizeComponentLineType(lineTypeValue);
+  const componentNo = normalizeComponentNo(componentNoValue);
+  const parentComponentNo = normalizeComponentNo(parentComponentNoValue);
+  if (lineType !== 'COMPONENT' && lineType !== 'PART') {
+    reasons.push(`lineType=${lineTypeValue} 不在 COMPONENT / PART 范围内`);
+    return reasons;
+  }
+  if (lineType === 'COMPONENT') {
+    if (!componentNo) {
+      reasons.push('组件行缺少 componentNo');
+    }
+    if (isComponentNoRangeInvalid(componentNo)) {
+      reasons.push(`组件编号 ${componentNo} 超出 C001-C9999 范围`);
+    }
+    if (parentComponentNo) {
+      reasons.push(`组件行不能填写 parentComponentNo=${parentComponentNo}`);
+    }
+    if (duplicateComponentNos.has(componentNo)) {
+      reasons.push(`组件编号 ${componentNo} 重复`);
+    }
+    return reasons;
+  }
+  if (componentNo) {
+    reasons.push(`零件行不能填写 componentNo=${componentNo}`);
+  }
+  if (parentComponentNo && !componentNos.has(parentComponentNo)) {
+    reasons.push(`所属组件 ${parentComponentNo} 在当前订单内不存在`);
+  }
+  return reasons;
 }
 
 function decimalToNumber(value: Prisma.Decimal | number | string | null | undefined) {

@@ -1,10 +1,15 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
+import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
+import { CommonStatus } from '@prisma/client';
 
 export class ProcessTemplateQueryDto {
   @IsOptional()
   @IsString()
   keyword?: string;
+
+  @IsOptional()
+  @IsIn(['ENABLED', 'DISABLED', 'ALL'])
+  status?: CommonStatus | 'ALL';
 }
 
 export class ProcessTemplateStepDto {

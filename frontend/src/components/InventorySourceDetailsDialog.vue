@@ -1,15 +1,15 @@
 <template>
   <el-dialog
     :model-value="modelValue"
-    title="库存来源详情"
+    :title="title || '库存来源详情'"
     width="min(1120px, calc(100vw - 32px))"
     append-to-body
     class="responsive-dialog inventory-source-dialog"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <el-alert
-      title="使用库存前必须核对生产订单、任务号、图号、版本和图纸文件；资料不一致、来源不完整或使用顺序异常时，必须逐批填写人工确认说明。"
-      type="warning"
+      :title="sourceGuardAlertTitle"
+      :type="sourceGuardAlertType"
       :closable="false"
       class="source-warning"
     />
@@ -17,7 +17,7 @@
     <div v-if="reviewMode" class="source-search-panel">
       <div>
         <strong>库存查询</strong>
-        <small>可按编码、名称、拼音、图号、客户历史或库存来源搜索；允许选择可替代产品，但必须逐批确认数量。</small>
+        <small>可按编码、名称、拼音、图号、客户历史或库存来源搜索；允许选择可替代零件，但必须逐批确认数量。</small>
       </div>
       <div class="source-search-controls">
         <el-autocomplete
@@ -27,6 +27,7 @@
           placeholder="编码/名称/拼音/图号/客户/库存来源"
           clearable
           popper-class="material-suggestion-popper"
+          @input="handleSourceSearchKeywordInput"
           @select="handleInventorySuggestionSelect"
         >
           <template #default="{ item }">
@@ -48,10 +49,17 @@
           <MaterialSuggestionOption :item="item" />
         </button>
       </div>
-      <div v-if="transformRuleLoading || transformRuleSuggestions.length" v-loading="transformRuleLoading" class="transform-suggestion-panel">
+      <div v-if="transformRulePanelVisible" v-loading="transformRuleLoading" class="transform-suggestion-panel">
         <div class="transform-suggestion-title">
-          <strong>来源加工建议</strong>
-          <span>仅用于提示可搜索的来源零件；是否使用库存仍需逐批人工核对。</span>
+          <div class="transform-suggestion-heading">
+            <strong>来源加工建议</strong>
+            <el-button size="small" link type="primary" @click="openTransformRulesPage">维护关系</el-button>
+          </div>
+          <span>查来源库存不会选中批次、不会扣库存，必须逐批勾选并确认。</span>
+          <small class="transform-suggestion-count">{{ transformRuleSuggestionSummary }}</small>
+        </div>
+        <div v-if="transformRuleEmptyVisible" class="transform-suggestion-empty">
+          本次订单零件暂无匹配的来源加工建议；需要使用半成品或通用件再加工时，请先维护来源加工关系。
         </div>
         <article v-for="rule in transformRuleSuggestions" :key="rule.id" class="transform-suggestion-item">
           <div>
@@ -60,10 +68,18 @@
             <small v-if="rule.defaultProcessRoute">建议工艺：{{ rule.defaultProcessRoute }}</small>
             <small v-if="rule.conversionDescription">{{ rule.conversionDescription }}</small>
           </div>
-          <el-button size="small" type="primary" plain @click="searchTransformSource(rule)">
-            查来源库存
-          </el-button>
+          <div class="transform-suggestion-action">
+            <el-button size="small" type="primary" plain @click="searchTransformSource(rule)">
+              查来源库存
+            </el-button>
+            <small>只切换搜索，不自动选用库存</small>
+          </div>
         </article>
+        <div v-if="transformRuleSuggestionHasMore" class="transform-suggestion-more">
+          <el-button size="small" plain :loading="transformRuleLoadingMore" @click="loadMoreTransformRuleSuggestions">
+            加载更多来源加工建议
+          </el-button>
+        </div>
       </div>
     </div>
 
@@ -74,17 +90,17 @@
           <strong>{{ detail.partName || '-' }} / {{ detail.partCode }}</strong>
         </div>
         <div>
-          <span>当前可用</span>
+          <span>{{ sourceAvailableSummaryLabel }}</span>
           <strong>{{ formatQuantity(effectiveDetailAvailableQuantity, detail.unit) }}</strong>
         </div>
         <div>
-          <span>库存批次</span>
+          <span>{{ sourceBatchSummaryLabel }}</span>
           <strong>{{ detail.batchCount }} 批</strong>
         </div>
         <div>
-          <span>来源构成</span>
-          <strong>订单 {{ detail.orderSourceCount }} / 备货 {{ detail.stockSourceCount }}</strong>
-          <small v-if="sourceKindSummaryText">{{ sourceKindSummaryText }}</small>
+          <span>{{ sourceCompositionSummaryLabel }}</span>
+          <strong>{{ sourceCompositionSummaryText }}</strong>
+          <small v-if="sourceKindSummaryVisible">{{ sourceKindSummaryText }}</small>
         </div>
       </div>
 
@@ -94,7 +110,7 @@
           <span>图号：{{ expected.drawingNo || '未填写' }}</span>
           <span>版本：{{ expected.drawingVersion || '未填写' }}</span>
           <span>规格：{{ expected.partSpecification || '未填写' }}</span>
-          <span>厚度：{{ expected.partThickness ? `${expected.partThickness} mm` : '未填写' }}</span>
+          <span>厚度：{{ expectedThicknessText }}</span>
           <span>本次需要：{{ expected.requiredQuantity ? formatQuantity(expected.requiredQuantity, expected.unit || '件') : '未填写' }}</span>
           <span>使用方式：{{ fulfillmentModeText }}</span>
         </div>
@@ -171,7 +187,7 @@
         <div class="selected-source-title">
           <div>
             <strong>已选库存批次</strong>
-            <span>这里会保留跨物料搜索后选中的批次；取消勾选某批次后，系统会从后续批次自动补足，不会再选回该批次。</span>
+            <span>拖动左侧手柄调整扣库顺序；提交生产会按当前顺序消耗库存。这里会保留跨零件搜索后选中的批次；取消勾选某批次后，系统会从后续批次自动补足，不会再选回该批次。</span>
           </div>
           <div class="selected-source-actions">
             <el-button size="small" @click="autoSelectSources">按默认顺序选用库存</el-button>
@@ -541,7 +557,7 @@
         </article>
       </div>
 
-      <el-empty v-if="detail && adjustedSourceRows.length === 0" description="当前条件下没有可用库存来源" />
+      <el-empty v-if="detail && adjustedSourceRows.length === 0" :description="sourceEmptyDescription" />
     </div>
 
     <template v-if="reviewMode" #footer>
@@ -627,6 +643,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Rank } from '@element-plus/icons-vue';
 import DrawingPreviewLink from './DrawingPreviewLink.vue';
@@ -645,9 +662,12 @@ import type {
 import { formatDate, formatQuantity } from '../utils/format';
 import { orderDisplayStatus } from '../utils/orderStatus';
 
+const router = useRouter();
 const props = defineProps<{
   modelValue: boolean;
   loading?: boolean;
+  title?: string;
+  referenceOnly?: boolean;
   detail?: InventorySourceDetailResponse | null;
   expected?: InventorySourceExpected | null;
   reviewMode?: boolean;
@@ -674,6 +694,22 @@ type ManualConfirmForm = {
   confirmedAt: Date;
   remark: string;
 };
+
+const sourceGuardAlertTitle = computed(() =>
+  props.referenceOnly
+    ? '当前仅用于核对零件基础资料、图纸和历史来源；当前筛选范围没有可用库存批次，不能作为库存使用确认。'
+    : '使用库存前必须核对生产订单、任务号、图号、版本和图纸文件；资料不一致、来源不完整或使用顺序异常时，必须逐批填写人工确认说明。'
+);
+const sourceGuardAlertType = computed(() => (props.referenceOnly ? 'info' : 'warning'));
+const sourceEmptyDescription = computed(() =>
+  props.referenceOnly ? '当前范围没有库存批次，仅展示零件基础资料和历史来源核对结果' : '当前条件下没有可用库存来源'
+);
+const sourceAvailableSummaryLabel = computed(() => (props.referenceOnly ? '当前范围可用' : '当前可用'));
+const sourceBatchSummaryLabel = computed(() => (props.referenceOnly ? '当前范围批次' : '库存批次'));
+const sourceCompositionSummaryLabel = computed(() => (props.referenceOnly ? '资料状态' : '来源构成'));
+const sourceCompositionSummaryText = computed(() =>
+  props.referenceOnly ? '无可用库存批次' : `订单 ${props.detail?.orderSourceCount || 0} / 备货 ${props.detail?.stockSourceCount || 0}`
+);
 type SourceRow = InventorySourceBatchDetail & {
   backendAvailableQuantity?: number;
   draftReservedQuantity?: number;
@@ -684,6 +720,7 @@ type SelectedSourceRow = StockSourceSelectionPayload & {
 
 const expected = computed(() => props.expected || null);
 const sourceSearchKeyword = ref('');
+const sourceSearchSelectedLabel = ref('');
 const activeSearchFocusBatchNo = ref('');
 const inventorySuggestionRequestSeq = ref(0);
 const lastInventorySuggestions = ref<InventoryMaterialSuggestion[]>([]);
@@ -698,14 +735,35 @@ const selectedSourceDragInsertAfter = ref(false);
 const orderPreviewVisible = ref(false);
 const orderPreviewLoading = ref(false);
 const orderPreview = ref<OrderDetail | null>(null);
+const orderPreviewRequestSeq = ref(0);
 const transformRuleLoading = ref(false);
+const transformRuleLoadingMore = ref(false);
 const transformRuleRequestSeq = ref(0);
 const transformRuleSuggestions = ref<MaterialTransformRule[]>([]);
+const transformRuleSuggestionTotal = ref(0);
+const transformRuleSuggestionOffset = ref(0);
+const transformRuleSuggestionHasMore = ref(false);
+const transformRuleSuggestionLimit = Number(5);
+const transformRulePanelVisible = computed(() =>
+  Boolean(props.reviewMode && expected.value?.partCode && (transformRuleLoading.value || transformRuleRequestSeq.value > 0))
+);
+const transformRuleEmptyVisible = computed(() =>
+  Boolean(transformRulePanelVisible.value && !transformRuleLoading.value && transformRuleSuggestions.value.length === 0)
+);
+const transformRuleSuggestionSummary = computed(() => {
+  if (transformRuleLoading.value && transformRuleSuggestions.value.length === 0) {
+    return '正在加载来源加工建议';
+  }
+  if (transformRuleSuggestionTotal.value <= 0) {
+    return '未匹配到来源加工建议';
+  }
+  return `已显示 ${transformRuleSuggestions.value.length} / ${transformRuleSuggestionTotal.value} 条来源加工建议`;
+});
 const sourceSearchResultHint = computed(() => {
   if (lastInventorySuggestions.value.some((item) => item.hasIdentityConflict)) {
     return '同编码存在多套历史资料，请点击候选项确认';
   }
-  return lastInventorySuggestions.value.length > 1 ? '匹配到多个物料，请选择具体零件' : '匹配到相似物料，请选择确认';
+  return lastInventorySuggestions.value.length > 1 ? '匹配到多个零件，请选择具体零件' : '匹配到相似零件，请选择确认';
 });
 const draftReservedQuantityByBatchId = computed(() => {
   const rows = new Map<string, number>();
@@ -879,8 +937,15 @@ const expectedMissingInfoReasons = computed(() => {
     !normalizeValue(row.drawingNo) ? '缺图号' : '',
     !normalizeValue(row.drawingVersion) ? '缺图纸版本' : '',
     !normalizeValue(row.partSpecification) ? '缺成品规格' : '',
-    Number(row.partThickness || 0) <= 0 ? '缺零件厚度' : ''
+    expectedRequiresThickness.value && Number(row.partThickness || 0) <= 0 ? '缺零件厚度' : ''
   ].filter(Boolean);
+});
+const expectedRequiresThickness = computed(() => expected.value?.lineType !== 'COMPONENT');
+const expectedThicknessText = computed(() => {
+  if (!expectedRequiresThickness.value) {
+    return '不适用（父级组件由子零件维护）';
+  }
+  return expected.value?.partThickness ? `${expected.value.partThickness} mm` : '未填写';
 });
 const expectedFileMissing = computed(() => Boolean(expected.value && !expected.value.drawingFileUrl));
 const orderDrawingInfoComplete = computed(() => expectedMissingInfoReasons.value.length === 0);
@@ -971,6 +1036,7 @@ const sourceKindSummaryText = computed(() => {
     .map(([kind, quantity]) => `${sourceKindText(kind)} ${formatQuantity(quantity, props.detail?.unit || '件')}`)
     .join(' / ');
 });
+const sourceKindSummaryVisible = computed(() => !props.referenceOnly && Boolean(sourceKindSummaryText.value));
 const confirmHint = computed(() => {
   if (props.loading) {
     return '正在查询库存来源...';
@@ -997,34 +1063,63 @@ const hasExpectedInfo = computed(() => {
   return Boolean(row?.drawingNo || row?.drawingVersion || row?.drawingFileName || row?.partThickness || row?.partSpecification);
 });
 
-async function loadTransformRuleSuggestions() {
+function resetTransformRuleSuggestions() {
+  transformRuleSuggestions.value = [];
+  transformRuleSuggestionTotal.value = 0;
+  transformRuleSuggestionOffset.value = 0;
+  transformRuleSuggestionHasMore.value = false;
+  transformRuleLoadingMore.value = false;
+}
+
+async function loadTransformRuleSuggestions(append = false) {
   const targetPartCode = expected.value?.partCode?.trim();
-  const requestId = ++transformRuleRequestSeq.value;
+  const requestId = append ? transformRuleRequestSeq.value : ++transformRuleRequestSeq.value;
   if (!props.modelValue || !props.reviewMode || !targetPartCode) {
-    transformRuleSuggestions.value = [];
+    resetTransformRuleSuggestions();
     transformRuleLoading.value = false;
     return;
   }
-  transformRuleLoading.value = true;
+  if (append) {
+    if (transformRuleLoading.value || transformRuleLoadingMore.value || !transformRuleSuggestionHasMore.value) {
+      return;
+    }
+    transformRuleLoadingMore.value = true;
+  } else {
+    resetTransformRuleSuggestions();
+    transformRuleLoading.value = true;
+  }
   try {
-    const rows = await erpApi.materialTransformRules({
+    const result = await erpApi.materialTransformRulesPage({
       targetPartCode,
       customerId: props.customerId || undefined,
       projectModel: expected.value?.projectModel?.trim() || undefined,
-      status: 'ENABLED'
+      status: 'ENABLED',
+      limit: transformRuleSuggestionLimit,
+      offset: append ? transformRuleSuggestionOffset.value : 0
     });
     if (requestId === transformRuleRequestSeq.value) {
-      transformRuleSuggestions.value = rows.filter((row) => row.sourceMaterialStatus !== 'DISABLED');
+      const rows = result.items.filter((row) => row.sourceMaterialStatus !== 'DISABLED');
+      transformRuleSuggestions.value = append ? [...transformRuleSuggestions.value, ...rows] : rows;
+      transformRuleSuggestionTotal.value = result.totalCount;
+      transformRuleSuggestionOffset.value = result.offset + result.items.length;
+      transformRuleSuggestionHasMore.value = result.hasMore;
     }
   } catch {
     if (requestId === transformRuleRequestSeq.value) {
-      transformRuleSuggestions.value = [];
+      if (!append) {
+        resetTransformRuleSuggestions();
+      }
     }
   } finally {
     if (requestId === transformRuleRequestSeq.value) {
       transformRuleLoading.value = false;
+      transformRuleLoadingMore.value = false;
     }
   }
+}
+
+function loadMoreTransformRuleSuggestions() {
+  void loadTransformRuleSuggestions(true);
 }
 
 function searchTransformSource(rule: MaterialTransformRule) {
@@ -1033,8 +1128,28 @@ function searchTransformSource(rule: MaterialTransformRule) {
   activeSearchFocusBatchNo.value = '';
   lastInventorySuggestions.value = [];
   sourceSearchKeyword.value = `${rule.sourcePartCode} ${rule.sourcePartName}`;
+  sourceSearchSelectedLabel.value = sourceSearchKeyword.value;
   emit('sourceSearch', rule.sourcePartCode);
-  ElMessage.info('已按来源加工关系切换到来源零件库存，请逐批核对后再确认');
+  ElMessage.info('已按来源加工关系切换到来源零件库存；系统未自动选用批次，请逐批勾选并人工确认');
+}
+
+function openTransformRulesPage() {
+  const query: Record<string, string> = {
+    status: 'ENABLED'
+  };
+  const targetPartCode = expected.value?.partCode?.trim();
+  const projectModel = expected.value?.projectModel?.trim();
+  if (targetPartCode) {
+    query.targetPartCode = targetPartCode;
+  }
+  if (props.customerId) {
+    query.customerId = props.customerId;
+  }
+  if (projectModel) {
+    query.projectModel = projectModel;
+  }
+  emit('update:modelValue', false);
+  void router.push({ path: '/inventory/material-transforms', query });
 }
 
 async function queryInventorySuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
@@ -1064,13 +1179,29 @@ async function queryInventorySuggestions(keyword: string, callback: (items: Inve
 function handleInventorySuggestionSelect(item: InventoryMaterialSuggestion) {
   resetReviewConfirmation();
   if (item.hasIdentityConflict) {
-    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，已按当前候选切换库存来源，请核对${materialIdentityConflictFieldsText(item)}`);
+    ElMessage.warning(`零件编码 ${item.partCode} 存在多套历史资料，已按当前候选切换库存来源，请核对${materialIdentityConflictFieldsText(item)}`);
   }
   sourceSearchManualPickRequired.value = false;
   lastInventorySuggestions.value = [item];
   activeSearchFocusBatchNo.value = item.matchedBatchNo || '';
   sourceSearchKeyword.value = item.partName ? `${item.partCode} ${item.partName}` : item.partCode;
+  sourceSearchSelectedLabel.value = sourceSearchKeyword.value;
   emit('sourceSearch', item.partCode);
+}
+
+function normalizeSourceSearchLabel(value: string) {
+  return value.trim().toLocaleLowerCase('zh-CN');
+}
+
+function handleSourceSearchKeywordInput(value: string) {
+  if (!sourceSearchSelectedLabel.value || normalizeSourceSearchLabel(value) === normalizeSourceSearchLabel(sourceSearchSelectedLabel.value)) {
+    return;
+  }
+  // 手工改动库存来源搜索词后清理旧候选和批次聚焦，避免显示新关键词但仍高亮上一次选择的库存批次。
+  activeSearchFocusBatchNo.value = '';
+  sourceSearchManualPickRequired.value = false;
+  lastInventorySuggestions.value = [];
+  sourceSearchSelectedLabel.value = '';
 }
 
 function canAutoSwitchInventorySuggestion(item: InventoryMaterialSuggestion) {
@@ -1079,7 +1210,7 @@ function canAutoSwitchInventorySuggestion(item: InventoryMaterialSuggestion) {
 
 function warnInventorySuggestionNeedsManualPick(item: InventoryMaterialSuggestion) {
   if (item.hasIdentityConflict) {
-    ElMessage.warning(`物料编码 ${item.partCode} 存在多套历史资料，请核对${materialIdentityConflictFieldsText(item)}，并点击候选项人工确认后再切换库存来源`);
+    ElMessage.warning(`零件编码 ${item.partCode} 存在多套历史资料，请核对${materialIdentityConflictFieldsText(item)}，并点击候选项人工确认后再切换库存来源`);
   }
 }
 
@@ -1104,6 +1235,7 @@ async function searchInventoryKeyword() {
     if (expected.value?.partCode) {
       emit('sourceSearch', expected.value.partCode);
     }
+    sourceSearchSelectedLabel.value = '';
     return;
   }
 
@@ -1119,6 +1251,8 @@ async function searchInventoryKeyword() {
     sourceSearchManualPickRequired.value = false;
     lastInventorySuggestions.value = [exact];
     activeSearchFocusBatchNo.value = exact.matchedBatchNo || '';
+    sourceSearchKeyword.value = exact.partName ? `${exact.partCode} ${exact.partName}` : exact.partCode;
+    sourceSearchSelectedLabel.value = exact.partName ? `${exact.partCode} ${exact.partName}` : exact.partCode;
     emit('sourceSearch', exact.partCode);
     return;
   }
@@ -1126,10 +1260,11 @@ async function searchInventoryKeyword() {
     activeSearchFocusBatchNo.value = '';
     sourceSearchManualPickRequired.value = true;
     lastInventorySuggestions.value = exactMatches;
-    ElMessage.warning('匹配到多个精确物料，请从下拉列表中选择具体零件');
+    ElMessage.warning('匹配到多个精确零件，请从下拉列表中选择具体零件');
     return;
   }
 
+  const requestId = ++inventorySuggestionRequestSeq.value;
   try {
     const suggestions = await erpApi.inventoryMaterialSuggestions(
       keyword,
@@ -1139,11 +1274,14 @@ async function searchInventoryKeyword() {
       props.excludeOrderId,
       props.customerId
     );
+    if (requestId !== inventorySuggestionRequestSeq.value) {
+      return;
+    }
     lastInventorySuggestions.value = suggestions;
     if (!suggestions.length) {
       activeSearchFocusBatchNo.value = '';
       sourceSearchManualPickRequired.value = false;
-      ElMessage.warning('没有找到匹配物料');
+      ElMessage.warning('没有找到匹配零件');
       return;
     }
     const exactSuggestions = suggestions.filter(
@@ -1158,6 +1296,7 @@ async function searchInventoryKeyword() {
       sourceSearchManualPickRequired.value = false;
       activeSearchFocusBatchNo.value = exact.matchedBatchNo || '';
       sourceSearchKeyword.value = exact.partName ? `${exact.partCode} ${exact.partName}` : exact.partCode;
+      sourceSearchSelectedLabel.value = sourceSearchKeyword.value;
       emit('sourceSearch', exact.partCode);
       return;
     }
@@ -1165,19 +1304,23 @@ async function searchInventoryKeyword() {
     if (exactSuggestions.length > 1) {
       activeSearchFocusBatchNo.value = '';
       lastInventorySuggestions.value = exactSuggestions;
-      ElMessage.warning('匹配到多个精确物料，请从下拉列表中选择具体零件');
+      ElMessage.warning('匹配到多个精确零件，请从下拉列表中选择具体零件');
       return;
     }
     activeSearchFocusBatchNo.value = '';
     ElMessage.warning(
       suggestions.length > 1
-        ? `找到 ${suggestions.length} 个匹配物料，请从下拉列表中选择具体零件`
-        : '找到 1 个相似物料，请点击结果确认后再切换库存来源'
+        ? `找到 ${suggestions.length} 个匹配零件，请从下拉列表中选择具体零件`
+        : '找到 1 个相似零件，请点击结果确认后再切换库存来源'
     );
   } catch (error) {
-    activeSearchFocusBatchNo.value = '';
-    sourceSearchManualPickRequired.value = false;
-    ElMessage.error(error instanceof Error ? error.message : '库存查询失败');
+    if (requestId === inventorySuggestionRequestSeq.value) {
+      activeSearchFocusBatchNo.value = '';
+      sourceSearchManualPickRequired.value = false;
+      lastInventorySuggestions.value = [];
+      sourceSearchSelectedLabel.value = '';
+      ElMessage.error(error instanceof Error ? error.message : '库存查询失败，请确认零件关键字和后端服务');
+    }
   }
 }
 
@@ -1188,6 +1331,7 @@ function searchExpectedPart() {
     activeSearchFocusBatchNo.value = '';
     lastInventorySuggestions.value = [];
     sourceSearchKeyword.value = expected.value.partName ? `${expected.value.partCode} ${expected.value.partName}` : expected.value.partCode;
+    sourceSearchSelectedLabel.value = sourceSearchKeyword.value;
     emit('sourceSearch', expected.value.partCode);
   }
 }
@@ -1688,6 +1832,7 @@ function focusSelectedSource(source: StockSourceSelectionPayload) {
   }
   activeSearchFocusBatchNo.value = source.batchNo || '';
   sourceSearchKeyword.value = source.partName ? `${partCode} ${source.partName}` : partCode;
+  sourceSearchSelectedLabel.value = sourceSearchKeyword.value;
   emit('sourceSearch', partCode);
 }
 
@@ -1821,10 +1966,10 @@ function replenishmentSourceText(row: InventorySourceBatchDetail) {
 
 function sourceComponentText(row: InventorySourceBatchDetail) {
   if (row.lineType === 'COMPONENT' && row.componentNo) {
-    return `组件 ${row.componentNo}`;
+    return `组件 ${String(row.componentNo || '').trim().toUpperCase() || '未编号'}`;
   }
   if (row.parentComponentNo) {
-    return `属于组件 ${row.parentComponentNo}`;
+    return `子零件 -> ${String(row.parentComponentNo || '').trim().toUpperCase()}`;
   }
   if (row.lineType === 'PART') {
     return '单独零件';
@@ -1885,23 +2030,24 @@ function compatibilityResult(row: InventorySourceBatchDetail) {
     return { type: 'warning' as const, label: '资料不完整', reason: '本次订单未上传图纸文件' };
   }
 
+  const targetRequiresThickness = target.lineType !== 'COMPONENT';
   const missingReasons = [
     target.drawingNo && !row.drawingNo ? '库存缺图号' : '',
     target.drawingVersion && !row.drawingVersion ? '库存缺版本' : '',
     target.drawingFileUrl && !row.drawingFileUrl ? '库存缺图纸文件' : '',
     target.partSpecification && !row.partSpecification ? '库存缺规格' : '',
-    target.partThickness && !row.partThickness ? '库存缺厚度' : ''
+    targetRequiresThickness && target.partThickness && !row.partThickness ? '库存缺厚度' : ''
   ].filter(Boolean);
   if (missingReasons.length > 0) {
     return { type: 'warning' as const, label: '资料不完整', reason: missingReasons.join('、') };
   }
 
   const mismatchReasons = [
-    sameText(row.partCode, target.partCode) ? '' : '物料编码不同',
+    sameText(row.partCode, target.partCode) ? '' : '零件编码不同',
     sameText(row.drawingNo, target.drawingNo) ? '' : '图号不同',
     sameText(row.drawingVersion, target.drawingVersion) ? '' : '版本不同',
     sameText(row.partSpecification, target.partSpecification) ? '' : '规格不同',
-    sameNumber(row.partThickness, target.partThickness) ? '' : '厚度不同'
+    targetRequiresThickness && !sameNumber(row.partThickness, target.partThickness) ? '厚度不同' : ''
   ].filter(Boolean);
 
   if (mismatchReasons.length > 0) {
@@ -2051,15 +2197,24 @@ async function openOrderPreview(orderNo?: string) {
   if (!normalizedOrderNo) {
     return;
   }
+  const requestId = ++orderPreviewRequestSeq.value;
   orderPreviewVisible.value = true;
   orderPreviewLoading.value = true;
   orderPreview.value = null;
   try {
-    orderPreview.value = await erpApi.order(normalizedOrderNo);
+    const detail = await erpApi.order(normalizedOrderNo);
+    if (requestId === orderPreviewRequestSeq.value) {
+      orderPreview.value = detail;
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '订单信息查询失败');
+    if (requestId === orderPreviewRequestSeq.value) {
+      orderPreview.value = null;
+      ElMessage.error(error instanceof Error ? error.message : '订单信息查询失败，请确认订单号和后端服务');
+    }
   } finally {
-    orderPreviewLoading.value = false;
+    if (requestId === orderPreviewRequestSeq.value) {
+      orderPreviewLoading.value = false;
+    }
   }
 }
 
@@ -2111,7 +2266,8 @@ watch(
   (visible) => {
     if (!visible) {
       activeSearchFocusBatchNo.value = '';
-      transformRuleSuggestions.value = [];
+      sourceSearchSelectedLabel.value = '';
+      resetTransformRuleSuggestions();
       return;
     }
     reviewConfirmChecked.value = Boolean(props.reviewed);
@@ -2124,6 +2280,7 @@ watch(
   () => [expected.value?.partCode, expected.value?.projectModel, props.customerId],
   () => {
     activeSearchFocusBatchNo.value = '';
+    sourceSearchSelectedLabel.value = '';
     void loadTransformRuleSuggestions();
   }
 );
@@ -2200,12 +2357,34 @@ watch(
   gap: 3px;
 }
 
+.transform-suggestion-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .transform-suggestion-title span,
+.transform-suggestion-count,
 .transform-suggestion-item span,
 .transform-suggestion-item small {
   color: #475569;
   font-size: 12px;
   line-height: 18px;
+}
+
+.transform-suggestion-count {
+  color: #1e3a8a;
+}
+
+.transform-suggestion-empty {
+  padding: 10px;
+  border: 1px dashed #93c5fd;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #475569;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .transform-suggestion-item {
@@ -2223,6 +2402,16 @@ watch(
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.transform-suggestion-action {
+  justify-items: end;
+  text-align: right;
+}
+
+.transform-suggestion-more {
+  display: flex;
+  justify-content: center;
 }
 
 .source-search-result {

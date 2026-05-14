@@ -1,6 +1,6 @@
 import { CommonStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsEnum, IsIn, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsArray, IsEnum, IsIn, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class MaterialDashboardQueryDto {
   @IsOptional()
@@ -20,12 +20,32 @@ export class MaterialDashboardQueryDto {
   scopeType?: 'COMMON' | 'CUSTOM';
 
   @IsOptional()
+  @IsIn(['BOM', 'APPLICABILITY', 'ORDER_HISTORY', 'MATERIAL_ONLY'])
+  relationType?: 'BOM' | 'APPLICABILITY' | 'ORDER_HISTORY' | 'MATERIAL_ONLY';
+
+  @IsOptional()
   @IsString()
   drawingNo?: string;
 
   @IsOptional()
   @IsString()
   drawingStatus?: string;
+
+  @IsOptional()
+  @IsIn(['BOM_LINE', 'MATERIAL_DEFAULT', 'MATERIAL_LATEST', 'ORDER_HISTORY', 'NONE'])
+  drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | 'NONE';
+
+  @IsOptional()
+  @IsIn(['COMPONENT', 'CHILD_PART', 'STANDALONE_PART', 'NONE'])
+  bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE';
+
+  @IsOptional()
+  @IsIn(['WITH_BOM', 'WITHOUT_BOM'])
+  bomPresence?: 'WITH_BOM' | 'WITHOUT_BOM';
+
+  @IsOptional()
+  @IsIn(['WITH_RECENT_ORDER', 'WITHOUT_RECENT_ORDER'])
+  recentOrderPresence?: 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER';
 
   @IsOptional()
   @IsString()
@@ -48,6 +68,14 @@ export class MaterialDashboardQueryDto {
   status?: CommonStatus;
 
   @IsOptional()
+  @IsIn(['LAST_ORDER_DATE', 'DRAWING_DATE', 'BOM_STATUS', 'PART_CODE', 'UPDATED_AT'])
+  sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE' | 'UPDATED_AT';
+
+  @IsOptional()
+  @IsIn(['ASC', 'DESC'])
+  sortOrder?: 'ASC' | 'DESC';
+
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(1)
@@ -65,4 +93,10 @@ export class MaterialProjectOptionsQueryDto {
   @IsOptional()
   @IsString()
   customerId?: string;
+}
+
+export class SaveCommonProjectModelsDto {
+  @IsArray()
+  @IsString({ each: true })
+  projectModels!: string[];
 }

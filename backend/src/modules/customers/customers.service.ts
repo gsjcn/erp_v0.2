@@ -19,6 +19,9 @@ export class CustomersService {
   async findAll(query: CustomerQueryDto) {
     const where: Prisma.CustomerWhereInput = {};
     const keyword = normalizeSearchKeyword(query.keyword);
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(query.limit || 50, 1), 200);
+    const offset = Math.max(query.offset || 0, 0);
 
     if (query.status) {
       where.status = query.status;
@@ -30,13 +33,31 @@ export class CustomersService {
       orderBy: [{ status: 'asc' }, { customerCode: 'asc' }]
     });
 
-    if (!keyword) {
-      return customers;
+    const matchedCustomers = keyword
+      ? customers
+          .filter((customer) => this.customerMatchesKeyword(customer, keyword))
+          .sort((left, right) => this.compareCustomerSearchResults(left, right, keyword))
+      : customers;
+
+    if (!withPage) {
+      return matchedCustomers;
     }
 
-    return customers
-      .filter((customer) => this.customerMatchesKeyword(customer, keyword))
-      .sort((left, right) => this.compareCustomerSearchResults(left, right, keyword));
+    const totalCount = matchedCustomers.length;
+    const items = matchedCustomers.slice(offset, offset + limit);
+    // 客户搜索分页必须把总数和是否还有更多返回给前端，避免下拉静默截断导致误选。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async findOne(id: string) {
+    // 客户下拉和跨页面跳转按 id 回填客户名称，不改变客户软停用和历史数据规则。
+    return this.ensureExistsWithContacts(id);
   }
 
   async checkName(query: CheckCustomerNameQueryDto) {
