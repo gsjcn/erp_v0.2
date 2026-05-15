@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import {
   AcknowledgeWarehouseNoticeDto,
   ConfirmBatchShipmentDto,
@@ -6,6 +6,8 @@ import {
   ConfirmShipmentDto,
   CreateWarehouseDto,
   CreateWarehouseLocationDto,
+  UpdateWarehouseDto,
+  UpdateWarehouseLocationDto,
   WarehouseNoticeQueryDto,
   WarehouseWorkQueryDto,
   WarehouseTransactionQueryDto
@@ -26,9 +28,33 @@ export class WarehousesController {
     return this.warehousesService.createWarehouse(dto);
   }
 
+  @Patch('warehouses/:warehouseId')
+  updateWarehouse(@Param('warehouseId') warehouseId: string, @Body() dto: UpdateWarehouseDto) {
+    return this.warehousesService.updateWarehouse(warehouseId, dto);
+  }
+
+  @Delete('warehouses/:warehouseId')
+  deleteWarehouse(@Param('warehouseId') warehouseId: string) {
+    return this.warehousesService.deleteWarehouse(warehouseId);
+  }
+
   @Post('warehouses/:warehouseId/locations')
   createLocation(@Param('warehouseId') warehouseId: string, @Body() dto: CreateWarehouseLocationDto) {
     return this.warehousesService.createLocation(warehouseId, dto);
+  }
+
+  @Patch('warehouses/:warehouseId/locations/:locationId')
+  updateLocation(
+    @Param('warehouseId') warehouseId: string,
+    @Param('locationId') locationId: string,
+    @Body() dto: UpdateWarehouseLocationDto
+  ) {
+    return this.warehousesService.updateLocation(warehouseId, locationId, dto);
+  }
+
+  @Delete('warehouses/:warehouseId/locations/:locationId')
+  deleteLocation(@Param('warehouseId') warehouseId: string, @Param('locationId') locationId: string) {
+    return this.warehousesService.deleteLocation(warehouseId, locationId);
   }
 
   @Get('warehouse/notices')

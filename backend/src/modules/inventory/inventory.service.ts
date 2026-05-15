@@ -37,7 +37,8 @@ import {
   SetModelBomsCommonBatchDto,
   SaveModelBomDto,
   SaveModelBomLineDto,
-  UpdateMaterialDto
+  UpdateMaterialDto,
+  type StockAlertFilter
 } from './dto';
 
 type InventorySummaryAccumulator = {
@@ -178,9 +179,18 @@ type MaterialMemoryRow = {
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity?: Prisma.Decimal | number | null;
   status: CommonStatus;
   createdAt: Date;
   updatedAt: Date;
+};
+
+type StockAlertComparableRow = {
+  materialId?: string;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity?: number | null;
+  availableQuantity: number;
 };
 
 type MaterialImportIssue = {
@@ -201,6 +211,8 @@ type ParsedMaterialImportRow = {
   drawingStatus?: string | null;
   partThickness?: number | null;
   projectModel?: string | null;
+  stockAlertEnabled?: boolean | null;
+  stockAlertQuantity?: number | null;
   remark?: string | null;
   raw: Record<string, string | number | null>;
   rowHash: string;
@@ -259,6 +271,8 @@ const materialImportHeaderAliases: Record<string, string[]> = {
   drawingStatus: ['图纸状态', 'drawingStatus'],
   partThickness: ['厚度', '厚度(mm)', 'partThickness'],
   projectModel: ['项目型号', '机型', 'projectModel'],
+  stockAlertEnabled: ['库存报警', '启用库存报警', '是否启用库存报警', 'stockAlertEnabled'],
+  stockAlertQuantity: ['最小库存', '最低库存', '库存报警数量', 'stockAlertQuantity'],
   remark: ['备注', 'remark']
 };
 const materialApplicabilityImportRequiredHeaders = ['零件编码'];
@@ -284,6 +298,27 @@ const materialTransformImportHeaderAliases: Record<string, string[]> = {
   status: ['状态', 'status'],
   remark: ['备注', 'remark']
 };
+
+const materialImportSessionMaterialIssueCodes = new Set([
+  'DUPLICATE_PART_CONFLICT',
+  'DUPLICATE_STOCK_ALERT_CONFLICT',
+  'DUPLICATE_DRAWING_REVISION_CONFLICT',
+  'EXISTING_MATERIAL_DIFFERENT',
+  'ORDER_HISTORY_DIFFERENT',
+  'EXISTING_DRAWING_REVISION_DIFFERENT'
+]);
+const materialImportSessionApplicabilityIssueCodes = new Set([
+  'DUPLICATE_SCOPE_CONFLICT',
+  'UNKNOWN_PART_CODE',
+  'INVALID_CUSTOMER'
+]);
+const materialImportSessionTransformIssueCodes = new Set([
+  'DUPLICATE_TRANSFORM_CONFLICT',
+  'UNKNOWN_SOURCE_PART_CODE',
+  'UNKNOWN_TARGET_PART_CODE',
+  'INVALID_CUSTOMER',
+  'INVALID_DEFAULT_PROCESS_ROUTE'
+]);
 
 const adjustmentAttachmentPrefix = '/uploads/inventory-adjustments/';
 const allowedAdjustmentExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
@@ -401,8 +436,17 @@ export class InventoryService {
     return where;
   }
 
+  private isPhysicalInventoryBatchStatus(status?: string | null) {
+    return status === 'AVAILABLE' || status === 'RESERVED';
+  }
+
+  private inventoryBatchReservedQuantity(status: string | null | undefined, storedQuantity: number, activeReservationQuantity: number) {
+    // RESERVED 批次代表仍有实物但已不可作为新订单可用库存，展示时必须计入预占而不是已使用。
+    return status === 'RESERVED' ? storedQuantity : activeReservationQuantity;
+  }
+
   private async buildInventoryOutTransactionWhere(query: InventoryQueryDto) {
-    if (query.status === 'AVAILABLE') {
+    if (query.status && query.status !== 'USED') {
       return null;
     }
 
@@ -535,12 +579,45 @@ export class InventoryService {
     }
   }
 
+  private normalizeStockAlertQuantity(value: unknown) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+    const quantity = Number(value);
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      throw new BadRequestException('库存报警数量必须大于或等于 0');
+    }
+    return quantity;
+  }
+
   private materialMemoryMatchesKeyword(material: MaterialMemoryRow, keyword?: string) {
     const normalizedKeyword = normalizeSearchKeyword(keyword);
     if (!normalizedKeyword) {
       return true;
     }
     return pinyinSearchMatches([material.partCode, material.partName, material.unit, material.partSpecification], normalizedKeyword);
+  }
+
+  private normalizeStockAlertFilter(filter?: StockAlertFilter | string) {
+    if (filter === 'ENABLED' || filter === 'TRIGGERED' || filter === 'DISABLED') {
+      return filter;
+    }
+    return undefined;
+  }
+
+  private materialMatchesStockAlertFilter(row: StockAlertComparableRow, filter?: StockAlertFilter | string) {
+    const normalizedFilter = this.normalizeStockAlertFilter(filter);
+    if (!normalizedFilter) {
+      return true;
+    }
+    if (normalizedFilter === 'ENABLED') {
+      return row.stockAlertEnabled;
+    }
+    if (normalizedFilter === 'DISABLED') {
+      return !row.stockAlertEnabled;
+    }
+    const alertQuantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : Number(row.stockAlertQuantity);
+    return row.stockAlertEnabled && alertQuantity !== null && Number(row.availableQuantity ?? 0) <= alertQuantity;
   }
 
   async materials(query: MaterialQueryDto) {
@@ -556,18 +633,25 @@ export class InventoryService {
       where: { status },
       orderBy: [{ updatedAt: 'desc' }, { partCode: 'asc' }]
     });
-    const materials = materialRows.filter(
+    const stockAlertFilter = this.normalizeStockAlertFilter(query.stockAlert);
+    let materials = materialRows.filter(
       (material) =>
         this.materialMemoryMatchesKeyword(material, query.keyword) || historyByCode.has(material.partCode.trim().toLocaleLowerCase())
     );
-    const totalCount = materials.length;
-    const pageMaterials = withPage ? materials.slice(offset, offset + limit) : materials;
-    if (pageMaterials.length === 0) {
+    if (stockAlertFilter === 'ENABLED') {
+      materials = materials.filter((material) => material.stockAlertEnabled);
+    } else if (stockAlertFilter === 'DISABLED') {
+      materials = materials.filter((material) => !material.stockAlertEnabled);
+    }
+
+    const needsFullStockAlertCheck = stockAlertFilter === 'TRIGGERED';
+    const aggregationMaterials = needsFullStockAlertCheck ? materials : withPage ? materials.slice(offset, offset + limit) : materials;
+    if (aggregationMaterials.length === 0) {
       const emptyItems: never[] = [];
       return withPage
         ? {
             items: emptyItems,
-            totalCount,
+            totalCount: needsFullStockAlertCheck ? 0 : materials.length,
             limit,
             offset,
             hasMore: false
@@ -575,8 +659,8 @@ export class InventoryService {
         : emptyItems;
     }
 
-    const materialByCode = new Map(pageMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
-    const partCodeConditions = pageMaterials.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }));
+    const materialByCode = new Map(aggregationMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+    const partCodeConditions = aggregationMaterials.map((material) => ({ partCode: { equals: material.partCode, mode: 'insensitive' as const } }));
     const [batches, orderLines] = await Promise.all([
       this.prisma.inventoryBatch.findMany({
         where: {
@@ -624,7 +708,7 @@ export class InventoryService {
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
-      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const reservedQuantity = batch.sourceOrderId ? 0 : (reservedQuantityByBatchId.get(batch.id) ?? 0);
       const quantity = Math.max(decimalToNumber(batch.quantity) - reservedQuantity, 0);
       current.availableQuantity += quantity;
       if (batch.sourceOrderId) {
@@ -659,7 +743,11 @@ export class InventoryService {
       usageByCode.set(key, current);
     }
 
-    const items = pageMaterials.map((material) => this.serializeMaterialMemoryRow(material, quantityByCode, usageByCode));
+    const stockAlertFilteredItems = aggregationMaterials
+      .map((material) => this.serializeMaterialMemoryRow(material, quantityByCode, usageByCode))
+      .filter((item) => this.materialMatchesStockAlertFilter(item, query.stockAlert));
+    const totalCount = needsFullStockAlertCheck ? stockAlertFilteredItems.length : materials.length;
+    const items = needsFullStockAlertCheck && withPage ? stockAlertFilteredItems.slice(offset, offset + limit) : stockAlertFilteredItems;
     return withPage
       ? {
           items,
@@ -704,6 +792,8 @@ export class InventoryService {
       partName: material.partName,
       unit: material.unit,
       partSpecification: material.partSpecification,
+      stockAlertEnabled: material.stockAlertEnabled,
+      stockAlertQuantity: material.stockAlertQuantity === null || material.stockAlertQuantity === undefined ? null : decimalToNumber(material.stockAlertQuantity),
       status: material.status,
       ...quantity,
       orderLineUsageCount: usage.orderLineUsageCount,
@@ -719,6 +809,11 @@ export class InventoryService {
     const partCode = this.normalizeMaterialRequired(dto.partCode, '零件编码');
     const partName = this.normalizeMaterialRequired(dto.partName, '零件名称');
     const unit = this.normalizeMaterialRequired(dto.unit, '单位');
+    const stockAlertEnabled = Boolean(dto.stockAlertEnabled);
+    const stockAlertQuantity = this.normalizeStockAlertQuantity(dto.stockAlertQuantity);
+    if (stockAlertEnabled && stockAlertQuantity === null) {
+      throw new BadRequestException('启用库存报警时必须填写最小库存数量');
+    }
     await this.ensureMaterialCodeAvailable(partCode);
 
     // 零件基础库只维护搜索资料，不创建库存、订单或生产任务。
@@ -728,6 +823,8 @@ export class InventoryService {
         partName,
         unit,
         partSpecification: String(dto.partSpecification || '').trim() || null,
+        stockAlertEnabled,
+        stockAlertQuantity: stockAlertEnabled ? stockAlertQuantity : null,
         status: dto.status || 'ENABLED'
       }
     });
@@ -738,34 +835,41 @@ export class InventoryService {
     if (!existing) {
       throw new NotFoundException('零件基础资料不存在');
     }
+    if (dto.status !== undefined && dto.status !== existing.status) {
+      // 零件基础资料状态变更必须走 disableMaterial / restoreMaterial，避免普通编辑绕过推荐关系停用和恢复边界。
+      throw new BadRequestException('零件基础资料状态请使用专用启用/停用接口');
+    }
     const partCode = dto.partCode !== undefined ? this.normalizeMaterialRequired(dto.partCode, '零件编码') : existing.partCode;
     const partName = dto.partName !== undefined ? this.normalizeMaterialRequired(dto.partName, '零件名称') : existing.partName;
     const unit = dto.unit !== undefined ? this.normalizeMaterialRequired(dto.unit, '单位') : existing.unit;
+    const stockAlertEnabled = dto.stockAlertEnabled !== undefined ? dto.stockAlertEnabled : existing.stockAlertEnabled;
+    let stockAlertQuantity =
+      dto.stockAlertQuantity !== undefined
+        ? this.normalizeStockAlertQuantity(dto.stockAlertQuantity)
+        : existing.stockAlertQuantity === null
+          ? null
+          : decimalToNumber(existing.stockAlertQuantity);
+    if (!stockAlertEnabled) {
+      stockAlertQuantity = null;
+    }
+    if (stockAlertEnabled && stockAlertQuantity === null) {
+      throw new BadRequestException('启用库存报警时必须填写最小库存数量');
+    }
     if (partCode.toLocaleLowerCase() !== existing.partCode.toLocaleLowerCase()) {
       await this.ensureMaterialCodeAvailable(partCode, materialId);
     }
-    const status = dto.status || existing.status;
     const data = {
       partCode,
       partName,
       unit,
       partSpecification:
         dto.partSpecification !== undefined ? String(dto.partSpecification || '').trim() || null : existing.partSpecification,
-      status
+      stockAlertEnabled,
+      stockAlertQuantity
     };
-    if (status !== 'DISABLED') {
-      return this.prisma.material.update({
-        where: { id: materialId },
-        data
-      });
-    }
-    return this.prisma.$transaction(async (tx) => {
-      const row = await tx.material.update({
-        where: { id: materialId },
-        data
-      });
-      await this.disableMaterialRecommendationLinks(tx, materialId);
-      return row;
+    return this.prisma.material.update({
+      where: { id: materialId },
+      data
     });
   }
 
@@ -781,6 +885,18 @@ export class InventoryService {
       });
       await this.disableMaterialRecommendationLinks(tx, materialId);
       return row;
+    });
+  }
+
+  async restoreMaterial(materialId: string) {
+    const existing = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('零件基础资料不存在');
+    }
+    // 恢复零件搜索记忆只恢复 Material 后续可选状态，不自动恢复适用范围、BOM 行、默认图纸或来源加工关系。
+    return this.prisma.material.update({
+      where: { id: materialId },
+      data: { status: 'ENABLED' }
     });
   }
 
@@ -891,6 +1007,14 @@ export class InventoryService {
     };
   }
 
+  private requireDefaultDrawingChangedBy(value?: string | null) {
+    const changedBy = String(value || '').trim();
+    if (!changedBy) {
+      throw new BadRequestException('设置默认图纸必须填写操作人员');
+    }
+    return changedBy;
+  }
+
   async materialDrawingRevisions(materialId: string) {
     const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
     if (!material) {
@@ -912,6 +1036,7 @@ export class InventoryService {
     await this.ensureMaterialDrawingRevisionAvailable(materialId, data.drawingNo, data.drawingVersion);
 
     const row = await this.prisma.$transaction(async (tx) => {
+      const defaultChangedBy = data.isDefault ? this.requireDefaultDrawingChangedBy(data.defaultChangedBy) : null;
       if (data.isDefault) {
         // 默认图纸修改必须保留操作时间和人员；这里只维护基础资料，不覆盖历史订单图纸快照。
         await tx.materialDrawingRevision.updateMany({ where: { materialId, isDefault: true }, data: { isDefault: false } });
@@ -920,7 +1045,7 @@ export class InventoryService {
         data: {
           materialId,
           ...data,
-          defaultChangedBy: data.isDefault ? data.defaultChangedBy || '系统操作员' : null,
+          defaultChangedBy,
           defaultChangedAt: data.isDefault ? new Date() : null
         }
       });
@@ -933,14 +1058,19 @@ export class InventoryService {
     if (!existing) {
       throw new NotFoundException('图纸版本不存在');
     }
-    const data = this.resolveMaterialDrawingRevisionData(dto);
-    await this.ensureMaterialDrawingRevisionAvailable(existing.materialId, data.drawingNo, data.drawingVersion, existing.id);
-    if (data.status === 'DISABLED') {
-      await this.ensureMaterialDrawingRevisionCanBeDisabled(existing.id);
+    if (dto.status !== undefined && dto.status !== existing.status) {
+      // 图纸版本状态变更必须走 disableMaterialDrawingRevision / restoreMaterialDrawingRevision，避免编辑图纸时绕过默认图纸和历史快照边界。
+      throw new BadRequestException('图纸版本状态请使用专用启用/停用接口');
     }
+    const nextStatus = dto.status || existing.status;
+    const data = this.resolveMaterialDrawingRevisionData({ ...dto, status: nextStatus });
+    await this.ensureMaterialDrawingRevisionAvailable(existing.materialId, data.drawingNo, data.drawingVersion, existing.id);
     const row = await this.prisma.$transaction(async (tx) => {
       if (data.isDefault) {
         // 同一个零件只允许一个启用默认图纸，BOM 行可另外指定自己的默认生产图纸。
+        if (!existing.isDefault) {
+          this.requireDefaultDrawingChangedBy(data.defaultChangedBy);
+        }
         await tx.materialDrawingRevision.updateMany({
           where: { materialId: existing.materialId, isDefault: true, id: { not: existing.id } },
           data: { isDefault: false }
@@ -950,7 +1080,7 @@ export class InventoryService {
         where: { id: existing.id },
         data: {
           ...data,
-          defaultChangedBy: data.isDefault ? data.defaultChangedBy || existing.defaultChangedBy || '系统操作员' : null,
+          defaultChangedBy: data.isDefault ? data.defaultChangedBy || existing.defaultChangedBy : null,
           defaultChangedAt: data.isDefault && !existing.isDefault ? new Date() : data.isDefault ? existing.defaultChangedAt || new Date() : null
         }
       });
@@ -967,6 +1097,25 @@ export class InventoryService {
     const row = await this.prisma.materialDrawingRevision.update({
       where: { id: revisionId },
       data: { status: 'DISABLED', isDefault: false, defaultChangedBy: null, defaultChangedAt: null }
+    });
+    return this.serializeMaterialDrawingRevision(row);
+  }
+
+  async restoreMaterialDrawingRevision(revisionId: string) {
+    const existing = await this.prisma.materialDrawingRevision.findUnique({
+      where: { id: revisionId },
+      include: { material: { select: { id: true, status: true } } }
+    });
+    if (!existing) {
+      throw new NotFoundException('图纸版本不存在');
+    }
+    if (existing.material.status !== 'ENABLED') {
+      throw new BadRequestException('恢复图纸版本前，所属零件基础资料必须是启用状态');
+    }
+    // 恢复图纸版本只恢复后续可选状态，不自动设为默认图纸，也不覆盖历史订单图纸快照。
+    const row = await this.prisma.materialDrawingRevision.update({
+      where: { id: revisionId },
+      data: { status: 'ENABLED' }
     });
     return this.serializeMaterialDrawingRevision(row);
   }
@@ -1026,6 +1175,8 @@ export class InventoryService {
       { header: '图纸状态', key: 'drawingStatus', width: 14 },
       { header: '厚度', key: 'partThickness', width: 12 },
       { header: '项目型号', key: 'projectModel', width: 18 },
+      { header: '库存报警', key: 'stockAlertEnabled', width: 14 },
+      { header: '最小库存', key: 'stockAlertQuantity', width: 12 },
       { header: '备注', key: 'remark', width: 34 }
     ];
     worksheet.addRows([
@@ -1037,6 +1188,8 @@ export class InventoryService {
         drawingStatus: '旧图',
         partThickness: 1,
         projectModel: 'B型5P',
+        stockAlertEnabled: '启用',
+        stockAlertQuantity: 20,
         remark: '百胜样机款'
       },
       {
@@ -1047,6 +1200,7 @@ export class InventoryService {
         drawingStatus: '旧图',
         partThickness: 2,
         projectModel: 'B型5P',
+        stockAlertEnabled: '停用',
         remark: '组件主件，子件后续在机型零件包维护'
       },
       {
@@ -1057,6 +1211,8 @@ export class InventoryService {
         drawingStatus: '旧图',
         partThickness: 2,
         projectModel: '',
+        stockAlertEnabled: '启用',
+        stockAlertQuantity: 10,
         remark: '示例来源零件，可加工为客户特定零件'
       }
     ]);
@@ -1080,6 +1236,14 @@ export class InventoryService {
       showErrorMessage: true,
       errorTitle: '单位必填',
       error: '请选择或填写常用单位'
+    });
+    (worksheet as ExcelJS.Worksheet & { dataValidations: { add(address: string, validation: ExcelJS.DataValidation): void } }).dataValidations.add('K2:K2000', {
+      type: 'list',
+      allowBlank: true,
+      formulae: ['"启用,停用,是,否,ENABLED,DISABLED"'],
+      showErrorMessage: true,
+      errorTitle: '库存报警格式',
+      error: '库存报警只能填写启用、停用、是、否、ENABLED 或 DISABLED'
     });
 
     const scopeSheet = workbook.addWorksheet(materialApplicabilityImportSheetName, {
@@ -1184,6 +1348,12 @@ export class InventoryService {
     return this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions(query));
   }
 
+  private businessDateTimeText(value = new Date()) {
+    const stamp = businessDateTimeKey(value);
+    // 零件库导出文件里的生成时间按公司业务时区展示，避免 NAS / Docker 默认 UTC 造成现场核对时间偏差。
+    return stamp.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6');
+  }
+
   async buildMaterialImportIssueReport(sessionId: string): Promise<Uint8Array> {
     const preview = await this.buildMaterialImportSessionPreview(sessionId, { includeRows: false });
     const [materialRows, applicabilityRows, transformRows] = await Promise.all([
@@ -1246,7 +1416,7 @@ export class InventoryService {
       ['零件数', preview.summary.materialUpsertCount, '图纸版本', preview.summary.drawingRevisionUpsertCount || 0],
       ['适用范围', preview.summary.applicabilityUpsertCount || 0, '来源关系', preview.summary.transformRuleUpsertCount || 0],
       ['错误数', preview.summary.errorCount, '警告数', preview.summary.warningCount],
-      ['生成时间', new Date().toISOString(), '说明', '仅用于修正 Excel；提交前后端仍会重新校验']
+      ['生成时间', this.businessDateTimeText(), '说明', '仅用于修正 Excel；提交前后端仍会重新校验']
     ]);
     styleHeader(overviewSheet);
     styleBody(overviewSheet);
@@ -1294,6 +1464,8 @@ export class InventoryService {
       { header: '图纸状态', key: 'drawingStatus', width: 14 },
       { header: '厚度', key: 'partThickness', width: 10 },
       { header: '单位', key: 'unit', width: 10 },
+      { header: '库存报警', key: 'stockAlertEnabled', width: 12 },
+      { header: '最小库存', key: 'stockAlertQuantity', width: 12 },
       { header: '状态', key: 'status', width: 12 },
       { header: '严重程度', key: 'severity', width: 12 },
       { header: '问题代码', key: 'code', width: 24 },
@@ -1329,6 +1501,10 @@ export class InventoryService {
           drawingStatus: row.drawingStatus,
           partThickness: row.partThickness === null ? null : decimalToNumber(row.partThickness),
           unit: row.unit,
+          stockAlertEnabled:
+            row.stockAlertEnabled === null || row.stockAlertEnabled === undefined ? '' : row.stockAlertEnabled ? '启用' : '停用',
+          stockAlertQuantity:
+            row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : decimalToNumber(row.stockAlertQuantity),
           remark: row.remark
         },
         this.materialImportIssueArray(row.issues)
@@ -1372,7 +1548,7 @@ export class InventoryService {
     if (issueSheet.rowCount === 1) {
       issueSheet.addRow({ severity: '通过', message: '当前零件库导入预览没有错误或警告' });
     }
-    issueSheet.autoFilter = { from: 'A1', to: 'V1' };
+    issueSheet.autoFilter = { from: 'A1', to: 'X1' };
     styleBody(issueSheet);
 
     const buffer = await workbook.xlsx.writeBuffer();
@@ -1415,8 +1591,29 @@ export class InventoryService {
     }
     await this.enrichMaterialImportWorkbookRows(parsed);
 
+    let createdFile: { id: string; acceptedRowCount: number; duplicateRowCount: number } | null = null;
     try {
-      const createdFile = await this.prisma.$transaction(async (tx) => {
+      createdFile = await runSerializableTransaction(
+        this.prisma,
+        async (tx) => {
+        const freshSession = await tx.materialImportSession.findUnique({
+          where: { id: sessionId },
+          select: { status: true }
+        });
+        if (!freshSession) {
+          throw new NotFoundException('零件导入会话不存在');
+        }
+        if (freshSession.status !== 'DRAFT') {
+          throw new BadRequestException('已提交或已放弃的零件导入会话不能继续上传');
+        }
+        const freshDuplicatedFile = await tx.materialImportFile.findUnique({
+          where: { sessionId_fileHash: { sessionId, fileHash } },
+          select: { id: true, fileName: true }
+        });
+        if (freshDuplicatedFile) {
+          throw new BadRequestException(`当前会话已上传过相同文件：${freshDuplicatedFile.fileName}`);
+        }
+
         const importFile = await tx.materialImportFile.create({
           data: {
             sessionId,
@@ -1427,7 +1624,10 @@ export class InventoryService {
             rowCount: parsedRowCount,
             materialRowCount: parsed.rows.length,
             scopeRowCount: parsed.applicabilityRows.length,
-            transformRowCount: parsed.transformRows.length
+            transformRowCount: parsed.transformRows.length,
+            // 文件记录先满足数据库计数约束，实际重复行数在写入预览行后立即回填。
+            acceptedRowCount: parsedRowCount,
+            duplicateRowCount: 0
           }
         });
         const createRowsResult = parsed.rows.length
@@ -1447,6 +1647,8 @@ export class InventoryService {
                 drawingStatus: row.drawingStatus,
                 partThickness: row.partThickness,
                 projectModel: row.projectModel,
+                stockAlertEnabled: row.stockAlertEnabled,
+                stockAlertQuantity: row.stockAlertQuantity,
                 remark: row.remark,
                 raw: row.raw,
                 issues: row.issues,
@@ -1511,7 +1713,10 @@ export class InventoryService {
             duplicateRowCount: parsedRowCount - acceptedRowCount
           }
         });
-      });
+        },
+        '零件库导入会话正在被其他操作修改，请刷新后重新上传'
+      );
+      await this.refreshMaterialImportSessionIssues(sessionId);
 
       return {
         ...(await this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions())),
@@ -1524,12 +1729,16 @@ export class InventoryService {
         }
       };
     } catch (error) {
+      if (createdFile?.id) {
+        await this.prisma.materialImportFile.delete({ where: { id: createdFile.id } }).catch(() => undefined);
+      }
       await this.removeMaterialImportStoredFile(file.filename);
       throw error;
     }
   }
 
   async commitMaterialImportSession(sessionId: string, dto: CommitMaterialImportSessionDto) {
+    await this.refreshMaterialImportSessionIssues(sessionId);
     const preview = await this.buildMaterialImportSessionPreview(sessionId, { includeRows: false });
     if (preview.status !== 'DRAFT') {
       throw new BadRequestException('只有草稿导入会话可以提交');
@@ -1544,28 +1753,43 @@ export class InventoryService {
       throw new BadRequestException('导入存在错误，请先修正 Excel 后重新上传');
     }
 
-    const rows = await this.prisma.materialImportRow.findMany({
-      where: { sessionId, errorCount: 0 },
-      orderBy: [{ partCode: 'asc' }, { createdAt: 'asc' }]
-    });
-    const [applicabilityRows, transformRows] = await Promise.all([
-      this.prisma.materialApplicabilityImportRow.findMany({
+    const result = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+      const freshPreview = await this.buildMaterialImportPreviewTokenSnapshot(sessionId, tx);
+      if (freshPreview.status !== 'DRAFT') {
+        throw new BadRequestException('只有草稿导入会话可以提交');
+      }
+      if (freshPreview.previewToken !== dto.previewToken) {
+        throw new BadRequestException('导入预览已变化，请刷新预览后再提交');
+      }
+      if (freshPreview.rowCount === 0) {
+        throw new BadRequestException('没有可提交的零件导入行');
+      }
+      if (freshPreview.errorCount > 0) {
+        throw new BadRequestException('导入存在错误，请先修正 Excel 后重新上传');
+      }
+
+      const rows = await tx.materialImportRow.findMany({
         where: { sessionId, errorCount: 0 },
         orderBy: [{ partCode: 'asc' }, { createdAt: 'asc' }]
-      }),
-      this.prisma.materialTransformImportRow.findMany({
-        where: { sessionId, errorCount: 0 },
-        orderBy: [{ targetPartCode: 'asc' }, { createdAt: 'asc' }]
-      })
-    ]);
-    const materialRows = this.uniqueMaterialImportRows(rows);
-    const partCodes = [
-      ...materialRows.map((row) => row.partCode),
-      ...applicabilityRows.map((row) => row.partCode),
-      ...transformRows.flatMap((row) => [row.sourcePartCode, row.targetPartCode])
-    ];
-
-    const result = await this.prisma.$transaction(async (tx) => {
+      });
+      const [applicabilityRows, transformRows] = await Promise.all([
+        tx.materialApplicabilityImportRow.findMany({
+          where: { sessionId, errorCount: 0 },
+          orderBy: [{ partCode: 'asc' }, { createdAt: 'asc' }]
+        }),
+        tx.materialTransformImportRow.findMany({
+          where: { sessionId, errorCount: 0 },
+          orderBy: [{ targetPartCode: 'asc' }, { createdAt: 'asc' }]
+        })
+      ]);
+      const materialRows = this.uniqueMaterialImportRows(rows);
+      const partCodes = [
+        ...materialRows.map((row) => row.partCode),
+        ...applicabilityRows.map((row) => row.partCode),
+        ...transformRows.flatMap((row) => [row.sourcePartCode, row.targetPartCode])
+      ];
       const existingMaterials = await this.findExistingMaterialsByPartCodes(partCodes, tx);
       const existingByCode = new Map(existingMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
       const customerLookup = await this.findMaterialImportCustomers([...applicabilityRows, ...transformRows], tx);
@@ -1579,6 +1803,8 @@ export class InventoryService {
       for (const row of materialRows) {
         const key = row.partCode.trim().toLocaleLowerCase();
         const existing = existingByCode.get(key);
+        // 库存报警导入只写 Material 基础资料提醒，不创建订单、生产任务或库存流水。
+        const stockAlertData = this.materialImportStockAlertData(row);
         if (existing) {
           await tx.material.update({
             where: { id: existing.id },
@@ -1587,7 +1813,8 @@ export class InventoryService {
               partName: row.partName,
               unit: row.unit,
               partSpecification: row.partSpecification || null,
-              status: 'ENABLED'
+              status: 'ENABLED',
+              ...stockAlertData
             }
           });
           updatedCount += 1;
@@ -1598,7 +1825,8 @@ export class InventoryService {
               partName: row.partName,
               unit: row.unit,
               partSpecification: row.partSpecification || null,
-              status: 'ENABLED'
+              status: 'ENABLED',
+              ...stockAlertData
             }
           });
           existingByCode.set(key, created);
@@ -1765,7 +1993,9 @@ export class InventoryService {
       });
 
       return { createdCount, updatedCount, drawingRevisionUpsertCount, applicabilityUpsertCount, transformRuleUpsertCount, committedMaterialCodes };
-    });
+      },
+      '零件库导入会话正在被其他操作修改，请刷新预览后重新提交'
+    );
 
     return {
       sessionId,
@@ -1775,39 +2005,58 @@ export class InventoryService {
   }
 
   async deleteMaterialImportFile(sessionId: string, fileId: string) {
-    const session = await this.prisma.materialImportSession.findUnique({ where: { id: sessionId } });
-    if (!session) {
-      throw new NotFoundException('零件导入会话不存在');
-    }
-    if (session.status !== 'DRAFT') {
-      throw new BadRequestException('已提交或已放弃的零件导入会话不能删除文件');
-    }
-    const importFile = await this.prisma.materialImportFile.findFirst({ where: { id: fileId, sessionId } });
-    if (!importFile) {
-      throw new NotFoundException('零件导入文件不存在');
-    }
-    await this.prisma.materialImportFile.delete({ where: { id: importFile.id } });
-    await this.removeMaterialImportStoredFile(importFile.storedFileName);
+    const deletedFile = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const session = await tx.materialImportSession.findUnique({ where: { id: sessionId }, select: { status: true } });
+        if (!session) {
+          throw new NotFoundException('零件导入会话不存在');
+        }
+        if (session.status !== 'DRAFT') {
+          throw new BadRequestException('已提交或已放弃的零件导入会话不能删除文件');
+        }
+        const importFile = await tx.materialImportFile.findFirst({
+          where: { id: fileId, sessionId },
+          select: { id: true, storedFileName: true }
+        });
+        if (!importFile) {
+          throw new NotFoundException('零件导入文件不存在');
+        }
+        await tx.materialImportFile.delete({ where: { id: importFile.id } });
+        return importFile;
+      },
+      '零件库导入会话正在被其他操作修改，请刷新后重新删除文件'
+    );
+    await this.removeMaterialImportStoredFile(deletedFile.storedFileName);
+    await this.refreshMaterialImportSessionIssues(sessionId);
     return this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions());
   }
 
   async discardMaterialImportSession(sessionId: string) {
-    const session = await this.prisma.materialImportSession.findUnique({
-      where: { id: sessionId },
-      include: { files: true }
-    });
-    if (!session) {
-      throw new NotFoundException('零件导入会话不存在');
-    }
-    if (session.status === 'COMMITTED') {
-      throw new BadRequestException('已提交的零件导入会话不能放弃');
-    }
-    await this.prisma.materialImportSession.delete({ where: { id: sessionId } });
-    await Promise.all(session.files.map((file) => this.removeMaterialImportStoredFile(file.storedFileName)));
+    const discardedFileNames = await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const session = await tx.materialImportSession.findUnique({
+          where: { id: sessionId },
+          include: { files: { select: { storedFileName: true } } }
+        });
+        if (!session) {
+          throw new NotFoundException('零件导入会话不存在');
+        }
+        if (session.status === 'COMMITTED') {
+          throw new BadRequestException('已提交的零件导入会话不能放弃');
+        }
+        const storedFileNames = session.files.map((file) => file.storedFileName);
+        await tx.materialImportSession.delete({ where: { id: sessionId } });
+        return storedFileNames;
+      },
+      '零件库导入会话正在被其他操作修改，请刷新后重新放弃'
+    );
+    await Promise.all(discardedFileNames.map((storedFileName) => this.removeMaterialImportStoredFile(storedFileName)));
     return {
       sessionId,
       discarded: true,
-      deletedFileCount: session.files.length
+      deletedFileCount: discardedFileNames.length
     };
   }
 
@@ -1880,12 +2129,16 @@ export class InventoryService {
   async updateMaterialApplicability(applicabilityId: string, dto: SaveMaterialApplicabilityDto) {
     const existing = await this.prisma.materialApplicability.findUnique({
       where: { id: applicabilityId },
-      select: { id: true, materialId: true }
+      select: { id: true, materialId: true, status: true }
     });
     if (!existing) {
       throw new NotFoundException('零件适用范围不存在');
     }
-    const scope = await this.resolveMaterialApplicabilityScope(dto);
+    if (dto.status !== undefined && dto.status !== existing.status) {
+      // 零件适用范围状态变更必须走 disableMaterialApplicability / restoreMaterialApplicability，避免普通编辑绕过客户和机型推荐边界。
+      throw new BadRequestException('零件适用范围状态请使用专用启用/停用接口');
+    }
+    const scope = await this.resolveMaterialApplicabilityScope({ ...dto, status: dto.status || existing.status });
     const duplicate = await this.prisma.materialApplicability.findUnique({
       where: {
         materialId_customerScopeKey_projectModelScopeKey: {
@@ -1915,6 +2168,28 @@ export class InventoryService {
     const row = await this.prisma.materialApplicability.update({
       where: { id: applicabilityId },
       data: { status: 'DISABLED' },
+      include: { customer: { select: { id: true, customerName: true, customerCode: true } } }
+    });
+    return this.serializeMaterialApplicability(row);
+  }
+
+  async restoreMaterialApplicability(applicabilityId: string) {
+    const existing = await this.prisma.materialApplicability.findUnique({
+      where: { id: applicabilityId },
+      include: {
+        material: { select: { id: true, status: true } }
+      }
+    });
+    if (!existing) {
+      throw new NotFoundException('零件适用范围不存在');
+    }
+    if (existing.material.status !== 'ENABLED') {
+      throw new BadRequestException('恢复适用范围前，所属零件基础资料必须是启用状态');
+    }
+    // 恢复适用范围只恢复后续推荐入口，不重写客户范围、机型范围，也不生成订单、库存或生产任务。
+    const row = await this.prisma.materialApplicability.update({
+      where: { id: applicabilityId },
+      data: { status: 'ENABLED' },
       include: { customer: { select: { id: true, customerName: true, customerCode: true } } }
     });
     return this.serializeMaterialApplicability(row);
@@ -2104,7 +2379,7 @@ export class InventoryService {
         projectModelScopeKey
       }
     });
-    return (maxCommon._max.commonSortOrder || 0) + 1;
+    return (maxCommon._max.commonSortOrder ?? 0) + 1;
   }
 
   private async modelBomCommonSaveData(args: {
@@ -2414,13 +2689,38 @@ export class InventoryService {
     if (!bom.sourceBomId) {
       throw new BadRequestException('只有复制自来源 BOM 的客户 BOM 才需要差异核对');
     }
-    if (dto.sourceBomId.trim() !== bom.sourceBomId) {
+    const sourceBomId = dto.sourceBomId?.trim() || '';
+    if (sourceBomId !== bom.sourceBomId) {
       throw new BadRequestException('差异核对来源 BOM 与当前客户 BOM 的复制来源不一致');
     }
     const reviewKey = dto.reviewKey.trim();
     const diffFingerprint = dto.diffFingerprint.trim();
     if (!reviewKey || !diffFingerprint) {
       throw new BadRequestException('差异核对记录缺少 reviewKey 或 diffFingerprint');
+    }
+    if (!reviewKey.startsWith(`${bom.id}|${bom.sourceBomId}|`)) {
+      throw new BadRequestException('差异核对记录 reviewKey 与当前客户 BOM 或来源 BOM 不一致');
+    }
+    const issueKind = dto.issueKind.trim();
+    if (!['MISSING_IN_CUSTOMER', 'CHANGED', 'CUSTOMER_EXTRA'].includes(issueKind)) {
+      throw new BadRequestException('差异核对类型无效');
+    }
+    const sourceLineId = dto.sourceLineId?.trim() || null;
+    const targetLineId = dto.targetLineId?.trim() || null;
+    if (
+      (issueKind === 'MISSING_IN_CUSTOMER' && (!sourceLineId || targetLineId)) ||
+      (issueKind === 'CHANGED' && (!sourceLineId || !targetLineId)) ||
+      (issueKind === 'CUSTOMER_EXTRA' && (sourceLineId || !targetLineId))
+    ) {
+      throw new BadRequestException('差异核对行引用与差异类型不一致');
+    }
+    const issueTitle = dto.issueTitle.trim();
+    if (!issueTitle) {
+      throw new BadRequestException('差异核对标题不能为空');
+    }
+    const reviewedBy = dto.reviewedBy?.trim() || '';
+    if (!reviewedBy) {
+      throw new BadRequestException('BOM 差异核对必须填写核对人员');
     }
     const fieldsJson = dto.fieldsJson ? (dto.fieldsJson as Prisma.InputJsonValue) : Prisma.JsonNull;
     // 只记录人工核对结果；不会自动覆盖来源 BOM 或客户 BOM 明细。
@@ -2430,27 +2730,27 @@ export class InventoryService {
         targetBomId: bom.id,
         sourceBomId: bom.sourceBomId,
         reviewKey,
-        issueKind: dto.issueKind.trim(),
-        sourceLineId: dto.sourceLineId?.trim() || null,
-        targetLineId: dto.targetLineId?.trim() || null,
-        issueTitle: dto.issueTitle.trim(),
+        issueKind,
+        sourceLineId,
+        targetLineId,
+        issueTitle,
         issueDetail: dto.issueDetail?.trim() || null,
         diffFingerprint,
         fieldsJson,
-        reviewedBy: dto.reviewedBy?.trim() || null,
+        reviewedBy,
         reviewRemark: dto.reviewRemark?.trim() || null,
         status: 'ENABLED',
         reviewedAt: new Date()
       },
       update: {
-        issueKind: dto.issueKind.trim(),
-        sourceLineId: dto.sourceLineId?.trim() || null,
-        targetLineId: dto.targetLineId?.trim() || null,
-        issueTitle: dto.issueTitle.trim(),
+        issueKind,
+        sourceLineId,
+        targetLineId,
+        issueTitle,
         issueDetail: dto.issueDetail?.trim() || null,
         diffFingerprint,
         fieldsJson,
-        reviewedBy: dto.reviewedBy?.trim() || null,
+        reviewedBy,
         reviewRemark: dto.reviewRemark?.trim() || null,
         status: 'ENABLED',
         reviewedAt: new Date()
@@ -2619,7 +2919,7 @@ export class InventoryService {
                 projectModelScopeKey
               }
             })
-          )._max.commonSortOrder || 0
+          )._max.commonSortOrder ?? 0
         ) + 1
       : null;
 
@@ -2848,7 +3148,7 @@ export class InventoryService {
             projectModelScopeKey: firstRow.projectModelScopeKey
           }
         });
-        let nextSortOrder = maxCommon._max.commonSortOrder || 0;
+        let nextSortOrder = maxCommon._max.commonSortOrder ?? 0;
         for (const row of groupRows) {
           const commonSortOrder = row.isCommon && row.commonSortOrder ? row.commonSortOrder : ++nextSortOrder;
           await tx.modelBom.update({
@@ -2924,58 +3224,71 @@ export class InventoryService {
   }
 
   async deleteModelBom(bomId: string) {
-    const existing = await this.prisma.modelBom.findUnique({
-      where: { id: bomId },
-      select: {
-        id: true,
-        bomName: true,
-        lines: { select: { id: true } },
-        customerScopes: { select: { id: true } },
-        diffReviewsAsSource: { select: { id: true } },
-        diffReviewsAsTarget: { select: { id: true } }
-      }
-    });
-    if (!existing) {
-      throw new NotFoundException('机型零件包不存在');
-    }
-    const copiedCustomerBoms = await this.prisma.modelBom.findMany({
-      where: { sourceBomId: bomId },
-      select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true },
-      orderBy: [{ updatedAt: 'desc' }]
-    });
-    if (copiedCustomerBoms.length > 0) {
-      const previewRows: string[] = [];
-      for (const bom of copiedCustomerBoms) {
-        if (previewRows.length >= 3) {
-          break;
+    return runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const existing = await tx.modelBom.findUnique({
+          where: { id: bomId },
+          select: {
+            id: true,
+            bomName: true,
+            status: true,
+            lines: { select: { id: true } },
+            customerScopes: { select: { id: true } },
+            diffReviewsAsSource: { select: { id: true } },
+            diffReviewsAsTarget: { select: { id: true } }
+          }
+        });
+        if (!existing) {
+          throw new NotFoundException('机型零件包不存在');
         }
-        previewRows.push(`${bom.bomName}${bom.customerNameSnapshot ? ` / ${bom.customerNameSnapshot}` : ''}${bom.projectModel ? ` / ${bom.projectModel}` : ''}`);
-      }
-      const preview = previewRows.join('、');
-      const remaining = copiedCustomerBoms.length > 3 ? ` 等 ${copiedCustomerBoms.length} 个客户 BOM` : '';
-      throw new BadRequestException(
-        `该 BOM 已被${copiedCustomerBoms.length} 个客户 BOM 作为来源引用：${preview}${remaining}。请先确认并删除这些客户 BOM，或改为停用来源 BOM；永久删除不会自动覆盖客户 BOM。`
-      );
-    }
+        if (existing.status !== 'DISABLED') {
+          throw new BadRequestException('只有已停用的无效空 BOM 才能永久删除；正常暂不用的 BOM 请先停用，保留历史推荐和维护记录');
+        }
+        if (existing.lines.length > 0) {
+          throw new BadRequestException(`该 BOM 仍有 ${existing.lines.length} 行明细，只能停用，不能物理删除；BOM 行删除必须软停用以保留历史维护记录`);
+        }
+        if (existing.customerScopes.length > 0) {
+          throw new BadRequestException(`该 BOM 仍有 ${existing.customerScopes.length} 个适用客户范围，只能停用，不能物理删除`);
+        }
+        const diffReviewCount = existing.diffReviewsAsSource.length + existing.diffReviewsAsTarget.length;
+        if (diffReviewCount > 0) {
+          throw new BadRequestException(`该 BOM 仍有 ${diffReviewCount} 条差异核对记录，只能停用，不能物理删除`);
+        }
+        const copiedCustomerBoms = await tx.modelBom.findMany({
+          where: { sourceBomId: bomId },
+          select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true },
+          orderBy: [{ updatedAt: 'desc' }]
+        });
+        if (copiedCustomerBoms.length > 0) {
+          const previewRows: string[] = [];
+          for (const bom of copiedCustomerBoms) {
+            if (previewRows.length >= 3) {
+              break;
+            }
+            previewRows.push(`${bom.bomName}${bom.customerNameSnapshot ? ` / ${bom.customerNameSnapshot}` : ''}${bom.projectModel ? ` / ${bom.projectModel}` : ''}`);
+          }
+          const preview = previewRows.join('、');
+          const remaining = copiedCustomerBoms.length > 3 ? ` 等 ${copiedCustomerBoms.length} 个客户 BOM` : '';
+          throw new BadRequestException(
+            `该 BOM 已被${copiedCustomerBoms.length} 个客户 BOM 作为来源引用：${preview}${remaining}。请先确认并删除这些客户 BOM，或改为停用来源 BOM；永久删除不会自动覆盖客户 BOM。`
+          );
+        }
 
-    await this.prisma.$transaction([
-      this.prisma.modelBomDiffReview.deleteMany({
-        where: { OR: [{ sourceBomId: bomId }, { targetBomId: bomId }] }
-      }),
-      this.prisma.modelBomCustomerScope.deleteMany({ where: { bomId } }),
-      // 无效 BOM 物理删除只清理 BOM 配置、适用客户、包内明细和差异核对记录，不改订单、生产或库存数据。
-      this.prisma.modelBomLine.deleteMany({ where: { bomId } }),
-      this.prisma.modelBom.delete({ where: { id: bomId } })
-    ]);
+        // 永久删除必须在事务内重新确认 BOM 仍为空；不能在永久删除时清理 BOM 行、适用范围或差异记录。
+        await tx.modelBom.delete({ where: { id: bomId } });
 
-    return {
-      id: existing.id,
-      bomName: existing.bomName,
-      lineCount: existing.lines.length,
-      customerScopeCount: existing.customerScopes.length,
-      diffReviewCount: existing.diffReviewsAsSource.length + existing.diffReviewsAsTarget.length,
-      deleted: true
-    };
+        return {
+          id: existing.id,
+          bomName: existing.bomName,
+          lineCount: existing.lines.length,
+          customerScopeCount: existing.customerScopes.length,
+          diffReviewCount,
+          deleted: true
+        };
+      },
+      'BOM 永久删除正在被其他业务写入，请刷新后重新删除'
+    );
   }
 
   private handleModelBomScopeUniqueError(error: unknown, message: string): never {
@@ -3192,7 +3505,7 @@ export class InventoryService {
     if (!material) {
       throw new BadRequestException('零件基础资料不存在');
     }
-    const defaultQuantity = Number(dto.defaultQuantity || 0);
+    const defaultQuantity = Number(dto.defaultQuantity ?? 0);
     if (defaultQuantity <= 0) {
       throw new BadRequestException('默认数量必须大于 0');
     }
@@ -3207,7 +3520,7 @@ export class InventoryService {
       ((await this.prisma.modelBomLine.aggregate({
         where: { bomId },
         _max: { sortOrder: true }
-      }))._max.sortOrder || 0) + 10;
+      }))._max.sortOrder ?? 0) + 10;
     const data = {
       materialId: material.id,
       partCodeSnapshot: material.partCode,
@@ -3238,10 +3551,13 @@ export class InventoryService {
   async updateModelBomLine(lineId: string, dto: SaveModelBomLineDto) {
     const existing = await this.prisma.modelBomLine.findUnique({
       where: { id: lineId },
-      select: { id: true, bomId: true, lineType: true, componentNo: true, partThicknessSnapshot: true, bom: { select: { customerId: true, projectModel: true } } }
+      select: { id: true, bomId: true, lineType: true, componentNo: true, partThicknessSnapshot: true, bom: { select: { customerId: true, projectModel: true, status: true } } }
     });
     if (!existing) {
       throw new NotFoundException('机型零件包明细不存在');
+    }
+    if (existing.bom.status === 'DISABLED') {
+      throw new BadRequestException('停用零件包不能编辑 BOM 明细，请先恢复启用后再维护');
     }
     const material = await this.prisma.material.findUnique({
       where: { id: dto.materialId },
@@ -3250,7 +3566,7 @@ export class InventoryService {
     if (!material) {
       throw new BadRequestException('零件基础资料不存在');
     }
-    const defaultQuantity = Number(dto.defaultQuantity || 0);
+    const defaultQuantity = Number(dto.defaultQuantity ?? 0);
     if (defaultQuantity <= 0) {
       throw new BadRequestException('默认数量必须大于 0');
     }
@@ -3274,6 +3590,11 @@ export class InventoryService {
     const shouldDisableChildren = structure.lineType === 'COMPONENT' && nextComponentNo && (dto.status || 'ENABLED') === 'DISABLED';
 
     const row = await this.prisma.$transaction(async (tx) => {
+      const currentBom = await tx.modelBom.findUnique({ where: { id: existing.bomId }, select: { status: true } });
+      if (!currentBom || currentBom.status === 'DISABLED') {
+        // BOM 明细编辑必须在事务内复核表头状态，避免停用后仍被并发请求改写明细。
+        throw new BadRequestException('停用零件包不能编辑 BOM 明细，请先恢复启用后再维护');
+      }
       const updated = await tx.modelBomLine.update({
         where: { id: existing.id },
         data: {
@@ -3346,27 +3667,34 @@ export class InventoryService {
       };
     });
 
-    const bom = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } });
-    if (!bom) {
-      throw new NotFoundException('机型零件包不存在');
-    }
-    const lines = await this.prisma.modelBomLine.findMany({
-      where: { id: { in: normalizedItems.map((item) => item.lineId) } },
-      select: { id: true, bomId: true }
-    });
-    if (lines.length !== normalizedItems.length || lines.some((line) => line.bomId !== bomId)) {
-      throw new BadRequestException('BOM 排序明细必须全部属于当前机型零件包');
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      // BOM 拖拽排序必须事务化保存，避免多行逐个更新造成部分成功、部分失败。
-      for (const item of normalizedItems) {
-        await tx.modelBomLine.update({
-          where: { id: item.lineId },
-          data: { sortOrder: item.sortOrder }
+    await runSerializableTransaction(
+      this.prisma,
+      async (tx) => {
+        const bom = await tx.modelBom.findUnique({ where: { id: bomId }, select: { id: true, status: true } });
+        if (!bom) {
+          throw new NotFoundException('机型零件包不存在');
+        }
+        if (bom.status === 'DISABLED') {
+          throw new BadRequestException('停用零件包不能拖拽排序 BOM 明细，请先恢复启用后再维护');
+        }
+        const lines = await tx.modelBomLine.findMany({
+          where: { id: { in: normalizedItems.map((item) => item.lineId) } },
+          select: { id: true, bomId: true }
         });
-      }
-    });
+        if (lines.length !== normalizedItems.length || lines.some((line) => line.bomId !== bomId)) {
+          throw new BadRequestException('BOM 排序明细必须全部属于当前机型零件包');
+        }
+
+        // BOM 拖拽排序必须事务化保存，并在同一事务内复核表头状态，避免停用后仍被并发请求改写排序。
+        for (const item of normalizedItems) {
+          await tx.modelBomLine.update({
+            where: { id: item.lineId },
+            data: { sortOrder: item.sortOrder }
+          });
+        }
+      },
+      'BOM 明细排序正在被其他业务写入，请刷新后重新排序'
+    );
     return this.modelBom(bomId);
   }
 
@@ -3595,11 +3923,15 @@ export class InventoryService {
   }
 
   async updateMaterialTransformRule(ruleId: string, dto: SaveMaterialTransformRuleDto) {
-    const existing = await this.prisma.materialTransformRule.findUnique({ where: { id: ruleId }, select: { id: true } });
+    const existing = await this.prisma.materialTransformRule.findUnique({ where: { id: ruleId }, select: { id: true, status: true } });
     if (!existing) {
       throw new NotFoundException('来源加工关系不存在');
     }
-    const data = await this.resolveMaterialTransformRuleData(dto);
+    if (dto.status !== undefined && dto.status !== existing.status) {
+      // 来源加工关系状态变更必须走 disableMaterialTransformRule / restoreMaterialTransformRule，避免普通编辑绕过库存来源核对边界。
+      throw new BadRequestException('来源加工关系状态请使用专用启用/停用接口');
+    }
+    const data = await this.resolveMaterialTransformRuleData({ ...dto, status: dto.status || existing.status });
     await this.ensureMaterialTransformRuleUnique(data, ruleId);
     const row = await this.prisma.materialTransformRule.update({
       where: { id: ruleId },
@@ -3622,6 +3954,34 @@ export class InventoryService {
     const row = await this.prisma.materialTransformRule.update({
       where: { id: ruleId },
       data: { status: 'DISABLED' },
+      include: {
+        customer: { select: { id: true, customerName: true, customerCode: true } },
+        sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
+        targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
+      }
+    });
+    const inventorySummary = await this.findTransformMaterialInventorySummary([row.sourceMaterial.partCode, row.targetMaterial.partCode]);
+    return this.serializeMaterialTransformRule(row, inventorySummary);
+  }
+
+  async restoreMaterialTransformRule(ruleId: string) {
+    const existing = await this.prisma.materialTransformRule.findUnique({
+      where: { id: ruleId },
+      include: {
+        sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
+        targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
+      }
+    });
+    if (!existing) {
+      throw new NotFoundException('来源加工关系不存在');
+    }
+    if (existing.sourceMaterial.status !== 'ENABLED' || existing.targetMaterial.status !== 'ENABLED') {
+      throw new BadRequestException('恢复来源加工关系前，来源零件和目标零件都必须是启用状态');
+    }
+    // 恢复启用只恢复后续建议展示，不重写客户范围、机型范围、工艺建议，也不改订单、生产任务或库存。
+    const row = await this.prisma.materialTransformRule.update({
+      where: { id: ruleId },
+      data: { status: 'ENABLED' },
       include: {
         customer: { select: { id: true, customerName: true, customerCode: true } },
         sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
@@ -3665,7 +4025,7 @@ export class InventoryService {
       const key = batch.partCode.trim().toLocaleLowerCase();
       const row = summary.get(key) || { availableQuantity: 0, batchCount: 0 };
       const physicalQuantity = decimalToNumber(batch.quantity);
-      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const reservedQuantity = batch.sourceOrderId ? 0 : (reservedQuantityByBatchId.get(batch.id) ?? 0);
       const availableQuantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
       if (availableQuantity <= 0) {
         continue;
@@ -4146,8 +4506,22 @@ export class InventoryService {
 
   private async findZeroInventoryMaterialRows(query: InventoryQueryDto) {
     const keyword = query.keyword?.trim();
-    if (!keyword || query.status === 'USED') {
+    if (query.status && query.status !== 'AVAILABLE') {
       return [];
+    }
+    if (!keyword) {
+      const stockAlertFilter = this.normalizeStockAlertFilter(query.stockAlert);
+      if (stockAlertFilter !== 'ENABLED' && stockAlertFilter !== 'TRIGGERED') {
+        return [];
+      }
+      // 库存报警筛选必须覆盖没有库存批次的零件；这里只生成 0 库存展示行，不创建库存批次、不追加库存流水。
+      return this.prisma.material.findMany({
+        where: {
+          status: 'ENABLED',
+          stockAlertEnabled: true
+        },
+        orderBy: [{ partCode: 'asc' }, { partName: 'asc' }]
+      });
     }
     // 关键字查到零件但没有库存批次时，也要返回 0 库存行，方便仓库确认“数据库有此零件、当前仓库无库存”。
     return this.findMaterialsByKeyword(keyword);
@@ -4206,6 +4580,35 @@ export class InventoryService {
       customerChangeStockQuantity: 0,
       warehouses: new Map()
     };
+  }
+
+  private async findMaterialStockAlertMap(partCodes: string[]) {
+    const normalizedPartCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
+    if (!normalizedPartCodes.length) {
+      return new Map<string, { materialId: string; stockAlertEnabled: boolean; stockAlertQuantity: number | null }>();
+    }
+    const materials = await this.prisma.material.findMany({
+      where: {
+        OR: normalizedPartCodes.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' as const } }))
+      },
+      select: {
+        id: true,
+        partCode: true,
+        stockAlertEnabled: true,
+        stockAlertQuantity: true
+      }
+    });
+    return new Map(
+      materials.map((material) => [
+        material.partCode.trim().toLocaleLowerCase(),
+        {
+          materialId: material.id,
+          stockAlertEnabled: material.stockAlertEnabled,
+          stockAlertQuantity:
+            material.stockAlertQuantity === null || material.stockAlertQuantity === undefined ? null : decimalToNumber(material.stockAlertQuantity)
+        }
+      ])
+    );
   }
 
   private activeReservationWhere(excludeOrderNo?: string, excludeOrderId?: string): Prisma.InventoryReservationWhereInput {
@@ -4319,32 +4722,36 @@ export class InventoryService {
       const row = summaryMap.get(key) ?? this.createSummaryAccumulator(batch);
 
       const quantity = decimalToNumber(batch.quantity);
+      const isPhysical = this.isPhysicalInventoryBatchStatus(batch.status) && quantity > 0;
       const isAvailable = batch.status === 'AVAILABLE' && quantity > 0;
-      const reservedQuantity = isAvailable && !batch.sourceOrderId
+      const activeReservationQuantity = isAvailable && !batch.sourceOrderId
         ? batch.reservations
             .filter((reservation) => this.stockReservationConsumesAvailability(reservation.order, currentOrder))
             .reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
         : 0;
+      const reservedQuantity = this.inventoryBatchReservedQuantity(batch.status, quantity, activeReservationQuantity);
       const availableQuantity = isAvailable ? Math.max(Math.round((quantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0) : 0;
       row.batchCount += 1;
       row.totalQuantity += quantity;
 
-      if (isAvailable) {
+      if (isPhysical) {
         row.physicalQuantity += quantity;
         row.reservedQuantity += reservedQuantity;
         row.availableQuantity += availableQuantity;
         row.warehouseIds.add(batch.warehouseId);
 
-        if (batch.sourceOrderId) {
-          row.orderInventoryQuantity += availableQuantity;
-        } else {
-          row.stockInventoryQuantity += availableQuantity;
-          if (batch.sourceKind === 'CANCELLED_ORDER') {
-            row.cancelledOrderStockQuantity += availableQuantity;
-          } else if (batch.sourceKind === 'CUSTOMER_CHANGE') {
-            row.customerChangeStockQuantity += availableQuantity;
+        if (isAvailable) {
+          if (batch.sourceOrderId) {
+            row.orderInventoryQuantity += availableQuantity;
           } else {
-            row.normalOrderStockQuantity += availableQuantity;
+            row.stockInventoryQuantity += availableQuantity;
+            if (batch.sourceKind === 'CANCELLED_ORDER') {
+              row.cancelledOrderStockQuantity += availableQuantity;
+            } else if (batch.sourceKind === 'CUSTOMER_CHANGE') {
+              row.customerChangeStockQuantity += availableQuantity;
+            } else {
+              row.normalOrderStockQuantity += availableQuantity;
+            }
           }
         }
       } else {
@@ -4361,9 +4768,11 @@ export class InventoryService {
           batchCount: 0
       };
       warehouseRow.batchCount += 1;
-      if (isAvailable) {
+      if (isPhysical) {
         warehouseRow.reservedQuantity += reservedQuantity;
-        warehouseRow.availableQuantity += availableQuantity;
+        if (isAvailable) {
+          warehouseRow.availableQuantity += availableQuantity;
+        }
       }
       row.warehouses.set(batch.warehouseId, warehouseRow);
       summaryMap.set(key, row);
@@ -4440,25 +4849,39 @@ export class InventoryService {
       summaryMap.set(key, row);
     }
 
-    return [...summaryMap.values()].map((row) => ({
-      // 按零件库存汇总只从 InventoryBatch 实时计算，不保存第二份汇总数量，避免库存账面不一致。
-      partCode: row.partCode,
-      partName: row.partName,
-      unit: row.unit,
-      batchCount: row.batchCount,
-      warehouseCount: row.warehouseIds.size,
-      physicalQuantity: row.physicalQuantity,
-      reservedQuantity: row.reservedQuantity,
-      availableQuantity: row.availableQuantity,
-      usedQuantity: row.usedQuantity,
-      totalQuantity: row.totalQuantity,
-      orderInventoryQuantity: row.orderInventoryQuantity,
-      stockInventoryQuantity: row.stockInventoryQuantity,
-      normalOrderStockQuantity: row.normalOrderStockQuantity,
-      cancelledOrderStockQuantity: row.cancelledOrderStockQuantity,
-      customerChangeStockQuantity: row.customerChangeStockQuantity,
-      warehouses: [...row.warehouses.values()].sort((a, b) => a.warehouseName.localeCompare(b.warehouseName, 'zh-Hans-CN'))
-    })).sort((a, b) => a.partCode.localeCompare(b.partCode, 'zh-Hans-CN'));
+    const summaryRows = [...summaryMap.values()];
+    const stockAlertByPartCode = await this.findMaterialStockAlertMap(summaryRows.map((row) => row.partCode));
+
+    return summaryRows.map((row) => {
+      const stockAlert = stockAlertByPartCode.get(row.partCode.trim().toLocaleLowerCase());
+      const stockAlertEnabled = Boolean(stockAlert?.stockAlertEnabled);
+      const stockAlertQuantity = stockAlert?.stockAlertQuantity ?? null;
+      return {
+        // 按零件库存汇总只从 InventoryBatch 实时计算，不保存第二份汇总数量，避免库存账面不一致。
+        materialId: stockAlert?.materialId,
+        partCode: row.partCode,
+        partName: row.partName,
+        unit: row.unit,
+        batchCount: row.batchCount,
+        warehouseCount: row.warehouseIds.size,
+        physicalQuantity: row.physicalQuantity,
+        reservedQuantity: row.reservedQuantity,
+        availableQuantity: row.availableQuantity,
+        usedQuantity: row.usedQuantity,
+        totalQuantity: row.totalQuantity,
+        orderInventoryQuantity: row.orderInventoryQuantity,
+        stockInventoryQuantity: row.stockInventoryQuantity,
+        normalOrderStockQuantity: row.normalOrderStockQuantity,
+        cancelledOrderStockQuantity: row.cancelledOrderStockQuantity,
+        customerChangeStockQuantity: row.customerChangeStockQuantity,
+        stockAlertEnabled,
+        stockAlertQuantity,
+        stockAlertTriggered: stockAlertEnabled && stockAlertQuantity !== null && row.availableQuantity <= stockAlertQuantity,
+        warehouses: [...row.warehouses.values()].sort((a, b) => a.warehouseName.localeCompare(b.warehouseName, 'zh-Hans-CN'))
+      };
+    })
+      .filter((row) => this.materialMatchesStockAlertFilter(row, query.stockAlert))
+      .sort((a, b) => a.partCode.localeCompare(b.partCode, 'zh-Hans-CN'));
   }
 
   async materialSuggestions(query: MaterialSuggestionQueryDto) {
@@ -4619,7 +5042,7 @@ export class InventoryService {
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
-      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const reservedQuantity = batch.sourceOrderId ? 0 : (reservedQuantityByBatchId.get(batch.id) ?? 0);
       const quantity = Math.max(decimalToNumber(batch.quantity) - reservedQuantity, 0);
       row.availableQuantity += quantity;
       if (batch.sourceOrderId) {
@@ -4677,11 +5100,11 @@ export class InventoryService {
         drawingStatus,
         partThickness,
         projectModel,
-        customerUsageCount: history?.customerUsageCount || 0,
-        historyUsageCount: history?.usageCount || 0,
+        customerUsageCount: history?.customerUsageCount ?? 0,
+        historyUsageCount: history?.usageCount ?? 0,
         hasCurrentCustomerHistory: Boolean(history?.hasQueryCustomerHistory),
-        identityVariantCount: history?.identityVariantCount || 0,
-        hasIdentityConflict: Boolean((history?.identityVariantCount || 0) > 1),
+        identityVariantCount: history?.identityVariantCount ?? 0,
+        hasIdentityConflict: Boolean((history?.identityVariantCount ?? 0) > 1),
         identityConflictFields: this.materialSuggestionIdentityConflictFields(history),
         lastCustomerCode: history?.lastCustomerCode,
         lastCustomerName: history?.lastCustomerName,
@@ -4764,7 +5187,7 @@ export class InventoryService {
         drawingVersion: line.drawingVersion,
         drawingDate: line.drawingDate,
         drawingStatus: line.drawingStatus,
-        partThickness: line.partThickness ? decimalToNumber(line.partThickness) : null,
+        partThickness: line.partThickness === null || line.partThickness === undefined ? null : decimalToNumber(line.partThickness),
         projectModel: line.projectModel,
         usageCount: 0,
         customerUsageCount: 0,
@@ -4917,7 +5340,7 @@ export class InventoryService {
     existing.drawingVersion = line.drawingVersion;
     existing.drawingDate = line.drawingDate;
     existing.drawingStatus = line.drawingStatus;
-    existing.partThickness = line.partThickness ? decimalToNumber(line.partThickness) : null;
+    existing.partThickness = line.partThickness === null || line.partThickness === undefined ? null : decimalToNumber(line.partThickness);
     existing.projectModel = line.projectModel;
   }
 
@@ -5102,7 +5525,7 @@ export class InventoryService {
     preferCustomerHistory: boolean,
     preferredProjectModel = ''
   ) {
-    const searchRankDiff = (right.searchMatchRank || 0) - (left.searchMatchRank || 0);
+    const searchRankDiff = (right.searchMatchRank ?? 0) - (left.searchMatchRank ?? 0);
     if (searchRankDiff !== 0) {
       return searchRankDiff;
     }
@@ -5115,7 +5538,7 @@ export class InventoryService {
         return lastCustomerOrderDateDiff;
       }
 
-      const customerUsageDiff = (right.customerUsageCount || 0) - (left.customerUsageCount || 0);
+      const customerUsageDiff = (right.customerUsageCount ?? 0) - (left.customerUsageCount ?? 0);
       if (customerUsageDiff !== 0) {
         return customerUsageDiff;
       }
@@ -5130,12 +5553,12 @@ export class InventoryService {
       }
     }
 
-    const historyUsageDiff = (right.historyUsageCount || 0) - (left.historyUsageCount || 0);
+    const historyUsageDiff = (right.historyUsageCount ?? 0) - (left.historyUsageCount ?? 0);
     if (historyUsageDiff !== 0) {
       return historyUsageDiff;
     }
 
-    const stockDiff = (right.availableQuantity || 0) - (left.availableQuantity || 0);
+    const stockDiff = (right.availableQuantity ?? 0) - (left.availableQuantity ?? 0);
     if (stockDiff !== 0) {
       return stockDiff;
     }
@@ -5250,6 +5673,11 @@ export class InventoryService {
       throw new BadRequestException('盘点后数量必须大于或等于 0');
     }
 
+    const targetStatus = dto.targetStatus;
+    if (targetStatus === 'SCRAPPED' && afterQuantity !== 0) {
+      throw new BadRequestException('报废或销毁清零后数量必须为 0');
+    }
+
     const countedBy = dto.countedBy?.trim();
     const signatureName = dto.signatureName?.trim();
     if (!countedBy) {
@@ -5341,7 +5769,10 @@ export class InventoryService {
         await tx.inventoryBatch.update({
           where: { id: batch.id },
           // 盘点为 0 的批次不再作为可用库存；如果后续重新盘点到正数，允许恢复为 AVAILABLE。
-          data: { quantity: afterQuantity, status: afterQuantity > 0 ? 'AVAILABLE' : 'USED' }
+          data: {
+            quantity: afterQuantity,
+            status: targetStatus === 'SCRAPPED' ? 'SCRAPPED' : afterQuantity > 0 ? 'AVAILABLE' : 'USED'
+          }
         });
 
         if (deltaQuantity !== 0) {
@@ -5492,7 +5923,7 @@ export class InventoryService {
       if (!this.stockReservationConsumesAvailability(row.order, currentOrder)) {
         continue;
       }
-      quantityByBatchId.set(row.batchId, (quantityByBatchId.get(row.batchId) || 0) + decimalToNumber(row.quantity));
+      quantityByBatchId.set(row.batchId, (quantityByBatchId.get(row.batchId) ?? 0) + decimalToNumber(row.quantity));
     }
     return quantityByBatchId;
   }
@@ -5517,9 +5948,12 @@ export class InventoryService {
         statusReason: reservation.statusReason,
         createdAt: reservation.createdAt
       }));
-    const reservedQuantity = reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
-    const physicalQuantity = batch.status === 'AVAILABLE' ? decimalToNumber(batch.quantity) : 0;
-    const quantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
+    const storedQuantity = decimalToNumber(batch.quantity);
+    const activeReservationQuantity = batch.sourceOrderId ? 0 : reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
+    const reservedQuantity = this.inventoryBatchReservedQuantity(batch.status, storedQuantity, activeReservationQuantity);
+    const physicalQuantity = this.isPhysicalInventoryBatchStatus(batch.status) ? storedQuantity : 0;
+    const quantity =
+      batch.status === 'AVAILABLE' ? Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0) : 0;
 
     return {
       id: batch.id,
@@ -5592,13 +6026,17 @@ export class InventoryService {
     });
 
     const sourceTaskMap = await this.findSourceTaskMap(rawBatches.map((batch) => batch.sourceProductionTaskNo));
+    const stockAlertPartCodes = this.normalizeStockAlertFilter(query.stockAlert)
+      ? new Set((await this.summary(query)).map((row) => row.partCode.trim().toLocaleLowerCase()))
+      : null;
     const batches = rawBatches.filter((batch) =>
-      this.inventoryBatchMatchesKeyword(batch, query.keyword, this.inventoryBatchSourceSearchValues(batch, sourceTaskMap))
+      this.inventoryBatchMatchesKeyword(batch, query.keyword, this.inventoryBatchSourceSearchValues(batch, sourceTaskMap)) &&
+        (!stockAlertPartCodes || stockAlertPartCodes.has(batch.partCode.trim().toLocaleLowerCase()))
     );
 
     return batches.map((batch) => {
       const storedQuantity = decimalToNumber(batch.quantity);
-      const physicalQuantity = batch.status === 'AVAILABLE' ? storedQuantity : 0;
+      const physicalQuantity = this.isPhysicalInventoryBatchStatus(batch.status) ? storedQuantity : 0;
       const reservations = (batch.reservations || [])
         .filter((reservation: any) => this.stockReservationConsumesAvailability(reservation.order, currentOrder))
         .map((reservation: any) => ({
@@ -5615,8 +6053,10 @@ export class InventoryService {
           statusReason: reservation.statusReason,
           createdAt: reservation.createdAt
         }));
-      const reservedQuantity = batch.sourceOrderId ? 0 : reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
-      const availableQuantity = Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0);
+      const activeReservationQuantity = batch.sourceOrderId ? 0 : reservations.reduce((sum: number, reservation: any) => sum + reservation.quantity, 0);
+      const reservedQuantity = this.inventoryBatchReservedQuantity(batch.status, storedQuantity, activeReservationQuantity);
+      const availableQuantity =
+        batch.status === 'AVAILABLE' ? Math.max(Math.round((physicalQuantity - reservedQuantity + Number.EPSILON) * 1000) / 1000, 0) : 0;
       const sourceTask = this.resolveInventorySourceTask(batch, sourceTaskMap);
       const sourceLine = this.resolveInventorySourceLine(batch, sourceTask);
       const sourceOrder = this.resolveInventorySourceOrder(batch, sourceTask);
@@ -5633,7 +6073,7 @@ export class InventoryService {
         parentComponentNo: sourceLine?.parentComponentNo || undefined,
         importSequence: sourceLine?.importSequence || undefined,
         // 批次列表的 quantity 保持账面当前剩余，盘点调整必须以它为准；availableQuantity 才是扣除预占后的可下单数量。
-        quantity: physicalQuantity,
+        quantity: storedQuantity,
         physicalQuantity,
         reservedQuantity,
         availableQuantity,
@@ -5771,37 +6211,24 @@ export class InventoryService {
         ])
       : [[], [], []];
     const errorCount =
-      Number(materialIssueAggregate._sum.errorCount || 0) +
-      Number(scopeIssueAggregate._sum.errorCount || 0) +
-      Number(transformIssueAggregate._sum.errorCount || 0);
+      Number(materialIssueAggregate._sum.errorCount ?? 0) +
+      Number(scopeIssueAggregate._sum.errorCount ?? 0) +
+      Number(transformIssueAggregate._sum.errorCount ?? 0);
     const warningCount =
-      Number(materialIssueAggregate._sum.warningCount || 0) +
-      Number(scopeIssueAggregate._sum.warningCount || 0) +
-      Number(transformIssueAggregate._sum.warningCount || 0);
-    const duplicateRowCount = Number(duplicateAggregate._sum.duplicateRowCount || 0);
-    const previewToken = createHash('sha256')
-      .update(
-        JSON.stringify({
-          sessionId,
-          status: session.status,
-          updatedAt: session.updatedAt.toISOString(),
-          rowCount,
-          errorCount,
-          warningCount,
-          duplicateRowCount,
-          files: session.files.map((file) => [
-            file.id,
-            file.fileHash,
-            file.rowCount,
-            file.materialRowCount,
-            file.scopeRowCount,
-            file.transformRowCount,
-            file.acceptedRowCount,
-            file.duplicateRowCount
-          ])
-        })
-      )
-      .digest('hex');
+      Number(materialIssueAggregate._sum.warningCount ?? 0) +
+      Number(scopeIssueAggregate._sum.warningCount ?? 0) +
+      Number(transformIssueAggregate._sum.warningCount ?? 0);
+    const duplicateRowCount = Number(duplicateAggregate._sum.duplicateRowCount ?? 0);
+    const previewToken = this.materialImportPreviewToken({
+      sessionId,
+      status: session.status,
+      updatedAt: session.updatedAt,
+      rowCount,
+      errorCount,
+      warningCount,
+      duplicateRowCount,
+      files: session.files
+    });
 
     return {
       id: session.id,
@@ -5842,9 +6269,12 @@ export class InventoryService {
       rowPage: {
         offset: rowOffset,
         limit: rowLimit,
-        loadedCount: previewRows.length,
+        loadedCount: previewRows.length + previewApplicabilityRows.length + previewTransformRows.length,
         totalCount: rowCount,
-        hasMore: rowOffset + previewRows.length < rowCount
+        hasMore:
+          rowOffset + rowLimit < materialRowCount ||
+          rowOffset + rowLimit < scopeRowCount ||
+          rowOffset + rowLimit < transformRowCount
       },
       rows: previewRows.map((row) => ({
         id: row.id,
@@ -5859,8 +6289,11 @@ export class InventoryService {
         drawingVersion: row.drawingVersion,
         drawingDate: this.formatDateOnly(row.drawingDate),
         drawingStatus: row.drawingStatus,
-        partThickness: row.partThickness ? decimalToNumber(row.partThickness) : null,
+        partThickness: row.partThickness === null ? null : decimalToNumber(row.partThickness),
         projectModel: row.projectModel,
+        stockAlertEnabled: row.stockAlertEnabled,
+        stockAlertQuantity:
+          row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : decimalToNumber(row.stockAlertQuantity),
         remark: row.remark,
         issues: this.materialImportIssueArray(row.issues),
         errorCount: row.errorCount,
@@ -5910,6 +6343,116 @@ export class InventoryService {
     return { rowLimit, rowOffset, includeRows: true };
   }
 
+  private materialImportPreviewToken(input: {
+    sessionId: string;
+    status: string;
+    updatedAt: Date;
+    rowCount: number;
+    errorCount: number;
+    warningCount: number;
+    duplicateRowCount: number;
+    files: Array<{
+      id: string;
+      fileHash: string;
+      rowCount: number;
+      materialRowCount: number;
+      scopeRowCount: number;
+      transformRowCount: number;
+      acceptedRowCount: number;
+      duplicateRowCount: number;
+    }>;
+  }) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          sessionId: input.sessionId,
+          status: input.status,
+          updatedAt: input.updatedAt.toISOString(),
+          rowCount: input.rowCount,
+          errorCount: input.errorCount,
+          warningCount: input.warningCount,
+          duplicateRowCount: input.duplicateRowCount,
+          files: input.files.map((file) => [
+            file.id,
+            file.fileHash,
+            file.rowCount,
+            file.materialRowCount,
+            file.scopeRowCount,
+            file.transformRowCount,
+            file.acceptedRowCount,
+            file.duplicateRowCount
+          ])
+        })
+      )
+      .digest('hex');
+  }
+
+  private async buildMaterialImportPreviewTokenSnapshot(sessionId: string, client: Prisma.TransactionClient | PrismaService = this.prisma) {
+    const session = await client.materialImportSession.findUnique({
+      where: { id: sessionId },
+      include: { files: { orderBy: { createdAt: 'asc' } } }
+    });
+    if (!session) {
+      throw new NotFoundException('零件导入会话不存在');
+    }
+    const [
+      materialRowCount,
+      materialIssueAggregate,
+      scopeRowCount,
+      scopeIssueAggregate,
+      transformRowCount,
+      transformIssueAggregate,
+      duplicateAggregate
+    ] = await Promise.all([
+      client.materialImportRow.count({ where: { sessionId } }),
+      client.materialImportRow.aggregate({
+        where: { sessionId },
+        _sum: { errorCount: true, warningCount: true }
+      }),
+      client.materialApplicabilityImportRow.count({ where: { sessionId } }),
+      client.materialApplicabilityImportRow.aggregate({
+        where: { sessionId },
+        _sum: { errorCount: true, warningCount: true }
+      }),
+      client.materialTransformImportRow.count({ where: { sessionId } }),
+      client.materialTransformImportRow.aggregate({
+        where: { sessionId },
+        _sum: { errorCount: true, warningCount: true }
+      }),
+      client.materialImportFile.aggregate({
+        where: { sessionId },
+        _sum: { duplicateRowCount: true }
+      })
+    ]);
+    const rowCount = materialRowCount + scopeRowCount + transformRowCount;
+    const errorCount =
+      Number(materialIssueAggregate._sum.errorCount ?? 0) +
+      Number(scopeIssueAggregate._sum.errorCount ?? 0) +
+      Number(transformIssueAggregate._sum.errorCount ?? 0);
+    const warningCount =
+      Number(materialIssueAggregate._sum.warningCount ?? 0) +
+      Number(scopeIssueAggregate._sum.warningCount ?? 0) +
+      Number(transformIssueAggregate._sum.warningCount ?? 0);
+    const duplicateRowCount = Number(duplicateAggregate._sum.duplicateRowCount ?? 0);
+    return {
+      status: session.status,
+      rowCount,
+      errorCount,
+      warningCount,
+      duplicateRowCount,
+      previewToken: this.materialImportPreviewToken({
+        sessionId,
+        status: session.status,
+        updatedAt: session.updatedAt,
+        rowCount,
+        errorCount,
+        warningCount,
+        duplicateRowCount,
+        files: session.files
+      })
+    };
+  }
+
   private materialImportIssueArray(value: Prisma.JsonValue | MaterialImportIssue[] | null | undefined): MaterialImportIssue[] {
     return Array.isArray(value) ? (value as MaterialImportIssue[]) : [];
   }
@@ -5929,6 +6472,146 @@ export class InventoryService {
     const counts = this.countMaterialImportIssues(row.issues);
     row.errorCount = counts.errorCount;
     row.warningCount = counts.warningCount;
+  }
+
+  private async refreshMaterialImportSessionIssues(sessionId: string) {
+    const session = await this.prisma.materialImportSession.findUnique({
+      where: { id: sessionId },
+      select: { id: true, status: true }
+    });
+    if (!session || session.status !== 'DRAFT') {
+      return;
+    }
+
+    const [materialRows, applicabilityRows, transformRows] = await Promise.all([
+      this.prisma.materialImportRow.findMany({ where: { sessionId }, orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }] }),
+      this.prisma.materialApplicabilityImportRow.findMany({ where: { sessionId }, orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }] }),
+      this.prisma.materialTransformImportRow.findMany({ where: { sessionId }, orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }] })
+    ]);
+    const parsed = {
+      rows: materialRows.map((row) => this.toMaterialImportSessionMaterialRow(row)),
+      applicabilityRows: applicabilityRows.map((row) => this.toMaterialImportSessionApplicabilityRow(row)),
+      transformRows: transformRows.map((row) => this.toMaterialImportSessionTransformRow(row))
+    };
+
+    // 多文件导入会话必须在每次文件变化后重新合并校验，避免拆分上传绕过零件、图纸、适用范围和来源关系冲突。
+    this.applyMaterialImportDuplicateConflicts(parsed.rows);
+    this.applyMaterialDrawingImportDuplicateConflicts(parsed.rows);
+    this.applyMaterialApplicabilityImportDuplicateConflicts(parsed.applicabilityRows);
+    this.applyMaterialTransformImportDuplicateConflicts(parsed.transformRows);
+    await this.enrichMaterialImportWorkbookRows(parsed);
+    await this.persistMaterialImportSessionIssues(parsed);
+  }
+
+  private materialImportIssuesWithoutCodes(value: Prisma.JsonValue | MaterialImportIssue[] | null | undefined, codes: Set<string>) {
+    return this.materialImportIssueArray(value).filter((issue) => !codes.has(issue.code));
+  }
+
+  private resetMaterialImportIssueCounts<T extends ParsedMaterialImportIssueRow>(row: T) {
+    const counts = this.countMaterialImportIssues(row.issues);
+    row.errorCount = counts.errorCount;
+    row.warningCount = counts.warningCount;
+    return row;
+  }
+
+  private toMaterialImportSessionMaterialRow(row: Prisma.MaterialImportRowGetPayload<object>): ParsedMaterialImportRow & { id: string } {
+    return this.resetMaterialImportIssueCounts({
+      id: row.id,
+      sourceRowNo: row.sourceRowNo,
+      partCode: row.partCode,
+      partName: row.partName,
+      unit: row.unit,
+      partSpecification: row.partSpecification,
+      drawingNo: row.drawingNo,
+      drawingVersion: row.drawingVersion,
+      drawingDate: row.drawingDate,
+      drawingStatus: row.drawingStatus,
+      partThickness: row.partThickness === null ? null : decimalToNumber(row.partThickness),
+      projectModel: row.projectModel,
+      stockAlertEnabled: row.stockAlertEnabled,
+      stockAlertQuantity: row.stockAlertQuantity === null ? null : decimalToNumber(row.stockAlertQuantity),
+      remark: row.remark,
+      raw: (row.raw || {}) as Record<string, string | number | null>,
+      rowHash: row.rowHash,
+      issues: this.materialImportIssuesWithoutCodes(row.issues, materialImportSessionMaterialIssueCodes),
+      errorCount: 0,
+      warningCount: 0
+    });
+  }
+
+  private toMaterialImportSessionApplicabilityRow(
+    row: Prisma.MaterialApplicabilityImportRowGetPayload<object>
+  ): ParsedMaterialApplicabilityImportRow & { id: string } {
+    return this.resetMaterialImportIssueCounts({
+      id: row.id,
+      sourceRowNo: row.sourceRowNo,
+      partCode: row.partCode,
+      customerCode: row.customerCode,
+      customerName: row.customerName,
+      projectModel: row.projectModel,
+      remark: row.remark,
+      status: row.status,
+      raw: (row.raw || {}) as Record<string, string | number | null>,
+      rowHash: row.rowHash,
+      issues: this.materialImportIssuesWithoutCodes(row.issues, materialImportSessionApplicabilityIssueCodes),
+      errorCount: 0,
+      warningCount: 0
+    });
+  }
+
+  private toMaterialImportSessionTransformRow(
+    row: Prisma.MaterialTransformImportRowGetPayload<object>
+  ): ParsedMaterialTransformImportRow & { id: string } {
+    return this.resetMaterialImportIssueCounts({
+      id: row.id,
+      sourceRowNo: row.sourceRowNo,
+      sourcePartCode: row.sourcePartCode,
+      targetPartCode: row.targetPartCode,
+      customerCode: row.customerCode,
+      customerName: row.customerName,
+      projectModel: row.projectModel,
+      multiplier: row.multiplier === null ? null : decimalToNumber(row.multiplier),
+      lossRate: row.lossRate === null ? null : decimalToNumber(row.lossRate),
+      defaultProcessRoute: row.defaultProcessRoute,
+      conversionDescription: row.conversionDescription,
+      remark: row.remark,
+      status: row.status,
+      raw: (row.raw || {}) as Record<string, string | number | null>,
+      rowHash: row.rowHash,
+      issues: this.materialImportIssuesWithoutCodes(row.issues, materialImportSessionTransformIssueCodes),
+      errorCount: 0,
+      warningCount: 0
+    });
+  }
+
+  private async persistMaterialImportSessionIssues(parsed: {
+    rows: Array<ParsedMaterialImportRow & { id: string }>;
+    applicabilityRows: Array<ParsedMaterialApplicabilityImportRow & { id: string }>;
+    transformRows: Array<ParsedMaterialTransformImportRow & { id: string }>;
+  }) {
+    const operations: Prisma.PrismaPromise<unknown>[] = [
+      ...parsed.rows.map((row) =>
+        this.prisma.materialImportRow.update({
+          where: { id: row.id },
+          data: { issues: row.issues, errorCount: row.errorCount, warningCount: row.warningCount }
+        })
+      ),
+      ...parsed.applicabilityRows.map((row) =>
+        this.prisma.materialApplicabilityImportRow.update({
+          where: { id: row.id },
+          data: { issues: row.issues, errorCount: row.errorCount, warningCount: row.warningCount }
+        })
+      ),
+      ...parsed.transformRows.map((row) =>
+        this.prisma.materialTransformImportRow.update({
+          where: { id: row.id },
+          data: { issues: row.issues, errorCount: row.errorCount, warningCount: row.warningCount }
+        })
+      )
+    ];
+    for (let index = 0; index < operations.length; index += 100) {
+      await this.prisma.$transaction(operations.slice(index, index + 100));
+    }
   }
 
   private async parseMaterialImportWorkbook(filePath: string) {
@@ -5953,6 +6636,7 @@ export class InventoryService {
       : [];
 
     this.applyMaterialImportDuplicateConflicts(rows);
+    this.applyMaterialDrawingImportDuplicateConflicts(rows);
     this.applyMaterialApplicabilityImportDuplicateConflicts(applicabilityRows);
     this.applyMaterialTransformImportDuplicateConflicts(transformRows);
 
@@ -5984,6 +6668,9 @@ export class InventoryService {
       if (Object.values(raw).every((value) => String(value ?? '').trim() === '')) {
         continue;
       }
+      const stockAlertEnabledText = this.materialImportCellText(row, columns.stockAlertEnabled);
+      const stockAlertQuantityText = this.materialImportCellText(row, columns.stockAlertQuantity);
+      const parsedStockAlertEnabled = this.parseMaterialImportBoolean(stockAlertEnabledText);
       const parsedRow: ParsedMaterialImportRow = {
         sourceRowNo: rowNo,
         partCode: this.materialImportCellText(row, columns.partCode),
@@ -5996,6 +6683,8 @@ export class InventoryService {
         drawingStatus: this.materialImportOptionalCellText(row, columns.drawingStatus),
         partThickness: this.materialImportCellNumber(row, columns.partThickness),
         projectModel: this.materialImportOptionalCellText(row, columns.projectModel),
+        stockAlertEnabled: parsedStockAlertEnabled,
+        stockAlertQuantity: this.parseMaterialImportNumberText(stockAlertQuantityText),
         remark: this.materialImportOptionalCellText(row, columns.remark),
         raw,
         rowHash: '',
@@ -6003,7 +6692,7 @@ export class InventoryService {
         errorCount: 0,
         warningCount: 0
       };
-      parsedRow.issues = this.buildMaterialImportRowIssues(parsedRow);
+      parsedRow.issues = this.buildMaterialImportRowIssues(parsedRow, stockAlertEnabledText, stockAlertQuantityText, parsedStockAlertEnabled);
       const counts = this.countMaterialImportIssues(parsedRow.issues);
       parsedRow.errorCount = counts.errorCount;
       parsedRow.warningCount = counts.warningCount;
@@ -6165,7 +6854,12 @@ export class InventoryService {
     }, {});
   }
 
-  private buildMaterialImportRowIssues(row: ParsedMaterialImportRow): MaterialImportIssue[] {
+  private buildMaterialImportRowIssues(
+    row: ParsedMaterialImportRow,
+    stockAlertEnabledText: string,
+    stockAlertQuantityText: string,
+    parsedStockAlertEnabled: boolean | null
+  ): MaterialImportIssue[] {
     const issues: MaterialImportIssue[] = [];
     if (!row.partCode) {
       issues.push({ severity: 'ERROR', code: 'REQUIRED_PART_CODE', message: '零件编码不能为空' });
@@ -6175,6 +6869,39 @@ export class InventoryService {
     }
     if (!row.unit) {
       issues.push({ severity: 'ERROR', code: 'REQUIRED_UNIT', message: '单位不能为空' });
+    }
+    if (stockAlertEnabledText && parsedStockAlertEnabled === null) {
+      issues.push({
+        severity: 'ERROR',
+        code: 'INVALID_STOCK_ALERT_ENABLED',
+        message: '库存报警只能填写启用、停用、是、否、ENABLED 或 DISABLED'
+      });
+    }
+    if (stockAlertQuantityText && row.stockAlertQuantity === null) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_STOCK_ALERT_QUANTITY', message: '最小库存必须是有效数字' });
+    }
+    if (row.partThickness !== null && row.partThickness !== undefined && row.partThickness < 0) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_PART_THICKNESS', message: '厚度不能小于 0' });
+    }
+    if (row.stockAlertQuantity !== null && row.stockAlertQuantity !== undefined && row.stockAlertQuantity < 0) {
+      issues.push({ severity: 'ERROR', code: 'INVALID_STOCK_ALERT_QUANTITY', message: '最小库存不能小于 0' });
+    }
+    if (row.stockAlertEnabled === true && !stockAlertQuantityText) {
+      issues.push({ severity: 'ERROR', code: 'STOCK_ALERT_QUANTITY_REQUIRED', message: '启用库存报警时必须填写最小库存数量' });
+    }
+    if (row.stockAlertEnabled === false && row.stockAlertQuantity !== null && row.stockAlertQuantity !== undefined) {
+      issues.push({
+        severity: 'WARNING',
+        code: 'STOCK_ALERT_QUANTITY_IGNORED',
+        message: '库存报警已停用，最小库存数量提交后会清空'
+      });
+    }
+    if (row.stockAlertEnabled === null && row.stockAlertQuantity !== null && row.stockAlertQuantity !== undefined) {
+      issues.push({
+        severity: 'WARNING',
+        code: 'STOCK_ALERT_QUANTITY_WITHOUT_ENABLED',
+        message: '只填写最小库存不会启用库存报警，提交后不会改动现有库存报警设置'
+      });
     }
     return issues;
   }
@@ -6231,15 +6958,55 @@ export class InventoryService {
       rowsByCode.set(key, [...(rowsByCode.get(key) || []), row]);
     }
     for (const sameCodeRows of rowsByCode.values()) {
-      const signatures = new Set(sameCodeRows.map((row) => this.materialImportIdentitySignature(row)));
-      if (signatures.size <= 1) {
+      const signatures = new Set(sameCodeRows.map((row) => this.materialImportImportIdentitySignature(row)));
+      if (signatures.size > 1) {
+        for (const row of sameCodeRows) {
+          this.pushMaterialImportIssue(row, {
+            severity: 'ERROR',
+            code: 'DUPLICATE_PART_CONFLICT',
+            message: '同一导入会话内相同零件编码的名称、单位、规格、厚度或项目型号不一致'
+          });
+        }
+      }
+
+      const stockAlertSignatures = new Set(
+        sameCodeRows.map((row) => this.materialImportExplicitStockAlertSignature(row)).filter(Boolean)
+      );
+      if (stockAlertSignatures.size <= 1) {
         continue;
       }
       for (const row of sameCodeRows) {
         this.pushMaterialImportIssue(row, {
           severity: 'ERROR',
-          code: 'DUPLICATE_PART_CONFLICT',
-          message: '同一导入会话内相同零件编码的名称、单位或规格不一致'
+          code: 'DUPLICATE_STOCK_ALERT_CONFLICT',
+          message: '同一导入会话内相同零件编码的库存报警设置不一致'
+        });
+      }
+    }
+  }
+
+  private applyMaterialDrawingImportDuplicateConflicts(rows: ParsedMaterialImportRow[]) {
+    const rowsByDrawing = new Map<string, ParsedMaterialImportRow[]>();
+    for (const row of rows) {
+      const partCode = row.partCode.trim().toLocaleLowerCase();
+      const drawingNo = String(row.drawingNo || '').trim().toLocaleLowerCase();
+      if (!partCode || !drawingNo) {
+        continue;
+      }
+      const drawingVersion = String(row.drawingVersion || 'A').trim().toLocaleLowerCase() || 'a';
+      const key = [partCode, drawingNo, drawingVersion].join('|');
+      rowsByDrawing.set(key, [...(rowsByDrawing.get(key) || []), row]);
+    }
+    for (const sameDrawingRows of rowsByDrawing.values()) {
+      const signatures = new Set(sameDrawingRows.map((row) => this.materialImportDrawingRevisionSignature(row)));
+      if (signatures.size <= 1) {
+        continue;
+      }
+      for (const row of sameDrawingRows) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'DUPLICATE_DRAWING_REVISION_CONFLICT',
+          message: '同一导入会话内相同零件编码、图号和图纸版本的图纸日期、状态或备注不一致'
         });
       }
     }
@@ -6318,6 +7085,27 @@ export class InventoryService {
     }
     const existingMaterials = await this.findExistingMaterialsByPartCodes(partCodes);
     const existingByCode = new Map(existingMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+    const existingMaterialCodeById = new Map(existingMaterials.map((material) => [material.id, material.partCode.trim().toLocaleLowerCase()]));
+    const existingDrawingRevisions =
+      existingMaterials.length > 0
+        ? await this.prisma.materialDrawingRevision.findMany({
+            where: { materialId: { in: existingMaterials.map((material) => material.id) } },
+            select: {
+              materialId: true,
+              drawingNo: true,
+              drawingVersion: true,
+              drawingDate: true,
+              drawingStatus: true,
+              remark: true
+            }
+          })
+        : [];
+    const existingDrawingByKey = new Map(
+      existingDrawingRevisions.map((revision) => {
+        const partCode = existingMaterialCodeById.get(revision.materialId) || '';
+        return [this.materialImportDrawingRevisionKey(partCode, revision.drawingNo, revision.drawingVersion), revision] as const;
+      })
+    );
     const historyRows = await this.findOrderLineHistoryByPartCodes(partCodes);
     const historyByCode = new Map<string, typeof historyRows>();
     for (const line of historyRows) {
@@ -6347,6 +7135,16 @@ export class InventoryService {
           severity: 'WARNING',
           code: 'ORDER_HISTORY_DIFFERENT',
           message: '历史订单中相同零件编码存在不同图号、名称、规格或厚度，请提交前确认'
+        });
+      }
+      const existingDrawing = existingDrawingByKey.get(
+        this.materialImportDrawingRevisionKey(row.partCode, row.drawingNo || '', row.drawingVersion || 'A')
+      );
+      if (existingDrawing && this.materialImportDrawingRevisionSignature(existingDrawing) !== this.materialImportDrawingRevisionSignature(row)) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'WARNING',
+          code: 'EXISTING_DRAWING_REVISION_DIFFERENT',
+          message: '系统已存在相同零件编码、图号和图纸版本，但图纸日期、状态或备注与本次导入不一致，提交后会按本次导入更新图纸版本'
         });
       }
     }
@@ -6442,12 +7240,31 @@ export class InventoryService {
         continue;
       }
       const existing = byCode.get(key);
-      if (existing && this.materialImportIdentitySignature(existing) !== this.materialImportIdentitySignature(row)) {
+      if (existing && this.materialImportImportIdentitySignature(existing) !== this.materialImportImportIdentitySignature(row)) {
         throw new BadRequestException(`零件编码 ${row.partCode} 在导入会话内存在不一致信息，请重新上传`);
       }
-      byCode.set(key, row);
+      const existingStockAlertSignature = existing ? this.materialImportExplicitStockAlertSignature(existing) : '';
+      const currentStockAlertSignature = this.materialImportExplicitStockAlertSignature(row);
+      if (existingStockAlertSignature && currentStockAlertSignature && existingStockAlertSignature !== currentStockAlertSignature) {
+        throw new BadRequestException(`零件编码 ${row.partCode} 在导入会话内存在不一致库存报警设置，请重新上传`);
+      }
+      byCode.set(key, existing ? this.mergeMaterialImportBaseRows(existing, row) : row);
     }
     return [...byCode.values()];
+  }
+
+  private mergeMaterialImportBaseRows(existing: any, current: any) {
+    if (current.stockAlertEnabled !== null && current.stockAlertEnabled !== undefined) {
+      return current;
+    }
+    if (existing.stockAlertEnabled !== null && existing.stockAlertEnabled !== undefined) {
+      return {
+        ...current,
+        stockAlertEnabled: existing.stockAlertEnabled,
+        stockAlertQuantity: existing.stockAlertQuantity ?? null
+      };
+    }
+    return current;
   }
 
   private uniqueMaterialDrawingImportRows(
@@ -6614,6 +7431,71 @@ export class InventoryService {
     return [value.partName, value.unit, value.partSpecification].map((item) => String(item || '').trim()).join('|');
   }
 
+  private materialImportImportIdentitySignature(value: {
+    partName?: string | null;
+    unit?: string | null;
+    partSpecification?: string | null;
+    partThickness?: number | Prisma.Decimal | null;
+    projectModel?: string | null;
+  }) {
+    const thickness =
+      value.partThickness === null || value.partThickness === undefined
+        ? ''
+        : typeof value.partThickness === 'number'
+          ? String(value.partThickness)
+          : String(decimalToNumber(value.partThickness));
+    return [value.partName, value.unit, value.partSpecification, thickness, value.projectModel]
+      .map((item) => String(item || '').trim())
+      .join('|');
+  }
+
+  private materialImportDrawingRevisionKey(partCode?: string | null, drawingNo?: string | null, drawingVersion?: string | null) {
+    return [partCode, drawingNo, drawingVersion || 'A']
+      .map((item) => String(item || '').trim().toLocaleLowerCase())
+      .join('|');
+  }
+
+  private materialImportDrawingRevisionSignature(value: {
+    drawingDate?: Date | string | null;
+    drawingStatus?: string | null;
+    remark?: string | null;
+  }) {
+    const drawingDate = value.drawingDate instanceof Date ? this.formatDateOnly(value.drawingDate) : value.drawingDate;
+    return [drawingDate, value.drawingStatus, value.remark].map((item) => String(item || '').trim()).join('|');
+  }
+
+  private materialImportExplicitStockAlertSignature(value: {
+    stockAlertEnabled?: boolean | null;
+    stockAlertQuantity?: number | Prisma.Decimal | null;
+  }) {
+    if (value.stockAlertEnabled === null || value.stockAlertEnabled === undefined) {
+      return '';
+    }
+    if (value.stockAlertEnabled === false) {
+      return 'DISABLED';
+    }
+    const quantity =
+      value.stockAlertQuantity === null || value.stockAlertQuantity === undefined
+        ? ''
+        : typeof value.stockAlertQuantity === 'number'
+          ? String(value.stockAlertQuantity)
+          : String(decimalToNumber(value.stockAlertQuantity));
+    return ['ENABLED', quantity].join('|');
+  }
+
+  private materialImportStockAlertData(row: {
+    stockAlertEnabled?: boolean | null;
+    stockAlertQuantity?: number | Prisma.Decimal | null;
+  }) {
+    if (row.stockAlertEnabled === true) {
+      return { stockAlertEnabled: true, stockAlertQuantity: row.stockAlertQuantity ?? 0 };
+    }
+    if (row.stockAlertEnabled === false) {
+      return { stockAlertEnabled: false, stockAlertQuantity: null };
+    }
+    return {};
+  }
+
   private materialImportHistoryIdentitySignature(value: {
     partName?: string | null;
     unit?: string | null;
@@ -6647,6 +7529,8 @@ export class InventoryService {
           drawingStatus: row.drawingStatus,
           partThickness: row.partThickness,
           projectModel: row.projectModel,
+          stockAlertEnabled: row.stockAlertEnabled,
+          stockAlertQuantity: row.stockAlertQuantity,
           remark: row.remark
         })
       )
@@ -6703,6 +7587,20 @@ export class InventoryService {
     return null;
   }
 
+  private parseMaterialImportBoolean(value?: string | null): boolean | null {
+    const normalized = String(value || '').trim().toLocaleLowerCase();
+    if (!normalized) {
+      return null;
+    }
+    if (['启用', '启用报警', '低库存报警', 'enabled', 'enable', 'true', '1', '是', 'yes', 'y'].includes(normalized)) {
+      return true;
+    }
+    if (['停用', '不启用', '关闭', '关闭报警', 'disabled', 'disable', 'false', '0', '否', 'no', 'n'].includes(normalized)) {
+      return false;
+    }
+    return null;
+  }
+
   private normalizeMaterialImportHeader(value: string) {
     return value.replace(/\s+/g, '').trim().toLocaleLowerCase();
   }
@@ -6747,7 +7645,11 @@ export class InventoryService {
   }
 
   private materialImportCellNumber(row: ExcelJS.Row, column?: number) {
-    const text = this.materialImportCellText(row, column).replace(/mm$/i, '').trim();
+    return this.parseMaterialImportNumberText(this.materialImportCellText(row, column));
+  }
+
+  private parseMaterialImportNumberText(value?: string | null) {
+    const text = String(value || '').replace(/mm$/i, '').trim();
     if (!text) {
       return null;
     }

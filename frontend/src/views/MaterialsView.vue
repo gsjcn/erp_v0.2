@@ -6,7 +6,7 @@
         <p class="page-subtitle">维护下单可搜索的零件搜索记忆；不会生成订单、不会占用库存、不会创建生产任务。</p>
       </div>
       <div class="page-actions">
-        <el-button v-if="!isMobileLayout" @click="erpApi.downloadMaterialImportTemplate">下载导入模板</el-button>
+        <el-button v-if="!isMobileLayout" :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate">下载导入模板</el-button>
         <el-button v-if="!isMobileLayout" type="success" plain @click="openImportDialog">导入零件库</el-button>
         <el-button @click="router.push('/materials')">返回零件管理</el-button>
         <el-button @click="openDesktopMaintenancePage('/inventory/model-boms', '机型零件包维护')">机型零件包</el-button>
@@ -45,6 +45,15 @@
         <div class="stat-label">当前页可用库存</div>
         <div class="stat-value">{{ currentAvailableText }}</div>
       </div>
+      <button
+        class="stat-card stat-card-button"
+        :class="{ active: filters.stockAlert === 'TRIGGERED' }"
+        type="button"
+        @click="applyTriggeredStockAlertFilter"
+      >
+        <div class="stat-label">低库存报警</div>
+        <div class="stat-value">{{ triggeredStockAlertText }}</div>
+      </button>
     </div>
 
     <div class="filter-bar">
@@ -63,6 +72,14 @@
         <el-select v-model="filters.status" placeholder="状态" style="width: 140px" @change="searchMaterials">
           <el-option label="启用" value="ENABLED" />
           <el-option label="停用" value="DISABLED" />
+        </el-select>
+      </div>
+      <div class="filter-field">
+        <label>库存报警</label>
+        <el-select v-model="filters.stockAlert" clearable placeholder="全部报警" style="width: 150px" @change="searchMaterials">
+          <el-option label="已触发" value="TRIGGERED" />
+          <el-option label="已启用" value="ENABLED" />
+          <el-option label="未启用" value="DISABLED" />
         </el-select>
       </div>
       <el-button type="primary" :loading="loading" @click="searchMaterials">查询</el-button>
@@ -92,6 +109,13 @@
         </el-table-column>
         <el-table-column label="当前库存" width="150">
           <template #default="{ row }">{{ formatQuantity(row.availableQuantity, row.unit) }}</template>
+        </el-table-column>
+        <el-table-column label="库存报警" width="160">
+          <template #default="{ row }">
+            <el-tag :type="stockAlertTagType(row)" effect="plain">
+              {{ stockAlertText(row) }}
+            </el-tag>
+          </template>
         </el-table-column>
         <el-table-column label="库存构成" min-width="180">
           <template #default="{ row }">
@@ -171,6 +195,7 @@
         </div>
         <p>{{ row.partCode }} / {{ row.unit }} / {{ row.partSpecification || '无规格' }}</p>
         <p>库存 {{ formatQuantity(row.availableQuantity, row.unit) }} / 使用 {{ row.orderLineUsageCount }} 次</p>
+        <p>库存报警：{{ stockAlertText(row) }}</p>
         <div class="mobile-actions">
           <span class="mobile-readonly-note">手机端只展示零件基础资料</span>
         </div>
@@ -178,7 +203,7 @@
       <div class="mobile-pagination-row">
         <span>已显示 {{ materials.length }} / {{ materialPagination.total }} 条</span>
         <el-pagination
-          small
+          size="small"
           background
           layout="prev, pager, next"
           :current-page="materialPagination.page"
@@ -212,15 +237,27 @@
         <el-form-item label="成品规格">
           <el-input v-model="form.partSpecification" placeholder="例如 200mm x 300mm；可留空" />
         </el-form-item>
+        <el-form-item label="库存报警">
+          <el-radio-group v-model="form.stockAlertEnabled">
+            <el-radio-button :value="false">不启用</el-radio-button>
+            <el-radio-button :value="true">低库存报警</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="form.stockAlertEnabled" label="最小库存" required>
+          <div class="stock-alert-form-row">
+            <el-input-number v-model="form.stockAlertQuantity" :min="0" :precision="3" :step="1" controls-position="right" />
+            <span class="unit-text">{{ form.unit || '件' }}</span>
+          </div>
+        </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="form.status" style="width: 160px">
+          <el-select v-model="form.status" :disabled="Boolean(editingMaterialId)" style="width: 160px">
             <el-option label="启用" value="ENABLED" />
             <el-option label="停用" value="DISABLED" />
           </el-select>
         </el-form-item>
       </el-form>
       <p class="dialog-hint">
-        这里只维护 `Material` 搜索记忆。库存数量、订单来源、客户/机型适用范围、BOM 和来源加工关系由独立功能维护；保存不会改写历史订单、库存批次或生产记录。
+        这里只维护 `Material` 搜索记忆。编辑已有零件时状态请使用列表里的启用/停用动作；保存不会改写历史订单、库存批次、BOM、默认图纸或来源加工关系。库存报警配置只写入 `Material`，不改变库存数量。
       </p>
       <template #footer>
         <el-button :disabled="saving" @click="closeMaterialDialog">取消</el-button>
@@ -230,7 +267,7 @@
 
     <el-dialog v-model="importDialogVisible" class="responsive-dialog material-import-dialog" title="导入零件基础库" width="1180px">
       <div class="import-toolbar">
-        <el-button @click="erpApi.downloadMaterialImportTemplate">下载模板</el-button>
+        <el-button :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate">下载模板</el-button>
         <el-button type="primary" :loading="importUploading" :disabled="materialImportBusy" @click="triggerMaterialImportFileInput">选择 .xlsx 文件</el-button>
         <el-button :loading="importRefreshing" :disabled="!materialImportSession || materialImportBusy" @click="refreshMaterialImportSession">刷新预览</el-button>
         <el-button
@@ -285,15 +322,15 @@
         </div>
         <div class="import-summary-item">
           <span>图纸版本</span>
-          <strong>{{ materialImportSession.summary.drawingRevisionUpsertCount || 0 }}</strong>
+          <strong>{{ materialImportSession.summary.drawingRevisionUpsertCount ?? 0 }}</strong>
         </div>
         <div class="import-summary-item">
           <span>适用范围</span>
-          <strong>{{ materialImportSession.summary.applicabilityUpsertCount || 0 }}</strong>
+          <strong>{{ materialImportSession.summary.applicabilityUpsertCount ?? 0 }}</strong>
         </div>
         <div class="import-summary-item">
           <span>来源关系</span>
-          <strong>{{ materialImportSession.summary.transformRuleUpsertCount || 0 }}</strong>
+          <strong>{{ materialImportSession.summary.transformRuleUpsertCount ?? 0 }}</strong>
         </div>
         <div class="import-summary-item danger">
           <span>错误</span>
@@ -314,7 +351,7 @@
           <span>{{ displayMaterialImportFileName(file.fileName) }}</span>
           <small>
             {{ file.sheetName }} / 读取 {{ file.rowCount }} 行
-            （零件 {{ file.materialRowCount || 0 }} / 范围 {{ file.scopeRowCount || 0 }} / 来源关系 {{ file.transformRowCount || 0 }}）
+            （零件 {{ file.materialRowCount ?? 0 }} / 范围 {{ file.scopeRowCount ?? 0 }} / 来源关系 {{ file.transformRowCount ?? 0 }}）
             / 新增预览 {{ file.acceptedRowCount }} 行 / 重复 {{ file.duplicateRowCount }} 行
           </small>
           <el-button
@@ -330,7 +367,7 @@
       </div>
 
       <el-tabs v-if="materialImportSession" v-model="materialImportActiveTab" class="import-preview-tabs">
-        <el-tab-pane :label="`零件基础库 ${materialImportSession.summary.materialRowCount || materialImportSession.rows.length}`" name="materials">
+        <el-tab-pane :label="`零件基础库 ${materialImportSession.rows.length}/${materialImportSession.summary.materialRowCount ?? 0}`" name="materials">
           <el-table v-loading="importUploading" :data="materialImportSession.rows" max-height="420">
             <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">{{ displayMaterialImportFileName(row.sourceFileName) }}</template>
@@ -351,6 +388,13 @@
             <el-table-column prop="projectModel" label="项目型号" min-width="120">
               <template #default="{ row }">{{ row.projectModel || '-' }}</template>
             </el-table-column>
+            <el-table-column label="库存报警" min-width="130">
+              <template #default="{ row }">
+                <el-tag v-if="row.stockAlertEnabled === true" type="warning" effect="plain">启用 {{ row.stockAlertQuantity ?? '-' }}</el-tag>
+                <el-tag v-else-if="row.stockAlertEnabled === false" type="info" effect="plain">停用</el-tag>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="校验" min-width="260" fixed="right">
               <template #default="{ row }">
                 <ImportIssueList :issues="row.issues" />
@@ -358,8 +402,8 @@
             </el-table-column>
           </el-table>
         </el-tab-pane>
-        <el-tab-pane :label="`适用范围 ${materialImportSession.summary.applicabilityRowCount || 0}`" name="applicabilities">
-          <el-table v-loading="importUploading" :data="materialImportSession.applicabilityRows || []" max-height="420">
+        <el-tab-pane :label="`适用范围 ${(materialImportSession.applicabilityRows ?? []).length}/${materialImportSession.summary.applicabilityRowCount ?? 0}`" name="applicabilities">
+          <el-table v-loading="importUploading" :data="materialImportSession.applicabilityRows ?? []" max-height="420">
             <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">{{ displayMaterialImportFileName(row.sourceFileName) }}</template>
             </el-table-column>
@@ -387,8 +431,8 @@
             </el-table-column>
           </el-table>
         </el-tab-pane>
-        <el-tab-pane :label="`来源加工关系 ${materialImportSession.summary.transformRowCount || 0}`" name="transforms">
-          <el-table v-loading="importUploading" :data="materialImportSession.transformRows || []" max-height="420">
+        <el-tab-pane :label="`来源加工关系 ${(materialImportSession.transformRows ?? []).length}/${materialImportSession.summary.transformRowCount ?? 0}`" name="transforms">
+          <el-table v-loading="importUploading" :data="materialImportSession.transformRows ?? []" max-height="420">
             <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
               <template #default="{ row }">{{ displayMaterialImportFileName(row.sourceFileName) }}</template>
             </el-table-column>
@@ -418,6 +462,20 @@
           </el-table>
         </el-tab-pane>
       </el-tabs>
+      <div v-if="materialImportSession" class="import-preview-pager">
+        <span>{{ materialImportPreviewProgressText }}</span>
+        <el-button
+          v-if="materialImportHasMoreRows"
+          type="primary"
+          plain
+          :loading="importLoadingMore"
+          :disabled="materialImportBusy"
+          @click="loadMoreMaterialImportRows"
+        >
+          继续加载预览
+        </el-button>
+        <span v-else class="check-ok">已显示全部预览行</span>
+      </div>
       <el-empty v-else description="请先上传零件库导入文件" />
 
       <template #footer>
@@ -452,6 +510,18 @@
             <li>不会创建订单、不会占用库存、不会创建生产任务。</li>
           </ul>
         </template>
+        <template v-else-if="materialImportConfirmAction === 'deleteFile'">
+          <p>
+            确认删除导入文件
+            <strong>{{ displayMaterialImportFileName(materialImportDeleteFileTarget?.fileName) }}</strong>
+            吗？
+          </p>
+          <ul>
+            <li>只会删除本次导入会话里的文件和对应预览行。</li>
+            <li>删除后后端会重新合并校验剩余文件，并刷新 `previewToken`。</li>
+            <li>不会影响已经存在的零件基础库、历史订单、库存批次或生产任务。</li>
+          </ul>
+        </template>
         <template v-else>
           <p>确认放弃本次零件库导入吗？已上传文件和预览行会删除。</p>
           <ul>
@@ -475,7 +545,7 @@
     <el-dialog
       v-model="materialStatusDialogVisible"
       class="responsive-dialog"
-      title="停用零件基础资料"
+      :title="materialStatusDialogTitle"
       width="560px"
       append-to-body
       :close-on-click-modal="!materialStatusSaving"
@@ -484,18 +554,57 @@
     >
       <div v-if="materialStatusTarget" class="material-confirm-panel">
         <p>
-          确定停用零件
+          确定{{ materialStatusActionLabel }}
           <strong>{{ materialStatusTarget.partCode }} / {{ materialStatusTarget.partName }}</strong>
           吗？
         </p>
         <ul>
-          <li>系统只会停用 `Material` 搜索记忆，影响后续搜索和推荐。</li>
+          <li>{{ materialStatusWarningText }}</li>
           <li>不会删除历史订单、库存批次、库存数量、生产记录或导入追溯。</li>
         </ul>
       </div>
       <template #footer>
         <el-button :disabled="materialStatusSaving" @click="closeMaterialStatusDialog">取消</el-button>
-        <el-button type="danger" :loading="materialStatusSaving" @click="confirmDisableMaterial">确认停用</el-button>
+        <el-button
+          :type="materialStatusAction === 'enable' ? 'success' : 'danger'"
+          :loading="materialStatusSaving"
+          @click="confirmMaterialStatusChange"
+        >
+          {{ materialStatusConfirmText }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="materialMaintenanceStatusDialogVisible"
+      class="responsive-dialog"
+      :title="materialMaintenanceStatusDialogTitle"
+      width="560px"
+      append-to-body
+      :close-on-click-modal="!materialMaintenanceStatusSaving"
+      :close-on-press-escape="!materialMaintenanceStatusSaving"
+      :before-close="handleMaterialMaintenanceStatusDialogClose"
+    >
+      <div v-if="activeMaterialMaintenanceStatusTarget" class="material-confirm-panel">
+        <p>
+          确定{{ activeMaterialMaintenanceStatusTarget.actionLabel }}
+          <strong>{{ activeMaterialMaintenanceStatusTarget.name }}</strong>
+          吗？
+        </p>
+        <ul>
+          <li>{{ activeMaterialMaintenanceStatusTarget.warning }}</li>
+          <li>不会删除历史订单、BOM 行、库存批次、库存流水、生产任务或导入追溯。</li>
+        </ul>
+      </div>
+      <template #footer>
+        <el-button :disabled="materialMaintenanceStatusSaving" @click="closeMaterialMaintenanceStatusDialog">取消</el-button>
+        <el-button
+          :type="activeMaterialMaintenanceStatusTarget?.nextStatus === 'ENABLED' ? 'success' : 'danger'"
+          :loading="materialMaintenanceStatusSaving"
+          @click="confirmMaterialMaintenanceStatusChange"
+        >
+          {{ materialMaintenanceStatusConfirmText }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -531,7 +640,7 @@
               <el-input v-model="applicabilityForm.projectModel" placeholder="例如 B3 / B5 / C型15P" />
             </el-form-item>
             <el-form-item label="状态">
-              <el-select v-model="applicabilityForm.status" style="width: 160px">
+              <el-select v-model="applicabilityForm.status" :disabled="Boolean(applicabilityForm.id)" style="width: 160px">
                 <el-option label="启用" value="ENABLED" />
                 <el-option label="停用" value="DISABLED" />
               </el-select>
@@ -629,8 +738,11 @@
             <el-form-item label="默认图纸">
               <el-switch v-model="drawingForm.isDefault" active-text="作为默认下单图纸" />
             </el-form-item>
+            <el-form-item v-if="drawingForm.isDefault" label="默认变更人" required>
+              <el-input v-model="drawingForm.defaultChangedBy" placeholder="填写本次设置默认图纸的操作人员" />
+            </el-form-item>
             <el-form-item label="状态">
-              <el-select v-model="drawingForm.status" style="width: 160px">
+              <el-select v-model="drawingForm.status" :disabled="Boolean(drawingForm.id)" style="width: 160px">
                 <el-option label="启用" value="ENABLED" />
                 <el-option label="停用" value="DISABLED" />
               </el-select>
@@ -714,6 +826,35 @@
         图纸版本用于 BOM 默认图纸和订单下单快照。修改默认图纸不会覆盖历史订单里的图号、版本、日期或文件。
       </p>
     </el-dialog>
+
+    <el-dialog
+      v-model="defaultDrawingDialogVisible"
+      class="responsive-dialog"
+      title="设置默认图纸"
+      width="520px"
+      :close-on-click-modal="!drawingOperationSavingId"
+      :close-on-press-escape="!drawingOperationSavingId"
+      :before-close="handleDefaultDrawingDialogClose"
+    >
+      <div v-if="activeDefaultDrawingRevision" class="status-dialog-content">
+        <p>
+          将 {{ activeDefaultDrawingRevision.drawingNo }} / {{ activeDefaultDrawingRevision.drawingVersion }} 设置为当前零件默认下单图纸。
+          历史订单图纸快照不会被覆盖。
+        </p>
+        <el-form label-width="110px">
+          <el-form-item label="操作人员" required>
+            <el-input v-model="defaultDrawingForm.defaultChangedBy" placeholder="填写本次设置默认图纸的操作人员" />
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="defaultDrawingForm.remark" type="textarea" :rows="3" placeholder="默认图纸变更说明" />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button :disabled="Boolean(drawingOperationSavingId)" @click="closeDefaultDrawingDialog">取消</el-button>
+        <el-button type="primary" :loading="Boolean(drawingOperationSavingId)" @click="confirmDefaultDrawingRevision">确认设为默认</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -721,10 +862,11 @@
 import { computed, defineComponent, h, onMounted, reactive, ref, type PropType } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { erpApi, type SaveMaterialDrawingRevisionPayload } from '../api/erp';
+import { erpApi, type StockAlertFilter, type UpdateMaterialDrawingRevisionPayload } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
 import { normalizeDisplayFileName } from '../utils/fileNames';
+import { formatDateTime, formatNumber, formatQuantity } from '../utils/format';
 import type {
   CommonStatus,
   MaterialApplicability,
@@ -764,6 +906,16 @@ const ImportIssueList = defineComponent({
         : h('div', { class: 'check-ok' }, '可写入');
   }
 });
+
+type MaterialMaintenanceStatusTarget = {
+  type: 'applicability' | 'drawing';
+  id: string;
+  name: string;
+  nextStatus: CommonStatus;
+  actionLabel: string;
+  warning: string;
+};
+
 const loading = ref(false);
 const saving = ref(false);
 const materialOperationSavingId = ref('');
@@ -775,15 +927,21 @@ const importRefreshing = ref(false);
 const importDiscarding = ref(false);
 const importDeletingFileId = ref('');
 const importIssueReportDownloading = ref(false);
+const importLoadingMore = ref(false);
+const materialImportTemplateDownloading = ref(false);
 const materialImportDragging = ref(false);
 const materialImportActiveTab = ref('materials');
 const materialImportConfirmDialogVisible = ref(false);
-const materialImportConfirmAction = ref<'commit' | 'discard'>('commit');
+const materialImportConfirmAction = ref<'commit' | 'discard' | 'deleteFile'>('commit');
+const materialImportDeleteFileTarget = ref<MaterialImportSessionPreview['files'][number]>();
 const materialImportInput = ref<HTMLInputElement>();
 const materialImportSession = ref<MaterialImportSessionPreview>();
 const materialStatusDialogVisible = ref(false);
 const materialStatusSaving = ref(false);
+const materialStatusAction = ref<'enable' | 'disable'>('disable');
 const materialStatusTarget = ref<MaterialMemory>();
+const materialMaintenanceStatusDialogVisible = ref(false);
+const activeMaterialMaintenanceStatusTarget = ref<MaterialMaintenanceStatusTarget>();
 const applicabilityDialogVisible = ref(false);
 const applicabilityLoading = ref(false);
 const applicabilitySaving = ref(false);
@@ -792,9 +950,12 @@ const drawingDialogVisible = ref(false);
 const drawingLoading = ref(false);
 const drawingSaving = ref(false);
 const drawingOperationSavingId = ref('');
+const defaultDrawingDialogVisible = ref(false);
+const activeDefaultDrawingRevision = ref<MaterialDrawingRevision | null>(null);
 const editingMaterialId = ref('');
 const activeMaterial = ref<MaterialMemory>();
 const materials = ref<MaterialMemory[]>([]);
+const triggeredStockAlertTotal = ref(0);
 const applicabilities = ref<MaterialApplicability[]>([]);
 const drawingRevisions = ref<MaterialDrawingRevision[]>([]);
 const routeActionApplied = ref(false);
@@ -802,6 +963,7 @@ const routeActionApplied = ref(false);
 const filters = reactive<{
   keyword: string;
   status: CommonStatus;
+  stockAlert?: StockAlertFilter;
 }>({
   keyword: '',
   status: 'ENABLED'
@@ -817,12 +979,16 @@ const form = reactive<{
   partName: string;
   unit: string;
   partSpecification: string;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity: number | null;
   status: CommonStatus;
 }>({
   partCode: '',
   partName: '',
   unit: '件',
   partSpecification: '',
+  stockAlertEnabled: false,
+  stockAlertQuantity: null,
   status: 'ENABLED'
 });
 
@@ -853,6 +1019,7 @@ const drawingForm = reactive<{
   drawingFileName: string;
   drawingFileUrl: string;
   isDefault: boolean;
+  defaultChangedBy: string;
   remark: string;
   status: CommonStatus;
 }>({
@@ -864,8 +1031,14 @@ const drawingForm = reactive<{
   drawingFileName: '',
   drawingFileUrl: '',
   isDefault: false,
+  defaultChangedBy: '',
   remark: '',
   status: 'ENABLED'
+});
+
+const defaultDrawingForm = reactive({
+  defaultChangedBy: '',
+  remark: ''
 });
 
 const dialogTitle = computed(() => (editingMaterialId.value ? '编辑零件基础资料' : '新增零件基础资料'));
@@ -875,37 +1048,94 @@ const applicabilityDialogTitle = computed(() =>
 const drawingDialogTitle = computed(() =>
   activeMaterial.value ? `图纸版本 - ${activeMaterial.value.partCode} / ${activeMaterial.value.partName}` : '图纸版本'
 );
+const materialStatusActionLabel = computed(() => (materialStatusAction.value === 'enable' ? '启用零件' : '停用零件'));
+const materialStatusDialogTitle = computed(() => `${materialStatusActionLabel.value}基础资料`);
+const materialStatusConfirmText = computed(() => `确认${materialStatusAction.value === 'enable' ? '启用' : '停用'}`);
+const materialStatusWarningText = computed(() =>
+  materialStatusAction.value === 'enable'
+    ? '系统只会恢复 `Material` 搜索记忆的后续可选状态，不会自动恢复适用范围、BOM 行、默认图纸或来源加工关系。'
+    : '系统只会停用 `Material` 搜索记忆，影响后续搜索和推荐。'
+);
+const materialMaintenanceStatusDialogTitle = computed(() => activeMaterialMaintenanceStatusTarget.value?.actionLabel || '资料状态确认');
+const materialMaintenanceStatusConfirmText = computed(() => `确认${activeMaterialMaintenanceStatusTarget.value?.actionLabel || '操作'}`);
+const materialMaintenanceStatusSaving = computed(() => Boolean(applicabilityOperationSavingId.value || drawingOperationSavingId.value));
 const enabledCount = computed(() => materials.value.filter((item) => item.status === 'ENABLED').length);
 const disabledCount = computed(() => materials.value.filter((item) => item.status === 'DISABLED').length);
+const triggeredStockAlertText = computed(() => `${triggeredStockAlertTotal.value} 条`);
 const materialImportCanCommit = computed(
   () =>
     Boolean(materialImportSession.value?.previewToken) &&
     materialImportSession.value?.status === 'DRAFT' &&
-    (materialImportSession.value?.summary.rowCount || 0) > 0 &&
-    (materialImportSession.value?.summary.errorCount || 0) === 0
+    (materialImportSession.value?.summary.rowCount ?? 0) > 0 &&
+    (materialImportSession.value?.summary.errorCount ?? 0) === 0
 );
 const materialImportHasIssues = computed(() => {
   const session = materialImportSession.value;
-  const issueCount = (session?.summary.errorCount || 0) + (session?.summary.warningCount || 0);
+  const issueCount = (session?.summary.errorCount ?? 0) + (session?.summary.warningCount ?? 0);
   return issueCount > 0;
 });
-const materialImportConfirmTitle = computed(() => (materialImportConfirmAction.value === 'commit' ? '确认写入零件库' : '放弃零件库导入'));
-const materialImportConfirmButtonText = computed(() => (materialImportConfirmAction.value === 'commit' ? '确认写入' : '确认放弃'));
-const materialImportConfirmSaving = computed(() => importCommitting.value || importDiscarding.value);
+const materialImportLoadedCount = computed(() => {
+  const session = materialImportSession.value;
+  if (!session) {
+    return 0;
+  }
+  return session.rows.length + (session.applicabilityRows ?? []).length + (session.transformRows ?? []).length;
+});
+const materialImportHasMoreRows = computed(() => {
+  const session = materialImportSession.value;
+  if (!session) {
+    return false;
+  }
+  return (
+    session.rows.length < (session.summary.materialRowCount ?? 0) ||
+    (session.applicabilityRows ?? []).length < (session.summary.applicabilityRowCount ?? 0) ||
+    (session.transformRows ?? []).length < (session.summary.transformRowCount ?? 0)
+  );
+});
+const materialImportPreviewProgressText = computed(() => {
+  const total = materialImportSession.value?.summary.rowCount ?? 0;
+  return `已加载 ${materialImportLoadedCount.value} / ${total} 行预览；未显示的行不会被静默忽略，可继续加载或下载问题明细核对。`;
+});
+const materialImportConfirmTitle = computed(() => {
+  if (materialImportConfirmAction.value === 'commit') {
+    return '确认写入零件库';
+  }
+  if (materialImportConfirmAction.value === 'deleteFile') {
+    return '删除导入文件';
+  }
+  return '放弃零件库导入';
+});
+const materialImportConfirmButtonText = computed(() => {
+  if (materialImportConfirmAction.value === 'commit') {
+    return '确认写入';
+  }
+  if (materialImportConfirmAction.value === 'deleteFile') {
+    return '确认删除';
+  }
+  return '确认放弃';
+});
+const materialImportConfirmSaving = computed(() => importCommitting.value || importDiscarding.value || Boolean(importDeletingFileId.value));
 const materialImportCommitSummaryText = computed(() => {
   const summary = materialImportSession.value?.summary;
   if (!summary) {
     return '当前没有可写入的零件库导入预览。';
   }
-  return `确认写入零件库吗？将新增或更新 ${summary.materialUpsertCount} 个零件、${summary.drawingRevisionUpsertCount || 0} 条图纸版本、${summary.applicabilityUpsertCount || 0} 条适用范围、${summary.transformRuleUpsertCount || 0} 条来源加工关系。`;
+  return `确认写入零件库吗？将新增或更新 ${summary.materialUpsertCount} 个零件、${summary.drawingRevisionUpsertCount ?? 0} 条图纸版本、${summary.applicabilityUpsertCount ?? 0} 条适用范围、${summary.transformRuleUpsertCount ?? 0} 条来源加工关系。`;
 });
 const materialImportBusy = computed(() =>
-  Boolean(importUploading.value || importCommitting.value || importRefreshing.value || importDiscarding.value || importDeletingFileId.value)
+  Boolean(
+    importUploading.value ||
+      importCommitting.value ||
+      importRefreshing.value ||
+      importDiscarding.value ||
+      importDeletingFileId.value ||
+      importLoadingMore.value
+  )
 );
 const currentAvailableText = computed(() => {
   const totals = new Map<string, number>();
   materials.value.forEach((item) => {
-    totals.set(item.unit, (totals.get(item.unit) || 0) + (item.availableQuantity || 0));
+    totals.set(item.unit, (totals.get(item.unit) ?? 0) + (item.availableQuantity ?? 0));
   });
   const text = [...totals.entries()].map(([unit, quantity]) => `${formatNumber(quantity)} ${unit}`).join(' / ');
   return text || '0';
@@ -926,11 +1156,15 @@ function routeQueryText(value: unknown) {
 function applyRouteQueryFilters() {
   const keyword = routeQueryText(route.query.keyword);
   const status = routeQueryText(route.query.status);
+  const stockAlert = routeQueryText(route.query.stockAlert);
   if (keyword) {
     filters.keyword = keyword;
   }
   if (status === 'ENABLED' || status === 'DISABLED') {
     filters.status = status;
+  }
+  if (stockAlert === 'ENABLED' || stockAlert === 'TRIGGERED' || stockAlert === 'DISABLED') {
+    filters.stockAlert = stockAlert;
   }
 }
 
@@ -944,17 +1178,29 @@ async function loadMaterials() {
     const requestPage = Math.max(materialPagination.page, 1);
     const requestLimit = materialPagination.limit;
     const requestOffset = (requestPage - 1) * requestLimit;
-    let result = await erpApi.inventoryMaterialsPage({
+    const baseFilters = {
       keyword: filters.keyword.trim() || undefined,
-      status: filters.status,
-      limit: requestLimit,
-      offset: requestOffset
-    });
+      status: filters.status
+    };
+    const [initialResult, triggeredRows] = await Promise.all([
+      erpApi.inventoryMaterialsPage({
+        ...baseFilters,
+        stockAlert: filters.stockAlert,
+        limit: requestLimit,
+        offset: requestOffset
+      }),
+      erpApi.inventoryMaterials({
+        ...baseFilters,
+        stockAlert: 'TRIGGERED'
+      })
+    ]);
+    let result = initialResult;
+    triggeredStockAlertTotal.value = triggeredRows.length;
     if (result.totalCount > 0 && result.items.length === 0 && requestPage > 1) {
       materialPagination.page = Math.max(Math.ceil(result.totalCount / requestLimit), 1);
       result = await erpApi.inventoryMaterialsPage({
-        keyword: filters.keyword.trim() || undefined,
-        status: filters.status,
+        ...baseFilters,
+        stockAlert: filters.stockAlert,
         limit: requestLimit,
         offset: (materialPagination.page - 1) * requestLimit
       });
@@ -964,6 +1210,7 @@ async function loadMaterials() {
     await applyRouteActionAfterLoad();
   } catch (error) {
     materials.value = [];
+    triggeredStockAlertTotal.value = 0;
     materialPagination.total = Number(0);
     ElMessage.error(error instanceof Error ? error.message : '零件基础库加载失败，请确认后端服务和筛选条件');
   } finally {
@@ -1008,6 +1255,13 @@ async function applyRouteActionAfterLoad() {
 function resetFilters() {
   filters.keyword = '';
   filters.status = 'ENABLED';
+  filters.stockAlert = undefined;
+  searchMaterials();
+}
+
+function applyTriggeredStockAlertFilter() {
+  filters.stockAlert = filters.stockAlert === 'TRIGGERED' ? undefined : 'TRIGGERED';
+  // 库存报警仅用于基础资料提醒和筛选，不会自动生成订单、生产任务或库存流水。
   searchMaterials();
 }
 
@@ -1017,6 +1271,8 @@ function resetForm() {
   form.partName = '';
   form.unit = '件';
   form.partSpecification = '';
+  form.stockAlertEnabled = false;
+  form.stockAlertQuantity = null;
   form.status = 'ENABLED';
 }
 
@@ -1062,6 +1318,7 @@ function closeMaterialImportConfirmDialog() {
     return;
   }
   materialImportConfirmDialogVisible.value = false;
+  materialImportDeleteFileTarget.value = undefined;
 }
 
 function handleMaterialImportConfirmDialogClose(done: () => void) {
@@ -1072,8 +1329,9 @@ function handleMaterialImportConfirmDialogClose(done: () => void) {
   done();
 }
 
-function openMaterialImportConfirmDialog(action: 'commit' | 'discard') {
+function openMaterialImportConfirmDialog(action: 'commit' | 'discard' | 'deleteFile', file?: MaterialImportSessionPreview['files'][number]) {
   materialImportConfirmAction.value = action;
+  materialImportDeleteFileTarget.value = file;
   materialImportConfirmDialogVisible.value = true;
 }
 
@@ -1084,6 +1342,7 @@ function closeMaterialStatusDialog() {
   }
   materialStatusDialogVisible.value = false;
   materialStatusTarget.value = undefined;
+  materialStatusAction.value = 'disable';
 }
 
 function handleMaterialStatusDialogClose(done: () => void) {
@@ -1092,7 +1351,31 @@ function handleMaterialStatusDialogClose(done: () => void) {
     return;
   }
   materialStatusTarget.value = undefined;
+  materialStatusAction.value = 'disable';
   done();
+}
+
+function closeMaterialMaintenanceStatusDialog() {
+  if (materialMaintenanceStatusSaving.value) {
+    ElMessage.warning('零件资料状态正在保存，请等待操作完成');
+    return;
+  }
+  materialMaintenanceStatusDialogVisible.value = false;
+  activeMaterialMaintenanceStatusTarget.value = undefined;
+}
+
+function handleMaterialMaintenanceStatusDialogClose(done: () => void) {
+  if (materialMaintenanceStatusSaving.value) {
+    ElMessage.warning('零件资料状态正在保存，请等待操作完成');
+    return;
+  }
+  activeMaterialMaintenanceStatusTarget.value = undefined;
+  done();
+}
+
+function openMaterialMaintenanceStatusDialog(target: MaterialMaintenanceStatusTarget) {
+  activeMaterialMaintenanceStatusTarget.value = target;
+  materialMaintenanceStatusDialogVisible.value = true;
 }
 
 function openDesktopMaintenancePage(path: string, actionLabel: string) {
@@ -1119,8 +1402,18 @@ function openEditDialog(row: MaterialMemory) {
   form.partName = row.partName;
   form.unit = row.unit;
   form.partSpecification = row.partSpecification || '';
+  form.stockAlertEnabled = Boolean(row.stockAlertEnabled);
+  form.stockAlertQuantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : Number(row.stockAlertQuantity);
   form.status = row.status;
   dialogVisible.value = true;
+}
+
+function validStockAlertQuantity(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  const quantity = Number(value);
+  return Number.isFinite(quantity) && quantity >= 0;
 }
 
 async function saveMaterial() {
@@ -1137,21 +1430,27 @@ async function saveMaterial() {
     ElMessage.warning('请填写零件编码、零件名称和单位');
     return;
   }
+  if (form.stockAlertEnabled && !validStockAlertQuantity(form.stockAlertQuantity)) {
+    ElMessage.warning('启用低库存报警时必须填写大于或等于 0 的最小库存');
+    return;
+  }
 
   saving.value = true;
   try {
+    // 库存报警只属于 Material 基础资料，不创建订单、生产任务或库存流水。
     const payload = {
       partCode,
       partName,
       unit,
       partSpecification: form.partSpecification.trim() || undefined,
-      status: form.status
+      stockAlertEnabled: form.stockAlertEnabled,
+      stockAlertQuantity: form.stockAlertEnabled ? Number(form.stockAlertQuantity) : null
     };
     if (editingMaterialId.value) {
       await erpApi.updateInventoryMaterial(editingMaterialId.value, payload);
       ElMessage.success('零件基础资料已保存');
     } else {
-      await erpApi.createInventoryMaterial(payload);
+      await erpApi.createInventoryMaterial({ ...payload, status: form.status });
       ElMessage.success('零件基础资料已新增');
     }
     dialogVisible.value = false;
@@ -1160,6 +1459,41 @@ async function saveMaterial() {
     ElMessage.error(error instanceof Error ? error.message : '零件基础资料保存失败');
   } finally {
     saving.value = false;
+  }
+}
+
+function stockAlertText(row: MaterialMemory) {
+  if (!row.stockAlertEnabled) {
+    return '未启用';
+  }
+  const alertQuantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? 0 : Number(row.stockAlertQuantity);
+  const quantityText = formatQuantity(alertQuantity, row.unit);
+  return row.availableQuantity <= alertQuantity ? `低库存：低于 ${quantityText}` : `正常：下限 ${quantityText}`;
+}
+
+function stockAlertTagType(row: MaterialMemory) {
+  if (!row.stockAlertEnabled) {
+    return 'info';
+  }
+  const alertQuantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? 0 : Number(row.stockAlertQuantity);
+  return row.availableQuantity <= alertQuantity ? 'danger' : 'success';
+}
+
+async function downloadMaterialImportTemplate() {
+  if (guardDesktopOperation('下载零件库导入模板')) {
+    return;
+  }
+  if (materialImportTemplateDownloading.value) {
+    return;
+  }
+  materialImportTemplateDownloading.value = true;
+  try {
+    await erpApi.downloadMaterialImportTemplate();
+    ElMessage.success('零件库导入模板已下载');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件库导入模板下载失败');
+  } finally {
+    materialImportTemplateDownloading.value = false;
   }
 }
 
@@ -1246,6 +1580,48 @@ async function refreshMaterialImportSession() {
   }
 }
 
+function mergeMaterialImportSessionRows(current: MaterialImportSessionPreview, nextPage: MaterialImportSessionPreview): MaterialImportSessionPreview {
+  const mergeById = <T extends { id: string }>(existing: T[] = [], incoming: T[] = []) => {
+    const seen = new Set(existing.map((item) => item.id));
+    return [...existing, ...incoming.filter((item) => !seen.has(item.id))];
+  };
+  const rows = mergeById(current.rows, nextPage.rows);
+  const applicabilityRows = mergeById(current.applicabilityRows ?? [], nextPage.applicabilityRows ?? []);
+  const transformRows = mergeById(current.transformRows ?? [], nextPage.transformRows ?? []);
+  return {
+    ...nextPage,
+    rows,
+    applicabilityRows,
+    transformRows,
+    rowPage: {
+      ...nextPage.rowPage,
+      loadedCount: rows.length + applicabilityRows.length + transformRows.length
+    }
+  };
+}
+
+async function loadMoreMaterialImportRows() {
+  const session = materialImportSession.value;
+  if (!session || !materialImportHasMoreRows.value) {
+    return;
+  }
+  if (materialImportBusy.value) {
+    ElMessage.warning('当前导入任务正在处理，请稍后再加载预览');
+    return;
+  }
+  importLoadingMore.value = true;
+  try {
+    // 零件库导入预览必须明确显示总数并支持继续加载，避免大文件只看到前 100 行。
+    const nextOffset = session.rowPage.offset + session.rowPage.limit;
+    const nextPage = await erpApi.materialImportSession(session.id, session.rowPage.limit, nextOffset);
+    materialImportSession.value = mergeMaterialImportSessionRows(session, nextPage);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件库导入预览继续加载失败');
+  } finally {
+    importLoadingMore.value = false;
+  }
+}
+
 async function downloadMaterialImportIssueReport() {
   if (!materialImportSession.value?.id) {
     ElMessage.warning('请先上传 Excel 并生成导入预览');
@@ -1272,17 +1648,12 @@ async function deleteMaterialImportFile(fileId: string) {
   if (materialImportBusy.value) {
     return;
   }
-  importDeletingFileId.value = fileId;
-  try {
-    materialImportSession.value = await erpApi.deleteMaterialImportFile(materialImportSession.value.id, fileId);
-    ElMessage.success('导入文件已删除，预览已刷新');
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导入文件删除失败');
-  } finally {
-    if (importDeletingFileId.value === fileId) {
-      importDeletingFileId.value = '';
-    }
+  const file = materialImportSession.value.files.find((item) => item.id === fileId);
+  if (!file) {
+    ElMessage.error('导入文件不存在，请刷新预览后重试');
+    return;
   }
+  openMaterialImportConfirmDialog('deleteFile', file);
 }
 
 async function discardMaterialImport() {
@@ -1316,7 +1687,31 @@ async function confirmMaterialImportAction() {
     await executeDiscardMaterialImport();
     return;
   }
+  if (materialImportConfirmAction.value === 'deleteFile') {
+    await executeDeleteMaterialImportFile();
+    return;
+  }
   await executeCommitMaterialImport();
+}
+
+async function executeDeleteMaterialImportFile() {
+  const file = materialImportDeleteFileTarget.value;
+  if (!materialImportSession.value || !file || importDeletingFileId.value) {
+    return;
+  }
+  importDeletingFileId.value = file.id;
+  try {
+    materialImportSession.value = await erpApi.deleteMaterialImportFile(materialImportSession.value.id, file.id);
+    materialImportConfirmDialogVisible.value = false;
+    materialImportDeleteFileTarget.value = undefined;
+    ElMessage.success('导入文件已删除，预览已刷新');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导入文件删除失败');
+  } finally {
+    if (importDeletingFileId.value === file.id) {
+      importDeletingFileId.value = '';
+    }
+  }
 }
 
 async function executeDiscardMaterialImport() {
@@ -1344,7 +1739,7 @@ async function executeCommitMaterialImport() {
   try {
     const result = await erpApi.commitMaterialImportSession(materialImportSession.value.id, materialImportSession.value.previewToken);
     ElMessage.success(
-      `导入完成：新增 ${result.createdCount} 个，更新 ${result.updatedCount} 个，图纸版本 ${result.drawingRevisionUpsertCount || 0} 条，适用范围 ${result.applicabilityUpsertCount || 0} 条，来源关系 ${result.transformRuleUpsertCount || 0} 条`
+      `导入完成：新增 ${result.createdCount} 个，更新 ${result.updatedCount} 个，图纸版本 ${result.drawingRevisionUpsertCount ?? 0} 条，适用范围 ${result.applicabilityUpsertCount ?? 0} 条，来源关系 ${result.transformRuleUpsertCount ?? 0} 条`
     );
     materialImportSession.value = undefined;
     materialImportConfirmDialogVisible.value = false;
@@ -1453,14 +1848,13 @@ async function saveApplicability() {
     const payload = {
       customerId: applicabilityForm.customerScope === 'SPECIFIC' ? applicabilityForm.customerId : undefined,
       projectModel: applicabilityForm.projectScope === 'SPECIFIC' ? applicabilityForm.projectModel.trim() : undefined,
-      remark: applicabilityForm.remark.trim() || undefined,
-      status: applicabilityForm.status
+      remark: applicabilityForm.remark.trim() || undefined
     };
     if (applicabilityForm.id) {
       await erpApi.updateMaterialApplicability(applicabilityForm.id, payload);
       ElMessage.success('适用范围已保存');
     } else {
-      await erpApi.saveMaterialApplicability(activeMaterial.value.id, payload);
+      await erpApi.saveMaterialApplicability(activeMaterial.value.id, { ...payload, status: applicabilityForm.status });
       ElMessage.success('适用范围已新增');
     }
     resetApplicabilityForm();
@@ -1470,7 +1864,7 @@ async function saveApplicability() {
   }
 }
 
-async function disableApplicability(row: MaterialApplicability) {
+function disableApplicability(row: MaterialApplicability) {
   if (guardDesktopOperation('停用适用范围')) {
     return;
   }
@@ -1480,21 +1874,17 @@ async function disableApplicability(row: MaterialApplicability) {
   if (applicabilityOperationSavingId.value) {
     return;
   }
-  applicabilityOperationSavingId.value = row.id;
-  try {
-    await erpApi.disableMaterialApplicability(row.id);
-    ElMessage.success('适用范围已停用');
-    await loadApplicabilities();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '适用范围停用失败');
-  } finally {
-    if (applicabilityOperationSavingId.value === row.id) {
-      applicabilityOperationSavingId.value = '';
-    }
-  }
+  openMaterialMaintenanceStatusDialog({
+    type: 'applicability',
+    id: row.id,
+    name: row.scopeLabel,
+    nextStatus: 'DISABLED',
+    actionLabel: '停用适用范围',
+    warning: '停用适用范围只影响后续推荐和下单选择，不会改写历史订单或已维护 BOM。'
+  });
 }
 
-async function enableApplicability(row: MaterialApplicability) {
+function enableApplicability(row: MaterialApplicability) {
   if (guardDesktopOperation('启用适用范围')) {
     return;
   }
@@ -1504,23 +1894,14 @@ async function enableApplicability(row: MaterialApplicability) {
   if (applicabilityOperationSavingId.value) {
     return;
   }
-  applicabilityOperationSavingId.value = row.id;
-  try {
-    await erpApi.updateMaterialApplicability(row.id, {
-      customerId: row.customerId || undefined,
-      projectModel: row.projectModel || undefined,
-      remark: row.remark || undefined,
-      status: 'ENABLED'
-    });
-    ElMessage.success('适用范围已启用');
-    await loadApplicabilities();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '适用范围启用失败');
-  } finally {
-    if (applicabilityOperationSavingId.value === row.id) {
-      applicabilityOperationSavingId.value = '';
-    }
-  }
+  openMaterialMaintenanceStatusDialog({
+    type: 'applicability',
+    id: row.id,
+    name: row.scopeLabel,
+    nextStatus: 'ENABLED',
+    actionLabel: '启用适用范围',
+    warning: '启用适用范围只恢复后续推荐入口，不会重写原客户范围、机型范围或备注。'
+  });
 }
 
 async function openDrawingDialog(row: MaterialMemory) {
@@ -1559,6 +1940,7 @@ function resetDrawingForm() {
   drawingForm.drawingFileName = '';
   drawingForm.drawingFileUrl = '';
   drawingForm.isDefault = drawingRevisions.value.length === 0;
+  drawingForm.defaultChangedBy = '';
   drawingForm.remark = '';
   drawingForm.status = 'ENABLED';
 }
@@ -1583,11 +1965,12 @@ function editDrawingRevision(row: MaterialDrawingRevision) {
   drawingForm.drawingFileName = row.drawingFileName || '';
   drawingForm.drawingFileUrl = row.drawingFileUrl || '';
   drawingForm.isDefault = row.isDefault;
+  drawingForm.defaultChangedBy = row.defaultChangedBy || '';
   drawingForm.remark = row.remark || '';
   drawingForm.status = row.status;
 }
 
-function drawingRevisionPayload(overrides: Partial<SaveMaterialDrawingRevisionPayload> = {}): SaveMaterialDrawingRevisionPayload {
+function drawingRevisionPayload(overrides: Partial<UpdateMaterialDrawingRevisionPayload> = {}): UpdateMaterialDrawingRevisionPayload {
   return {
     drawingNo: drawingForm.drawingNo.trim(),
     drawingVersion: drawingForm.drawingVersion.trim(),
@@ -1596,9 +1979,8 @@ function drawingRevisionPayload(overrides: Partial<SaveMaterialDrawingRevisionPa
     drawingFileName: drawingForm.drawingFileName.trim() || undefined,
     drawingFileUrl: drawingForm.drawingFileUrl.trim() || undefined,
     isDefault: drawingForm.isDefault,
-    defaultChangedBy: drawingForm.isDefault ? '系统操作员' : undefined,
+    defaultChangedBy: drawingForm.isDefault ? drawingForm.defaultChangedBy.trim() : undefined,
     remark: drawingForm.remark.trim() || undefined,
-    status: drawingForm.status,
     ...overrides
   };
 }
@@ -1617,6 +1999,10 @@ async function saveDrawingRevision() {
     ElMessage.warning('请填写图号和图纸版本');
     return;
   }
+  if (drawingForm.isDefault && !drawingForm.defaultChangedBy.trim()) {
+    ElMessage.warning('设置默认图纸必须填写操作人员');
+    return;
+  }
   drawingSaving.value = true;
   try {
     const payload = drawingRevisionPayload();
@@ -1624,7 +2010,7 @@ async function saveDrawingRevision() {
       await erpApi.updateMaterialDrawingRevision(drawingForm.id, payload);
       ElMessage.success('图纸版本已保存');
     } else {
-      await erpApi.saveMaterialDrawingRevision(activeMaterial.value.id, payload);
+      await erpApi.saveMaterialDrawingRevision(activeMaterial.value.id, { ...payload, status: drawingForm.status });
       ElMessage.success('图纸版本已新增');
     }
     await loadDrawingRevisions();
@@ -1644,6 +2030,37 @@ async function setDefaultDrawingRevision(row: MaterialDrawingRevision) {
   if (drawingOperationSavingId.value) {
     return;
   }
+  activeDefaultDrawingRevision.value = row;
+  defaultDrawingForm.defaultChangedBy = '';
+  defaultDrawingForm.remark = row.remark || '';
+  defaultDrawingDialogVisible.value = true;
+}
+
+function closeDefaultDrawingDialog() {
+  if (drawingOperationSavingId.value) {
+    warnMaterialMaintenanceSavingClose('默认图纸正在更新，请等待保存完成');
+    return;
+  }
+  defaultDrawingDialogVisible.value = false;
+}
+
+function handleDefaultDrawingDialogClose(done: () => void) {
+  if (drawingOperationSavingId.value) {
+    warnMaterialMaintenanceSavingClose('默认图纸正在更新，请等待保存完成');
+    return;
+  }
+  done();
+}
+
+async function confirmDefaultDrawingRevision() {
+  const row = activeDefaultDrawingRevision.value;
+  if (!row) {
+    return;
+  }
+  if (!defaultDrawingForm.defaultChangedBy.trim()) {
+    ElMessage.warning('设置默认图纸必须填写操作人员');
+    return;
+  }
   drawingOperationSavingId.value = row.id;
   try {
     await erpApi.updateMaterialDrawingRevision(row.id, {
@@ -1654,11 +2071,11 @@ async function setDefaultDrawingRevision(row: MaterialDrawingRevision) {
       drawingFileName: row.drawingFileName || undefined,
       drawingFileUrl: row.drawingFileUrl || undefined,
       isDefault: true,
-      defaultChangedBy: '系统操作员',
-      remark: row.remark || undefined,
-      status: 'ENABLED'
+      defaultChangedBy: defaultDrawingForm.defaultChangedBy.trim(),
+      remark: defaultDrawingForm.remark.trim() || row.remark || undefined
     });
     ElMessage.success('默认图纸已更新');
+    defaultDrawingDialogVisible.value = false;
     await loadDrawingRevisions();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '默认图纸更新失败');
@@ -1669,7 +2086,7 @@ async function setDefaultDrawingRevision(row: MaterialDrawingRevision) {
   }
 }
 
-async function disableDrawingRevision(row: MaterialDrawingRevision) {
+function disableDrawingRevision(row: MaterialDrawingRevision) {
   if (guardDesktopOperation('停用图纸版本')) {
     return;
   }
@@ -1679,21 +2096,17 @@ async function disableDrawingRevision(row: MaterialDrawingRevision) {
   if (drawingOperationSavingId.value) {
     return;
   }
-  drawingOperationSavingId.value = row.id;
-  try {
-    await erpApi.disableMaterialDrawingRevision(row.id);
-    ElMessage.success('图纸版本已停用');
-    await loadDrawingRevisions();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '图纸版本停用失败');
-  } finally {
-    if (drawingOperationSavingId.value === row.id) {
-      drawingOperationSavingId.value = '';
-    }
-  }
+  openMaterialMaintenanceStatusDialog({
+    type: 'drawing',
+    id: row.id,
+    name: `${row.drawingNo} / ${row.drawingVersion}${row.drawingDate ? ` / ${row.drawingDate}` : ''}`,
+    nextStatus: 'DISABLED',
+    actionLabel: '停用图纸版本',
+    warning: '停用图纸版本只影响后续 BOM 和订单选择，不会覆盖历史订单图纸快照。'
+  });
 }
 
-async function enableDrawingRevision(row: MaterialDrawingRevision) {
+function enableDrawingRevision(row: MaterialDrawingRevision) {
   if (guardDesktopOperation('启用图纸版本')) {
     return;
   }
@@ -1703,26 +2116,65 @@ async function enableDrawingRevision(row: MaterialDrawingRevision) {
   if (drawingOperationSavingId.value) {
     return;
   }
-  drawingOperationSavingId.value = row.id;
+  openMaterialMaintenanceStatusDialog({
+    type: 'drawing',
+    id: row.id,
+    name: `${row.drawingNo} / ${row.drawingVersion}${row.drawingDate ? ` / ${row.drawingDate}` : ''}`,
+    nextStatus: 'ENABLED',
+    actionLabel: '启用图纸版本',
+    warning: '启用图纸版本只恢复可选状态，不会自动设为默认，也不会覆盖历史订单图纸快照。'
+  });
+}
+
+async function confirmMaterialMaintenanceStatusChange() {
+  const target = activeMaterialMaintenanceStatusTarget.value;
+  if (!target || materialMaintenanceStatusSaving.value) {
+    return;
+  }
+
+  if (target.type === 'applicability') {
+    applicabilityOperationSavingId.value = target.id;
+    try {
+      if (target.nextStatus === 'ENABLED') {
+        // 恢复适用范围只恢复推荐入口，不重写原客户范围、机型范围或备注。
+        await erpApi.restoreMaterialApplicability(target.id);
+        ElMessage.success('适用范围已启用');
+      } else {
+        // 停用适用范围只影响后续推荐，不改写历史订单、BOM 或导入追溯。
+        await erpApi.disableMaterialApplicability(target.id);
+        ElMessage.success('适用范围已停用');
+      }
+      materialMaintenanceStatusDialogVisible.value = false;
+      activeMaterialMaintenanceStatusTarget.value = undefined;
+      await loadApplicabilities();
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : target.nextStatus === 'ENABLED' ? '适用范围启用失败' : '适用范围停用失败');
+    } finally {
+      if (applicabilityOperationSavingId.value === target.id) {
+        applicabilityOperationSavingId.value = '';
+      }
+    }
+    return;
+  }
+
+  drawingOperationSavingId.value = target.id;
   try {
-    await erpApi.updateMaterialDrawingRevision(row.id, {
-      drawingNo: row.drawingNo,
-      drawingVersion: row.drawingVersion,
-      drawingDate: row.drawingDate || undefined,
-      drawingStatus: row.drawingStatus || undefined,
-      drawingFileName: row.drawingFileName || undefined,
-      drawingFileUrl: row.drawingFileUrl || undefined,
-      isDefault: row.isDefault,
-      defaultChangedBy: row.isDefault ? '系统操作员' : undefined,
-      remark: row.remark || undefined,
-      status: 'ENABLED'
-    });
-    ElMessage.success('图纸版本已启用');
+    if (target.nextStatus === 'ENABLED') {
+      // 恢复图纸版本只恢复可选状态，不自动设为默认，也不覆盖历史订单图纸快照。
+      await erpApi.restoreMaterialDrawingRevision(target.id);
+      ElMessage.success('图纸版本已启用');
+    } else {
+      // 图纸版本停用只影响后续选择；历史订单继续保留下单时图纸快照。
+      await erpApi.disableMaterialDrawingRevision(target.id);
+      ElMessage.success('图纸版本已停用');
+    }
+    materialMaintenanceStatusDialogVisible.value = false;
+    activeMaterialMaintenanceStatusTarget.value = undefined;
     await loadDrawingRevisions();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '图纸版本启用失败');
+    ElMessage.error(error instanceof Error ? error.message : target.nextStatus === 'ENABLED' ? '图纸版本启用失败' : '图纸版本停用失败');
   } finally {
-    if (drawingOperationSavingId.value === row.id) {
+    if (drawingOperationSavingId.value === target.id) {
       drawingOperationSavingId.value = '';
     }
   }
@@ -1735,25 +2187,46 @@ function disableMaterial(row: MaterialMemory) {
   if (materialOperationSavingId.value) {
     return;
   }
+  materialStatusAction.value = 'disable';
   materialStatusTarget.value = row;
   materialStatusDialogVisible.value = true;
 }
 
-async function confirmDisableMaterial() {
+function enableMaterial(row: MaterialMemory) {
+  if (guardDesktopOperation('启用零件')) {
+    return;
+  }
+  if (materialOperationSavingId.value) {
+    return;
+  }
+  materialStatusAction.value = 'enable';
+  materialStatusTarget.value = row;
+  materialStatusDialogVisible.value = true;
+}
+
+async function confirmMaterialStatusChange() {
   const row = materialStatusTarget.value;
   if (!row || materialStatusSaving.value || materialOperationSavingId.value) {
     return;
   }
+  const action = materialStatusAction.value;
   materialStatusSaving.value = true;
   materialOperationSavingId.value = row.id;
   try {
-    await erpApi.disableInventoryMaterial(row.id);
-    ElMessage.success('零件基础资料已停用');
+    if (action === 'enable') {
+      // 恢复零件搜索记忆只恢复 Material 后续可选状态，不自动恢复适用范围、BOM 行、默认图纸或来源加工关系。
+      await erpApi.restoreInventoryMaterial(row.id);
+      ElMessage.success('零件基础资料已启用');
+    } else {
+      await erpApi.disableInventoryMaterial(row.id);
+      ElMessage.success('零件基础资料已停用');
+    }
     materialStatusDialogVisible.value = false;
     materialStatusTarget.value = undefined;
+    materialStatusAction.value = 'disable';
     await loadMaterials();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '零件基础资料停用失败');
+    ElMessage.error(error instanceof Error ? error.message : action === 'enable' ? '零件基础资料启用失败' : '零件基础资料停用失败');
   } finally {
     materialStatusSaving.value = false;
     if (materialOperationSavingId.value === row.id) {
@@ -1762,45 +2235,6 @@ async function confirmDisableMaterial() {
   }
 }
 
-async function enableMaterial(row: MaterialMemory) {
-  if (guardDesktopOperation('启用零件')) {
-    return;
-  }
-  if (materialOperationSavingId.value) {
-    return;
-  }
-  materialOperationSavingId.value = row.id;
-  try {
-    await erpApi.updateInventoryMaterial(row.id, { status: 'ENABLED' });
-    ElMessage.success('零件基础资料已启用');
-    await loadMaterials();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '零件基础资料启用失败');
-  } finally {
-    if (materialOperationSavingId.value === row.id) {
-      materialOperationSavingId.value = '';
-    }
-  }
-}
-
-function formatQuantity(value: number | undefined, unit?: string) {
-  return `${formatNumber(value || 0)} ${unit || ''}`.trim();
-}
-
-function formatNumber(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
-}
-
-function formatDateTime(value?: string) {
-  if (!value) {
-    return '-';
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
 </script>
 
 <style scoped>
@@ -1828,6 +2262,17 @@ function formatDateTime(value?: string) {
 
 .material-library-alert {
   margin-bottom: 16px;
+}
+
+.stock-alert-form-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.unit-text {
+  color: #64748b;
+  font-size: 13px;
 }
 
 .table-pagination-row,
@@ -1986,6 +2431,17 @@ function formatDateTime(value?: string) {
   margin-top: 8px;
 }
 
+.import-preview-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .check-ok {
   color: #16a34a;
 }
@@ -2031,6 +2487,11 @@ function formatDateTime(value?: string) {
 
   .import-file-row {
     grid-template-columns: 1fr;
+  }
+
+  .import-preview-pager {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

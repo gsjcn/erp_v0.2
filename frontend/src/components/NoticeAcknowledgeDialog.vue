@@ -17,10 +17,24 @@
 
       <el-form label-width="112px">
         <el-form-item :label="nameLabel" required>
-          <el-input
+          <el-select
+            v-if="useSelect"
             v-model="acknowledgedBy"
-            maxlength="30"
-            show-word-limit
+            filterable
+            remote
+            clearable
+            reserve-keyword
+            style="width: 100%"
+            :placeholder="selectPlaceholder || namePlaceholder"
+            :remote-method="handleSelectSearch"
+            :loading="selectLoading"
+            @visible-change="handleSelectVisible"
+          >
+            <el-option v-for="option in selectOptions" :key="option.value" :label="option.label" :value="option.value" />
+          </el-select>
+          <el-input
+            v-else
+            v-model="acknowledgedBy"
             :placeholder="namePlaceholder"
             @keyup.enter="submit"
           />
@@ -53,6 +67,10 @@ const props = withDefaults(
     nameLabel?: string;
     namePlaceholder?: string;
     confirmText?: string;
+    useSelect?: boolean;
+    selectOptions?: Array<{ label: string; value: string }>;
+    selectLoading?: boolean;
+    selectPlaceholder?: string;
   }>(),
   {
     title: '确认通知',
@@ -62,13 +80,19 @@ const props = withDefaults(
     loading: false,
     nameLabel: '确认人员',
     namePlaceholder: '请输入确认人员姓名',
-    confirmText: '确认已知晓'
+    confirmText: '确认已知晓',
+    useSelect: false,
+    selectOptions: () => [],
+    selectLoading: false,
+    selectPlaceholder: ''
   }
 );
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
   confirm: [acknowledgedBy: string];
+  search: [keyword: string];
+  visibleChange: [visible: boolean];
 }>();
 
 const acknowledgedBy = ref('');
@@ -101,10 +125,18 @@ function formatLocalDateTime(value: Date) {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
+function handleSelectSearch(keyword: string) {
+  emit('search', keyword);
+}
+
+function handleSelectVisible(visible: boolean) {
+  emit('visibleChange', visible);
+}
+
 function submit() {
   const name = acknowledgedBy.value.trim();
   if (!name) {
-    ElMessage.warning(`请输入${props.nameLabel}`);
+    ElMessage.warning(props.useSelect ? `请选择${props.nameLabel}` : `请输入${props.nameLabel}`);
     return;
   }
   emit('confirm', name);

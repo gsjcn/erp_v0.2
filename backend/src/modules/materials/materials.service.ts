@@ -131,7 +131,12 @@ export class MaterialsService {
       withoutRecentOrderCount: allRows.filter((row) => !row.lastOrderDate).length,
       relationCounts: this.dashboardCountMap(allRows.map((row) => row.currentRelationType)),
       drawingSourceCounts: this.dashboardCountMap(allRows.map((row) => row.drawingSource || 'NONE')),
-      bomStructureCounts: this.dashboardCountMap(allRows.flatMap((row) => (row.bomStructureTypes.length > 0 ? row.bomStructureTypes : ['NONE'])))
+      bomStructureCounts: this.dashboardCountMap(allRows.flatMap((row) => (row.bomStructureTypes.length > 0 ? row.bomStructureTypes : ['NONE']))),
+      stockAlertCounts: {
+        ENABLED: allRows.filter((row) => row.stockAlertEnabled).length,
+        TRIGGERED: allRows.filter((row) => row.stockAlertTriggered).length,
+        DISABLED: allRows.filter((row) => !row.stockAlertEnabled).length
+      }
     };
 
     return {
@@ -443,7 +448,7 @@ export class MaterialsService {
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
-      const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+      const reservedQuantity = batch.sourceOrderId ? 0 : (reservedQuantityByBatchId.get(batch.id) ?? 0);
       const quantity = Math.max(decimalToNumber(batch.quantity) - reservedQuantity, 0);
       current.availableQuantity += quantity;
       if (batch.sourceOrderId) {
@@ -539,6 +544,9 @@ export class MaterialsService {
       orderInventoryQuantity: 0,
       stockInventoryQuantity: 0
     };
+    const stockAlertQuantity =
+      material.stockAlertQuantity === null || material.stockAlertQuantity === undefined ? null : decimalToNumber(material.stockAlertQuantity);
+    const stockAlertEnabled = Boolean(material.stockAlertEnabled);
     const customerNames = this.uniqueList([
       ...displayApplicabilities.map((item) => item.customer?.customerName || item.customerNameSnapshot || ''),
       ...displayBomLines.map((line) => line.bom.customer?.customerName || line.bom.customerNameSnapshot || ''),
@@ -624,6 +632,10 @@ export class MaterialsService {
       orderLineUsageCount: history.length,
       currentCustomerUsageCount,
       ...quantity,
+      // 库存报警只基于 Material 配置和当前 InventoryBatch 可用量计算提醒，不自动下单、补单、提交生产或扣库存。
+      stockAlertEnabled,
+      stockAlertQuantity,
+      stockAlertTriggered: stockAlertEnabled && stockAlertQuantity !== null && quantity.availableQuantity <= stockAlertQuantity,
       searchText: searchParts.join(' '),
       searchParts,
       history,
@@ -665,6 +677,9 @@ export class MaterialsService {
       return false;
     }
     if (query.recentOrderPresence && !this.rowMatchesRecentOrderPresence(row, query.recentOrderPresence)) {
+      return false;
+    }
+    if (query.stockAlert && query.stockAlert !== 'ALL' && !this.rowMatchesStockAlert(row, query.stockAlert)) {
       return false;
     }
     const drawingDateFrom = this.parseDate(query.drawingDateFrom);
@@ -761,6 +776,17 @@ export class MaterialsService {
     recentOrderPresence: NonNullable<MaterialDashboardQueryDto['recentOrderPresence']>
   ) {
     return recentOrderPresence === 'WITH_RECENT_ORDER' ? Boolean(row.lastOrderDate) : !row.lastOrderDate;
+  }
+
+  private rowMatchesStockAlert(row: ReturnType<MaterialsService['buildDashboardRow']>, stockAlert: NonNullable<MaterialDashboardQueryDto['stockAlert']>) {
+    if (stockAlert === 'ENABLED') {
+      return row.stockAlertEnabled;
+    }
+    if (stockAlert === 'DISABLED') {
+      return !row.stockAlertEnabled;
+    }
+    // 库存报警筛选只用于提醒核对，不触发订单、生产或库存流水。
+    return row.stockAlertTriggered;
   }
 
   private rowMatchesCustomer(row: ReturnType<MaterialsService['buildDashboardRow']>, customerId: string) {
@@ -870,7 +896,7 @@ export class MaterialsService {
         if (aProjectRank !== bProjectRank) {
           return aProjectRank - bProjectRank;
         }
-        return (a.sortOrder || 0) - (b.sortOrder || 0);
+        return (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
       });
     return rows[0];
   }
@@ -945,7 +971,7 @@ export class MaterialsService {
           this.compareDashboardText(a.bom.bomName, b.bom.bomName, 'ASC') ||
           this.compareDashboardText(a.bom.projectModel, b.bom.projectModel, 'ASC') ||
           this.dashboardBomLineDisplayOrder(a) - this.dashboardBomLineDisplayOrder(b) ||
-          (a.sortOrder || 0) - (b.sortOrder || 0)
+          (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
       )
       .map((line) => ({
         lineId: line.id,
@@ -959,7 +985,7 @@ export class MaterialsService {
         componentNo: line.componentNo?.trim().toUpperCase() || null,
         parentComponentNo: line.parentComponentNo?.trim().toUpperCase() || null,
         displayOrder: this.dashboardBomLineDisplayOrder(line),
-        sortOrder: line.sortOrder || 0
+        sortOrder: line.sortOrder ?? 0
       }));
   }
 
@@ -974,7 +1000,7 @@ export class MaterialsService {
       .filter((line) => line.status === 'ENABLED' && line.material?.status !== 'DISABLED')
       .sort(
       (left, right) =>
-        (left.sortOrder || 0) - (right.sortOrder || 0) ||
+        (left.sortOrder ?? 0) - (right.sortOrder ?? 0) ||
         left.createdAt.getTime() - right.createdAt.getTime() ||
         left.id.localeCompare(right.id)
     );
@@ -1065,7 +1091,7 @@ export class MaterialsService {
         if (a.isDefault !== b.isDefault) {
           return a.isDefault ? -1 : 1;
         }
-        const dateDiff = (b.drawingDate?.getTime() || 0) - (a.drawingDate?.getTime() || 0);
+        const dateDiff = (b.drawingDate?.getTime() ?? 0) - (a.drawingDate?.getTime() ?? 0);
         if (dateDiff !== 0) {
           return dateDiff;
         }

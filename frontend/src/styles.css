@@ -128,7 +128,14 @@ a {
   border-bottom: 1px solid #edf2f7;
 }
 
-.topbar > span {
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.topbar-actions > span {
   color: var(--erp-muted);
   font-size: 12px;
   font-weight: 500;
@@ -669,7 +676,12 @@ a {
     gap: 4px;
   }
 
-  .topbar > span {
+  .topbar-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .topbar-actions > span {
     display: none;
   }
 

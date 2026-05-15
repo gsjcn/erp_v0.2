@@ -1,46 +1,42 @@
-export function formatDate(value?: string) {
+export function formatDate(value?: Date | string | null) {
   if (!value) {
     return '-';
+  }
+  if (value instanceof Date) {
+    return formatDateParts(value);
   }
   const businessDate = dateOnlyBusinessDate(value);
-  if (businessDate) {
-    return businessDate.toLocaleDateString('zh-CN');
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  const date = businessDate || new Date(value);
+  if (!isValidDate(date)) {
     return '-';
   }
-  return date.toLocaleDateString('zh-CN');
+  return formatDateParts(date);
 }
 
-export function formatDateTime(value?: Date | string) {
+export function formatDateTime(value?: Date | string | null) {
   if (!value) {
     return '-';
   }
-  return new Date(value).toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  });
+  const date = value instanceof Date ? value : new Date(value);
+  if (!isValidDate(date)) {
+    return '-';
+  }
+  return `${formatDateParts(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 
 export function formatDateInputValue(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, '0');
-  const day = String(value.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  if (!isValidDate(value)) {
+    return '';
+  }
+  return formatDateParts(value);
 }
 
 export function formatDateTimeInputValue(value: Date) {
   // datetime-local 需要浏览器本地墙钟时间，不能用 toISOString 直接生成 UTC 时间。
-  const hour = String(value.getHours()).padStart(2, '0');
-  const minute = String(value.getMinutes()).padStart(2, '0');
-  const second = String(value.getSeconds()).padStart(2, '0');
-  return `${formatDateInputValue(value)}T${hour}:${minute}:${second}`;
+  if (!isValidDate(value)) {
+    return '';
+  }
+  return `${formatDateInputValue(value)}T${pad2(value.getHours())}:${pad2(value.getMinutes())}:${pad2(value.getSeconds())}`;
 }
 
 export function formatDateInputText(value?: Date | string | null) {
@@ -55,7 +51,7 @@ export function formatDateInputText(value?: Date | string | null) {
     return formatDateInputValue(businessDate);
   }
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  if (!isValidDate(date)) {
     return '';
   }
   return formatDateInputValue(date);
@@ -70,7 +66,32 @@ function dateOnlyBusinessDate(value: string) {
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
 }
 
-export function formatQuantity(value: number, unit?: string) {
-  const number = Number.isInteger(value) ? value.toFixed(0) : value.toString();
+function formatDateParts(value: Date) {
+  if (!isValidDate(value)) {
+    return '-';
+  }
+  return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
+}
+
+function isValidDate(value: Date) {
+  return !Number.isNaN(value.getTime());
+}
+
+function pad2(value: number) {
+  return String(value).padStart(2, '0');
+}
+
+export function formatQuantity(value?: number | null, unit?: string | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return unit ? `- ${unit}` : '-';
+  }
+  const number = formatNumber(value);
   return `${number} ${unit || ''}`.trim();
+}
+
+export function formatNumber(value?: number | null, fractionDigits = 3) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '-';
+  }
+  return Number.isInteger(value) ? String(value) : value.toFixed(fractionDigits).replace(/\.?0+$/, '');
 }

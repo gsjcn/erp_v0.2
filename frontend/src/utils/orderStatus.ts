@@ -24,6 +24,7 @@ export function orderDisplayStatus(order: OrderStatusSource): OrderDisplayStatus
   }
   if (
     order.productionStatus === 'COMPLETED' ||
+    order.productionStatus === 'STORED' ||
     order.warehouseStage === 'WAITING_RECEIPT' ||
     order.warehouseStage === 'WAITING_SHIPMENT'
   ) {
@@ -32,11 +33,12 @@ export function orderDisplayStatus(order: OrderStatusSource): OrderDisplayStatus
   if (
     order.status === 'IN_PRODUCTION' ||
     order.productionStatus === 'IN_PROGRESS' ||
+    order.productionStatus === 'WAITING_CONFIRMATION' ||
     order.warehouseStage === 'IN_PRODUCTION_STAGE'
   ) {
     return 'ORDER_IN_PRODUCTION';
   }
-  if (order.status === 'SUBMITTED' || order.productionStatus === 'PENDING' || order.warehouseStage === 'WAITING_PRODUCTION') {
+  if (order.status === 'PENDING_PRODUCTION' || order.productionStatus === 'PENDING' || order.warehouseStage === 'WAITING_PRODUCTION') {
     return 'WAITING_PRODUCTION';
   }
   return order.status;

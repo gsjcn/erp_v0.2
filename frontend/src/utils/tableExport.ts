@@ -8,10 +8,11 @@ export function escapeHtml(value: unknown) {
 }
 
 export function formatFileDateTime(date = new Date()) {
+  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
   const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(
-    date.getMinutes()
-  )}`;
+  return `${safeDate.getFullYear()}${pad(safeDate.getMonth() + 1)}${pad(safeDate.getDate())}_${pad(
+    safeDate.getHours()
+  )}${pad(safeDate.getMinutes())}`;
 }
 
 export function downloadHtmlAsExcel(html: string, filename: string) {

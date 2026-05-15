@@ -49,7 +49,10 @@
             </template>
           </nav>
         </div>
-        <span>TerraMaster F4-424 MAX / PostgreSQL / Docker</span>
+        <div class="topbar-actions">
+          <el-button :icon="Bell" plain @click="router.push('/notices')">全部通知</el-button>
+          <span>TerraMaster F4-424 MAX / PostgreSQL / Docker</span>
+        </div>
       </header>
 
       <main class="content">
@@ -61,7 +64,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { ArrowLeft } from '@element-plus/icons-vue';
+import { ArrowLeft, Bell } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
 import { navItems } from '../config/navigation';

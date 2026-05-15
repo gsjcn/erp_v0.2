@@ -158,7 +158,11 @@ export class CustomersService {
     try {
       return await this.prisma.$transaction(async (tx) => {
         if (shouldUpdateContacts) {
-          await tx.customerContact.deleteMany({ where: { customerId: id } });
+          // 多联系人编辑只软停用旧联系人，保留历史维护痕迹；页面只读取 ENABLED 联系人。
+          await tx.customerContact.updateMany({
+            where: { customerId: id, status: CommonStatus.ENABLED },
+            data: { status: CommonStatus.DISABLED, isPrimary: false }
+          });
         }
         return tx.customer.update({
           where: { id },
@@ -191,7 +195,9 @@ export class CustomersService {
     await this.ensureExists(id);
 
     if (dto.status === CommonStatus.ENABLED) {
-      const primaryContactCount = await this.prisma.customerContact.count({ where: { customerId: id, isPrimary: true } });
+      const primaryContactCount = await this.prisma.customerContact.count({
+        where: { customerId: id, status: CommonStatus.ENABLED, isPrimary: true }
+      });
       if (primaryContactCount === 0) {
         throw new BadRequestException('没有主要联系人，不能启用客户');
       }
@@ -460,6 +466,7 @@ export class CustomersService {
   private customerInclude() {
     return {
       contacts: {
+        where: { status: CommonStatus.ENABLED },
         orderBy: [{ isPrimary: 'desc' as const }, { createdAt: 'asc' as const }]
       }
     };

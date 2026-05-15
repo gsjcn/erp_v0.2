@@ -88,12 +88,20 @@ async function assertCustomerSearchRanking() {
           customerCode: prefixCode,
           customerName: prefixName,
           contactName: '排序回归联系人',
+          regionType: 'CHINA',
+          country: '中国',
+          province: '江苏省',
+          city: '常州市',
           status: 'ENABLED'
         },
         {
           customerCode: exactCode,
           customerName: exactName,
           contactName: '排序回归联系人',
+          regionType: 'CHINA',
+          country: '中国',
+          province: '江苏省',
+          city: '无锡市',
           status: 'ENABLED'
         }
       ]
@@ -617,6 +625,19 @@ function toOrderUpdateLine(line, overrides = {}) {
     selectedStockSources: line.selectedStockSources || [],
     ...overrides
   };
+}
+
+function assertNoBlankOptionalOrderLineText(order, label) {
+  const optionalFields = ['drawingNo', 'drawingVersion', 'drawingFileName', 'drawingFileUrl', 'partSpecification', 'remark'];
+  for (const line of order.lines || []) {
+    for (const field of optionalFields) {
+      const value = line[field];
+      assert(
+        value === null || value === undefined || String(value).trim() !== '',
+        `${label} ${line.partCode} ${field} 不能保存为空字符串，空值必须归一化为 null`
+      );
+    }
+  }
 }
 
 async function assertImportSourcePreview(order) {
@@ -1285,6 +1306,91 @@ async function assertSubmitRejectsInvalidPersistedComponentStructure(orderNo) {
     );
   }
   assert(rejected, '提交生产前必须拒绝数据库中组件父子关系异常的草稿订单');
+}
+
+async function deleteSubmittedOrderStatusRegressionData(orderNo) {
+  const prisma = new PrismaClient();
+  try {
+    await prisma.productionNotice.deleteMany({ where: { orderNo: { equals: orderNo, mode: 'insensitive' } } });
+    await prisma.productionTask.deleteMany({ where: { orderNo: { equals: orderNo, mode: 'insensitive' } } });
+    await prisma.inventoryReservation.deleteMany({ where: { orderNo: { equals: orderNo, mode: 'insensitive' } } });
+    await prisma.customerOrder.deleteMany({ where: { orderNo: { equals: orderNo, mode: 'insensitive' } } });
+    await prisma.orderNoReservation.deleteMany({ where: { orderNo: { equals: orderNo, mode: 'insensitive' } } });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+async function assertSubmitReturnsPendingProductionStatus(customerName) {
+  const orderNo = `${orderPrefix}-PENDING-PRODUCTION`;
+  const partCode = `${materialPrefix}-PENDING-PRODUCTION`;
+  let cleanupIndex = -1;
+  try {
+    await deleteSubmittedOrderStatusRegressionData(orderNo);
+    const prisma = new PrismaClient();
+    let customer;
+    try {
+      customer = await prisma.customer.findFirst({
+        where: { customerName },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true }
+      });
+    } finally {
+      await prisma.$disconnect();
+    }
+    assert(customer?.id, `未找到客户 ${customerName}，无法验证提交生产状态`);
+
+    const createdOrder = await requestJson('/orders', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        customerId: customer.id,
+        orderNo,
+        orderDate: '2026-06-24',
+        lines: [
+          {
+            lineType: 'PART',
+            partCategory: '通用件',
+            projectModel: '提交状态回归',
+            partCode,
+            partName: '提交状态回归零件',
+            drawingNo: `VERIFY-${runId}-PENDING`,
+            drawingVersion: 'A',
+            partThickness: 1,
+            partSpecification: '100mm x 100mm',
+            quantity: 1,
+            productionPlanQuantity: 1,
+            fulfillmentMode: 'PRODUCTION',
+            unit: '件',
+            processSteps: [{ processName: '激光切割' }]
+          }
+        ]
+      })
+    });
+    createdOrderNos.push(orderNo);
+    cleanupIndex = createdOrderNos.length - 1;
+    assert(createdOrder.status === 'DRAFT', `提交状态回归订单创建后必须是 DRAFT，实际 ${createdOrder.status}`);
+
+    const submittedOrder = await requestJson(`/orders/${encodeURIComponent(orderNo)}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ submittedByCode: 'PLAN-001' })
+    });
+    assert(
+      submittedOrder.status === 'PENDING_PRODUCTION',
+      `订单提交生产后必须返回 PENDING_PRODUCTION，实际 ${submittedOrder.status}`
+    );
+    const fetchedOrder = await requestJson(`/orders/${encodeURIComponent(orderNo)}`);
+    assert(
+      fetchedOrder.status === 'PENDING_PRODUCTION',
+      `订单提交生产后详情接口必须返回 PENDING_PRODUCTION，实际 ${fetchedOrder.status}`
+    );
+  } finally {
+    if (cleanupIndex >= 0) {
+      createdOrderNos.splice(cleanupIndex, 1);
+    }
+    await deleteSubmittedOrderStatusRegressionData(orderNo);
+  }
 }
 
 async function assertImportMissingThicknessDraftRequiresReview(customerName) {
@@ -2020,6 +2126,7 @@ async function main() {
       createdOrderNos.push(editableOrderNo);
     }
     assert(updatedOrder.orderNo === editableOrderNo, '导入草稿订单应允许编辑订单号');
+    assertNoBlankOptionalOrderLineText(updatedOrder, '导入草稿编辑后');
     assert(
       updatedOrder.lines.some((line) => line.lineType === 'COMPONENT' && line.componentNo === 'C001'),
       '导入草稿编辑后必须保留组件编号'
@@ -2049,6 +2156,7 @@ async function main() {
       staleImportSourceOrder.lines.length === updatedOrder.lines.length,
       '导入来源文件 ID 失效时，草稿编辑不能因为外键错误失败'
     );
+    assertNoBlankOptionalOrderLineText(staleImportSourceOrder, '导入来源失效编辑后');
     const recoveredImportSourceLine = staleImportSourceOrder.lines.find((line) => line.partCode === updatedOrder.lines[0].partCode);
     assert(
       recoveredImportSourceLine?.sourceImportFileId &&
@@ -2106,6 +2214,7 @@ async function main() {
       '跨文件连续上传创建草稿后必须保留自动绑定的所属组件和需求数量'
     );
     await assertSubmitRejectsInvalidPersistedComponentStructure(`${orderPrefix}-SPLIT`);
+    await assertSubmitReturnsPendingProductionStatus(customerName);
 
     const committedStoredFile = await firstStoredImportFile(sessionId);
     const committedStoredPath = join(await orderImportUploadDir(), committedStoredFile.storedFileName);

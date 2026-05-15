@@ -91,6 +91,46 @@ function verifyRequiredFiles() {
   }
 }
 
+function verifyOrderStatusEnumContract() {
+  const schemaSource = readFile('database/prisma/schema.prisma');
+  const orderStatusBlock = schemaSource.match(/enum\s+OrderStatus\s*\{([\s\S]*?)\}/)?.[1] || '';
+  if (!orderStatusBlock.includes('PENDING_PRODUCTION')) {
+    addFailure('schema.prisma OrderStatus must include PENDING_PRODUCTION for the first-stage submitted order state.');
+  }
+  if (orderStatusBlock.includes('SUBMITTED')) {
+    addFailure('schema.prisma OrderStatus must not keep SUBMITTED; use PENDING_PRODUCTION to match AGENTS.md.');
+  }
+
+  const runtimeFiles = [
+    'backend/src/modules/orders/orders.service.ts',
+    'backend/src/modules/statistics/statistics.service.ts',
+    'database/prisma/seed.ts',
+    'database/prisma/verify-first-stage.ts',
+    'frontend/src/components/StatusTag.vue',
+    'frontend/src/types/erp.ts',
+    'frontend/src/utils/orderStatus.ts',
+    'frontend/src/views/OrdersListView.vue'
+  ];
+  for (const projectPath of runtimeFiles) {
+    const source = readFile(projectPath);
+    if (/OrderStatus\.SUBMITTED|status\s*===\s*['"`]SUBMITTED['"`]|value:\s*['"`]SUBMITTED['"`]|SUBMITTED:\s*['"`]/.test(source)) {
+      addFailure(`${projectPath} must use PENDING_PRODUCTION instead of the old SUBMITTED order status.`);
+    }
+  }
+
+  const migrationSource = readFile('database/prisma/migrations/20260515242000_order_status_pending_production/migration.sql');
+  const migrationSnippets = [
+    'ALTER TYPE "OrderStatus" RENAME VALUE \'SUBMITTED\' TO \'PENDING_PRODUCTION\'',
+    'SET "status" = \'PENDING_PRODUCTION\'::"OrderStatus"',
+    'WHERE "status"::text = \'SUBMITTED\''
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSource.includes(snippet)) {
+      addFailure(`Order status migration must keep compatibility snippet: ${snippet}`);
+    }
+  }
+}
+
 function verifyNavigation() {
   const navPath = 'frontend/src/config/navigation.ts';
   if (!fileExists(navPath)) {
@@ -406,6 +446,12 @@ function verifyCustomerSelectOnlyShowsName() {
       addFailure(`Customer search pagination must keep visible count/load-more contract snippet: ${snippet}`);
     }
   }
+  const frontendSources = walkFiles(resolveProjectPath('frontend/src'))
+    .map((filePath) => fs.readFileSync(filePath, 'utf8'))
+    .join('\n');
+  if (/customers\s*\(\s*keyword\?:\s*string/.test(apiSource) || /erpApi\.customers\(/.test(frontendSources)) {
+    addFailure('Frontend customer dropdowns must use customersPage() with visible total/hasMore instead of the legacy unpaged customers() API.');
+  }
   if (!agentsSource.includes('客户搜索结果必须按命中强度排序')) {
     addFailure('AGENTS.md must document ranked customer search behavior.');
   }
@@ -451,6 +497,76 @@ function verifyCustomerSelectOnlyShowsName() {
   }
   if (/erpApi\.customers\(\)/.test(productionViewSource)) {
     addFailure('ProductionView.vue must not load all customers just to render filter labels.');
+  }
+}
+
+function verifyCustomerContactSoftDisableWorkflow() {
+  const schemaPath = 'database/prisma/schema.prisma';
+  const migrationPath = 'database/prisma/migrations/20260515114500_customer_contact_status/migration.sql';
+  const servicePath = 'backend/src/modules/customers/customers.service.ts';
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
+  const typesPath = 'frontend/src/types/erp.ts';
+
+  for (const projectPath of [schemaPath, migrationPath, servicePath, verifierPath, typesPath]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing customer contact soft-disable file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const requiredSnippets = [
+    [schemaPath, readFile(schemaPath), 'status       CommonStatus @default(ENABLED)'],
+    [schemaPath, readFile(schemaPath), '@@index([customerId, status])'],
+    [migrationPath, readFile(migrationPath), '客户多联系人改为软停用旧记录'],
+    [migrationPath, readFile(migrationPath), 'ALTER TABLE "CustomerContact" ADD COLUMN IF NOT EXISTS "status" "CommonStatus"'],
+    [servicePath, readFile(servicePath), 'customerContact.updateMany'],
+    [servicePath, readFile(servicePath), '多联系人编辑只软停用旧联系人'],
+    [servicePath, readFile(servicePath), 'data: { status: CommonStatus.DISABLED, isPrimary: false }'],
+    [servicePath, readFile(servicePath), 'where: { status: CommonStatus.ENABLED }'],
+    [verifierPath, readFile(verifierPath), 'CUSTOMER_DISABLED_CONTACT_PRIMARY'],
+    [verifierPath, readFile(verifierPath), 'where: { status: CommonStatus.ENABLED }'],
+    [typesPath, readFile(typesPath), 'status?: CommonStatus;']
+  ];
+  for (const [projectPath, source, snippet] of requiredSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${projectPath} must keep customer contact soft-disable snippet: ${snippet}`);
+    }
+  }
+
+  const verifierSource = readFile(verifierPath);
+  const migrationSqlSource = readMigrationSqlSource();
+  const customerCoreVerifierSnippets = [
+    'CUSTOMER_IDENTITY_MISSING',
+    'CUSTOMER_OPTIONAL_TEXT_BLANK',
+    'CUSTOMER_CONTACT_SNAPSHOT_PHONE_WITHOUT_NAME',
+    'CUSTOMER_CONTACT_IDENTITY_MISSING',
+    'CUSTOMER_CONTACT_OPTIONAL_TEXT_BLANK'
+  ];
+  for (const snippet of customerCoreVerifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep customer core data verification snippet: ${snippet}`);
+    }
+  }
+
+  const customerCoreDatabaseSnippets = [
+    'Customer_identity_not_blank',
+    'Customer_optional_text_not_blank',
+    'Customer_region_fields_valid',
+    'Customer_contact_snapshot_valid',
+    'CustomerContact_identity_not_blank',
+    'CustomerContact_optional_text_not_blank',
+    'CustomerContact_disabled_not_primary',
+    'CustomerContact_one_enabled_primary_per_customer'
+  ];
+  for (const snippet of customerCoreDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep customer core database guard snippet: ${snippet}`);
+    }
+  }
+
+  const serviceSource = readFile(servicePath);
+  if (serviceSource.includes('customerContact.deleteMany')) {
+    addFailure('CustomersService must soft-disable old CustomerContact rows instead of deleting multi-contact history.');
   }
 }
 
@@ -566,8 +682,9 @@ function verifyCaseInsensitiveBusinessKeyContracts() {
   const ordersServicePath = 'backend/src/modules/orders/orders.service.ts';
   const warehousesServicePath = 'backend/src/modules/warehouses/warehouses.service.ts';
   const schemaPath = 'database/prisma/schema.prisma';
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
 
-  for (const projectPath of [customerServicePath, ordersServicePath, warehousesServicePath, schemaPath]) {
+  for (const projectPath of [customerServicePath, ordersServicePath, warehousesServicePath, schemaPath, verifierPath]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing business key contract source file: ${projectPath}`);
       return;
@@ -578,6 +695,7 @@ function verifyCaseInsensitiveBusinessKeyContracts() {
   const ordersSource = readFile(ordersServicePath);
   const warehousesSource = readFile(warehousesServicePath);
   const schemaSource = readFile(schemaPath);
+  const verifierSource = readFile(verifierPath);
   const migrationSqlSource = readMigrationSqlSource();
 
   const customerSnippets = [
@@ -646,11 +764,28 @@ function verifyCaseInsensitiveBusinessKeyContracts() {
     'LOWER("warehouseCode")',
     'WarehouseLocation_warehouseId_locationCode_lower_key',
     'LOWER("locationCode")',
-    'OrderNoReservation_orderNoNormalized_key'
+    'OrderNoReservation_orderNoNormalized_key',
+    'OrderNoReservation_identity_not_blank',
+    'OrderNoReservation_order_no_normalized',
+    'OrderNoReservation_reason_valid'
   ];
   for (const snippet of migrationSnippets) {
     if (!migrationSqlSource.includes(snippet)) {
       addFailure(`Prisma migrations must keep case-insensitive business key index/reservation snippet: ${snippet}`);
+    }
+  }
+
+  const orderNoVerifierSnippets = [
+    'ORDER_NO_RESERVATION_IDENTITY_MISSING',
+    'ORDER_NO_RESERVATION_REASON_HAS_SPACES',
+    'ORDER_NO_RESERVATION_REASON_INVALID',
+    'DRAFT_ORDER_RENUMBERED',
+    'SEED_DRAFT_STOCK_RESERVED',
+    'ORDER_NO_RESERVATION_NORMALIZED_MISMATCH'
+  ];
+  for (const snippet of orderNoVerifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep order number reservation data verification snippet: ${snippet}`);
     }
   }
 }
@@ -733,6 +868,30 @@ function verifyProductionOrderSummaryWorkflow() {
       addFailure(`ProductionService.orderSummary must keep first-stage order aggregation snippet: ${snippet}`);
     }
   }
+  const productionOrderSummaryZeroFallbackSnippets = [
+    'Number(task.customerOrderQuantity || 0)',
+    'Number(task.plannedQuantity || 0)',
+    'Number(task.completedQuantity || 0)',
+    'Number(task.unresolvedShortageQuantity || 0)',
+    'Number(task.pendingProductionReplenishmentQuantity || 0)',
+    'current.unresolvedShortageQuantityByUnit.get(shortageUnit) || 0',
+    'current.pendingProductionReplenishmentQuantityByUnit.get(shortageUnit) || 0',
+    'current.progressBuckets.get(progressLabel) || 0',
+    'orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) || 0',
+    'stockQuantityByTaskNo.get(transaction.productionTaskNo) || 0',
+    'stockQuantityByTaskNo.get(task.productionTaskNo) || 0',
+    'orderReceiptQuantityByTaskNo.get(task.productionTaskNo) || 0',
+    'Number(left.stepNo || 0)',
+    'Number(right.stepNo || 0)',
+    'orderReceiptQuantity || (task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0)',
+    'quantityByLine.get(key) || 0',
+    'completedReplenishmentQuantityByLine.get(key) || 0'
+  ];
+  for (const snippet of productionOrderSummaryZeroFallbackSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`ProductionService.orderSummary must use ?? for quantity fallback so explicit 0 quantities remain stable: ${snippet}`);
+    }
+  }
 
   const batchStartSnippets = [
     'async batchStart(dto: BatchStartProductionDto)',
@@ -807,8 +966,9 @@ function verifyProductionOperatorSearchWorkflow() {
   const viewPath = 'frontend/src/views/ProductionView.vue';
   const apiPath = 'frontend/src/api/erp.ts';
   const seedPath = 'database/prisma/seed.ts';
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
 
-  for (const projectPath of [controllerPath, servicePath, viewPath, apiPath, seedPath]) {
+  for (const projectPath of [controllerPath, servicePath, viewPath, apiPath, seedPath, verifierPath]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing production operator workflow file: ${projectPath}`);
       return;
@@ -879,6 +1039,8 @@ function verifyProductionOperatorSearchWorkflow() {
     "role: '下单管理员'",
     "accountId: 'WS-001'",
     "role: '车间主任'",
+    "accountId: 'WH-001'",
+    "role: '仓库管理员'",
     "accountId: 'TECH-001'",
     "role: '技术工艺员'",
     "pinyinInitials: 'gsj'",
@@ -888,6 +1050,37 @@ function verifyProductionOperatorSearchWorkflow() {
   for (const snippet of seedSnippets) {
     if (!seedSource.includes(snippet)) {
       addFailure(`seed.ts must keep first-stage production operator seed snippet: ${snippet}`);
+    }
+  }
+
+  const verifierSource = readFile(verifierPath);
+  const verifierSnippets = [
+    'PRODUCTION_OPERATOR_OPTIONAL_TEXT_BLANK',
+    'PRODUCTION_OPERATOR_ID_CARD_MASK_STALE',
+    'PRODUCTION_OPERATOR_ID_CARD_EXPOSED',
+    'PRODUCTION_OPERATOR_PINYIN_NOT_NORMALIZED',
+    'PRODUCTION_OPERATOR_KEYWORDS_EMPTY',
+    'PRODUCTION_OPERATOR_INITIALS_UNSEARCHABLE'
+  ];
+  for (const snippet of verifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep production operator data verification snippet: ${snippet}`);
+    }
+  }
+
+  const migrationSqlSource = readMigrationSqlSource();
+  const migrationSnippets = [
+    'ProductionOperator_accountId_lower_key',
+    'ProductionOperator_identity_not_blank',
+    'ProductionOperator_optional_text_not_blank',
+    'ProductionOperator_enabled_search_fields_valid',
+    'ProductionOperator_id_card_mask_valid',
+    'CARDINALITY("keywords") > 0',
+    '"idCardMasked" !~ \'\\d{8,}\''
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep production operator database guard snippet: ${snippet}`);
     }
   }
 }
@@ -936,6 +1129,7 @@ function verifyPlannerProcessAndSubmitGuard() {
   }
 
   const serviceSource = readFile(servicePath);
+  const migrationSqlSource = readMigrationSqlSource();
   const serviceSnippets = [
     'async updateLineProcess(orderNo: string, lineId: string, dto: UpdateLineProcessDto)',
     'const processEditor = await this.resolveProcessEditorOperator(dto.configuredByCode);',
@@ -959,6 +1153,16 @@ function verifyPlannerProcessAndSubmitGuard() {
   for (const snippet of serviceSnippets) {
     if (!serviceSource.includes(snippet)) {
       addFailure(`OrdersService must keep planner-only process/submit guard snippet: ${snippet}`);
+    }
+  }
+  const submitQuantityZeroFallbackSnippets = [
+    'effectivePlanQuantityByLineId.get(line.id) || 0',
+    'effectivePlanQuantityByLineId.get(insufficientReworkSourceLine.id) || 0',
+    'Number(record.shortageQuantity || 0)'
+  ];
+  for (const snippet of submitQuantityZeroFallbackSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`OrdersService submit and shortage quantity checks must use ?? fallback so explicit 0 quantities remain stable: ${snippet}`);
     }
   }
   if (
@@ -1170,6 +1374,135 @@ function verifyProcessPinyinSearchWorkflow() {
   }
 }
 
+function verifyProcessMemoryCoreDataGuards() {
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
+  if (!fileExists(verifierPath)) {
+    addFailure(`Missing process memory data verifier: ${verifierPath}`);
+    return;
+  }
+
+  const verifierSource = readFile(verifierPath);
+  const migrationSqlSource = readMigrationSqlSource();
+  const verifierSnippets = [
+    'PROCESS_DEFINITION_OPTIONAL_TEXT_BLANK',
+    'PROCESS_DEFINITION_SEARCH_TEXT_EMPTY',
+    'PROCESS_DEFINITION_SEARCH_TEXT_HAS_SPACES',
+    'PROCESS_TEMPLATE_OPTIONAL_TEXT_BLANK',
+    'PROCESS_TEMPLATE_STATUS_SEARCH_MISMATCH',
+    'PROCESS_TEMPLATE_DISABLED_KEY_INVALID',
+    'PROCESS_TEMPLATE_ENABLED_KEY_DISABLED',
+    'PROCESS_TEMPLATE_SEARCH_TEXT_EMPTY',
+    'PROCESS_TEMPLATE_SEARCH_TEXT_HAS_SPACES',
+    'PROCESS_TEMPLATE_STEPS_NOT_ARRAY',
+    'template.status === CommonStatus.ENABLED && template.searchText !== expectedSearchText'
+  ];
+  for (const snippet of verifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep process memory core data verification snippet: ${snippet}`);
+    }
+  }
+
+  const migrationSnippets = [
+    'ProcessDefinition_identity_not_blank',
+    'ProcessDefinition_optional_text_not_blank',
+    'ProcessTemplate_identity_not_blank',
+    'ProcessTemplate_status_search_consistent',
+    'ProcessTemplate_steps_array_not_empty',
+    'ProcessTemplate_optional_text_not_blank',
+    '"templateNameNormalized" LIKE (\'disabled:\' || "id" || \':%\')',
+    'jsonb_typeof("steps") = \'array\' AND jsonb_array_length("steps") > 0'
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep process memory core database guard snippet: ${snippet}`);
+    }
+  }
+
+  const processTextLimitChecks = [
+    {
+      path: 'backend/src/modules/process-templates/dto.ts',
+      tokens: ['MaxLength', '@MaxLength']
+    },
+    {
+      path: 'backend/src/modules/process-templates/process-templates.service.ts',
+      tokens: [
+        'normalized.length > 60',
+        'remark && remark.length > 300',
+        'step.processRemark && step.processRemark.length > 120',
+        '流程记忆名称不能超过 60 个字符',
+        '流程记忆备注不能超过 300 个字符',
+        '参数备注不能超过 120 个字符'
+      ]
+    },
+    {
+      path: 'backend/src/modules/process-definitions/dto.ts',
+      tokens: ['MaxLength', '@MaxLength']
+    },
+    {
+      path: 'backend/src/modules/process-definitions/process-definitions.service.ts',
+      tokens: [
+        'normalized.length > 30',
+        'remark && remark.length > 200',
+        '标准工序名称不能超过 30 个字符',
+        '标准工序备注不能超过 200 个字符'
+      ]
+    },
+    {
+      path: 'frontend/src/components/ProcessTemplateManager.vue',
+      tokens: [
+        'templateNameMaxLength',
+        'templateRemarkMaxLength',
+        'processRemarkMaxLength',
+        'show-word-limit',
+        'maxlength="30"',
+        'truncateTemplateName',
+        'slice(0, templateNameMaxLength'
+      ]
+    }
+  ];
+
+  for (const check of processTextLimitChecks) {
+    const source = readFile(check.path);
+    for (const token of check.tokens) {
+      if (source.includes(token)) {
+        addFailure(`Process memory business text must not be truncated by hard length limits: ${check.path} contains ${token}`);
+      }
+    }
+  }
+
+  const removedVerifierTokens = ['PROCESS_TEMPLATE_STEP_REMARK_TOO_LONG', 'ORDER_LINE_PROCESS_STEP_REMARK_TOO_LONG'];
+  for (const token of removedVerifierTokens) {
+    if (verifierSource.includes(token)) {
+      addFailure(`verify-first-stage.ts must not reject long process remarks with removed guard: ${token}`);
+    }
+  }
+}
+
+function verifyNoBusinessTextHardMaxLength() {
+  const businessTextFiles = [
+    'backend/src/modules/process-definitions/dto.ts',
+    'backend/src/modules/process-templates/dto.ts',
+    'frontend/src/components/NoticeAcknowledgeDialog.vue',
+    'frontend/src/components/ProcessDefinitionManager.vue',
+    'frontend/src/components/ProcessTemplateManager.vue',
+    'frontend/src/views/OrderDetailView.vue',
+    'frontend/src/views/OrdersListView.vue',
+    'frontend/src/views/ProcessSelectionView.vue',
+    'frontend/src/views/WarehouseView.vue'
+  ];
+
+  for (const projectPath of businessTextFiles) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing business text length guard file: ${projectPath}`);
+      continue;
+    }
+    const source = readFile(projectPath);
+    if (/\bMaxLength\b|@MaxLength|maxlength=|:maxlength=|show-word-limit/.test(source)) {
+      addFailure(`Business text inputs and DTOs must not add hard max length truncation: ${projectPath}`);
+    }
+  }
+}
+
 function verifyMaterialSuggestionSearchWorkflow() {
   const dtoPath = 'backend/src/modules/inventory/dto.ts';
   const orderDtoPath = 'backend/src/modules/orders/dto.ts';
@@ -1255,8 +1588,8 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: serviceSource, file: servicePath, snippet: 'queryCustomerSnapshotOrderDate' },
     { source: serviceSource, file: servicePath, snippet: 'identityKeys: new Set<string>()' },
     { source: serviceSource, file: servicePath, snippet: 'identityFieldValues: new Map<string, Set<string>>()' },
-    { source: serviceSource, file: servicePath, snippet: 'identityVariantCount: history?.identityVariantCount || 0' },
-    { source: serviceSource, file: servicePath, snippet: 'hasIdentityConflict: Boolean((history?.identityVariantCount || 0) > 1)' },
+    { source: serviceSource, file: servicePath, snippet: 'identityVariantCount: history?.identityVariantCount ?? 0' },
+    { source: serviceSource, file: servicePath, snippet: 'hasIdentityConflict: Boolean((history?.identityVariantCount ?? 0) > 1)' },
     { source: serviceSource, file: servicePath, snippet: 'identityConflictFields: this.materialSuggestionIdentityConflictFields(history)' },
     { source: serviceSource, file: servicePath, snippet: 'const materialSuggestionIdentityFieldLabels' },
     { source: serviceSource, file: servicePath, snippet: 'private materialSuggestionIdentityConflictFields' },
@@ -1308,7 +1641,7 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: serviceSource, file: servicePath, snippet: 'disabledMaterialCodes.has(key)' },
     { source: serviceSource, file: servicePath, snippet: 'const suggestionMaterials = [...materialRows.values()].filter' },
     { source: serviceSource, file: servicePath, snippet: "sourceType === 'ALL' || item.availableQuantity > 0" },
-    { source: serviceSource, file: servicePath, snippet: 'partThickness: line.partThickness ? decimalToNumber(line.partThickness) : null' },
+    { source: serviceSource, file: servicePath, snippet: 'partThickness: line.partThickness === null || line.partThickness === undefined ? null : decimalToNumber(line.partThickness)' },
     { source: serviceSource, file: servicePath, snippet: 'drawingDate: this.formatDateOnly(drawingDate)' },
     { source: serviceSource, file: servicePath, snippet: 'async materials(query: MaterialQueryDto)' },
     { source: serviceSource, file: servicePath, snippet: 'const historyByCode = normalizedKeyword' },
@@ -1364,7 +1697,9 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '本次订单零件暂无匹配的来源加工建议' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'exactSuggestions.length === 1' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function canAutoSwitchInventorySuggestion' },
-    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'return !item.hasIdentityConflict;' },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: "matchKind: 'EXACT' | 'FUZZY'" },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: "matchKind === 'EXACT' && !item.hasIdentityConflict" },
+    { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: '唯一模糊命中也必须人工点击候选项' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function warnInventorySuggestionNeedsManualPick' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function materialIdentityConflictFieldsText' },
     { source: inventorySourceDetailsSource, file: inventorySourceDetailsPath, snippet: 'function keepInventorySuggestionManualPick' },
@@ -1419,7 +1754,7 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '按零件汇总使用率、可用、预占、订单库存、备货库存和仓库分布' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存使用率' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function formatInventoryUsageRate' },
-    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'Number(row.usedQuantity || 0) / totalQuantity' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'Number(row.usedQuantity ?? 0) / totalQuantity' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function isZeroInventorySummaryRow' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '当前范围 0 库存' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function summarySourceDetailsButtonText' },
@@ -1629,6 +1964,44 @@ function verifyMaterialSuggestionSearchWorkflow() {
   for (const item of requiredSnippets) {
     if (!item.source.includes(item.snippet)) {
       addFailure(`${item.file} must keep material suggestion search snippet: ${item.snippet}`);
+    }
+  }
+  const materialSuggestionZeroThicknessSnippets = [
+    'partThickness: line.partThickness ? decimalToNumber(line.partThickness) : null',
+    'existing.partThickness = line.partThickness ? decimalToNumber(line.partThickness) : null',
+    'partThickness: row.partThickness ? decimalToNumber(row.partThickness) : null'
+  ];
+  for (const snippet of materialSuggestionZeroThicknessSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`inventory.service.ts must preserve explicit 0 partThickness during material suggestion/import serialization: ${snippet}`);
+    }
+  }
+  const inventoryQuantityZeroFallbackSnippets = [
+    'Number(row.availableQuantity || 0)',
+    'reservedQuantityByBatchId.get(batch.id) || 0',
+    '_max.commonSortOrder || 0',
+    'Number(dto.defaultQuantity || 0)',
+    '_max.sortOrder || 0',
+    'history?.customerUsageCount || 0',
+    'history?.usageCount || 0',
+    'identityVariantCount: history?.identityVariantCount || 0',
+    '(history?.identityVariantCount || 0)',
+    'right.searchMatchRank || 0',
+    'left.searchMatchRank || 0',
+    'right.customerUsageCount || 0',
+    'left.customerUsageCount || 0',
+    'right.historyUsageCount || 0',
+    'left.historyUsageCount || 0',
+    'right.availableQuantity || 0',
+    'left.availableQuantity || 0',
+    'quantityByBatchId.get(row.batchId) || 0',
+    '_sum.errorCount || 0',
+    '_sum.warningCount || 0',
+    '_sum.duplicateRowCount || 0'
+  ];
+  for (const snippet of inventoryQuantityZeroFallbackSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`inventory.service.ts must use ?? for inventory/material quantity fallback so a valid 0 is not treated as missing: ${snippet}`);
     }
   }
 
@@ -1941,7 +2314,7 @@ function verifyPartComponentStructureWorkflow() {
 
   const orderLineSnippets = [
     'class="line-drag-handle"',
-    ':draggable="lines.length > 1"',
+    ':draggable="!readOnly && lines.length > 1"',
     '@dragstart.stop="startLineDrag($event, $index)"',
     '@dragover.prevent="handleLineDragOver($event, $index)"',
     '@drop.prevent="dropLineDrag($index)"',
@@ -2078,6 +2451,7 @@ function verifyPartComponentStructureWorkflow() {
     '确认保留差异',
     '撤销核对',
     '核对人',
+    ':disabled="!sourceBomReviewForm.reviewedBy.trim()"',
     'BOM 差异核对记录已保存',
     'BOM 差异核对已撤销',
     'openSourceBomDiffReviewDialog',
@@ -2597,7 +2971,7 @@ function verifyPartComponentStructureWorkflow() {
     '客户 BOM 缺少',
     '后续来源更新只提示差异，不自动覆盖客户 BOM',
     'erpApi.reorderModelBomLines(activeBom.value.id, { items })',
-    'return activeBomLineDisplayOrderMap.value.get(row.id) || row.displayOrder || 0;',
+    'return activeBomLineDisplayOrderMap.value.get(row.id) ?? row.displayOrder ?? 0;',
     'formatLineOrderTitle(row)',
     'BOM 明细顺序 ${displayBomLineOrder(row) || \'-\'}',
     '顺序列显示连续编号 1、2、3；拖拽保存后仍按连续编号查看。',
@@ -2610,6 +2984,8 @@ function verifyPartComponentStructureWorkflow() {
     '常用 BOM 只影响当前范围内的显示顺序和下单推荐优先级',
     'result.customerScopeCount',
     'result.diffReviewCount',
+    '仅允许删除已停用、无包内明细、无适用客户、无差异核对记录且没有客户副本引用的无效空 BOM。',
+    '有明细、客户范围、差异核对记录或客户副本引用时，后端会阻断物理删除，请改为停用。',
     'useDeviceProfile',
     'v-if="!isMobileLayout" type="primary" @click="openBomCreateDialog"',
     "v-if=\"row.status === 'ENABLED' && row.isCommon\"",
@@ -2635,8 +3011,43 @@ function verifyPartComponentStructureWorkflow() {
   if (modelBomSource.includes('ElMessageBox.confirm')) {
     addFailure('ModelBomsView.vue BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
   }
+  if (modelBomSource.includes("reviewedBy: '系统操作员'") || modelBomSource.includes("|| '系统操作员'")) {
+    addFailure('ModelBomsView.vue BOM diff review must require an explicit reviewer instead of falling back to 系统操作员.');
+  }
   if (modelBomSource.includes('<el-button link type="primary" @click="openThicknessReviewLineEdit(row)">填写厚度</el-button>')) {
     addFailure('ModelBomsView.vue thickness review should open by clicking the 厚度核对 tag, not by adding a separate 填写厚度 button.');
+  }
+
+  const modelBomDeleteSafetySnippets = [
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, "existing.status !== 'DISABLED'"],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '只有已停用的无效空 BOM 才能永久删除'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'BOM 行删除必须软停用以保留历史维护记录'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '该 BOM 仍有 ${existing.customerScopes.length} 个适用客户范围，只能停用，不能物理删除'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '该 BOM 仍有 ${diffReviewCount} 条差异核对记录，只能停用，不能物理删除'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'BOM 永久删除正在被其他业务写入，请刷新后重新删除'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '永久删除必须在事务内重新确认 BOM 仍为空'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '不能在永久删除时清理 BOM 行、适用范围或差异记录'],
+    ['ModelBomsView.vue', modelBomSource, '已删除无效空 BOM'],
+    ['MaterialsManagementView.vue', materialDashboardSource, '已删除无效空 BOM'],
+    ['MaterialsManagementView.vue', materialDashboardSource, '误操作创建且没有明细、适用客户或差异记录的无效空 BOM 可永久删除']
+  ];
+  for (const [file, source, snippet] of modelBomDeleteSafetySnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${file} must keep safe physical delete boundary for invalid empty BOM: ${snippet}`);
+    }
+  }
+  const deleteModelBomBlock = inventoryServiceSource.match(/async deleteModelBom\(bomId: string\) \{[\s\S]*?\n  private handleModelBomScopeUniqueError/);
+  if (!deleteModelBomBlock) {
+    addFailure('InventoryService.deleteModelBom must keep a dedicated permanent-delete boundary.');
+  } else {
+    if (!deleteModelBomBlock[0].includes('return runSerializableTransaction(')) {
+      addFailure('InventoryService.deleteModelBom must re-check empty BOM state inside a serializable transaction.');
+    }
+    for (const forbidden of ['modelBomLine.deleteMany', 'modelBomCustomerScope.deleteMany', 'modelBomDiffReview.deleteMany']) {
+      if (deleteModelBomBlock[0].includes(forbidden)) {
+        addFailure(`InventoryService.deleteModelBom must not physically clean BOM child history during permanent delete: ${forbidden}`);
+      }
+    }
   }
 
   const modelBomSeedSnippets = [
@@ -2759,13 +3170,13 @@ function verifyPartComponentStructureWorkflow() {
     ':loading="bomOperationSavingKey === projectBomOperationKey(item, \'delete\')"',
     ':loading="bomOperationSavingKey === contextBomOperationKey(bom, \'delete\')"',
     'BOM 停用失败，请确认后端服务和当前 BOM 状态',
-    '后端会阻断仍被客户副本引用的来源 BOM',
+    '后端会阻断仍有明细、适用客户、差异记录或客户副本引用的 BOM',
     'project-quick-item',
     '查看/编辑BOM',
     '停用BOM',
     '删除BOM',
     '查看/编辑会进入机型零件包页维护表头、明细和拖拽顺序',
-    '误操作创建的无效 BOM 可永久删除',
+    '误操作创建且没有明细、适用客户或差异记录的无效空 BOM 可永久删除',
     'result.customerScopeCount',
     'result.diffReviewCount',
     'erpApi.disableModelBom(bom.id)',
@@ -2887,7 +3298,7 @@ function verifyPartComponentStructureWorkflow() {
     'handleManagementConfirmDialogClose',
     'class="management-confirm-panel"',
     '下单前维护零件搜索记忆、适用范围、机型 BOM 和最近历史用料；库存数量由 InventoryBatch 独立计算。',
-    '这里只维护零件搜索记忆，方便后续下单搜索和 0 库存查看；不会修改历史订单、库存批次、库存数量、BOM 明细或生产记录。',
+    '这里只维护零件搜索记忆，方便后续下单搜索和 0 库存查看；编辑已有零件时状态请使用列表里的启用/停用动作，不会修改历史订单、库存批次、库存数量、BOM 明细或生产记录。',
     '仅搜索记忆',
     '编辑零件搜索记忆',
     '新增零件搜索记忆',
@@ -2899,7 +3310,8 @@ function verifyPartComponentStructureWorkflow() {
     '零件搜索记忆已启用',
     'project-quick-state',
     '数据库已保存',
-    '本机缓存',
+    '读取失败，显示默认值',
+    '常用机型设置保存失败，未写入数据库',
     'refreshCommonProjects',
     '常用机型已从数据库刷新',
     'materialCommonProjectModels',
@@ -2992,6 +3404,20 @@ function verifyPartComponentStructureWorkflow() {
   for (const snippet of materialProjectModelSnippets) {
     if (!materialsServiceSource.includes(snippet)) {
       addFailure(`materials.service.ts must keep customer project/model relevance sort snippet: ${snippet}`);
+    }
+  }
+  const materialsServiceZeroFallbackSnippets = [
+    'reservedQuantityByBatchId.get(batch.id) || 0',
+    'a.sortOrder || 0',
+    'b.sortOrder || 0',
+    'line.sortOrder || 0',
+    'left.sortOrder || 0',
+    'right.sortOrder || 0',
+    'drawingDate?.getTime() || 0'
+  ];
+  for (const snippet of materialsServiceZeroFallbackSnippets) {
+    if (materialsServiceSource.includes(snippet)) {
+      addFailure(`materials.service.ts must use ?? for inventory/dashboard numeric fallback so explicit 0 values remain stable: ${snippet}`);
     }
   }
 
@@ -3151,6 +3577,10 @@ function verifyPartComponentStructureWorkflow() {
     ':loading="drawingOperationSavingId === row.id"',
     'if (drawingOperationSavingId.value) {',
     'materialImportBusy',
+    'materialImportTemplateDownloading',
+    ':loading="materialImportTemplateDownloading"',
+    'downloadMaterialImportTemplate',
+    '零件库导入模板已下载',
     'importRefreshing',
     'importDiscarding',
     'importDeletingFileId',
@@ -3174,7 +3604,8 @@ function verifyPartComponentStructureWorkflow() {
     'confirmMaterialImportAction',
     'materialImportCommitSummaryText',
     'materialStatusDialogVisible',
-    'confirmDisableMaterial',
+    'materialStatusAction',
+    'confirmMaterialStatusChange',
     'class="material-confirm-panel"',
     '写入前仍以后端重新校验和当前 `previewToken` 为准。',
     '零件库文件上传失败',
@@ -3183,7 +3614,7 @@ function verifyPartComponentStructureWorkflow() {
     '零件库导入可预览写入零件基础资料、适用范围和来源加工关系；必须人工确认，不会创建订单、库存或生产任务。',
     '维护下单可搜索的零件搜索记忆',
     '库存数量从 InventoryBatch 实时汇总；停用只影响后续搜索和推荐，不删除历史订单、库存批次、库存数量或生产记录。',
-    '这里只维护 `Material` 搜索记忆。库存数量、订单来源、客户/机型适用范围、BOM 和来源加工关系由独立功能维护；保存不会改写历史订单、库存批次或生产记录。',
+    '这里只维护 `Material` 搜索记忆。编辑已有零件时状态请使用列表里的启用/停用动作；保存不会改写历史订单、库存批次、BOM、默认图纸或来源加工关系。',
     '系统只会停用 `Material` 搜索记忆',
     '不会删除历史订单、库存批次、库存数量、生产记录或导入追溯。'
   ];
@@ -3351,6 +3782,137 @@ function verifyPartComponentStructureWorkflow() {
     addFailure('MaterialTransformsView.vue source-transform status changes must use el-dialog instead of ElMessageBox.confirm');
   }
 
+  const materialMemoryRestoreSnippets = [
+    ['MaterialsView.vue', materialsViewSource, 'erpApi.restoreInventoryMaterial(row.id)'],
+    ['MaterialsView.vue', materialsViewSource, '恢复零件搜索记忆只恢复 Material 后续可选状态，不自动恢复适用范围、BOM 行、默认图纸或来源加工关系'],
+    ['MaterialsView.vue', materialsViewSource, '<el-select v-model="form.status" :disabled="Boolean(editingMaterialId)"'],
+    ['MaterialsView.vue', materialsViewSource, '编辑已有零件时状态请使用列表里的启用/停用动作'],
+    ['MaterialsView.vue', materialsViewSource, 'await erpApi.createInventoryMaterial({ ...payload, status: form.status })'],
+    ['MaterialsManagementView.vue', materialDashboardSource, 'erpApi.restoreInventoryMaterial(row.id)'],
+    ['MaterialsManagementView.vue', materialDashboardSource, '恢复零件搜索记忆只恢复 Material 后续可选状态；适用范围、BOM 行和来源加工关系需单独人工恢复'],
+    ['MaterialsManagementView.vue', materialDashboardSource, '<el-select v-model="form.status" :disabled="Boolean(editingMaterialId)"'],
+    ['MaterialsManagementView.vue', materialDashboardSource, '编辑已有零件时状态请使用列表里的启用/停用动作'],
+    ['MaterialsManagementView.vue', materialDashboardSource, 'await erpApi.createInventoryMaterial({ ...payload, status: form.status })'],
+    ['InventoryView.vue', inventorySource, 'erpApi.restoreInventoryMaterial(target.id)'],
+    ['InventoryView.vue', inventorySource, '恢复搜索记忆只恢复后续可选状态，不自动恢复已停用的适用范围、BOM、默认图纸或来源加工关系'],
+    ['InventoryView.vue', inventorySource, '<el-select v-model="materialMemoryForm.status" disabled'],
+    ['InventoryView.vue', inventorySource, '状态请使用表格右侧的启用/停用动作，避免编辑保存时绕过专用状态流程。'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'export interface UpdateMaterialMemoryPayload {'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'updateInventoryMaterial(materialId: string, payload: UpdateMaterialMemoryPayload)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'restoreInventoryMaterial(materialId: string)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "`/inventory/materials/${materialId}/restore`"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "@Patch('materials/:materialId/restore')"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'return this.inventoryService.restoreMaterial(materialId);'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'async restoreMaterial(materialId: string)'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'dto.status !== undefined && dto.status !== existing.status'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '零件基础资料状态变更必须走 disableMaterial / restoreMaterial'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '零件基础资料状态请使用专用启用/停用接口'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复零件搜索记忆只恢复 Material 后续可选状态，不自动恢复适用范围、BOM 行、默认图纸或来源加工关系']
+  ];
+  for (const [file, source, snippet] of materialMemoryRestoreSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${file} must keep dedicated material memory restore contract snippet: ${snippet}`);
+    }
+  }
+  const updateMaterialMemoryPayloadMatch = frontendApiSource.match(/export interface UpdateMaterialMemoryPayload\s*{([\s\S]*?)}/);
+  if (!updateMaterialMemoryPayloadMatch || updateMaterialMemoryPayloadMatch[1].includes('status?:')) {
+    addFailure('frontend/src/api/erp.ts UpdateMaterialMemoryPayload must not include status; material memory status changes must use dedicated restore/disable APIs');
+  }
+
+  const materialScopeAndDrawingRestoreSnippets = [
+    ['MaterialsView.vue', materialsViewSource, 'materialMaintenanceStatusDialogVisible'],
+    ['MaterialsView.vue', materialsViewSource, 'activeMaterialMaintenanceStatusTarget'],
+    ['MaterialsView.vue', materialsViewSource, 'confirmMaterialMaintenanceStatusChange'],
+    ['MaterialsView.vue', materialsViewSource, 'erpApi.restoreMaterialApplicability(target.id)'],
+    ['MaterialsView.vue', materialsViewSource, '恢复适用范围只恢复推荐入口，不重写原客户范围、机型范围或备注'],
+    ['MaterialsView.vue', materialsViewSource, '<el-select v-model="applicabilityForm.status" :disabled="Boolean(applicabilityForm.id)"'],
+    ['MaterialsView.vue', materialsViewSource, 'await erpApi.saveMaterialApplicability(activeMaterial.value.id, { ...payload, status: applicabilityForm.status })'],
+    ['MaterialsView.vue', materialsViewSource, 'erpApi.restoreMaterialDrawingRevision(target.id)'],
+    ['MaterialsView.vue', materialsViewSource, '恢复图纸版本只恢复可选状态，不自动设为默认，也不覆盖历史订单图纸快照'],
+    ['MaterialsView.vue', materialsViewSource, 'defaultDrawingDialogVisible'],
+    ['MaterialsView.vue', materialsViewSource, '默认变更人'],
+    ['MaterialsView.vue', materialsViewSource, 'confirmDefaultDrawingRevision'],
+    ['MaterialsView.vue', materialsViewSource, '设置默认图纸必须填写操作人员'],
+    ['MaterialsView.vue', materialsViewSource, '<el-select v-model="drawingForm.status" :disabled="Boolean(drawingForm.id)"'],
+    ['MaterialsView.vue', materialsViewSource, 'await erpApi.saveMaterialDrawingRevision(activeMaterial.value.id, { ...payload, status: drawingForm.status })'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'restoreMaterialApplicability(applicabilityId: string)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "export type UpdateMaterialApplicabilityPayload = Omit<SaveMaterialApplicabilityPayload, 'status'>"],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'updateMaterialApplicability(applicabilityId: string, payload: UpdateMaterialApplicabilityPayload)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "`/inventory/material-applicabilities/${applicabilityId}/restore`"],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'restoreMaterialDrawingRevision(revisionId: string)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "export type UpdateMaterialDrawingRevisionPayload = Omit<SaveMaterialDrawingRevisionPayload, 'status'>"],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'updateMaterialDrawingRevision(revisionId: string, payload: UpdateMaterialDrawingRevisionPayload)'],
+    ['MaterialsView.vue', materialsViewSource, 'type UpdateMaterialDrawingRevisionPayload'],
+    ['MaterialsView.vue', materialsViewSource, 'function drawingRevisionPayload(overrides: Partial<UpdateMaterialDrawingRevisionPayload> = {}): UpdateMaterialDrawingRevisionPayload'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "`/inventory/material-drawing-revisions/${revisionId}/restore`"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "@Patch('material-applicabilities/:applicabilityId/restore')"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'return this.inventoryService.restoreMaterialApplicability(applicabilityId);'],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "@Patch('material-drawing-revisions/:revisionId/restore')"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'return this.inventoryService.restoreMaterialDrawingRevision(revisionId);'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'async restoreMaterialApplicability(applicabilityId: string)'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '零件适用范围状态变更必须走 disableMaterialApplicability / restoreMaterialApplicability'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '零件适用范围状态请使用专用启用/停用接口'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复适用范围只恢复后续推荐入口，不重写客户范围、机型范围，也不生成订单、库存或生产任务'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复适用范围前，所属零件基础资料必须是启用状态'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'async restoreMaterialDrawingRevision(revisionId: string)'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'requireDefaultDrawingChangedBy'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '设置默认图纸必须填写操作人员'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '图纸版本状态变更必须走 disableMaterialDrawingRevision / restoreMaterialDrawingRevision'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '图纸版本状态请使用专用启用/停用接口'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复图纸版本只恢复后续可选状态，不自动设为默认图纸，也不覆盖历史订单图纸快照'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复图纸版本前，所属零件基础资料必须是启用状态']
+  ];
+  for (const [file, source, snippet] of materialScopeAndDrawingRestoreSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${file} must keep dedicated material scope/drawing restore contract snippet: ${snippet}`);
+    }
+  }
+  if (materialsViewSource.includes("defaultChangedBy: '系统操作员'") || inventoryServiceSource.includes("|| '系统操作员'")) {
+    addFailure('Default drawing changes must record an explicit operator instead of silently falling back to 系统操作员.');
+  }
+  const materialDrawingDatabaseSnippets = [
+    'MaterialDrawingRevision_enabled_default_unique',
+    'ON "MaterialDrawingRevision"("materialId")',
+    `WHERE "isDefault" = true AND "status" = 'ENABLED'`,
+    'MaterialDrawingRevision_materialId_drawingNo_drawingVersion_lower_key',
+    'LOWER("drawingNo")',
+    'LOWER("drawingVersion")',
+    'MaterialDrawingRevision_identity_not_blank',
+    'MaterialDrawingRevision_disabled_not_default',
+    'MaterialDrawingRevision_default_operator_required',
+    'BTRIM("defaultChangedBy")'
+  ];
+  for (const snippet of materialDrawingDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`MaterialDrawingRevision default drawing database contract must keep migration snippet: ${snippet}`);
+    }
+  }
+
+  const materialTransformRestoreSnippets = [
+    ['MaterialTransformsView.vue', materialTransformsSource, 'erpApi.restoreMaterialTransformRule(row.id)'],
+    ['MaterialTransformsView.vue', materialTransformsSource, '恢复启用只恢复建议展示，不重写原来的客户范围、机型范围、倍率、损耗和工艺建议'],
+    ['MaterialTransformsView.vue', materialTransformsSource, '<el-select v-model="form.status" :disabled="Boolean(form.id)"'],
+    ['MaterialTransformsView.vue', materialTransformsSource, '...(form.id ? {} : { status: form.status })'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'const updatePayload: UpdateMaterialTransformRulePayload = {'],
+    ['MaterialTransformsView.vue', materialTransformsSource, '来源加工关系状态必须走 restoreMaterialTransformRule / disableMaterialTransformRule，普通编辑不携带 status。'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'restoreMaterialTransformRule(ruleId: string)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "export type UpdateMaterialTransformRulePayload = Omit<SaveMaterialTransformRulePayload, 'status'>"],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'updateMaterialTransformRule(ruleId: string, payload: UpdateMaterialTransformRulePayload)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, "`/inventory/material-transform-rules/${ruleId}/restore`"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "@Patch('material-transform-rules/:ruleId/restore')"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'return this.inventoryService.restoreMaterialTransformRule(ruleId);'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'async restoreMaterialTransformRule(ruleId: string)'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '来源加工关系状态变更必须走 disableMaterialTransformRule / restoreMaterialTransformRule'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '来源加工关系状态请使用专用启用/停用接口'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复启用只恢复后续建议展示，不重写客户范围、机型范围、工艺建议，也不改订单、生产任务或库存'],
+    ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '恢复来源加工关系前，来源零件和目标零件都必须是启用状态']
+  ];
+  for (const [file, source, snippet] of materialTransformRestoreSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${file} must keep dedicated source-transform restore contract snippet: ${snippet}`);
+    }
+  }
+
   const materialTransformPaginationSnippets = [
     ['MaterialTransformsView.vue', materialTransformsSource, 'rulePagination'],
     ['MaterialTransformsView.vue', materialTransformsSource, 'handleRulePageChange'],
@@ -3371,6 +3933,12 @@ function verifyPartComponentStructureWorkflow() {
     if (!source.includes(snippet)) {
       addFailure(`${file} must keep paginated source-transform rule loading snippet: ${snippet}`);
     }
+  }
+  if (materialTransformsSource.includes('form.multiplier = row.multiplier || 1')) {
+    addFailure('MaterialTransformsView.vue must preserve an invalid persisted multiplier while editing so validation can block it instead of silently replacing it with 1.');
+  }
+  if (!materialTransformsSource.includes('form.multiplier = row.multiplier ?? 1')) {
+    addFailure('MaterialTransformsView.vue must only default missing transform multiplier values with ?? 1.');
   }
 
   const fixedFormatStructureFiles = [
@@ -3746,6 +4314,11 @@ function verifyPartComponentStructureWorkflow() {
     '组件停用后子零件也必须停用',
     "select: { id: true, customerId: true, projectModel: true, status: true }",
     '停用零件包不能新增 BOM 明细，请先恢复启用后再维护',
+    '停用零件包不能编辑 BOM 明细，请先恢复启用后再维护',
+    'BOM 明细编辑必须在事务内复核表头状态',
+    '停用零件包不能拖拽排序 BOM 明细，请先恢复启用后再维护',
+    'BOM 拖拽排序必须事务化保存，并在同一事务内复核表头状态',
+    'BOM 明细排序正在被其他业务写入，请刷新后重新排序',
     'const hasBomLinePartThickness = bomLinePartThickness > 0;',
     'const hasHistoryPartThickness = Number(historyPartThickness || 0) > 0;',
     '历史订单厚度只作为 BOM 核对预填',
@@ -3756,15 +4329,23 @@ function verifyPartComponentStructureWorkflow() {
     'serializeModelBomDiffReview',
     '只有复制自来源 BOM 的客户 BOM 才需要差异核对',
     '差异核对来源 BOM 与当前客户 BOM 的复制来源不一致',
+    'BOM 差异核对必须填写核对人员',
+    'reviewKey.startsWith(`${bom.id}|${bom.sourceBomId}|`)',
+    "['MISSING_IN_CUSTOMER', 'CHANGED', 'CUSTOMER_EXTRA'].includes(issueKind)",
+    '差异核对行引用与差异类型不一致',
+    '差异核对标题不能为空',
+    "const reviewedBy = dto.reviewedBy?.trim() || '';",
     '只记录人工核对结果；不会自动覆盖来源 BOM 或客户 BOM 明细',
     '核对记录撤销只停用人工确认，不会删除或覆盖任何 BOM 明细',
     "where: { sourceBomId: bomId }",
     '作为来源引用',
     '永久删除不会自动覆盖客户 BOM',
     'customerScopes: { select: { id: true } }',
-    'this.prisma.modelBomCustomerScope.deleteMany({ where: { bomId } })',
+    'BOM 永久删除正在被其他业务写入，请刷新后重新删除',
+    'await tx.modelBom.delete({ where: { id: bomId } })',
     'customerScopeCount: existing.customerScopes.length',
-    '适用客户、包内明细和差异核对记录，不改订单、生产或库存数据',
+    '永久删除必须在事务内重新确认 BOM 仍为空',
+    '不能在永久删除时清理 BOM 行、适用范围或差异记录',
     'ensureMaterialDrawingRevisionCanBeDisabled',
     "defaultDrawingRevision?.status === 'ENABLED'",
     '该图纸版本已被启用 BOM 行指定为默认图纸',
@@ -3794,6 +4375,8 @@ function verifyPartComponentStructureWorkflow() {
 
   const bomDataVerifierSnippets = [
     'checkModelBomData',
+    'await checkMaterialDrawingRevisions();',
+    'async function checkMaterialDrawingRevisions()',
     'checkFirstStageVerificationFixtures',
     'FIRST_STAGE_SEED_CUSTOMER_COVERAGE_MISSING',
     'FIRST_STAGE_SEED_GLOBAL_BOM_MISSING',
@@ -3810,6 +4393,13 @@ function verifyPartComponentStructureWorkflow() {
     'committedOrderNoSet',
     'normalizeComponentNo',
     'isComponentNoRangeInvalid',
+    'MODEL_BOM_IDENTITY_MISSING',
+    'MODEL_BOM_SCOPE_MODE_INVALID',
+    'MODEL_BOM_COMMON_SORT_INVALID',
+    'MODEL_BOM_CUSTOMER_SCOPE_ROW_IDENTITY_MISSING',
+    'MODEL_BOM_LINE_IDENTITY_MISSING',
+    'MODEL_BOM_LINE_DEFAULT_QUANTITY_INVALID',
+    'MODEL_BOM_LINE_OPTIONAL_TEXT_BLANK',
     'MODEL_BOM_CHILD_PARENT_DISABLED_OR_MISSING',
     'MODEL_BOM_CUSTOMER_SCOPE_KEY_MISMATCH',
     'MODEL_BOM_COMPONENT_NO_DUPLICATE',
@@ -3830,11 +4420,32 @@ function verifyPartComponentStructureWorkflow() {
     'MODEL_BOM_LINE_DISABLED_MATERIAL_ENABLED',
     'MODEL_BOM_DEFAULT_DRAWING_DISABLED',
     'MODEL_BOM_DEFAULT_DRAWING_MATERIAL_MISMATCH',
+    'MATERIAL_DRAWING_DEFAULT_DUPLICATE',
+    'MATERIAL_DRAWING_DISABLED_IS_DEFAULT',
+    'MATERIAL_DRAWING_DEFAULT_OPERATOR_MISSING',
+    'MATERIAL_DRAWING_DEFAULT_TIME_MISSING',
+    'MATERIAL_DRAWING_REVISION_IDENTITY_MISSING',
+    'MATERIAL_DRAWING_REVISION_IDENTITY_HAS_SPACES',
+    'MATERIAL_DRAWING_REVISION_OPTIONAL_TEXT_BLANK',
+    'MATERIAL_DRAWING_REVISION_OPTIONAL_TEXT_HAS_SPACES',
+    'MATERIAL_DRAWING_REVISION_DUPLICATE',
     'MODEL_BOM_DIFF_REVIEW_SOURCE_MISMATCH',
     'MODEL_BOM_DIFF_REVIEW_SOURCE_LINE_MISMATCH',
     'MODEL_BOM_DIFF_REVIEW_TARGET_LINE_MISMATCH',
     'MODEL_BOM_DIFF_REVIEW_FINGERPRINT_MISSING',
+    'MODEL_BOM_DIFF_REVIEW_IDENTITY_MISSING',
+    'MODEL_BOM_DIFF_REVIEW_OPTIONAL_TEXT_BLANK',
+    'MODEL_BOM_DIFF_REVIEW_SOURCE_TARGET_SAME',
+    'MODEL_BOM_DIFF_REVIEW_KIND_INVALID',
+    'MODEL_BOM_DIFF_REVIEW_KEY_SCOPE_INVALID',
+    'MODEL_BOM_DIFF_REVIEW_LINE_SHAPE_INVALID',
+    'MODEL_BOM_DIFF_REVIEW_FIELDS_JSON_INVALID',
     'checkMaterialTransformRuleData',
+    'MATERIAL_TRANSFORM_RULE_IDENTITY_MISSING',
+    'MATERIAL_TRANSFORM_RULE_SOURCE_TARGET_SAME',
+    'MATERIAL_TRANSFORM_RULE_MULTIPLIER_INVALID',
+    'MATERIAL_TRANSFORM_RULE_PROJECT_SCOPE_KEY_MISMATCH',
+    'MATERIAL_TRANSFORM_RULE_OPTIONAL_TEXT_BLANK',
     'MATERIAL_TRANSFORM_RULE_DISABLED_MATERIAL_ENABLED',
     '启用子零件所属组件 ${parentComponentNo} 不存在或已停用'
   ];
@@ -3852,7 +4463,7 @@ function verifyPartComponentStructureWorkflow() {
     'ModelBomDiffReview_targetLineId_fkey',
     'model MaterialCommonProjectModel',
     'MaterialCommonProjectModel_projectModelNormalized_key',
-    'isCommon             Boolean      @default(false)',
+    'isCommon              Boolean                 @default(false)',
     'ModelBom_isCommon_commonSortOrder_idx',
     'ModelBom_customerScopeKey_projectModelScopeKey_key',
     'ON "ModelBom"("customerScopeKey", "projectModelScopeKey")',
@@ -3862,6 +4473,66 @@ function verifyPartComponentStructureWorkflow() {
   for (const snippet of bomScopeDatabaseSnippets) {
     if (!prismaSchemaSource.includes(snippet) && !migrationSqlSource.includes(snippet)) {
       addFailure(`ModelBom scope uniqueness must keep schema/migration snippet: ${snippet}`);
+    }
+  }
+
+  const modelBomCoreDatabaseSnippets = [
+    'ModelBom_identity_not_blank',
+    'ModelBom_scope_mode_valid',
+    'ModelBom_scope_keys_valid',
+    'ModelBom_common_sort_valid',
+    'ModelBomCustomerScope_identity_not_blank',
+    'ModelBomLine_identity_not_blank',
+    'ModelBomLine_type_valid',
+    'ModelBomLine_quantities_valid',
+    'ModelBomLine_component_shape_valid'
+  ];
+  for (const snippet of modelBomCoreDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`ModelBom core database guards must keep migration snippet: ${snippet}`);
+    }
+  }
+
+  const materialDrawingRevisionDatabaseSnippets = [
+    'MaterialDrawingRevision_identity_not_blank',
+    'MaterialDrawingRevision_identity_trimmed',
+    'MaterialDrawingRevision_optional_text_not_blank',
+    'MaterialDrawingRevision_default_operator_required',
+    'MaterialDrawingRevision_enabled_default_unique',
+    'MaterialDrawingRevision_materialId_drawingNo_drawingVersion_lower_key'
+  ];
+  for (const snippet of materialDrawingRevisionDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`MaterialDrawingRevision database guards must keep migration snippet: ${snippet}`);
+    }
+  }
+
+  const modelBomDiffReviewDatabaseSnippets = [
+    'ModelBomDiffReview_identity_not_blank',
+    'ModelBomDiffReview_source_target_distinct',
+    'ModelBomDiffReview_issue_kind_valid',
+    'ModelBomDiffReview_issue_line_shape_valid',
+    'ModelBomDiffReview_review_key_scope_valid',
+    'ModelBomDiffReview_reviewed_by_required',
+    'ModelBomDiffReview_optional_text_not_blank',
+    'ModelBomDiffReview_fields_json_shape'
+  ];
+  for (const snippet of modelBomDiffReviewDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`ModelBomDiffReview database guards must keep migration snippet: ${snippet}`);
+    }
+  }
+
+  const materialTransformRuleDatabaseSnippets = [
+    'MaterialTransformRule_identity_not_blank',
+    'MaterialTransformRule_source_target_distinct',
+    'MaterialTransformRule_quantities_valid',
+    'MaterialTransformRule_optional_text_not_blank',
+    'MaterialTransformRule_scope_keys_valid'
+  ];
+  for (const snippet of materialTransformRuleDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`MaterialTransformRule database guards must keep migration snippet: ${snippet}`);
     }
   }
 
@@ -3974,7 +4645,11 @@ function verifyMaterialImportIssueReportWorkflow() {
     'backend/src/modules/inventory/inventory.controller.ts',
     'frontend/src/api/erp.ts',
     'frontend/src/views/MaterialsView.vue',
-    'database/prisma/schema.prisma'
+    'database/prisma/schema.prisma',
+    'database/prisma/verify-first-stage.ts',
+    'database/prisma/migrations/20260515233000_material_import_preview_error_rows/migration.sql',
+    'scripts/verify-material-import-api.cjs',
+    'package.json'
   ];
   for (const projectPath of requiredFiles) {
     if (!fileExists(projectPath)) {
@@ -3988,18 +4663,52 @@ function verifyMaterialImportIssueReportWorkflow() {
   const frontendApiSource = readFile('frontend/src/api/erp.ts');
   const materialsViewSource = readFile('frontend/src/views/MaterialsView.vue');
   const schemaSource = readFile('database/prisma/schema.prisma');
+  const dataVerifierSource = readFile('database/prisma/verify-first-stage.ts');
+  const materialImportPreviewErrorMigrationSource = readFile(
+    'database/prisma/migrations/20260515233000_material_import_preview_error_rows/migration.sql'
+  );
+  const materialImportApiVerifySource = readFile('scripts/verify-material-import-api.cjs');
+  const packageSource = readFile('package.json');
+  const migrationSqlSource = readMigrationSqlSource();
 
   const serviceSnippets = [
     'async buildMaterialImportIssueReport(sessionId: string)',
+    'businessDateTimeText(value = new Date())',
+    'const stamp = businessDateTimeKey(value);',
+    "return stamp.replace(/^(\\d{4})(\\d{2})(\\d{2})(\\d{2})(\\d{2})(\\d{2})$/, '$1-$2-$3 $4:$5:$6');",
+    "['生成时间', this.businessDateTimeText(), '说明', '仅用于修正 Excel；提交前后端仍会重新校验']",
     "workbook.addWorksheet('问题明细'",
     '零件库导入问题导出只输出校验明细，不写入正式零件库。',
     'materialImportIssueArray(row.issues)',
-    '当前零件库导入预览没有错误或警告'
+    '当前零件库导入预览没有错误或警告',
+    'loadedCount: previewRows.length + previewApplicabilityRows.length + previewTransformRows.length',
+    'rowOffset + rowLimit < materialRowCount',
+    'rowOffset + rowLimit < scopeRowCount',
+    'rowOffset + rowLimit < transformRowCount',
+    'refreshMaterialImportSessionIssues(sessionId)',
+    'buildMaterialImportPreviewTokenSnapshot(sessionId, tx)',
+    'materialImportPreviewToken({',
+    'const deletedFile = await runSerializableTransaction(',
+    'const discardedFileNames = await runSerializableTransaction(',
+    '文件记录先满足数据库计数约束，实际重复行数在写入预览行后立即回填。',
+    'acceptedRowCount: parsedRowCount',
+    'INVALID_PART_THICKNESS',
+    '多文件导入会话必须在每次文件变化后重新合并校验',
+    'materialImportSessionMaterialIssueCodes',
+    'applyMaterialDrawingImportDuplicateConflicts(rows)',
+    'DUPLICATE_DRAWING_REVISION_CONFLICT',
+    'EXISTING_DRAWING_REVISION_DIFFERENT',
+    'materialImportImportIdentitySignature',
+    '同一导入会话内相同零件编码的名称、单位、规格、厚度或项目型号不一致',
+    '同一导入会话内相同零件编码、图号和图纸版本的图纸日期、状态或备注不一致'
   ];
   for (const snippet of serviceSnippets) {
     if (!inventoryServiceSource.includes(snippet)) {
       addFailure(`inventory.service.ts must keep material import issue report snippet: ${snippet}`);
     }
+  }
+  if (inventoryServiceSource.includes("['生成时间', new Date().toISOString()")) {
+    addFailure('inventory.service.ts material import issue report must use businessDateTimeText() instead of UTC toISOString().');
   }
 
   const controllerSnippets = [
@@ -4019,7 +4728,13 @@ function verifyMaterialImportIssueReportWorkflow() {
     '零件库导入问题明细.xlsx',
     '下载问题明细',
     'importIssueReportDownloading',
-    'materialImportHasIssues'
+    "materialImportConfirmAction.value === 'deleteFile'",
+    'executeDeleteMaterialImportFile',
+    'materialImportHasIssues',
+    '继续加载预览',
+    'materialImportPreviewProgressText',
+    'loadMoreMaterialImportRows',
+    '未显示的行不会被静默忽略'
   ];
   for (const snippet of frontendSnippets) {
     if (!frontendApiSource.includes(snippet) && !materialsViewSource.includes(snippet)) {
@@ -4033,13 +4748,95 @@ function verifyMaterialImportIssueReportWorkflow() {
     'model MaterialApplicabilityImportRow',
     'model MaterialTransformImportRow',
     'issues            Json?',
-    'errorCount        Int                   @default(0)',
-    'warningCount      Int                   @default(0)'
+    'errorCount         Int                   @default(0)',
+    'warningCount       Int                   @default(0)'
   ];
   for (const snippet of schemaSnippets) {
     if (!schemaSource.includes(snippet)) {
       addFailure(`Prisma schema must keep material import issue persistence snippet: ${snippet}`);
     }
+  }
+
+  const dataVerifierSnippets = [
+    'await checkMaterialImportData();',
+    'async function checkMaterialImportData()',
+    'MATERIAL_IMPORT_SESSION_STATUS_INVALID',
+    'MATERIAL_IMPORT_FILE_ROW_COUNT_MISMATCH',
+    'MATERIAL_IMPORT_FILE_ACCEPTED_ROW_COUNT_MISMATCH',
+    'MATERIAL_IMPORT_ROW_REQUIRED_FIELD_MISSING_WITHOUT_ISSUE',
+    'MATERIAL_IMPORT_ROW_STOCK_ALERT_QUANTITY_MISSING',
+    'MATERIAL_IMPORT_ROW_ISSUE_COUNT_MISMATCH',
+    'MATERIAL_APPLICABILITY_IMPORT_ROW_REQUIRED_FIELD_MISSING_WITHOUT_ISSUE',
+    'MATERIAL_APPLICABILITY_IMPORT_ROW_STATUS_INVALID',
+    'MATERIAL_TRANSFORM_IMPORT_ROW_REQUIRED_FIELD_MISSING_WITHOUT_ISSUE',
+    'MATERIAL_TRANSFORM_IMPORT_ROW_SOURCE_TARGET_SAME',
+    'MATERIAL_TRANSFORM_IMPORT_ROW_ISSUE_COUNT_MISMATCH'
+  ];
+  for (const snippet of dataVerifierSnippets) {
+    if (!dataVerifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep material import data verification snippet: ${snippet}`);
+    }
+  }
+
+  const databaseGuardSnippets = [
+    'MaterialImportSession_status_valid',
+    'MaterialImportSession_commit_fields_valid',
+    'MaterialImportFile_identity_not_blank',
+    'MaterialImportFile_counts_valid',
+    'MaterialImportRow_identity_not_blank',
+    'MaterialImportRow_values_valid',
+    'MaterialApplicabilityImportRow_identity_not_blank',
+    'MaterialApplicabilityImportRow_values_valid',
+    'MaterialTransformImportRow_identity_not_blank',
+    'MaterialTransformImportRow_values_valid'
+  ];
+  for (const snippet of databaseGuardSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Material import database guards must keep migration snippet: ${snippet}`);
+    }
+  }
+  const previewErrorRowMigrationSnippets = [
+    'DROP CONSTRAINT IF EXISTS "MaterialImportRow_identity_not_blank"',
+    'MaterialImportRow_trace_identity_not_blank',
+    'DROP CONSTRAINT IF EXISTS "MaterialApplicabilityImportRow_identity_not_blank"',
+    'MaterialApplicabilityImportRow_trace_identity_not_blank',
+    'DROP CONSTRAINT IF EXISTS "MaterialTransformImportRow_identity_not_blank"',
+    'MaterialTransformImportRow_trace_identity_not_blank',
+    '"MaterialTransformImportRow_values_valid"'
+  ];
+  for (const snippet of previewErrorRowMigrationSnippets) {
+    if (!materialImportPreviewErrorMigrationSource.includes(snippet)) {
+      addFailure(`Material import preview error-row migration must keep snippet: ${snippet}`);
+    }
+  }
+
+  const regressionScriptSnippets = [
+    'verify-material-import-api',
+    '零件库导入模板',
+    '/inventory/material-import-template',
+    '/inventory/material-import-config',
+    '/inventory/material-import-sessions',
+    'uploadWorkbook',
+    'issueMaterialImportWorkbook',
+    'missingRequiredMaterialImportWorkbook',
+    'REQUIRED_PART_NAME',
+    'REQUIRED_UNIT',
+    'STOCK_ALERT_QUANTITY_REQUIRED',
+    'required-field-preview-errors',
+    '旧 previewToken 提交',
+    'assertCommittedMaterialData',
+    'assertNoOrderProductionInventorySideEffects',
+    'sourceTransformRules',
+    'targetTransformRules',
+    '来源加工关系只作为建议，不自动扣库存'
+  ];
+  for (const snippet of regressionScriptSnippets) {
+    if (!materialImportApiVerifySource.includes(snippet) && !packageSource.includes(snippet)) {
+      addFailure(`verify-material-import-api.cjs/package.json must keep material import API regression snippet: ${snippet}`);
+    }
+  }
+  if (!packageSource.includes('"verify:material-import-api": "node scripts/verify-material-import-api.cjs"')) {
+    addFailure('package.json must expose verify:material-import-api for material Excel import regression testing.');
   }
 }
 
@@ -4122,6 +4919,7 @@ function verifyMobileCompactOrderCards() {
     'useDeviceProfile',
     'v-if="!isMobileLayout" @click="openImportDialog"',
     'v-if="!isMobileLayout" type="primary" @click="openCreate"',
+    ':read-only="isMobileLayout"',
     '手机端订单列表仅用于查看明细',
     ':before-close="handleOrderSavingDialogClose"',
     'closeCreateOrderDialog',
@@ -4193,11 +4991,14 @@ function verifyMobileCompactOrderCards() {
     'isMobileProductionTaskExpanded',
     'production-task-header-actions',
     'useDeviceProfile',
+    'showMobileScanReserved',
+    'v-if="isMobileLayout" :icon="Camera"',
     'guardDesktopProductionMutation',
-    '手机端仅查看生产进度和通知，${actionLabel}请在电脑端操作',
-    '手机端只查看生产概况',
-    '手机端只查看生产进度',
-    '手机端只查看补单申请',
+    '生产页属于现场执行端：手机端允许开始生产、工序确认、完成确认、生产通知和补单审核。',
+    '订单提交生产仍由订单页控制，手机端不开放下单、导入或提交生产。',
+    'v-if="selectedProductionOrderNo && shouldShowStartAction(task)"',
+    ':disabled="!canOpenProcess(task, step)"',
+    'openReplenishmentApprovalFromRequest(request)',
     '客户名称加载失败，请确认客户筛选和后端服务',
     'clearOperatorOptions',
     '操作人员列表加载失败，请确认后端服务和人员资料',
@@ -4236,10 +5037,13 @@ function verifyMobileCompactOrderCards() {
     'toggleMobileWarehouseCard',
     'isMobileWarehouseCardExpanded',
     'useDeviceProfile',
+    'showMobileScanReserved',
+    'v-if="isMobileLayout" :icon="Camera"',
     'guardDesktopWarehouseMutation',
-    '手机端仅查看仓库、库存和通知，${actionLabel}请在电脑端操作',
-    '手机端只查看待入库信息',
-    '手机端只查看发货信息',
+    '手机端可处理入库、发货和仓库通知，${actionLabel}请在电脑端操作',
+    '@click="openConfirm(receipt)"',
+    '@click="openOrderShipmentConfirm(group.rows[0])"',
+    '@click="openShipmentConfirm(shipment)"',
     '客户变更零件处理',
     '客户取消零件',
     '客户新增零件',
@@ -4271,6 +5075,7 @@ function verifyMobileCompactOrderCards() {
     '启用记忆',
     '保存影响',
     '只维护下单搜索记忆，用于后续订单选料、库存搜索和 0 库存零件展示。',
+    '状态请使用表格右侧的启用/停用动作，避免编辑保存时绕过专用状态流程。',
     '不会修改库存数量；库存仍然只从 InventoryBatch 实时计算。',
     '不会覆盖历史订单、BOM 明细、库存批次、库存流水或生产记录。',
     '需要修改库存数量时，请到库存溯源里做盘点调整，系统会追加 InventoryTransaction。',
@@ -4278,10 +5083,12 @@ function verifyMobileCompactOrderCards() {
     '0 库存行来自零件搜索记忆匹配，表示当前筛选范围没有可用库存或历史批次。',
     'materialMemoryDisableDialogVisible',
     'materialMemoryDisableTarget',
-    '系统只会停用零件搜索记忆，不会删除历史订单、库存批次、库存数量和生产记录。',
-    '停用零件搜索记忆',
+    'materialMemoryStatusAction',
+    'materialMemoryStatusDialogTitle',
+    '不会删除历史订单、库存批次、库存数量、库存流水和生产记录。',
+    '启用后只恢复 Material 后续可选状态，不会自动恢复已停用的适用范围、BOM、默认图纸或来源加工关系。',
     'confirmDisableMaterialMemory',
-    '零件搜索记忆正在停用，请等待操作完成',
+    'materialMemoryStatusSavingText',
     '零件搜索记忆正在保存，请等待保存完成',
     '零件搜索记忆已保存',
     '零件搜索记忆停用失败',
@@ -4465,6 +5272,7 @@ function verifyMobileCompactOrderCards() {
     '查看生产流程',
     'v-if="!isMobileLayout" class="line-actions"',
     'v-if="!isMobileLayout && lineNeedsReplenishmentAction(line)"',
+    ':read-only="isMobileLayout"',
     'openImportSourcePreview',
     '来源 Excel 预览',
     '预览来源Excel',
@@ -4511,6 +5319,12 @@ function verifyMobileCompactOrderCards() {
     }
   }
   const orderLineEditorSnippets = [
+    'readOnly?: boolean',
+    'const readOnly = computed(() => props.readOnly)',
+    'guardReadOnlyOrderLineMutation',
+    '订单明细只读',
+    ':disabled="readOnly ||',
+    ':review-mode="!readOnly"',
     'mobile-card-compact-summary',
     'mobile-card-header-actions',
     'order-line-mobile-toolbar',
@@ -4632,6 +5446,7 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
   }
 
   const serviceSource = readFile(servicePath);
+  const migrationSqlSource = readMigrationSqlSource();
   const serviceSnippets = [
     'async completeProcessStep(id: string, dto: CompleteProcessStepDto)',
     'runSerializableTransaction',
@@ -4640,12 +5455,17 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     '已完成发货订单不能修改工序完成记录',
     '生产任务已入库，不能修改工序完成记录',
     '生产任务必须先开始，才能确认工序完成',
+    '请选择工序操作人员',
+    'required: dto.isCompleted',
     '已完成生产的工序不能改为未完成',
     '生产流程必须按已保存的顺序完成，避免跳过前道工序直接把后道工序标绿。',
     '必须先完成上一道工序',
     '后续工序已完成，不能回退当前工序',
     'resolveProcessQuantityGuard',
     'syncTaskStatusFromProcessSteps',
+    'ProductionStatus.WAITING_CONFIRMATION',
+    '工序全完成只进入待最终确认',
+    '最终生产确认只更新最后一道工序记录，不能用系统操作员覆盖已人工确认的前序工序。',
     'async completeProcessSteps(id: string, dto: CompleteProcessStepsDto)',
     '批量确认的工序必须连续',
     '批量确认仍必须遵守工艺顺序，只允许连续确认，不能跳过前道工序。',
@@ -4656,15 +5476,24 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
       addFailure(`ProductionService must keep process completion sequence rule snippet: ${snippet}`);
     }
   }
+  if (
+    serviceSource.includes('markAllProcessStepsCompleted') ||
+    serviceSource.includes("operatorCode: 'SYSTEM'") ||
+    serviceSource.includes("operatorName: '系统完成'")
+  ) {
+    addFailure('ProductionService final completion must not overwrite manual process completion operators with SYSTEM / 系统完成.');
+  }
 
   const viewSource = readFile(viewPath);
   const viewSnippets = [
     'function canOpenProcess(row: ProductionTask, processName: string)',
+    'const status = effectiveProductionStatus(row);',
     "if (row.orderStatus === 'COMPLETED')",
     "return isProcessCompleted(row, processName);",
-    "if (effectiveProductionStatus(row) === 'PENDING')",
+    "if (status === 'PENDING' || status === 'CANCELLED')",
     'return row.status === \'COMPLETED\' || isProcessCompleted(row, processName) || isCurrentProcess(row, processName);',
     'function processButtonTitle(row: ProductionTask, processName: string)',
+    '生产任务已取消，只能查看历史记录',
     '订单已完成发货，只能查看工序记录',
     '该订单已完成发货，工序完成表只能查看，不能再修改。',
     'return \'请先开始生产\';',
@@ -4675,6 +5504,8 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     'closeProcessDialog',
     '工序完成表正在保存，请等待保存完成',
     'selectedProcessNamesForSave()',
+    'missingOperatorProcessNames',
+    '确认工序完成时必须选择操作人员',
     'erpApi.completeProcessSteps(activeTask.value.id',
     'erpApi.completeProcessStep(activeTask.value.id',
     '该生产任务已经入库，不能再修改工序完成表',
@@ -4706,11 +5537,30 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     'PROCESS_COMPLETION_SKIPPED_PREVIOUS',
     'PROCESS_COMPLETION_STEP_OUT_OF_RANGE',
     'PROCESS_COMPLETION_STEP_NAME_MISMATCH',
-    'COMPLETED_TASK_PROCESS_INCOMPLETE'
+    'COMPLETED_TASK_PROCESS_INCOMPLETE',
+    'WAITING_CONFIRMATION_TASK_PROCESS_INCOMPLETE',
+    'processCompletionLogActions',
+    'checkProductionProcessCompletionLogs',
+    'PROCESS_COMPLETION_LOG_ACTION_INVALID',
+    'PROCESS_COMPLETION_LOG_AFTER_SNAPSHOT_INVALID'
   ];
   for (const snippet of verifierSnippets) {
     if (!verifierSource.includes(snippet)) {
       addFailure(`verify-first-stage.ts must keep process completion sequence data verification snippet: ${snippet}`);
+    }
+  }
+
+  const migrationSnippets = [
+    'ProductionProcessCompletionLog_identity_not_blank',
+    'ProductionProcessCompletionLog_action_valid',
+    'ProductionProcessCompletionLog_snapshot_shape',
+    'TASK_WITHDRAWN',
+    'APPROVE_REPLENISHMENT_REQUEST',
+    'REJECT_REPLENISHMENT_REQUEST'
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep process completion log guard snippet: ${snippet}`);
     }
   }
 }
@@ -4788,16 +5638,45 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     '已完成发货订单不能撤回生产任务',
     '生产任务已入库，不能撤回',
     '已有补单任务开始生产，不能自动撤回',
-    'tx.productionTask.deleteMany',
-    'tx.productionProcessCompletion.deleteMany',
+    '已有生产报废补单申请',
+    'withdrawHandlingQuantityLimit',
+    '当前生产任务没有已记录产出数量，不能转库存或报废',
+    '撤回处理数量不能超过已记录产出数量',
+    '管理撤回只能处理已经记录的生产产出，不能凭撤回操作生成超量库存或报废记录。',
+    'formatWithdrawProcessSummary',
+    '撤回前工序',
+    'cancelPendingReplenishmentTasksForWithdraw',
+    '管理撤回取消未开始补单',
+    'status: ProductionStatus.CANCELLED',
+    'archiveWithdrawProcessScrapRecords',
+    'ProductionProcessCompletionWithdrawSnapshot',
+    'ProductionProcessCompletionScrapCancelled',
+    '工序报废数量改回 0 时归档旧报废记录',
+    "import { businessDateKey, businessDateTimeKey } from '../../common/business-date';",
+    'businessDateTimeText(value: Date)',
+    'const stamp = businessDateTimeKey(value);',
+    "return stamp.replace(/^(\\d{4})(\\d{2})(\\d{2})(\\d{2})(\\d{2})(\\d{2})$/, '$1-$2-$3 $4:$5:$6');",
+    '`处理日期：${this.businessDateTimeText(handledAt)}`',
+    "sourceRecordId: `${sourceRecordId}:scrap-cancel:${businessDateTimeKey()}-${randomUUID().slice(0, 8).toUpperCase()}:${record.id}`",
+    "sourceRecordId: `${task.id}:withdraw:${businessDateTimeKey(handledAt)}-${randomUUID().slice(0, 8).toUpperCase()}`",
+    "sourceRecordId: `${record.sourceRecordId}:withdraw:${businessDateTimeKey(handledAt)}-${randomUUID().slice(0, 8).toUpperCase()}:${record.id}`",
+    'resetWithdrawProcessCompletions',
+    '撤回保留工序完成表和日志',
+    "action: 'TASK_WITHDRAWN'",
     'status: ProductionStatus.PENDING',
     'sourceRecordType: \'ProductionTaskWithdraw\'',
+    'beforeQuantity: 0',
+    'deltaQuantity: handlingQuantity',
     'target: ProductionNoticeTarget.PRODUCTION',
     'target: ProductionNoticeTarget.WAREHOUSE',
+    '通知确认只允许把生产端 PENDING 改为 ACKNOWLEDGED',
+    'status: ProductionNoticeStatus.PENDING',
+    '生产通知已确认，不能重复确认',
     '管理撤回后需要仓库确认转库存',
     'async approveReplenishmentRequest(id: string, dto: ApproveProductionReplenishmentRequestDto)',
     '没有待确认的生产报废补单申请',
     '生产报废补单申请已经生成任务',
+    '生产报废补单申请必须填写大于 0 的报废数量',
     '已取消订单不能确认生产报废补单',
     '已完成发货订单不能确认生产报废补单',
     '生产任务已入库，不能确认生产报废补单',
@@ -4817,8 +5696,15 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     "shortageMode: 'MANAGER_APPROVED'",
     "status: 'REJECTED'",
     "action: 'REJECT_REPLENISHMENT_REQUEST'",
+    'hasSubmittedShortageHandling(dto)',
+    'dto.isCompleted && isFinalStep && (this.hasSubmittedShortageHandling(dto) || existingShortageHandling.shortageQuantity > 0)',
+    '批量确认连续工序时，只允许最后一道工序登记缺货处理。',
+    'await this.upsertProductionScrapRecord(tx, task, saved, shortageHandling.scrapQuantity)',
     'syncProductionReplenishmentRequest',
     '生产人员不能直接生成补单任务，只能发起生产报废补单申请',
+    'rejectPendingProductionReplenishmentRequest',
+    '操作员取消生产报废补单申请',
+    '操作员修改短缺处理方式时保留原生产报废补单申请',
     '操作员在工序完成表中发现报废并选择“生产报废补单申请”时，只创建待确认申请，不直接生成生产任务',
     'sourceType 固定为 PRODUCTION_SCRAP',
     'generateNextReplenishmentRequestNo',
@@ -4830,6 +5716,30 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     if (!serviceSource.includes(snippet)) {
       addFailure(`ProductionService must keep replenishment/withdraw business rule snippet: ${snippet}`);
     }
+  }
+  if (serviceSource.includes('productionProcessCompletion.deleteMany')) {
+    addFailure('ProductionService withdraw must reset process completions and keep logs instead of deleting ProductionProcessCompletion rows');
+  }
+  if (serviceSource.includes('productionTask.deleteMany')) {
+    addFailure('ProductionService must cancel pending replenishment tasks with ProductionStatus.CANCELLED instead of deleting ProductionTask history.');
+  }
+  if (serviceSource.includes('productionReplenishmentRequest.delete')) {
+    addFailure('ProductionService must reject pending ProductionReplenishmentRequest rows instead of deleting request history.');
+  }
+  if (serviceSource.includes('productionScrapRecord.deleteMany')) {
+    addFailure('ProductionService must archive ProductionScrapRecord rows instead of deleting production scrap history.');
+  }
+  if (serviceSource.includes(':scrap-cancel:${Date.now()}')) {
+    addFailure('ProductionService archived scrap sourceRecordId must use businessDateTimeKey and random suffix instead of Date.now().');
+  }
+  if (serviceSource.includes('sourceRecordId: `${task.id}:${handledAt.getTime()}`')) {
+    addFailure('ProductionService withdraw scrap sourceRecordId must use businessDateTimeKey(handledAt) and random suffix instead of handledAt.getTime().');
+  }
+  if (serviceSource.includes(':withdraw:${handledAt.getTime()}')) {
+    addFailure('ProductionService archived withdraw scrap sourceRecordId must use businessDateTimeKey(handledAt) and random suffix instead of handledAt.getTime().');
+  }
+  if (serviceSource.includes('handledAt.toISOString()') || serviceSource.includes("handledAt.toLocaleString('zh-CN', { hour12: false })")) {
+    addFailure('ProductionService withdraw remarks and notices must use businessDateTimeText(handledAt) instead of server/UTC time formatting.');
   }
 
   const apiSource = readFile(apiPath);
@@ -4878,8 +5788,11 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     '<NoticeAcknowledgeDialog',
     '[notice.customerName, notice.orderNo, notice.partCode, notice.partName]',
     'saveNoticeAcknowledge',
+    'const shouldShowShortagePanel = computed(() => shortageQuantity.value > 0)',
+    'buildShortagePayloadFromForm',
     'value="REPLENISHMENT_REQUEST">生产报废补单申请',
     '保存后只生成生产报废补单申请，车间主管确认后系统才会生成补单任务。',
+    '生产报废补单申请必须填写大于 0 的报废数量',
     'v-model="replenishmentRequestVisible"',
     'title="生产报废补单申请"',
     'loadProductionReplenishmentRequests',
@@ -4908,12 +5821,17 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     ':before-close="handleWithdrawDialogClose"',
     'closeWithdrawDialog',
     '生产撤回正在保存，请等待保存完成',
-    '撤回会清空当前任务的工序完成记录并退回待确认生产',
+    '撤回会重置当前任务的工序完成状态并退回待确认生产',
+    '系统会保留撤回前工序摘要和日志',
     'withdrawForm.managerName',
     'withdrawForm.reason',
     'withdrawForm.handledAt',
     'withdrawForm.handlingMode',
     'withdrawForm.handlingQuantity',
+    'withdrawHandlingQuantityMax',
+    ':max="withdrawHandlingQuantityMax || undefined"',
+    '当前生产任务没有已记录产出数量，不能转库存或报废',
+    '撤回处理数量不能超过已记录产出数量',
     'handleWithdrawModeChange',
     'erpApi.withdrawProductionTask',
     '生产任务已撤回',
@@ -4926,12 +5844,21 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
   }
 
   const verifierSource = readFile(verifierPath);
+  const migrationSqlSource = readMigrationSqlSource();
   const verifierSnippets = [
     'await checkProductionNotices()',
     'await checkProductionReplenishmentRequests()',
     'await checkProductionScrapRecords()',
     'PRODUCTION_NOTICE_ACK_MISSING',
+    'PRODUCTION_NOTICE_IDENTITY_MISSING',
+    'PRODUCTION_NOTICE_OPTIONAL_TEXT_BLANK',
+    'PRODUCTION_NOTICE_PENDING_ACK_STALE',
+    'PRODUCTION_NOTICE_QUANTITY_FIELDS_INCOMPLETE',
+    'PRODUCTION_NOTICE_QUANTITY_NEGATIVE',
+    'PRODUCTION_NOTICE_QUANTITY_UNIT_MISSING',
+    'REPLENISHMENT_IDENTITY_BLANK',
     'REPLENISHMENT_SOURCE_TYPE_INVALID',
+    'REPLENISHMENT_SCRAP_NON_POSITIVE',
     'PENDING_REPLENISHMENT_ORDER_CANCELLED',
     'PENDING_REPLENISHMENT_ORDER_COMPLETED',
     'PENDING_REPLENISHMENT_TASK_RECEIVED',
@@ -4939,13 +5866,53 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'APPROVED_REPLENISHMENT_TASK_MISSING',
     'APPROVED_REPLENISHMENT_TASK_SOURCE_TYPE',
     'REJECTED_REPLENISHMENT_APPROVAL_FIELDS_STALE',
+    'REJECTED_REPLENISHMENT_COMPLETION_MODE',
     'PENDING_REPLENISHMENT_DUPLICATE',
+    'ProductionProcessCompletionWithdrawSnapshot',
+    'ProductionProcessCompletionScrapCancelled',
+    'SCRAP_RECORD_IDENTITY_BLANK',
+    'SCRAP_RECORD_SOURCE_TYPE_UNKNOWN',
+    'SCRAP_RECORD_CANCELLED_SOURCE_MISMATCH',
+    'SCRAP_RECORD_WITHDRAW_ARCHIVE_SOURCE_MISMATCH',
     'ProductionTaskWithdraw',
     'SCRAP_RECORD_WITHDRAW_SOURCE_MISMATCH'
   ];
   for (const snippet of verifierSnippets) {
     if (!verifierSource.includes(snippet)) {
       addFailure(`verify-first-stage.ts must keep replenishment/withdraw data verification snippet: ${snippet}`);
+    }
+  }
+  const noticeMigrationSnippets = [
+    'ProductionNotice_identity_not_blank',
+    'ProductionNotice_optional_text_not_blank',
+    'ProductionNotice_ack_status_consistent',
+    'ProductionNotice_quantity_fields_consistent'
+  ];
+  for (const snippet of noticeMigrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep production notice database guard snippet: ${snippet}`);
+    }
+  }
+  const replenishmentRequestMigrationSnippets = [
+    'ProductionReplenishmentRequest_identity_not_blank',
+    'ProductionReplenishmentRequest_source_status_valid',
+    'ProductionReplenishmentRequest_quantities_valid',
+    'ProductionReplenishmentRequest_status_fields_consistent'
+  ];
+  for (const snippet of replenishmentRequestMigrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep production replenishment request database guard snippet: ${snippet}`);
+    }
+  }
+  const scrapRecordMigrationSnippets = [
+    'ProductionScrapRecord_identity_not_blank',
+    'ProductionScrapRecord_quantity_positive',
+    'ProductionScrapRecord_source_type_valid',
+    'ProductionScrapRecord_archive_source_marker_valid'
+  ];
+  for (const snippet of scrapRecordMigrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep production scrap record database guard snippet: ${snippet}`);
     }
   }
 
@@ -4965,6 +5932,121 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     if (!seedSource.includes(snippet)) {
       addFailure(`seed.ts must keep replenishment/notice coverage snippet: ${snippet}`);
     }
+  }
+}
+
+function verifyProductionTaskCancelledStatusWorkflow() {
+  const schemaPath = 'database/prisma/schema.prisma';
+  const migrationPath = 'database/prisma/migrations/20260515103000_production_task_cancelled_status/migration.sql';
+  const statusFlowMigrationPath = 'database/prisma/migrations/20260515133000_production_status_waiting_stored/migration.sql';
+  const statusBackfillMigrationPath = 'database/prisma/migrations/20260515141000_backfill_stored_production_tasks/migration.sql';
+  const productionServicePath = 'backend/src/modules/production/production.service.ts';
+  const ordersServicePath = 'backend/src/modules/orders/orders.service.ts';
+  const frontendTypesPath = 'frontend/src/types/erp.ts';
+  const productionViewPath = 'frontend/src/views/ProductionView.vue';
+  const orderDetailViewPath = 'frontend/src/views/OrderDetailView.vue';
+  const ordersListViewPath = 'frontend/src/views/OrdersListView.vue';
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
+
+  for (const projectPath of [
+    schemaPath,
+    migrationPath,
+    statusFlowMigrationPath,
+    statusBackfillMigrationPath,
+    productionServicePath,
+    ordersServicePath,
+    frontendTypesPath,
+    productionViewPath,
+    orderDetailViewPath,
+    ordersListViewPath,
+    verifierPath
+  ]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing production task cancelled status file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const migrationSqlSource = readMigrationSqlSource();
+  const checks = [
+    [schemaPath, readFile(schemaPath), 'CANCELLED'],
+    [schemaPath, readFile(schemaPath), 'WAITING_CONFIRMATION'],
+    [schemaPath, readFile(schemaPath), 'STORED'],
+    [migrationPath, readFile(migrationPath), "ALTER TYPE \"ProductionStatus\" ADD VALUE IF NOT EXISTS 'CANCELLED'"],
+    [statusFlowMigrationPath, readFile(statusFlowMigrationPath), "ALTER TYPE \"ProductionStatus\" ADD VALUE IF NOT EXISTS 'WAITING_CONFIRMATION'"],
+    [statusFlowMigrationPath, readFile(statusFlowMigrationPath), "ALTER TYPE \"ProductionStatus\" ADD VALUE IF NOT EXISTS 'STORED'"],
+    [statusBackfillMigrationPath, readFile(statusBackfillMigrationPath), 'UPDATE "ProductionTask" AS task'],
+    [statusBackfillMigrationPath, readFile(statusBackfillMigrationPath), 'SET "status" = \'STORED\''],
+    [statusBackfillMigrationPath, readFile(statusBackfillMigrationPath), 'WHERE task."status" = \'COMPLETED\''],
+    [statusBackfillMigrationPath, readFile(statusBackfillMigrationPath), 'batch."productionTaskId" = task."id"'],
+    ['database/prisma/migrations/*/migration.sql', migrationSqlSource, 'ProductionTask_quantities_valid'],
+    ['database/prisma/migrations/*/migration.sql', migrationSqlSource, 'ProductionTask_identity_not_blank'],
+    ['database/prisma/migrations/*/migration.sql', migrationSqlSource, 'ProductionTask_completed_time_order'],
+    ['database/prisma/migrations/*/migration.sql', migrationSqlSource, 'ProductionTask_status_fields_consistent'],
+    [productionServicePath, readFile(productionServicePath), 'where.status = { not: ProductionStatus.CANCELLED }'],
+    [productionServicePath, readFile(productionServicePath), 'status: nextStatus'],
+    [productionServicePath, readFile(productionServicePath), 'ProductionStatus.STORED'],
+    [productionServicePath, readFile(productionServicePath), 'private assertTaskNotStored(task: { status: ProductionStatus }, message: string)'],
+    [productionServicePath, readFile(productionServicePath), '已入库状态本身就是写保护'],
+    [productionServicePath, readFile(productionServicePath), "this.assertTaskNotStored(task, '生产任务已入库，不能修改工序完成记录')"],
+    [productionServicePath, readFile(productionServicePath), 'task.status === ProductionStatus.WAITING_CONFIRMATION'],
+    [productionServicePath, readFile(productionServicePath), 'cancelPendingReplenishmentTasksForWithdraw'],
+    [productionServicePath, readFile(productionServicePath), '已取消任务只保留历史，不能通过管理撤回重新改回待生产'],
+    [productionServicePath, readFile(productionServicePath), '生产任务已取消，不能管理撤回'],
+    [productionServicePath, readFile(productionServicePath), '已取消任务只保留历史，不能再写入最终完成数量'],
+    [productionServicePath, readFile(productionServicePath), '生产任务已取消，不能确认生产完成'],
+    [productionServicePath, readFile(productionServicePath), '已取消任务只保留历史，不能再改写工序完成表'],
+    [productionServicePath, readFile(productionServicePath), '生产任务已取消，不能修改工序完成记录'],
+    [productionServicePath, readFile(productionServicePath), '已取消任务只保留历史，不能再确认生成新的生产报废补单'],
+    [productionServicePath, readFile(productionServicePath), '生产任务已取消，不能确认生产报废补单'],
+    [productionServicePath, readFile(productionServicePath), '已取消任务只保留历史，不能再驳回并改写短缺处理记录'],
+    [productionServicePath, readFile(productionServicePath), '生产任务已取消，不能驳回生产报废补单'],
+    [ordersServicePath, readFile(ordersServicePath), 'cancelPendingProductionTasks'],
+    [ordersServicePath, readFile(ordersServicePath), 'activeProductionTasks'],
+    [ordersServicePath, readFile(ordersServicePath), 'ProductionStatus.CANCELLED'],
+    [ordersServicePath, readFile(ordersServicePath), 'ProductionStatus.WAITING_CONFIRMATION'],
+    [ordersServicePath, readFile(ordersServicePath), 'ProductionStatus.STORED'],
+    [ordersServicePath, readFile(ordersServicePath), '待最终确认、已完成、已入库或已取消的任务历史不得被后续编辑改写'],
+    [ordersServicePath, readFile(ordersServicePath), 'private isTaskWaitingReceipt(task: any)'],
+    [ordersServicePath, readFile(ordersServicePath), '待入库只代表生产已最终确认但尚未生成库存批次；STORED 必须已经入库，不能再回到待入库。'],
+    [frontendTypesPath, readFile(frontendTypesPath), "'CANCELLED'"],
+    [frontendTypesPath, readFile(frontendTypesPath), "'WAITING_CONFIRMATION'"],
+    [frontendTypesPath, readFile(frontendTypesPath), "'STORED'"],
+    [productionViewPath, readFile(productionViewPath), "CANCELLED: '已取消'"],
+    [productionViewPath, readFile(productionViewPath), "row.status === 'CANCELLED'"],
+    [productionViewPath, readFile(productionViewPath), '已取消任务只保留历史状态，不能因工序完成或历史无工序快照被重新算成待确认完成'],
+    [productionViewPath, readFile(productionViewPath), "activeTask.value?.status === 'STORED'"],
+    [productionViewPath, readFile(productionViewPath), "status !== 'RECEIVED'"],
+    [productionViewPath, readFile(productionViewPath), "if (status === 'RECEIVED')"],
+    [productionViewPath, readFile(productionViewPath), '已取消任务只保留历史，不允许从生产端再次管理撤回'],
+    [productionViewPath, readFile(productionViewPath), '生产任务已取消，只能查看历史记录'],
+    [orderDetailViewPath, readFile(orderDetailViewPath), "task.status !== 'CANCELLED' && (task.status !== 'PENDING' || task.completedQuantity > 0)"],
+    [orderDetailViewPath, readFile(orderDetailViewPath), '已取消任务只保留历史，不参与订单取消时的已生产处理计划'],
+    [orderDetailViewPath, readFile(orderDetailViewPath), 'function lineHasStartedProductionProgress(line: OrderLine)'],
+    [orderDetailViewPath, readFile(orderDetailViewPath), "line.productionStatus !== 'PENDING' && line.productionStatus !== 'CANCELLED'"],
+    [orderDetailViewPath, readFile(orderDetailViewPath), '已取消生产任务只保留历史，不参与“已开始生产”判断，也不能作为订单变更入口。'],
+    [orderDetailViewPath, readFile(orderDetailViewPath), '该零件生产任务已取消，只保留历史，不能创建补单或生产数量变更'],
+    [orderDetailViewPath, readFile(orderDetailViewPath), '补单任务已取消，只保留历史'],
+    [ordersListViewPath, readFile(ordersListViewPath), "task.status !== 'CANCELLED' && (task.status !== 'PENDING' || task.completedQuantity > 0)"],
+    [ordersListViewPath, readFile(ordersListViewPath), '已取消任务只保留历史，不参与订单取消时的已生产处理计划'],
+    [verifierPath, readFile(verifierPath), 'CANCELLED_TASK_HAS_PRODUCTION_PROGRESS'],
+    [verifierPath, readFile(verifierPath), 'PRODUCTION_TASK_IDENTITY_MISSING'],
+    [verifierPath, readFile(verifierPath), 'PRODUCTION_TASK_COMPLETED_BEFORE_STARTED'],
+    [verifierPath, readFile(verifierPath), 'CANCELLED_TASK_REMARK_MISSING'],
+    [verifierPath, readFile(verifierPath), 'WAITING_CONFIRMATION_TASK_PROCESS_INCOMPLETE'],
+    [verifierPath, readFile(verifierPath), 'COMPLETED_TASK_HAS_INVENTORY_BATCH'],
+    [verifierPath, readFile(verifierPath), '已有入库批次的任务必须进入 STORED'],
+    [verifierPath, readFile(verifierPath), 'STORED_TASK_FINAL_FIELDS_MISSING'],
+    [verifierPath, readFile(verifierPath), 'STORED_TASK_MISSING_INVENTORY_BATCH'],
+    [verifierPath, readFile(verifierPath), 'STORED_TASK_PROCESS_INCOMPLETE']
+  ];
+  for (const [projectPath, source, snippet] of checks) {
+    if (!source.includes(snippet)) {
+      addFailure(`${projectPath} must keep ProductionTask CANCELLED status snippet: ${snippet}`);
+    }
+  }
+  if (readFile(ordersServicePath).includes("status: { not: 'COMPLETED' }")) {
+    addFailure('OrdersService must not update cancelled production tasks through legacy status != COMPLETED checks.');
   }
 }
 
@@ -5048,8 +6130,15 @@ function verifyOrderChangeAndCancellationWorkflow() {
     'async cancelReplenishment(orderNo: string, productionTaskNo: string, dto: CancelReplenishmentDto)',
     '这里只能取消补单任务',
     '已开始生产的补单不能直接取消，请走生产撤回流程',
-    'tx.productionNotice.deleteMany',
-    'tx.productionTask.delete({ where: { id: task.id } })',
+    'acknowledgePendingProductionNotices',
+    '取消补单同步关闭待处理通知',
+    '订单取消同步关闭未开始生产任务通知',
+    '通知历史不得删除',
+    'cancelPendingProductionTasks',
+    '未开始生产任务取消后保留 ProductionTask 历史',
+    'status: ProductionStatus.CANCELLED',
+    '取消新增补单零件',
+    'productionPlanQuantity: 0',
     '取消补单',
     'async createAdditionalMaterial(orderNo: string, dto: CreateAdditionalMaterialDto)',
     '待提交生产订单请直接编辑订单，不要创建补单零件',
@@ -5090,6 +6179,18 @@ function verifyOrderChangeAndCancellationWorkflow() {
     if (!serviceSource.includes(snippet)) {
       addFailure(`OrdersService must keep order change/cancellation business rule snippet: ${snippet}`);
     }
+  }
+  if (serviceSource.includes('productionNotice.deleteMany')) {
+    addFailure('OrdersService must acknowledge stale pending ProductionNotice rows instead of deleting notification history.');
+  }
+  if (serviceSource.includes('productionTask.deleteMany')) {
+    addFailure('OrdersService must mark pending ProductionTask rows as CANCELLED instead of bulk deleting task history.');
+  }
+  if (serviceSource.includes('productionTask.delete(')) {
+    addFailure('OrdersService must mark pending ProductionTask rows as CANCELLED instead of deleting task history.');
+  }
+  if (serviceSource.includes('orderLine.delete({ where: { id: task.orderLineId } })')) {
+    addFailure('OrdersService cancelReplenishment must keep added order lines for traceability and zero their quantities instead of deleting them.');
   }
 
   const apiSource = readFile(apiPath);
@@ -5150,6 +6251,8 @@ function verifyOrderChangeAndCancellationWorkflow() {
     'erpApi.updateLineQuantityAfterProductionStarted',
     'erpApi.cancelOrder',
     '订单已取消；如有已开工任务，通知已同步生产和仓库',
+    '未开始的生产任务会标记为已取消并保留历史',
+    '未开工生产任务标记为已取消并保留历史',
     ':before-close="handleOrderDetailSavingDialogClose"',
     'closeEditDialog',
     'closeDeleteDraftDialog',
@@ -5173,6 +6276,7 @@ function verifyOrderChangeAndCancellationWorkflow() {
     ':before-close="handleOrderSavingDialogClose"',
     '订单操作正在保存，请等待保存完成',
     '正常订单和补单订单都可以取消',
+    '未开始生产任务会标记为已取消并保留历史',
     '处理已生产零件',
     '零件包、零件、客户关键字',
     'activeCancelOrderDetail',
@@ -5190,6 +6294,13 @@ function verifyOrderChangeAndCancellationWorkflow() {
     if (!listViewSource.includes(snippet)) {
       addFailure(`OrdersListView.vue must keep cancel order dialog workflow snippet: ${snippet}`);
     }
+  }
+  if (
+    detailViewSource.includes('生产任务会删除') ||
+    detailViewSource.includes('删除未开工生产任务') ||
+    listViewSource.includes('删除未开工任务')
+  ) {
+    addFailure('Order cancellation UI must explain that unstarted ProductionTask rows are marked CANCELLED and kept for history, not deleted.');
   }
   const planOverrideClearSnippets = [
     { source: listViewSource, file: 'OrdersListView.vue', snippet: 'function clearProductionPlanOverride(line: CreateOrderLinePayload)' },
@@ -5261,7 +6372,7 @@ function verifyShortageReplenishmentClosureWorkflow() {
     'needsReplenishmentAction: records.length > 0',
     'private toEffectiveUnresolvedShortageRecords(tasks: any[])',
     'const completedReplenishmentQuantityByLine = this.toCompletedReplenishmentQuantityByLine(tasks);',
-    'const coveringQuantity = completedReplenishmentQuantityByLine.get(key) || 0;',
+    'const coveringQuantity = completedReplenishmentQuantityByLine.get(key) ?? 0;',
     'const usedQuantity = Math.min(record.shortageQuantity, coveringQuantity);',
     'const remainingQuantity = this.roundQuantity(record.shortageQuantity - usedQuantity);',
     'if (remainingQuantity <= 0)',
@@ -5272,6 +6383,15 @@ function verifyShortageReplenishmentClosureWorkflow() {
   for (const snippet of serviceSnippets) {
     if (!serviceSource.includes(snippet)) {
       addFailure(`OrdersService must keep completed replenishment closing pending shortage snippet: ${snippet}`);
+    }
+  }
+  const shortageClosureZeroFallbackSnippets = [
+    'completedReplenishmentQuantityByLine.get(key) || 0',
+    'quantityByLine.get(key) || 0'
+  ];
+  for (const snippet of shortageClosureZeroFallbackSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`OrdersService shortage replenishment closure must use ?? fallback so explicit 0 quantities remain stable: ${snippet}`);
     }
   }
 
@@ -5285,6 +6405,7 @@ function verifyShortageReplenishmentClosureWorkflow() {
     'class="pending-shortage-panel resolved-shortage-panel',
     '已完成补单、客户数量调整或无需补单说明后，不再列入待处理提醒',
     'function lineCompletedReplenishmentText(line: OrderLine)',
+    "['COMPLETED', 'STORED'].includes(task.status)",
     'return `补单已完成 ${formatQuantity(quantity, line.unit)}',
     'function lineNeedsReplenishmentAction(line: OrderLine)',
     'return Boolean(line.unresolvedShortageQuantity && line.unresolvedShortageQuantity > 0)',
@@ -5303,7 +6424,7 @@ function verifyShortageReplenishmentClosureWorkflow() {
     'checkProductionShortageResolutions',
     'completedReplenishmentQuantityByLineId',
     'completedReplenishmentCoveredCompletionIds',
-    'task.status === ProductionStatus.COMPLETED || Boolean(task.inventoryBatch)',
+    'task.status === ProductionStatus.COMPLETED || task.status === ProductionStatus.STORED || Boolean(task.inventoryBatch)',
     '!completedReplenishmentCoveredCompletionIds.has(completion.id)',
     'PRODUCTION_SHORTAGE_RESOLUTION_MODE_INVALID',
     'PRODUCTION_SHORTAGE_RESOLUTION_REASON_MISSING',
@@ -5321,8 +6442,9 @@ function verifyWarehouseWorkflow() {
   const servicePath = 'backend/src/modules/warehouses/warehouses.service.ts';
   const apiPath = 'frontend/src/api/erp.ts';
   const viewPath = 'frontend/src/views/WarehouseView.vue';
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
 
-  for (const projectPath of [controllerPath, servicePath, apiPath, viewPath]) {
+  for (const projectPath of [controllerPath, servicePath, apiPath, viewPath, verifierPath]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing warehouse workflow file: ${projectPath}`);
       return;
@@ -5348,20 +6470,53 @@ function verifyWarehouseWorkflow() {
   }
 
   const serviceSource = readFile(servicePath);
+  const verifierSource = readFile(verifierPath);
+  const migrationSqlSource = readMigrationSqlSource();
   const serviceSnippets = [
     'async warehouseNotices(query: WarehouseNoticeQueryDto = {})',
     'target: ProductionNoticeTarget.WAREHOUSE',
     'async acknowledgeWarehouseNotice',
+    'resolveWarehouseOperatorSnapshot(dto.acknowledgedByCode, dto.acknowledgedBy, \'通知\')',
+    '仓库通知已确认，不能重复确认',
+    'formatWarehouseNoticeHandlingRemark',
+    'customerChangeHandlingQuantityLimit',
+    '处理数量不能超过本次客户变更数量',
+    '确认无实物处理时必须填写备注说明',
+    '转入库存数量必须大于 0',
     'runSerializableTransaction',
     'async pendingReceipts(query: WarehouseWorkQueryDto)',
     'status: ProductionStatus.COMPLETED',
+    'status: ProductionStatus.STORED',
     'inventoryBatch: null',
     'async confirmReceipt(productionTaskId: string, dto: ConfirmReceiptDto)',
+    'dto.warehouseConfirmedByCode',
+    'private formatReceiptRemark',
+    'private async resolveWarehouseOperatorSnapshot',
     'sourceRecordType: \'ProductionTask\'',
     'sourceRecordType: \'ProductionTaskOverage\'',
     'async pendingShipments(query: WarehouseWorkQueryDto)',
     'sourceOrderId: { not: null }',
     'quantity: { gt: 0 }',
+    'tx.inventoryBatch.count({ where: { warehouseId } })',
+    'tx.inventoryTransaction.count({ where: { warehouseId } })',
+    'tx.inventoryBatch.count({ where: { locationId: { in: locationIds } } })',
+    'tx.inventoryTransaction.count({ where: { locationId: { in: locationIds } } })',
+    'tx.warehouseLocation.updateMany',
+    "where: { warehouseId, status: 'ENABLED' }",
+    "data: { status: 'DISABLED' }",
+    '仓库状态正在被其他业务修改，请刷新后重新停用',
+    '该仓库已有库存批次或库存流水，只能停用，不能删除',
+    '只有完全没有库存批次和库存流水历史的空仓库允许物理删除',
+    'tx.inventoryBatch.count({ where: { locationId } })',
+    'tx.inventoryTransaction.count({ where: { locationId } })',
+    '该库位已有库存批次或库存流水，只能停用，不能删除',
+    '只有完全没有库存批次和库存流水历史的空库位允许物理删除',
+    '仓库正在被其他业务写入，请刷新后重新删除',
+    '库位正在被其他业务写入，请刷新后重新删除',
+    '停用仓库不能新增库位，请先启用仓库',
+    '停用仓库下的库位不能启用，请先启用所属仓库',
+    '停用仓库不允许新增后续可选库位',
+    '库位恢复启用前必须先启用所属仓库',
     'async confirmShipment(batchId: string, dto: ConfirmShipmentDto)',
     'async confirmBatchShipment(dto: ConfirmBatchShipmentDto)',
     '批量发货只能选择同一个订单的库存批次',
@@ -5381,6 +6536,31 @@ function verifyWarehouseWorkflow() {
     }
   }
 
+  const verifierSnippets = [
+    'WAREHOUSE_IDENTITY_MISSING',
+    'WAREHOUSE_LOCATION_IDENTITY_MISSING',
+    'WAREHOUSE_LOCATION_ENABLED_UNDER_DISABLED_WAREHOUSE',
+    'WAREHOUSE_CODE_NOT_NORMALIZED',
+    'LOCATION_CODE_NOT_NORMALIZED'
+  ];
+  for (const snippet of verifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep warehouse master-data verification snippet: ${snippet}`);
+    }
+  }
+
+  const migrationSnippets = [
+    'Warehouse_identity_not_blank',
+    'Warehouse_code_normalized',
+    'WarehouseLocation_identity_not_blank',
+    'WarehouseLocation_code_normalized'
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep warehouse master-data database guard snippet: ${snippet}`);
+    }
+  }
+
   const apiSource = readFile(apiPath);
   const apiSnippets = [
     'pendingReceipts(filters: WarehouseWorkFilters = {})',
@@ -5391,7 +6571,9 @@ function verifyWarehouseWorkflow() {
     'confirmShipment(batchId: string, remark?: string)',
     'confirmBatchShipment(batchIds: string[], remark?: string)',
     'confirmOrderShipment(orderNo: string, remark?: string)',
-    'warehouseNotices(status?: ProductionNoticeStatus)',
+    'warehouseNotices(status?: ProductionNoticeStatus, filters: Omit<ProductionNoticeFilters',
+    'noticeType: filters.noticeType',
+    'customerKeyword: filters.customerKeyword?.trim() || undefined',
     'acknowledgeWarehouseNotice(id: string, payload: AcknowledgeWarehouseNoticePayload | string)',
     'warehouseTransactions(filters: WarehouseTransactionFilters = {})'
   ];
@@ -5414,6 +6596,19 @@ function verifyWarehouseWorkflow() {
     'erpApi.acknowledgeWarehouseNotice',
     'async function confirmReceipt()',
     'erpApi.confirmReceipt',
+    'warehouseOperatorOptions',
+    'searchWarehouseOperators',
+    'warehouseConfirmedByCode',
+    'warehouseConfirmedByCode: warehouseOperator.code',
+    'acknowledgedByCode',
+    'acknowledgedByCode: warehouseOperator.code',
+    'stockNoticeHandlingQuantityMax',
+    'stockNoticeQuantityText',
+    ':max="stockNoticeHandlingQuantityMax || undefined"',
+    '处理数量不能超过本次客户变更数量',
+    '确认无实物处理时请填写备注说明',
+    'warehouseOperatorSelectOptions',
+    'warehouseOperatorSnapshot',
     'async function confirmShipment()',
     'erpApi.confirmShipment',
     'async function confirmBatchShipment()',
@@ -5421,6 +6616,11 @@ function verifyWarehouseWorkflow() {
     'erpApi.confirmOrderShipment',
     ':close-on-press-escape="!saving"',
     ':close-on-press-escape="!stockNoticeSaving"',
+    'warehouseStatusVisible',
+    'activeWarehouseStatusTarget',
+    'confirmWarehouseStatusTarget',
+    '已随仓库停用的库位不会自动恢复，需要逐个启用',
+    '停用仓库会同步停用该仓库下仍启用的库位',
     '仓库业务正在保存，请等待保存完成',
     '仓库通知正在处理，请等待保存完成',
     'if (stockNoticeSaving.value) {',
@@ -5456,19 +6656,33 @@ function verifyWarehouseWorkflow() {
 
 function verifyNoticeCustomerNameDisplay() {
   const productionServicePath = 'backend/src/modules/production/production.service.ts';
+  const productionControllerPath = 'backend/src/modules/production/production.controller.ts';
   const warehouseServicePath = 'backend/src/modules/warehouses/warehouses.service.ts';
   const typesPath = 'frontend/src/types/erp.ts';
+  const apiPath = 'frontend/src/api/erp.ts';
   const productionViewPath = 'frontend/src/views/ProductionView.vue';
   const warehouseViewPath = 'frontend/src/views/WarehouseView.vue';
+  const adminNoticesViewPath = 'frontend/src/views/AdminNoticesView.vue';
+  const routerPath = 'frontend/src/router.ts';
+  const layoutPath = 'frontend/src/layout/AppLayout.vue';
   const noticeDialogPath = 'frontend/src/components/NoticeAcknowledgeDialog.vue';
+  const noticeApiScriptPath = 'scripts/verify-production-notices-api.cjs';
+  const packagePath = 'package.json';
 
   for (const projectPath of [
     productionServicePath,
+    productionControllerPath,
     warehouseServicePath,
     typesPath,
+    apiPath,
     productionViewPath,
     warehouseViewPath,
-    noticeDialogPath
+    adminNoticesViewPath,
+    routerPath,
+    layoutPath,
+    noticeDialogPath,
+    noticeApiScriptPath,
+    packagePath
   ]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing notice customer display source file: ${projectPath}`);
@@ -5478,9 +6692,20 @@ function verifyNoticeCustomerNameDisplay() {
 
   const serviceSnippets = [
     [productionServicePath, 'return this.toNoticesWithCustomerNames(notices);'],
+    [productionServicePath, 'async adminNotices(query: ProductionNoticeQueryDto = {})'],
+    [productionServicePath, 'buildProductionNoticeWhere(query, query.target)'],
+    [productionServicePath, 'buildProductionNoticeWhere'],
+    [productionServicePath, 'const where: Prisma.ProductionNoticeWhereInput = target ? { target } : {};'],
+    [productionServicePath, 'productionNoticeCustomerScope'],
+    [productionServicePath, '通知历史筛选必须覆盖订单、客户、零件、通知原因和任务号'],
     [productionServicePath, 'const customerNameByOrderId = new Map(orders.map((order) => [order.id, order.customerName]));'],
     [productionServicePath, 'customerNameByOrderId.get(notice.orderId) || customerNameByOrderNo.get(notice.orderNo) || undefined'],
+    [productionControllerPath, "@Get('notices/admin')"],
+    [productionControllerPath, 'return this.productionService.adminNotices(query);'],
     [warehouseServicePath, 'return this.toNoticesWithCustomerNames(notices);'],
+    [warehouseServicePath, 'buildWarehouseNoticeWhere'],
+    [warehouseServicePath, 'warehouseNoticeCustomerScope'],
+    [warehouseServicePath, '仓库历史通知筛选必须支持订单、客户、零件、通知类型和时间组合查询'],
     [warehouseServicePath, 'const customerNameByOrderId = new Map(orders.map((order) => [order.id, order.customerName]));'],
     [warehouseServicePath, 'customerNameByOrderId.get(notice.orderId) || customerNameByOrderNo.get(notice.orderNo) || undefined']
   ];
@@ -5502,7 +6727,10 @@ function verifyNoticeCustomerNameDisplay() {
   }
   const noticeDialogResponsiveSnippets = [
     'class="responsive-dialog notice-acknowledge-dialog"',
-    'overflow-wrap: anywhere'
+    'overflow-wrap: anywhere',
+    'useSelect',
+    "emit('search', keyword)",
+    "emit('visibleChange', visible)"
   ];
   for (const snippet of noticeDialogResponsiveSnippets) {
     if (!noticeDialogSource.includes(snippet)) {
@@ -5514,6 +6742,9 @@ function verifyNoticeCustomerNameDisplay() {
   const productionViewSnippets = [
     'function productionNoticeTitle(notice: ProductionNotice)',
     '[notice.customerName, notice.orderNo, notice.partCode, notice.partName]',
+    'productionNoticeFilters',
+    'resetProductionNoticeFilters',
+    'noticeType: productionNoticeFilters.noticeType === \'ALL\' ? undefined : productionNoticeFilters.noticeType',
     ':notice-title="activeProductionNotice ? productionNoticeTitle(activeProductionNotice) : \'\'"'
   ];
   for (const snippet of productionViewSnippets) {
@@ -5526,6 +6757,9 @@ function verifyNoticeCustomerNameDisplay() {
   const warehouseViewSnippets = [
     'function warehouseNoticeTitle(notice: ProductionNotice)',
     '[notice.customerName, notice.orderNo, notice.partCode, notice.partName]',
+    'warehouseNoticeFilters',
+    'resetWarehouseNoticeFilters',
+    'noticeType: warehouseNoticeFilters.noticeType === \'ALL\' ? undefined : warehouseNoticeFilters.noticeType',
     ':notice-title="activeWarehouseNotice ? warehouseNoticeTitle(activeWarehouseNotice) : \'\'"'
   ];
   for (const snippet of warehouseViewSnippets) {
@@ -5533,10 +6767,78 @@ function verifyNoticeCustomerNameDisplay() {
       addFailure(`WarehouseView.vue must keep customerName in warehouse notice title snippet: ${snippet}`);
     }
   }
+
+  const apiSource = readFile(apiPath);
+  const apiSnippets = [
+    'adminProductionNotices(filters: ProductionNoticeFilters = {})',
+    '`/production/tasks/notices/admin${toQuery({',
+    'target: filters.target'
+  ];
+  for (const snippet of apiSnippets) {
+    if (!apiSource.includes(snippet)) {
+      addFailure(`frontend erpApi must keep admin notice API snippet: ${snippet}`);
+    }
+  }
+
+  const adminNoticesViewSource = readFile(adminNoticesViewPath);
+  const adminNoticesViewSnippets = [
+    'erpApi.adminProductionNotices',
+    "targetFilter.value === 'ALL' ? undefined : targetFilter.value",
+    "statusFilter.value === 'ALL' ? undefined : statusFilter.value",
+    "noticeTypeFilter.value === 'ALL' ? undefined : noticeTypeFilter.value",
+    'noticeTargetLabel',
+    'noticeStatusLabel',
+    '管理员通知中心只读拉取历史消息'
+  ];
+  for (const snippet of adminNoticesViewSnippets) {
+    if (!adminNoticesViewSource.includes(snippet)) {
+      addFailure(`AdminNoticesView.vue must keep read-only admin notice center snippet: ${snippet}`);
+    }
+  }
+
+  const routerSource = readFile(routerPath);
+  if (!routerSource.includes("path: '/notices'") || !routerSource.includes('AdminNoticesView.vue')) {
+    addFailure('router.ts must expose the read-only admin notice center route.');
+  }
+
+  const layoutSource = readFile(layoutPath);
+  if (!layoutSource.includes("router.push('/notices')") || !layoutSource.includes('全部通知')) {
+    addFailure('AppLayout.vue must keep the topbar entry for admin all notices.');
+  }
+
+  const noticeApiScriptSource = readFile(noticeApiScriptPath);
+  const noticeApiScriptSnippets = [
+    '/production/tasks/notices',
+    '/production/tasks/notices/admin',
+    '/warehouse/notices',
+    "noticeType: 'QUANTITY_INCREASE'",
+    "noticeType: 'ORDER_CANCELLED'",
+    "status: 'ACKNOWLEDGED'",
+    'customerKeyword',
+    'seedShortageTask',
+    'assertProductionShortageCompletionRequiresHandling',
+    'assertFinalProcessStepShortageRequestCreatesPendingReview',
+    'final process step shortage request must wait for supervisor review',
+    "shortageMode: 'REPLENISHMENT_REQUEST'",
+    "request?.sourceType === 'PRODUCTION_SCRAP'",
+    'shortage completion without handling must be rejected',
+    "shortageMode: 'MANAGER_APPROVED'",
+    'shortage completion must record shortageQuantity=2',
+    'Production and warehouse notice API filter verification passed.'
+  ];
+  for (const snippet of noticeApiScriptSnippets) {
+    if (!noticeApiScriptSource.includes(snippet)) {
+      addFailure(`verify-production-notices-api.cjs must keep notice API filter regression snippet: ${snippet}`);
+    }
+  }
+  if (!readFile(packagePath).includes('"verify:production-notices-api": "node scripts/verify-production-notices-api.cjs"')) {
+    addFailure('package.json must expose verify:production-notices-api for real API notice filter regression checks.');
+  }
 }
 
 function verifyInventoryTransactionOrderLineTraceability() {
   const schemaPath = 'database/prisma/schema.prisma';
+  const inventoryServicePath = 'backend/src/modules/inventory/inventory.service.ts';
   const warehousesServicePath = 'backend/src/modules/warehouses/warehouses.service.ts';
   const warehousesDtoPath = 'backend/src/modules/warehouses/dto.ts';
   const statisticsServicePath = 'backend/src/modules/statistics/statistics.service.ts';
@@ -5544,10 +6846,14 @@ function verifyInventoryTransactionOrderLineTraceability() {
   const verifierPath = 'database/prisma/verify-first-stage.ts';
   const repairPath = 'database/prisma/repair-first-stage.ts';
   const apiPath = 'frontend/src/api/erp.ts';
+  const typesPath = 'frontend/src/types/erp.ts';
+  const statusTagPath = 'frontend/src/components/StatusTag.vue';
+  const inventoryViewPath = 'frontend/src/views/InventoryView.vue';
   const warehouseViewPath = 'frontend/src/views/WarehouseView.vue';
 
   for (const projectPath of [
     schemaPath,
+    inventoryServicePath,
     warehousesServicePath,
     warehousesDtoPath,
     statisticsServicePath,
@@ -5555,6 +6861,9 @@ function verifyInventoryTransactionOrderLineTraceability() {
     verifierPath,
     repairPath,
     apiPath,
+    typesPath,
+    statusTagPath,
+    inventoryViewPath,
     warehouseViewPath
   ]) {
     if (!fileExists(projectPath)) {
@@ -5567,9 +6876,39 @@ function verifyInventoryTransactionOrderLineTraceability() {
     [
       schemaPath,
       [
-        'orderLineId            String?',
-        'orderLine              OrderLine?',
+        'enum InventoryStatus',
+        'RESERVED',
+        'SCRAPPED',
+        'orderLineId  String?',
+        'orderLine    OrderLine?',
         '@@index([orderLineId])'
+      ]
+    ],
+    [
+      typesPath,
+      [
+        "export type InventoryStatus = 'AVAILABLE' | 'RESERVED' | 'USED' | 'SCRAPPED'"
+      ]
+    ],
+    [
+      statusTagPath,
+      [
+        "RESERVED: '已预占'",
+        "SCRAPPED: '已报废'",
+        "RESERVED: 'warning'",
+        "SCRAPPED: 'danger'"
+      ]
+    ],
+    [
+      inventoryServicePath,
+      [
+        "query.status && query.status !== 'USED'",
+        "query.status && query.status !== 'AVAILABLE'",
+        'private isPhysicalInventoryBatchStatus',
+        "status === 'AVAILABLE' || status === 'RESERVED'",
+        'private inventoryBatchReservedQuantity',
+        "status === 'RESERVED' ? storedQuantity : activeReservationQuantity",
+        'quantity: storedQuantity'
       ]
     ],
     [
@@ -5580,6 +6919,13 @@ function verifyInventoryTransactionOrderLineTraceability() {
         'warehouseConfirmedBy?: string',
         'salesConfirmedBy?: string',
         'overShipmentReason?: string'
+      ]
+    ],
+    [
+      inventoryViewPath,
+      [
+        'value="RESERVED"',
+        'value="SCRAPPED"'
       ]
     ],
     [
@@ -5618,8 +6964,19 @@ function verifyInventoryTransactionOrderLineTraceability() {
       verifierPath,
       [
         'checkInventoryTransactionOrderLineLinks',
+        'INVENTORY_BATCH_WAREHOUSE_MISSING',
+        'INVENTORY_BATCH_LOCATION_MISSING',
+        'INVENTORY_TRANSACTION_WAREHOUSE_MISSING',
+        'INVENTORY_TRANSACTION_LOCATION_MISSING',
         'INVENTORY_TRANSACTION_ORDER_LINE_MISSING',
         'INVENTORY_TRANSACTION_ORDER_LINE_ORDER_MISMATCH',
+        'prisma.$queryRaw<Array<{ transactionNo: string }>>',
+        'WHERE "batchId" IS NULL',
+        'INVENTORY_BATCH_STATUS_INVALID',
+        'RESERVED_BATCH_ZERO_QUANTITY',
+        'RESERVED_BATCH_WITHOUT_ACTIVE_RESERVATION',
+        'RESERVED_BATCH_QUANTITY_MISMATCH',
+        'SCRAPPED_BATCH_HAS_QUANTITY',
         'sourceRecordType: \'InventoryBatch\''
       ]
     ],
@@ -5661,6 +7018,29 @@ function verifyInventoryTransactionOrderLineTraceability() {
       if (!source.includes(snippet)) {
         addFailure(`${projectPath} must keep inventory transaction order-line traceability snippet: ${snippet}`);
       }
+    }
+  }
+  const verifierSource = readFile(verifierPath);
+  if (verifierSource.includes('where: { batchId: null }')) {
+    addFailure('verify-first-stage.ts must use raw SQL for InventoryTransaction.batchId null drift checks because Prisma schema marks batchId as required.');
+  }
+
+  const migrationSqlSource = readMigrationSqlSource();
+  const inventoryCheckSnippets = [
+    'InventoryTransaction" ALTER COLUMN "batchId" SET NOT NULL',
+    'InventoryBatch_quantity_non_negative',
+    'InventoryBatch_identity_not_blank',
+    'InventoryBatch_status_quantity_consistent',
+    'ADD VALUE IF NOT EXISTS \'RESERVED\'',
+    'ADD VALUE IF NOT EXISTS \'SCRAPPED\'',
+    '"status" = \'RESERVED\'',
+    '"status" IN (\'USED\', \'SCRAPPED\')',
+    'InventoryTransaction_quantity_positive',
+    'InventoryTransaction_identity_not_blank'
+  ];
+  for (const snippet of inventoryCheckSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep inventory batch/transaction database guard snippet: ${snippet}`);
     }
   }
 }
@@ -5746,6 +7126,29 @@ function verifyPartialShipmentWorkflow() {
       addFailure(`WarehousesService must keep partial shipment/over-shipment business rule snippet: ${snippet}`);
     }
   }
+  const warehouseShipmentServiceZeroThicknessSnippets = [
+    'partThickness: task.orderLine?.partThickness ? decimalToNumber(task.orderLine.partThickness) : null',
+    'partThickness: batch.productionTask?.orderLine?.partThickness\n        ? decimalToNumber(batch.productionTask.orderLine.partThickness)\n        : batch.sourceOrderLine?.partThickness'
+  ];
+  for (const snippet of warehouseShipmentServiceZeroThicknessSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`WarehousesService must preserve explicit 0 partThickness in warehouse source/shipment serialization: ${snippet}`);
+    }
+  }
+  const warehouseShipmentServiceZeroFallbackSnippets = [
+    'receivedQuantityMap.get(task.orderLineId) || 0',
+    'receivedMap.get(orderLineId) || 0',
+    'receivedMap.get(orderLineId) || 0) + decimalToNumber(transaction.quantity)',
+    'shippedMap.get(orderLineId) || 0',
+    'shippedQuantityByLine.get(batch.sourceOrderLineId) || 0',
+    'shippedQuantityMap.get(batch.sourceOrderLineId) || 0',
+    'shippedQuantityByLine.get(line.id) || 0'
+  ];
+  for (const snippet of warehouseShipmentServiceZeroFallbackSnippets) {
+    if (serviceSource.includes(snippet)) {
+      addFailure(`WarehousesService must preserve zero receipt/shipment quantities with ?? fallback, found: ${snippet}`);
+    }
+  }
 
   const viewSource = readFile(viewPath);
   const viewSnippets = [
@@ -5775,8 +7178,8 @@ function verifyPartialShipmentWorkflow() {
     'goActiveShipmentShortageDetail',
     ':disabled="Boolean(activeShipmentShortageText)"',
     'function defaultShipmentQuantity(row: WarehouseShipment)',
-    'const suggestedQuantity = Number(row.suggestedShipmentQuantity || 0)',
-    'return remainingQuantity > 0 ? Math.min(Number(row.quantity || 0), remainingQuantity) : 0',
+    'const suggestedQuantity = Number(row.suggestedShipmentQuantity ?? 0)',
+    'return remainingQuantity > 0 ? Math.min(Number(row.quantity ?? 0), remainingQuantity) : 0',
     'function formatShipmentLineTotal(rows: EditableWarehouseShipment[], field: keyof EditableWarehouseShipment)',
     'const seenLineKeys = new Set<string>();',
     'if (seenLineKeys.has(lineKey))',
@@ -5784,7 +7187,7 @@ function verifyPartialShipmentWorkflow() {
     'const lineMap = new Map<string, { current: number; remaining: number; unit: string }>();',
     'existing.current += current',
     'const overQuantity = Math.max(item.current - item.remaining, 0);',
-    'row.isStockOverShipment && Number(row.currentShipmentQuantity || 0) > 0',
+    'row.isStockOverShipment && Number(row.currentShipmentQuantity ?? 0) > 0',
     'const batchShipmentRequiresSalesConfirmation = computed',
     'activeShipmentOverQuantity > 0',
     '本次发货超过订单未发货数量或使用备货库存，必须填写销售确认人',
@@ -5801,6 +7204,28 @@ function verifyPartialShipmentWorkflow() {
   for (const snippet of viewSnippets) {
     if (!viewSource.includes(snippet)) {
       addFailure(`WarehouseView.vue must keep partial shipment UI snippet: ${snippet}`);
+    }
+  }
+  const warehouseShipmentZeroFallbackSnippets = [
+    'Number(row.suggestedShipmentQuantity || 0)',
+    'Number(row.currentShipmentQuantity || 0)',
+    'Number(row.remainingQuantity || 0)',
+    'Number(row.quantity || 0)',
+    'Number(source.quantity || 0)',
+    'Number(a.quantity || 0)',
+    'Number(b.quantity || 0)',
+    'Number(shipmentForm.shipmentQuantity || 0)',
+    'Number(activeShipment.value.remainingQuantity || 0)',
+    'Number(stockNoticeForm.handlingQuantity || 0)',
+    'quantityByUnit.get(row.unit) || 0',
+    'overByUnit.get(item.unit) || 0',
+    'activeShipment?.quantity || 0',
+    '(row.reservedQuantity || 0) > 0',
+    '(transaction.reservedQuantity || 0) > 0'
+  ];
+  for (const snippet of warehouseShipmentZeroFallbackSnippets) {
+    if (viewSource.includes(snippet)) {
+      addFailure(`WarehouseView.vue must preserve zero shipment quantities with ?? fallback, found: ${snippet}`);
     }
   }
 
@@ -6149,9 +7574,6 @@ function isAllowedSliceLimit(filePath, lines, index) {
   if (/\.slice\(0,\s*60\)/.test(line) && /safe.*FileName|file\.originalname|baseName/.test(context)) {
     return true;
   }
-  if (/name\.slice\(0,\s*templateNameMaxLength\)/.test(line) || /baseName\.slice\(0,\s*templateNameMaxLength/.test(line)) {
-    return true;
-  }
   if (/\.slice\(0,\s*2\)/.test(line) && /limitedReservations|row\.reservations/.test(context)) {
     return true;
   }
@@ -6268,6 +7690,23 @@ function verifyStatisticsDisplayContract() {
       addFailure(`StatisticsService must keep first-stage statistics contract snippet: ${snippet}`);
     }
   }
+  const statisticsServiceZeroFallbackSnippets = [
+    'orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) || 0',
+    'stockQuantityByTaskNo.get(transaction.productionTaskNo) || 0',
+    'unitMap.get(normalizedUnit) || 0',
+    'target.get(orderLineId) || 0',
+    'Number(row.totalProductionPlanQuantity || 0)',
+    'Number(row.totalQuantity || 0)',
+    'Number(row[field] || 0)',
+    'actualQuantityByUnit.get(row.unit || \'件\') || 0',
+    'quantityByLineId.get(line.id) || 0',
+    'orderReceiptQuantity || (task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0)'
+  ];
+  for (const snippet of statisticsServiceZeroFallbackSnippets) {
+    if (statisticsServiceSource.includes(snippet)) {
+      addFailure(`StatisticsService must use ?? for read-only quantity fallback so explicit 0 quantities remain stable: ${snippet}`);
+    }
+  }
 
   const statisticsWritePattern = /this\.prisma\.[A-Za-z0-9_]+\.(create|createMany|update|updateMany|upsert|delete|deleteMany)\s*\(/;
   if (statisticsWritePattern.test(statisticsServiceSource)) {
@@ -6299,7 +7738,7 @@ function verifySharedOrderDisplayStatus() {
       pattern: /order\.productionStatus === 'COMPLETED'[\s\S]*?return 'ORDER_COMPLETED_UNSHIPPED'/
     },
     { name: 'in production order', pattern: /order\.status === 'IN_PRODUCTION'[\s\S]*?return 'ORDER_IN_PRODUCTION'/ },
-    { name: 'submitted order', pattern: /order\.status === 'SUBMITTED'[\s\S]*?return 'WAITING_PRODUCTION'/ }
+    { name: 'pending production order', pattern: /order\.status === 'PENDING_PRODUCTION'[\s\S]*?return 'WAITING_PRODUCTION'/ }
   ];
 
   for (const rule of requiredStatusRules) {
@@ -6358,18 +7797,52 @@ function verifySharedDateFormattingContract() {
   const snippets = [
     'function dateOnlyBusinessDate(value: string)',
     'export function formatDateInputText(value?: Date | string | null)',
-    'export function formatDateTime(value?: Date | string)',
+    'export function formatDate(value?: Date | string | null)',
+    'export function formatDateTime(value?: Date | string | null)',
+    'const date = value instanceof Date ? value : new Date(value);',
     'export function formatDateTimeInputValue(value: Date)',
     'datetime-local',
     'return formatDateInputValue(businessDate);',
     '业务日期只取日期字段，避免浏览器时区把 UTC 零点显示成前一天',
     'T00:00:00(?:\\.000)?Z',
-    'Number.isNaN(date.getTime())'
+    'function formatDateParts(value: Date)',
+    'function isValidDate(value: Date)',
+    'function pad2(value: number)',
+    'export function formatDateInputValue(value: Date) {\n  if (!isValidDate(value)) {\n    return \'\';\n  }',
+    'export function formatDateTimeInputValue(value: Date) {\n  // datetime-local 需要浏览器本地墙钟时间，不能用 toISOString 直接生成 UTC 时间。\n  if (!isValidDate(value)) {\n    return \'\';\n  }',
+    'export function formatQuantity(value?: number | null, unit?: string | null)',
+    'export function formatNumber(value?: number | null, fractionDigits = 3)',
+    "if (typeof value !== 'number' || !Number.isFinite(value))",
+    'return `${formatDateParts(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;'
   ];
   for (const snippet of snippets) {
     if (!source.includes(snippet)) {
       addFailure(`format.ts must keep timezone-safe business date formatting snippet: ${snippet}`);
     }
+  }
+  if (/toLocale(?:Date)?String\s*\(/.test(source)) {
+    addFailure('format.ts must render visible business dates with explicit YYYY-MM-DD / YYYY-MM-DD HH:mm:ss formatting, not browser locale output.');
+  }
+  if (
+    !/export function formatDateTime\(value\?: Date \| string \| null\) \{[\s\S]*const date = value instanceof Date \? value : new Date\(value\);[\s\S]*!isValidDate\(date\)[\s\S]*return '-';[\s\S]*formatDateParts\(date\)[\s\S]*pad2\(date\.getHours\(\)\)/.test(
+      source
+    )
+  ) {
+    addFailure('format.ts formatDateTime must return "-" for invalid dates and render through explicit validated local date parts.');
+  }
+  if (/export function formatQuantity\(value: number[\s\S]*value\.toString\(\)/.test(source)) {
+    addFailure('format.ts formatQuantity must tolerate null, undefined, NaN and Infinity before calling toString().');
+  }
+  if (!source.includes('const number = formatNumber(value);')) {
+    addFailure('format.ts formatQuantity must delegate numeric rendering to shared formatNumber().');
+  }
+
+  const tableExportSource = readFile('frontend/src/utils/tableExport.ts');
+  if (!tableExportSource.includes('const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;')) {
+    addFailure('tableExport.ts formatFileDateTime must avoid NaN filenames when an invalid Date is passed.');
+  }
+  if (!tableExportSource.includes('safeDate.getFullYear()') || !tableExportSource.includes('safeDate.getMinutes()')) {
+    addFailure('tableExport.ts formatFileDateTime must build export filenames from the validated safeDate value.');
   }
 
   const orderDetailSource = readFile('frontend/src/views/OrderDetailView.vue');
@@ -6378,6 +7851,12 @@ function verifySharedDateFormattingContract() {
   }
   if (orderDetailSource.includes('line.drawingDate ? line.drawingDate.substring(0, 10) : undefined')) {
     addFailure('OrderDetailView.vue must not prepare drawingDate by substring(0, 10); use formatDateInputText to avoid timezone date shifts.');
+  }
+  if (orderDetailSource.includes('partThickness: line.lineType === \'COMPONENT\' ? 0 : line.partThickness || 1')) {
+    addFailure('OrderDetailView.vue must use ?? when preparing editable partThickness so a valid 0 is not replaced with 1.');
+  }
+  if (!orderDetailSource.includes('partThickness: line.lineType === \'COMPONENT\' ? 0 : (line.partThickness ?? 1)')) {
+    addFailure('OrderDetailView.vue must preserve existing partThickness values when opening the edit dialog.');
   }
 
   const inventorySource = readFile('frontend/src/views/InventoryView.vue');
@@ -6391,8 +7870,199 @@ function verifySharedDateFormattingContract() {
     addFailure('InventoryView.vue must not generate datetime-local values through toISOString().slice(0, 19).');
   }
 
+  const productionSource = readFile('frontend/src/views/ProductionView.vue');
   const warehouseSource = readFile('frontend/src/views/WarehouseView.vue');
+  const modelBomsSource = readFile('frontend/src/views/ModelBomsView.vue');
+  const materialsSource = readFile('frontend/src/views/MaterialsView.vue');
+  const materialsManagementSource = readFile('frontend/src/views/MaterialsManagementView.vue');
+  const materialTransformsSource = readFile('frontend/src/views/MaterialTransformsView.vue');
   const ordersListSource = readFile('frontend/src/views/OrdersListView.vue');
+  const processSelectionSource = readFile('frontend/src/views/ProcessSelectionView.vue');
+  const statisticsSource = readFile('frontend/src/views/StatisticsView.vue');
+  const inventorySourceDialogSource = readFile('frontend/src/components/InventorySourceDetailsDialog.vue');
+  if (!productionSource.includes("import { formatDate, formatDateTime, formatQuantity } from '../utils/format';")) {
+    addFailure('ProductionView.vue must use shared formatDateTime for production notices, logs, and print timestamps.');
+  }
+  if (!warehouseSource.includes("import { formatDate, formatDateTime, formatQuantity } from '../utils/format';")) {
+    addFailure('WarehouseView.vue must use shared formatDateTime for warehouse notices and confirmation timestamps.');
+  }
+  if (!/import\s+\{[^}]*formatDateTime[^}]*formatQuantity[^}]*\}\s+from '\.\.\/utils\/format';/.test(modelBomsSource)) {
+    addFailure('ModelBomsView.vue must use shared formatDateTime for BOM diff review timestamps.');
+  }
+  if (!/import\s+\{[^}]*formatDateTime[^}]*formatQuantity[^}]*\}\s+from '\.\.\/utils\/format';/.test(materialsSource)) {
+    addFailure('MaterialsView.vue must use shared formatDateTime for material updatedAt timestamps.');
+  }
+  if (!inventorySourceDialogSource.includes("import { formatDate, formatDateTime, formatDateTimeInputValue, formatQuantity } from '../utils/format';")) {
+    addFailure('InventorySourceDetailsDialog.vue must use shared formatDateTime for manual stock-source confirmation timestamps.');
+  }
+  const zeroSafeQuantityFallbacks = [
+    ['WarehouseView.vue', warehouseSource, 'completedQuantity || row.quantity'],
+    ['WarehouseView.vue', warehouseSource, 'plannedQuantity || row.quantity'],
+    ['WarehouseView.vue', warehouseSource, 'customerOrderQuantity || row.quantity'],
+    ['WarehouseView.vue', warehouseSource, 'completedQuantity || receipt.quantity'],
+    ['WarehouseView.vue', warehouseSource, 'plannedQuantity || receipt.quantity'],
+    ['WarehouseView.vue', warehouseSource, 'customerOrderQuantity || receipt.quantity'],
+    ['WarehouseView.vue', warehouseSource, 'stockNoticeHandlingQuantityMax.value || Number(notice.afterQuantity || 0)'],
+    ['WarehouseView.vue', warehouseSource, 'handlingPlan?.handlingQuantity || 0'],
+    ['WarehouseView.vue', warehouseSource, 'stockQuantity || 0'],
+    ['WarehouseView.vue', warehouseSource, 'row.stockQuantity ? formatQuantity'],
+    ['WarehouseView.vue', warehouseSource, 'receipt.stockQuantity ? formatQuantity'],
+    ['WarehouseView.vue', warehouseSource, 'pendingProductionReplenishmentLineCount || 0'],
+    ['WarehouseView.vue', warehouseSource, 'unresolvedShortageLineCount || 0'],
+    ['ProductionView.vue', productionSource, 'customerOrderQuantity || row.plannedQuantity'],
+    ['ProductionView.vue', productionSource, 'customerOrderQuantity || activeFinalTask.value.plannedQuantity'],
+    ['ProductionView.vue', productionSource, 'finalCompletion?.completedQuantity || row.completedQuantity || row.plannedQuantity'],
+    ['ProductionView.vue', productionSource, 'activeReplenishmentApprovalCompletion.scrapQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'activeReplenishmentApprovalCompletion.shortageQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'completion?.scrapQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'finalCompletion?.scrapQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'completion.scrapQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'snapshot.shortageQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'snapshot.scrapQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'processForm.completedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'finalForm.completedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'row.plannedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'previousCompletion.completedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'item.completedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'task.customerOrderQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'task.plannedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'task.completedQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'task.unresolvedShortageQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'task.pendingProductionReplenishmentQuantity || 0'],
+    ['ProductionView.vue', productionSource, 'pendingProductionReplenishmentLineCount || 0'],
+    ['ProductionView.vue', productionSource, 'unresolvedShortageLineCount || 0'],
+    ['ProductionView.vue', productionSource, 'unresolvedShortageQuantityByUnit.get(unit) || 0'],
+    ['ProductionView.vue', productionSource, 'pendingProductionReplenishmentQuantityByUnit.get(unit) || 0'],
+    ['ProductionView.vue', productionSource, 'buckets.get(label) || 0'],
+    ['OrderDetailView.vue', orderDetailSource, 'completedQuantity || task.plannedQuantity || 0'],
+    ['OrderDetailView.vue', orderDetailSource, 'row.completedQuantity ? formatQuantity'],
+    ['OrderDetailView.vue', orderDetailSource, 'fallbackQuantity || 0'],
+    ['OrderDetailView.vue', orderDetailSource, 'record.scrapQuantity || 0'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(quantityChangeForm.value.quantity || 0)'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(quantityChangeForm.value.productionPlanQuantity || 0)'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(source.quantity || 0)'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(line.productionPlanQuantity || 0)'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(line.partThickness || 0)'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(line.quantity || 0)'],
+    ['OrderDetailView.vue', orderDetailSource, 'Number(line.unresolvedShortageQuantity || 0)'],
+    ['OrdersListView.vue', ordersListSource, 'pendingProductionReplenishmentQuantity || 0'],
+    ['OrdersListView.vue', ordersListSource, 'unresolvedShortageQuantity || 0'],
+    ['OrdersListView.vue', ordersListSource, 'pendingProductionReplenishmentLineCount || 0'],
+    ['OrdersListView.vue', ordersListSource, 'unresolvedShortageLineCount || 0'],
+    ['OrdersListView.vue', ordersListSource, 'formatQuantity(line.quantity || 0'],
+    ['OrdersListView.vue', ordersListSource, 'formatQuantity(line.productionPlanQuantity || 0'],
+    ['OrdersListView.vue', ordersListSource, 'line.orderQuantity || line.unitUsage'],
+    ['OrdersListView.vue', ordersListSource, 'bomLine.defaultQuantity || 1'],
+    ['OrdersListView.vue', ordersListSource, 'line.quantity = quantity > 0 ? quantity : 1'],
+    ['OrdersListView.vue', ordersListSource, 'Number(line.partThickness || 0)'],
+    ['OrdersListView.vue', ordersListSource, 'Number(bomLine.partThickness || 0)'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'pendingProductionReplenishmentQuantity || 0'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'unresolvedShortageQuantity || 0'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'pendingProductionReplenishmentLineCount || 0'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'unresolvedShortageLineCount || 0'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'line.productionPlanQuantity || 0'],
+    ['OrderLineEditor.vue', readFile('frontend/src/components/OrderLineEditor.vue'), 'formatQuantity(line.quantity || 0'],
+    ['OrderLineEditor.vue', readFile('frontend/src/components/OrderLineEditor.vue'), 'Number(line.quantity || 0'],
+    ['OrderLineEditor.vue', readFile('frontend/src/components/OrderLineEditor.vue'), 'Number(line.productionPlanQuantity || 0'],
+    ['OrderLineEditor.vue', readFile('frontend/src/components/OrderLineEditor.vue'), 'line.productionPlanQuantity = line.quantity || 1'],
+    ['InventoryView.vue', inventorySource, 'formatQuantity(row.reservedQuantity || 0'],
+    ['InventoryView.vue', inventorySource, 'formatQuantity(row.normalOrderStockQuantity || 0'],
+    ['InventoryView.vue', inventorySource, 'formatQuantity(row.cancelledOrderStockQuantity || 0'],
+    ['InventoryView.vue', inventorySource, 'formatQuantity(row.customerChangeStockQuantity || 0'],
+    ['InventoryView.vue', inventorySource, 'Number(selectedBatch.value?.reservedQuantity || 0)'],
+    ['InventoryView.vue', inventorySource, 'totalByUnit.get(unit) || 0'],
+    ['InventoryView.vue', inventorySource, 'Number(row[field] || 0)'],
+    ['InventoryView.vue', inventorySource, 'Number(row.quantity || 0)'],
+    ['InventoryView.vue', inventorySource, 'Number(row.reservedQuantity || 0)'],
+    ['InventoryView.vue', inventorySource, 'Number(row.totalQuantity || 0)'],
+    ['InventoryView.vue', inventorySource, 'Number(row.usedQuantity || 0)'],
+    ['InventoryView.vue', inventorySource, 'Number(row.batchCount || 0)'],
+    ['InventoryView.vue', inventorySource, 'Number(row.availableQuantity || 0)'],
+    ['StatisticsView.vue', statisticsSource, 'totalByUnit.get(unit) || 0'],
+    ['StatisticsView.vue', statisticsSource, 'Number(row[field] || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'Number(line.partThickness || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'Number(row.partThickness || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'Number(sourceLine.partThickness || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'Number(item.partThickness || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'Number(lineForm.partThickness || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'Number(lineFormOriginalPartThickness.value || 0)'],
+    ['ModelBomsView.vue', modelBomsSource, 'left.displayOrder || 0'],
+    ['ModelBomsView.vue', modelBomsSource, 'right.displayOrder || 0'],
+    ['ModelBomsView.vue', modelBomsSource, 'activeBomLineDisplayOrderMap.value.get(row.id) || row.displayOrder || 0'],
+    ['ModelBomsView.vue', modelBomsSource, 'left.sortOrder || 0'],
+    ['ModelBomsView.vue', modelBomsSource, 'right.sortOrder || 0'],
+    ['ModelBomsView.vue', modelBomsSource, 'item.sortOrder || 0'],
+    ['ModelBomsView.vue', modelBomsSource, 'row.sortOrder || 0'],
+    ['MaterialsView.vue', materialsSource, 'drawingRevisionUpsertCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'applicabilityUpsertCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'transformRuleUpsertCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'file.materialRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'file.scopeRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'file.transformRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'materialImportSession.summary.materialRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'materialImportSession.summary.applicabilityRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'materialImportSession.summary.transformRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'materialImportSession.value?.summary.rowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'session?.summary.errorCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'session?.summary.warningCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'session.summary.materialRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'session.summary.applicabilityRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'session.summary.transformRowCount || 0'],
+    ['MaterialsView.vue', materialsSource, 'materialImportSession.applicabilityRows || []'],
+    ['MaterialsView.vue', materialsSource, 'materialImportSession.transformRows || []'],
+    ['MaterialsView.vue', materialsSource, 'session.applicabilityRows || []'],
+    ['MaterialsView.vue', materialsSource, 'session.transformRows || []'],
+    ['MaterialsView.vue', materialsSource, 'totals.get(item.unit) || 0'],
+    ['MaterialsView.vue', materialsSource, 'item.availableQuantity || 0'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'formatQuantity(row.sourceAvailableQuantity || 0'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'formatQuantity(row.targetAvailableQuantity || 0'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'row.sourceAvailableQuantity || 0'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'row.targetAvailableQuantity || 0'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'row.sourceAvailableBatchCount || 0'],
+    ['MaterialTransformsView.vue', materialTransformsSource, 'row.targetAvailableBatchCount || 0'],
+    ['InventorySourceDetailsDialog.vue', inventorySourceDialogSource, 'expected.requiredQuantity ? formatQuantity'],
+    ['MaterialsManagementView.vue', materialsManagementSource, 'row.defaultQuantity ? formatQuantity']
+  ];
+  for (const [viewName, viewSource, snippet] of zeroSafeQuantityFallbacks) {
+    if (viewSource.includes(snippet)) {
+      addFailure(`${viewName} must use ?? for quantity fallback so a valid 0 quantity is not replaced by another business quantity.`);
+    }
+  }
+  if (!warehouseSource.includes('function stockNoticeDisplayQuantity(notice: ProductionNotice)')) {
+    addFailure('WarehouseView.vue must centralize warehouse notice display quantity so customer-change notices show handling quantity, not afterQuantity.');
+  }
+  if (!warehouseSource.includes('return stockNoticeHandlingQuantityMax.value;')) {
+    addFailure('WarehouseView.vue customer-change and withdraw notices must display stockNoticeHandlingQuantityMax as the business handling quantity.');
+  }
+  for (const [viewName, viewSource] of [
+    ['MaterialsView.vue', materialsSource],
+    ['MaterialsManagementView.vue', materialsManagementSource],
+    ['ModelBomsView.vue', modelBomsSource]
+  ]) {
+    if (/function\s+formatQuantity\s*\(/.test(viewSource) || /function\s+formatNumber\s*\(/.test(viewSource)) {
+      addFailure(`${viewName} must use shared formatQuantity() so missing quantities are not silently displayed as 0.`);
+    }
+  }
+  if (!inventorySourceDialogSource.includes('manualConfirmedAt: formatDateTimeInputValue(form.confirmedAt || confirmedAt)')) {
+    addFailure('InventorySourceDetailsDialog.vue must store manual stock-source confirmation time as local business datetime text.');
+  }
+  if (inventorySourceDialogSource.includes('manualConfirmedAt: (form.confirmedAt || confirmedAt).toISOString()')) {
+    addFailure('InventorySourceDetailsDialog.vue must not store manual stock-source confirmation time through UTC toISOString().');
+  }
+  for (const [viewName, viewSource] of [
+    ['ProductionView.vue', productionSource],
+    ['WarehouseView.vue', warehouseSource],
+    ['ModelBomsView.vue', modelBomsSource],
+    ['MaterialsView.vue', materialsSource],
+    ['InventorySourceDetailsDialog.vue', inventorySourceDialogSource]
+  ]) {
+    if (viewSource.includes("toLocaleString('zh-CN', { hour12: false })") || viewSource.includes("new Date().toLocaleString('zh-CN'")) {
+      addFailure(`${viewName} must not bypass shared formatDateTime for visible timestamps.`);
+    }
+    if (/function\s+formatDateTime\s*\(/.test(viewSource)) {
+      addFailure(`${viewName} must not define a local formatDateTime helper; use frontend/src/utils/format.ts.`);
+    }
+  }
   for (const [viewName, viewSource] of [
     ['WarehouseView.vue', warehouseSource],
     ['OrdersListView.vue', ordersListSource],
@@ -6467,7 +8137,7 @@ function verifyBackendBusinessDateKeyContract() {
   ];
   for (const servicePath of services) {
     const source = readFile(servicePath);
-    if (!source.includes("import { businessDateKey } from '../../common/business-date';")) {
+    if (!/import\s+\{[^}]*\bbusinessDateKey\b[^}]*\}\s+from\s+'..\/..\/common\/business-date';/.test(source)) {
       addFailure(`${servicePath} must import businessDateKey for date-based business numbers.`);
     }
     if (source.includes("new Date().toISOString().slice(0, 10).replace(/-/g, '')")) {
@@ -6490,6 +8160,31 @@ function verifyBackendBusinessDateKeyContract() {
   }
   if (ordersSource.includes('new Date(line.drawingDate).toISOString().slice(0, 10)')) {
     addFailure('OrdersService must not convert order-line drawingDate through UTC toISOString().slice(0, 10).');
+  }
+  if (ordersSource.includes('const record = `${new Date().toISOString()} ${line}`;')) {
+    addFailure('OrdersService.appendOrderRemark must use businessRemarkTimestamp() instead of UTC toISOString().');
+  }
+  if (
+    !ordersSource.includes('businessDateTimeText(value = new Date())') ||
+    !ordersSource.includes('businessRemarkTimestamp(value = new Date())') ||
+    !ordersSource.includes('const stamp = businessDateTimeKey(value);') ||
+    !ordersSource.includes("return stamp.replace(/^(\\d{4})(\\d{2})(\\d{2})(\\d{2})(\\d{2})(\\d{2})$/, '$1-$2-$3 $4:$5:$6');") ||
+    !ordersSource.includes('return this.businessDateTimeText(value);') ||
+    !ordersSource.includes('const record = `${this.businessRemarkTimestamp()} ${line}`;')
+  ) {
+    addFailure('OrdersService.appendOrderRemark must keep business-time order remark timestamp formatting.');
+  }
+  if (ordersSource.includes("['生成时间', this.formatDateTime(new Date()), '说明', '仅用于修正 Excel；创建草稿前后端仍会重新校验']")) {
+    addFailure('OrdersService order import issue report must use businessDateTimeText() instead of server local formatDateTime(new Date()).');
+  }
+  if (!ordersSource.includes("['生成时间', this.businessDateTimeText(), '说明', '仅用于修正 Excel；创建草稿前后端仍会重新校验']")) {
+    addFailure('OrdersService order import issue report must keep business-time 生成时间 in Excel issue report.');
+  }
+  if (ordersSource.includes('this.formatDateTime(file.createdAt)') || ordersSource.includes('private formatDateTime(value?: Date | string | null)')) {
+    addFailure('OrdersService order import issue report upload time must use businessDateTimeText(file.createdAt), not server-local formatDateTime().');
+  }
+  if (!ordersSource.includes('this.businessDateTimeText(file.createdAt)')) {
+    addFailure('OrdersService order import issue report must render uploaded file time with businessDateTimeText(file.createdAt).');
   }
 
   const uploadControllers = [
@@ -6553,10 +8248,15 @@ function verifyBackendBusinessDateKeyContract() {
 
 function verifyStockSourcePayloadSanitizer() {
   const stockSourceReviewPath = 'frontend/src/utils/stockSourceReview.ts';
+  const orderLineStockChecksPath = 'frontend/src/utils/orderLineStockChecks.ts';
   const orderDtoPath = 'backend/src/modules/orders/dto.ts';
   const orderServicePath = 'backend/src/modules/orders/orders.service.ts';
   if (!fileExists(stockSourceReviewPath)) {
     addFailure(`Missing stock source review utility: ${stockSourceReviewPath}`);
+    return;
+  }
+  if (!fileExists(orderLineStockChecksPath)) {
+    addFailure(`Missing stock line check utility: ${orderLineStockChecksPath}`);
     return;
   }
   if (!fileExists(orderDtoPath)) {
@@ -6569,10 +8269,41 @@ function verifyStockSourcePayloadSanitizer() {
   }
 
   const source = readFile(stockSourceReviewPath);
+  const orderLineStockChecksSource = readFile(orderLineStockChecksPath);
   const orderDtoSource = readFile(orderDtoPath);
   const orderServiceSource = readFile(orderServicePath);
-  if (!/function\s+normalizeSelectedStockSources\s*\([^)]*\)\s*{[\s\S]*const\s+quantity\s*=\s*Number\(source\.quantity\s*\|\|\s*0\)[\s\S]*if\s*\(!batchId\s*\|\|\s*quantity\s*<=\s*0\)\s*{[\s\S]*continue;[\s\S]*}/.test(source)) {
+  if (!/function\s+normalizeSelectedStockSources\s*\([^)]*\)\s*{[\s\S]*const\s+quantity\s*=\s*Number\(source\.quantity\s*\?\?\s*0\)[\s\S]*if\s*\(!batchId\s*\|\|\s*quantity\s*<=\s*0\)\s*{[\s\S]*continue;[\s\S]*}/.test(source)) {
     addFailure('stockSourceReview.ts must keep zero-quantity queue placeholders out of normalized selectedStockSources.');
+  }
+  const stockSourceUtilityZeroFallbacks = [
+    [stockSourceReviewPath, source, 'Number(line.quantity || 0)'],
+    [stockSourceReviewPath, source, 'Number(source.quantity || 0)'],
+    [stockSourceReviewPath, source, 'Number(source.availableQuantity || 0)'],
+    [stockSourceReviewPath, source, 'current?.quantity || 0'],
+    [stockSourceReviewPath, source, 'Number(required || 0)'],
+    [stockSourceReviewPath, source, 'Number(actual || 0)'],
+    [stockSourceReviewPath, source, 'Number(line.partThickness || 0)'],
+    ['frontend/src/components/OrderLineEditor.vue', readFile('frontend/src/components/OrderLineEditor.vue'), 'Number(line.partThickness || 0)'],
+    ['frontend/src/components/OrderLineEditor.vue', readFile('frontend/src/components/OrderLineEditor.vue'), 'Number(snapshot.autoFields.partThickness || 0)'],
+    [orderLineStockChecksPath, orderLineStockChecksSource, 'stockInventoryQuantity || 0'],
+    [orderLineStockChecksPath, orderLineStockChecksSource, 'Number(source.quantity || 0)'],
+    [orderServicePath, orderServiceSource, 'Number(source.quantity || 0)'],
+    [orderServicePath, orderServiceSource, 'selectedSourceMap.get(batch.id)?.quantity || 0'],
+    [orderServicePath, orderServiceSource, 'reservedQuantityByBatchId.get(batch.id) || 0'],
+    [orderServicePath, orderServiceSource, 'Number(batch.selectedQuantity || 0)'],
+    [orderServicePath, orderServiceSource, 'selectedQuantityByBatchId.get(source.batchId) || 0'],
+    [orderServicePath, orderServiceSource, 'reservedQuantityByBatchId.get(batchId) || 0'],
+    [orderServicePath, orderServiceSource, 'reservedQuantityByBatchId.get(row.batchId) || 0'],
+    [orderServicePath, orderServiceSource, 'Number(selection.quantity || 0)'],
+    [orderServicePath, orderServiceSource, 'current?.quantity || 0'],
+    [orderServicePath, orderServiceSource, 'Number(row.quantity || 0)'],
+    [orderServicePath, orderServiceSource, 'Number(batch.reservedByOtherOrders || 0)'],
+    [orderServicePath, orderServiceSource, 'selectedQuantityMap.get(candidate.id) || 0']
+  ];
+  for (const [projectPath, projectSource, snippet] of stockSourceUtilityZeroFallbacks) {
+    if (projectSource.includes(snippet)) {
+      addFailure(`${projectPath} must use ?? for stock-source quantity fallback so a valid 0 is not treated as missing: ${snippet}`);
+    }
   }
   if (!/function\s+normalizeSelectedStockSourcesForPayload\s*\([^)]*\)\s*{[\s\S]*const\s*{\s*availableQuantity\s*,\s*\.\.\.payload\s*}\s*=\s*source;[\s\S]*return\s+payload;[\s\S]*}/.test(source)) {
     addFailure('stockSourceReview.ts must strip availableQuantity before building selectedStockSources payload.');
@@ -6589,7 +8320,7 @@ function verifyStockSourcePayloadSanitizer() {
   if (!/class\s+StockSourceSelectionDto[\s\S]*@Min\(0\.001\)[\s\S]*quantity!:\s*number;/.test(orderDtoSource)) {
     addFailure('StockSourceSelectionDto.quantity must require @Min(0.001) so UI queue placeholders cannot be submitted as real stock sources.');
   }
-  if (!/private\s+normalizeStockSourceSelections\s*\([^)]*\)\s*{[\s\S]*const\s+quantity\s*=\s*this\.roundQuantity\(Number\(selection\.quantity\s*\|\|\s*0\)\)[\s\S]*if\s*\(!batchId\s*\|\|\s*quantity\s*<=\s*0\)\s*{[\s\S]*continue;[\s\S]*}/.test(orderServiceSource)) {
+  if (!/private\s+normalizeStockSourceSelections\s*\([^)]*\)\s*{[\s\S]*const\s+quantity\s*=\s*this\.roundQuantity\(Number\(selection\.quantity\s*\?\?\s*0\)\)[\s\S]*if\s*\(!batchId\s*\|\|\s*quantity\s*<=\s*0\)\s*{[\s\S]*continue;[\s\S]*}/.test(orderServiceSource)) {
     addFailure('OrdersService.normalizeStockSourceSelections must ignore zero-quantity queue placeholders before saving or reserving stock.');
   }
   if (
@@ -6649,9 +8380,9 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     'for (const source of props.draftReservedSources || [])',
     'const adjustedSourceRows = computed<SourceRow[]>(() =>',
     'const backendAvailableQuantity = row.quantity',
-    'const draftReservedQuantity = draftReservedQuantityByBatchId.value.get(row.id) || 0',
+    'const draftReservedQuantity = draftReservedQuantityByBatchId.value.get(row.id) ?? 0',
     'quantity: Math.max(Math.round((backendAvailableQuantity - draftReservedQuantity + Number.EPSILON) * 1000) / 1000, 0)',
-    'reservedQuantity: Number(row.reservedQuantity || 0) + draftReservedQuantity',
+    'reservedQuantity: Number(row.reservedQuantity ?? 0) + draftReservedQuantity',
     'currentAvailableQuantity: row.quantity',
     'selectedSourceCurrentAvailableQuantity(source)',
     'sourceMaxSelectableQuantity(row)',
@@ -6666,11 +8397,11 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     'left.row.quantity - right.row.quantity',
     'function roundSelectionQuantity(value: number)',
     'function selectedQueueTargetQuantity(sources: StockSourceSelectionPayload[], refillToRequired: boolean)',
-    'sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0)',
+    'sources.reduce((sum, source) => sum + Number(source.quantity ?? 0), 0)',
     'function shouldRefillSelectedSourceQueue(sources: StockSourceSelectionPayload[], explicitRefill?: boolean)',
-    'const nextQueueQuantity = sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0)',
+    'const nextQueueQuantity = sources.reduce((sum, source) => sum + Number(source.quantity ?? 0), 0)',
     'const queueAlreadyCoveredNeed = Math.max(selectedQuantityTotal.value, nextQueueQuantity) >= requiredQuantity.value - 0.0001',
-    'const hasQueuePlaceholder = sources.some((source) => Number(source.quantity || 0) <= 0)',
+    'const hasQueuePlaceholder = sources.some((source) => Number(source.quantity ?? 0) <= 0)',
     'return queueAlreadyCoveredNeed || hasQueuePlaceholder',
     'function rebalanceSelectedSourceQueue(',
     'lockIndex?: number',
@@ -6682,13 +8413,13 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     'keepQueuedWhenZero?: boolean',
     'function selectedSourceQueuePlaceholder(source: StockSourceSelectionPayload)',
     '队列占位',
-    'selectedSourceRows.value.filter((source) => Number(source.quantity || 0) > 0 && sourceNeedsManualConfirmation(source))',
-    'selectedSourceRows.value.find((source) => Number(source.quantity || 0) > 0 && !source.compatibilityStatus)',
+    'selectedSourceRows.value.filter((source) => Number(source.quantity ?? 0) > 0 && sourceNeedsManualConfirmation(source))',
+    'selectedSourceRows.value.find((source) => Number(source.quantity ?? 0) > 0 && !source.compatibilityStatus)',
     'rebalanceSelectedSourceQueue(rows, {',
     'excludedBatchIds: new Set([batchId])',
     'removeSelectedSource(row.id);',
     'distributeByQueue: true',
-    'selectedSourceRows.value.filter((source) => Number(source.quantity || 0) > 0 && sourceNeedsManualConfirmation(source))',
+    'selectedSourceRows.value.filter((source) => Number(source.quantity ?? 0) > 0 && sourceNeedsManualConfirmation(source))',
     'function autoSelectSources()',
     'function bulkSelectSourcesByQuantity()',
     'function rebalanceCurrentSelectedSourcesByQueue()',
@@ -6723,6 +8454,24 @@ function verifyInventorySourceCurrentOrderReservationUi() {
   for (const snippet of dialogSnippets) {
     if (!dialogSource.includes(snippet)) {
       addFailure(`InventorySourceDetailsDialog.vue must keep current-order stock reservation UI snippet: ${snippet}`);
+    }
+  }
+  const dialogZeroFallbackSnippets = [
+    'Number(source.quantity || 0)',
+    'Number(row.reservedQuantity || 0)',
+    'Number(expected.value?.requiredQuantity || 0)',
+    'Number(row.partThickness || 0)',
+    'selectedSourceMap.value.get(row.id)?.quantity || 0',
+    "find((source) => source.batchId === batchId)?.quantity || 0",
+    'Number(value || 0)',
+    'Number(options.lockQuantity || 0)',
+    'Number(requestedQuantity || 0)',
+    'current?.quantity || 0',
+    'Number((row as SourceRow).draftReservedQuantity || 0)'
+  ];
+  for (const snippet of dialogZeroFallbackSnippets) {
+    if (dialogSource.includes(snippet)) {
+      addFailure(`InventorySourceDetailsDialog.vue must preserve zero stock source quantities with ?? fallback, found: ${snippet}`);
     }
   }
   if (!readFile('AGENTS.md').includes('操作人员可以拖拽调整已选库存使用顺序')) {
@@ -6867,6 +8616,8 @@ function verifyOrderStockSourceValidationTransaction() {
   }
 
   const source = readFile(servicePath);
+  const verifierSource = readFile('database/prisma/verify-first-stage.ts');
+  const migrationSqlSource = readMigrationSqlSource();
   const validationCalls = [...source.matchAll(/validateOrderStockSourceSelections\s*\(([^)]*)\)/g)].map((match) => match[1]);
   const runtimeCalls = validationCalls.filter((args) => !args.includes("lines: CreateOrderDto['lines']"));
   const invalidCall = runtimeCalls.find((args) => !/\btx\b/.test(args));
@@ -6887,7 +8638,7 @@ function verifyOrderStockSourceValidationTransaction() {
   ) {
     addFailure('OrdersService consumeAvailableStock must build sortedStockBatches from selectedStockSources order for manual stock usage.');
   }
-  if (!/const\s+candidateBatches\s*=\s*hasManualSelections\s*\?[\s\S]*sortedStockBatches\.map\(\(batch\)\s*=>\s*\(\{[\s\S]*selectedQuantity:\s*selectedSourceMap\.get\(batch\.id\)\?\.quantity\s*\|\|\s*0/.test(source)) {
+  if (!/const\s+candidateBatches\s*=\s*hasManualSelections\s*\?[\s\S]*sortedStockBatches\.map\(\(batch\)\s*=>\s*\(\{[\s\S]*selectedQuantity:\s*selectedSourceMap\.get\(batch\.id\)\?\.quantity\s*\?\?\s*0/.test(source)) {
     addFailure('OrdersService consumeAvailableStock must carry selectedQuantity onto candidateBatches before deducting by queue.');
   }
   if (
@@ -6931,6 +8682,27 @@ function verifyOrderStockSourceValidationTransaction() {
   }
   if (!source.includes('resolveSubmitPlanOperatorFromClient') || !source.includes('productionPlanOverrideByRole?.trim()')) {
     addFailure('OrdersService must validate production plan override role snapshots, not only account and reason.');
+  }
+
+  const reservationMigrationSnippets = [
+    'InventoryReservation_quantity_positive',
+    'InventoryReservation_identity_not_blank',
+    'InventoryReservation_status_time_consistent'
+  ];
+  for (const snippet of reservationMigrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep inventory reservation database guard snippet: ${snippet}`);
+    }
+  }
+  const reservationVerifierSnippets = [
+    'RESERVATION_IDENTITY_MISSING',
+    'CONSUMED_RESERVATION_HAS_RELEASE_TIME',
+    'RELEASED_RESERVATION_HAS_CONSUMED_TIME'
+  ];
+  for (const snippet of reservationVerifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep inventory reservation verification snippet: ${snippet}`);
+    }
   }
 }
 
@@ -7024,6 +8796,7 @@ function verifyInventoryAdjustmentWorkflow() {
   const dtoSnippets = [
     'export class AdjustInventoryBatchDto',
     'afterQuantity!: number',
+    "targetStatus?: 'SCRAPPED'",
     'countedBy!: string',
     'signatureName!: string',
     'attachmentFileName!: string',
@@ -7049,9 +8822,11 @@ function verifyInventoryAdjustmentWorkflow() {
     'status: InventoryReservationStatus.ACTIVE',
     '盘点后数量不能小于已预占数量',
     'const deltaQuantity = afterQuantity - beforeQuantity',
+    "const targetStatus = dto.targetStatus",
+    '报废或销毁清零后数量必须为 0',
     'tx.inventoryAdjustment.create',
     'tx.inventoryBatch.update',
-    "status: afterQuantity > 0 ? 'AVAILABLE' : 'USED'",
+    "status: targetStatus === 'SCRAPPED' ? 'SCRAPPED' : afterQuantity > 0 ? 'AVAILABLE' : 'USED'",
     'tx.inventoryTransaction.create',
     "transactionType: deltaQuantity > 0 ? 'IN' : 'OUT'",
     "sourceRecordType: 'InventoryAdjustment'",
@@ -7084,6 +8859,7 @@ function verifyInventoryAdjustmentWorkflow() {
   const apiSource = readFile(apiPath);
   const apiSnippets = [
     'export interface AdjustInventoryBatchPayload',
+    "targetStatus?: 'SCRAPPED'",
     'export interface InventoryAdjustmentUploadResponse',
     'async uploadInventoryAdjustmentFile(file: File)',
     "formData.set('file', file)",
@@ -7107,6 +8883,7 @@ function verifyInventoryAdjustmentWorkflow() {
     ':close-on-press-escape="!adjustSaving"',
     ':before-close="handleAdjustDialogBeforeClose"',
     'adjustmentReservedQuantity',
+    "targetStatus: undefined as 'SCRAPPED' | undefined",
     ':min="adjustmentMinQuantity"',
     '该批次已有订单预占，盘点后数量不能低于',
     'v-model="adjustForm.countedBy"',
@@ -7132,8 +8909,11 @@ function verifyInventoryAdjustmentWorkflow() {
     '请填写签字人',
     '请上传盘点工单、照片或 PDF 附件',
     '盘点后数量不能低于已预占数量',
+    "adjustForm.targetStatus = 'SCRAPPED'",
+    '报废或销毁清零后数量必须为 0',
     'const attachment = await erpApi.uploadInventoryAdjustmentFile(adjustmentFile.value)',
     'await erpApi.adjustInventoryBatch(selectedBatch.value.id',
+    'targetStatus: adjustForm.targetStatus',
     'attachmentFileUrl: attachment?.fileUrl',
     'await loadInventory()'
   ];
@@ -7144,17 +8924,20 @@ function verifyInventoryAdjustmentWorkflow() {
   }
 
   const verifierSource = readFile(verifierPath);
+  const migrationSqlSource = readMigrationSqlSource();
   const verifierSnippets = [
     'await checkInventoryAdjustments()',
     'async function checkInventoryAdjustments()',
     'prisma.inventoryAdjustment.findMany',
     "where: { sourceRecordType: 'InventoryAdjustment', sourceRecordId: { in: adjustmentIds } }",
+    'INVENTORY_ADJUSTMENT_NEGATIVE_QUANTITY',
     'INVENTORY_ADJUSTMENT_DELTA_MISMATCH',
     'INVENTORY_ADJUSTMENT_TRANSACTION_MISSING',
     'INVENTORY_ADJUSTMENT_TRANSACTION_MISMATCH',
     'INVENTORY_ADJUSTMENT_ZERO_DELTA_HAS_TRANSACTION',
     'INVENTORY_ADJUSTMENT_SIGN_MISSING',
     'INVENTORY_ADJUSTMENT_ATTACHMENT_MISSING',
+    'INVENTORY_ADJUSTMENT_ATTACHMENT_SIZE_INVALID',
     'INVENTORY_ADJUSTMENT_ATTACHMENT_FILE_MISSING',
     "const inventoryAdjustmentPrefix = '/uploads/inventory-adjustments/'",
     "resolve(uploadRoot, 'inventory-adjustments', storedFileName)"
@@ -7162,6 +8945,17 @@ function verifyInventoryAdjustmentWorkflow() {
   for (const snippet of verifierSnippets) {
     if (!verifierSource.includes(snippet)) {
       addFailure(`verify-first-stage.ts must keep inventory adjustment data verification snippet: ${snippet}`);
+    }
+  }
+  const migrationSnippets = [
+    'InventoryAdjustment_quantities_valid',
+    '"deltaQuantity" = "afterQuantity" - "beforeQuantity"',
+    'InventoryAdjustment_identity_not_blank',
+    'InventoryAdjustment_attachment_required'
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep inventory adjustment database guard snippet: ${snippet}`);
     }
   }
 
@@ -7214,8 +9008,28 @@ function verifyProcessDefinitionReferenceGuard() {
       addFailure(`ProcessDefinitionsService must keep default-process reference guard snippet: ${snippet}`);
     }
   }
-  if (!/async\s+update\s*\([^)]*\)\s*{[\s\S]*nextStatus[\s\S]*findProcessDefinitionReferences\(existing\.processNameNormalized\)[\s\S]*referencedProcessDefinitionError/.test(source)) {
-    addFailure('ProcessDefinitionsService.update must reject renaming or disabling referenced process definitions.');
+  const processStatusBoundarySnippets = [
+    '同名停用工序必须走 restore',
+    '已停用，请在状态筛选中查看停用工序并恢复启用',
+    'dto.status !== undefined',
+    '标准工序状态变更必须走 delete / restore',
+    '标准工序状态请使用专用启用/停用接口',
+    'existing.status !== CommonStatus.ENABLED',
+    '已停用的标准工序需先恢复启用后再编辑'
+  ];
+  for (const snippet of processStatusBoundarySnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`ProcessDefinitionsService must keep dedicated process-definition status boundary snippet: ${snippet}`);
+    }
+  }
+  const processDuplicateGuardSnippets = ['const normalizedRows = processNames', 'seenKeys.has(row.key)', '请把次数或参数写入工序备注'];
+  for (const snippet of processDuplicateGuardSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`ProcessDefinitionsService.ensureActiveNames must reject duplicate process names: ${snippet}`);
+    }
+  }
+  if (!/async\s+update\s*\([^)]*\)\s*{[\s\S]*findProcessDefinitionReferences\(existing\.processNameNormalized\)[\s\S]*referencedProcessDefinitionError/.test(source)) {
+    addFailure('ProcessDefinitionsService.update must reject renaming referenced process definitions.');
   }
   if (!/async\s+delete\s*\([^)]*\)\s*{[\s\S]*findProcessDefinitionReferences\(existing\.processNameNormalized\)[\s\S]*referencedProcessDefinitionError/.test(source)) {
     addFailure('ProcessDefinitionsService.delete must reject disabling referenced process definitions.');
@@ -7241,6 +9055,7 @@ function verifyMissingProcessDefinitionRepairCoverage() {
   }
 
   const repairSource = readFile(repairPath);
+  const migrationSqlSource = readMigrationSqlSource();
   const repairSnippets = [
     'collectMissingProcessDefinitionRepairs',
     'printMissingProcessDefinitionRepairs',
@@ -7285,9 +9100,14 @@ function verifyMissingProcessDefinitionRepairCoverage() {
     'where: { status: CommonStatus.ENABLED }',
     'enabledProcessKeys',
     'normalizeSearchKeyword(processName)',
+    'ORDER_LINE_PROCESS_STEP_DUPLICATE',
     'ORDER_LINE_PROCESS_DEFINITION_MISSING',
+    'MODEL_BOM_DEFAULT_PROCESS_DUPLICATE',
     'MODEL_BOM_DEFAULT_PROCESS_DEFINITION_MISSING',
+    'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DUPLICATE',
     'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DEFINITION_MISSING',
+    'PRODUCTION_TASK_PROCESS_STEP_DUPLICATE',
+    'PRODUCTION_TASK_PROCESS_DEFINITION_MISSING',
     'prisma.modelBomLine.findMany',
     'prisma.materialTransformRule.findMany',
     'splitDefaultProcessRoute',
@@ -7296,6 +9116,23 @@ function verifyMissingProcessDefinitionRepairCoverage() {
   for (const snippet of verifierSnippets) {
     if (!verifierSource.includes(snippet)) {
       addFailure(`verify-first-stage.ts must keep missing process definition verification snippet: ${snippet}`);
+    }
+  }
+  const processStepUniqueIndexSnippets = [
+    'OrderLineProcessStep_orderLineId_processName_lower_key',
+    'ON "OrderLineProcessStep"("orderLineId", LOWER("processName"))',
+    'ProductionProcessCompletion_productionTaskId_processName_lower_key',
+    'ON "ProductionProcessCompletion"("productionTaskId", LOWER("processName"))',
+    'OrderLineProcessStep_stepNo_positive',
+    'OrderLineProcessStep_processName_not_blank',
+    'ProductionProcessCompletion_stepNo_positive',
+    'ProductionProcessCompletion_processName_not_blank',
+    'ProductionProcessCompletion_quantities_non_negative',
+    'ProductionProcessCompletion_completed_quantity_positive'
+  ];
+  for (const snippet of processStepUniqueIndexSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep process-step duplicate guard index snippet: ${snippet}`);
     }
   }
 }
@@ -7334,6 +9171,15 @@ function verifyRepairDraftReservationPriority() {
     !source.includes('data: { partThicknessSnapshot: null }')
   ) {
     addFailure('repair-first-stage.ts must clean stale ModelBom component thickness snapshots without touching orders, production or inventory.');
+  }
+  if (
+    !source.includes('collectWarehouseLocationStatusRepairs') ||
+    !source.includes('printWarehouseLocationStatusRepairs') ||
+    !source.includes('warehouse: { status: CommonStatus.DISABLED }') ||
+    !source.includes('tx.warehouseLocation.update') ||
+    !source.includes('data: { status: CommonStatus.DISABLED }')
+  ) {
+    addFailure('repair-first-stage.ts must repair enabled locations under disabled warehouses without touching inventory history.');
   }
   if (
     !source.includes('collectModelBomScopeBlocks') ||
@@ -7394,6 +9240,7 @@ function verifyDataVerifierStockSourceReviewStatus() {
   }
 
   const source = readFile(verifierPath);
+  const migrationSqlSource = readMigrationSqlSource();
   if (!source.includes('STOCK_SOURCE_REVIEW_STATUS_MISSING') || !source.includes('STOCK_SOURCE_REVIEW_STATUS_INVALID')) {
     addFailure('verify-first-stage.ts must report missing or invalid stock source compatibilityStatus.');
   }
@@ -7414,6 +9261,36 @@ function verifyDataVerifierStockSourceReviewStatus() {
   }
   if (!source.includes('PLAN_OVERRIDE_OPERATOR_SNAPSHOT_STALE') || !source.includes('historyBackfillOperatorCode')) {
     addFailure('verify-first-stage.ts must verify production plan override operator snapshots while allowing explicit history backfill records.');
+  }
+  const orderVerifierSnippets = [
+    'CUSTOMER_ORDER_IDENTITY_MISSING',
+    'CUSTOMER_ORDER_SNAPSHOT_INVALID',
+    'ORDER_LINE_IDENTITY_MISSING',
+    'ORDER_LINE_QUANTITY_INVALID',
+    'ORDER_LINE_PART_THICKNESS_MISSING',
+    'isImportDraftMissingThickness',
+    'ORDER_LINE_OPTIONAL_TEXT_BLANK'
+  ];
+  for (const snippet of orderVerifierSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep order core data verification snippet: ${snippet}`);
+    }
+  }
+  const orderMigrationSnippets = [
+    'CustomerOrder_identity_not_blank',
+    'CustomerOrder_order_no_normalized',
+    'CustomerOrder_customer_snapshot_shape',
+    'OrderLine_required_text_not_blank',
+    'OrderLine_quantities_valid',
+    'OrderLine_optional_text_not_blank',
+    'OrderLine_component_shape_valid',
+    "!~ '^C[0-9]+$'",
+    '缺厚度零件允许先保存为 0 待人工核对'
+  ];
+  for (const snippet of orderMigrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep order core database guard snippet: ${snippet}`);
+    }
   }
   if (/const\s+shouldHaveProcessSteps\s*=\s*[^;]*line\.fulfillmentMode\s*!==\s*OrderLineFulfillmentMode\.STOCK[^;]*;/.test(source)) {
     addFailure('verify-first-stage.ts must require process steps for any submitted line with productionPlanQuantity > 0, including partial STOCK lines.');
@@ -7480,6 +9357,7 @@ function verifyOrderExcelImportWorkflow() {
   const controllerPath = 'backend/src/modules/orders/orders.controller.ts';
   const dtoPath = 'backend/src/modules/orders/dto.ts';
   const schemaPath = 'database/prisma/schema.prisma';
+  const dataVerifierPath = 'database/prisma/verify-first-stage.ts';
   const ordersViewPath = 'frontend/src/views/OrdersListView.vue';
   const orderDetailPath = 'frontend/src/views/OrderDetailView.vue';
   const lineEditorPath = 'frontend/src/components/OrderLineEditor.vue';
@@ -7494,12 +9372,14 @@ function verifyOrderExcelImportWorkflow() {
   const uploadFileNameRegressionScriptPath = 'scripts/verify-upload-filenames-api.cjs';
   const fileNameNormalizerRegressionScriptPath = 'scripts/verify-file-name-normalizers.cjs';
   const workbookRegressionScriptPath = 'scripts/verify-order-import-workbooks.cjs';
+  const apiAggregateRegressionScriptPath = 'scripts/verify-first-stage-api.cjs';
 
   for (const projectPath of [
     servicePath,
     controllerPath,
     dtoPath,
     schemaPath,
+    dataVerifierPath,
     ordersViewPath,
     orderDetailPath,
     lineEditorPath,
@@ -7513,7 +9393,8 @@ function verifyOrderExcelImportWorkflow() {
     regressionScriptPath,
     uploadFileNameRegressionScriptPath,
     fileNameNormalizerRegressionScriptPath,
-    workbookRegressionScriptPath
+    workbookRegressionScriptPath,
+    apiAggregateRegressionScriptPath
   ]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing Excel order import source file: ${projectPath}`);
@@ -7525,6 +9406,7 @@ function verifyOrderExcelImportWorkflow() {
   const controllerSource = readFile(controllerPath);
   const dtoSource = readFile(dtoPath);
   const schemaSource = readFile(schemaPath);
+  const dataVerifierSource = readFile(dataVerifierPath);
   const ordersViewSource = readFile(ordersViewPath);
   const orderDetailSource = readFile(orderDetailPath);
   const lineEditorSource = readFile(lineEditorPath);
@@ -7539,6 +9421,8 @@ function verifyOrderExcelImportWorkflow() {
   const uploadFileNameRegressionScriptSource = readFile(uploadFileNameRegressionScriptPath);
   const fileNameNormalizerRegressionScriptSource = readFile(fileNameNormalizerRegressionScriptPath);
   const workbookRegressionScriptSource = readFile(workbookRegressionScriptPath);
+  const apiAggregateRegressionScriptSource = readFile(apiAggregateRegressionScriptPath);
+  const migrationSqlSource = readMigrationSqlSource();
 
   const serviceSnippets = [
     "workbook.getWorksheet('ERP上传净表')",
@@ -7560,6 +9444,7 @@ function verifyOrderExcelImportWorkflow() {
     'componentNo: row.componentNo || undefined',
     'parentComponentNo: row.parentComponentNo || undefined',
     'normalizeEditableOrderLineComponentFields',
+    "partThickness: lineType === 'COMPONENT' ? 0 : line.partThickness",
     'this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences(dto.lines))',
     'this.normalizeEditableOrderLineComponentFields(await this.normalizeOrderLineImportReferences([dto]))[0]',
     'componentNo: this.normalizeEditableComponentNo(line.componentNo) || undefined',
@@ -7589,6 +9474,8 @@ function verifyOrderExcelImportWorkflow() {
     'excludedOrderNos.has(this.normalizeOrderNo(order.orderNo))',
     'deleteDraft(orderNo: string)',
     'orderNoReservation.deleteMany',
+    '订单导入会话正在被其他操作修改，请刷新后重新放弃或删除记忆',
+    '订单导入会话正在被其他操作修改，请刷新后重新删除文件',
     'sourceImportSessionId',
     'sourceImportFileName',
     'sourceImportRowNo',
@@ -7759,7 +9646,7 @@ function verifyOrderExcelImportWorkflow() {
     '@@index([sessionId, orderNo, sourceRowNo])',
     'sourceImportSessionId',
     'sourceImportFileId',
-    'sourceImportFile OrderImportFile? @relation("OrderLineSourceImportFile"',
+    'sourceImportFile                OrderImportFile?         @relation("OrderLineSourceImportFile"',
     '@@index([sourceImportFileId])',
     'sourceImportFileName',
     'sourceImportRowNo',
@@ -7772,6 +9659,42 @@ function verifyOrderExcelImportWorkflow() {
       addFailure(`Prisma schema must keep Excel import persistence snippet: ${snippet}`);
     }
   }
+
+  const dataVerifierSnippets = [
+    'await checkOrderImportData();',
+    'async function checkOrderImportData()',
+    'ORDER_IMPORT_SESSION_STATUS_INVALID',
+    'ORDER_IMPORT_DRAFT_COMMIT_FIELDS_STALE',
+    'ORDER_IMPORT_FILE_COUNT_MISMATCH',
+    'ORDER_IMPORT_FILE_ACCEPTED_ROW_COUNT_MISMATCH',
+    'ORDER_IMPORT_ROW_QUANTITY_INVALID',
+    'ORDER_IMPORT_ROW_ISSUE_COUNT_MISMATCH',
+    'ORDER_IMPORT_CLEAN_COMPONENT_SHAPE_INVALID'
+  ];
+  for (const snippet of dataVerifierSnippets) {
+    if (!dataVerifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep Excel import data verification snippet: ${snippet}`);
+    }
+  }
+
+  const orderImportDatabaseSnippets = [
+    'OrderImportSession_status_valid',
+    'OrderImportSession_commit_fields_valid',
+    'OrderImportFile_identity_not_blank',
+    'OrderImportFile_counts_valid',
+    'OrderImportRow_identity_not_blank',
+    'OrderImportRow_line_type_valid',
+    'OrderImportRow_quantities_valid',
+    'OrderImportRow_json_shape_valid',
+    'OrderImportRow_clean_required_fields',
+    'OrderImportRow_clean_component_shape'
+  ];
+  for (const snippet of orderImportDatabaseSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Order import database guards must keep migration snippet: ${snippet}`);
+    }
+  }
+
   const orderSchemaStart = schemaSource.indexOf('model CustomerOrder');
   const productionTaskSchemaStart = schemaSource.indexOf('model ProductionTask');
   const orderSchemaSource =
@@ -7935,8 +9858,42 @@ function verifyOrderExcelImportWorkflow() {
   if (!packageSource.includes('"verify:order-import-workbooks": "node scripts/verify-order-import-workbooks.cjs"')) {
     addFailure('package.json must expose verify:order-import-workbooks for Excel workbook artifact validation.');
   }
-  if (!packageSource.includes('npm run verify:file-name-normalizers && npm run verify:order-import-workbooks && npm run backend:verify:first-stage')) {
-    addFailure('verify:first-stage must run workbook artifact validation before backend/frontend builds.');
+  if (!packageSource.includes('"verify:prisma-client-enums": "node scripts/verify-prisma-client-enums.cjs"')) {
+    addFailure('package.json must expose verify:prisma-client-enums to catch stale generated Prisma Client enum values.');
+  }
+  if (!packageSource.includes('"verify:first-stage:api": "node scripts/verify-first-stage-api.cjs"')) {
+    addFailure('package.json must expose verify:first-stage:api for self-contained first-stage API regression checks.');
+  }
+  if (
+    !packageSource.includes(
+      'npm run verify:file-name-normalizers && npm run verify:prisma-client-enums && npm run verify:order-import-workbooks && npm run backend:verify:first-stage'
+    )
+  ) {
+    addFailure('verify:first-stage must check generated Prisma Client enums and workbook artifacts before backend/frontend builds.');
+  }
+  if (!packageSource.includes('npm run backend:build && npm run verify:first-stage:api && npm run frontend:build')) {
+    addFailure('verify:first-stage:strict must include self-contained API regressions after backend build and before frontend build.');
+  }
+
+  const apiAggregateRegressionSnippets = [
+    'FIRST_STAGE_API_BASE_URL',
+    'FIRST_STAGE_API_PORT',
+    'verify:material-import-api',
+    'verify:order-import-api',
+    'verify:production-notices-api',
+    'verify:upload-filenames-api',
+    "ORDER_IMPORT_API_BASE_URL: apiBaseUrl",
+    "MATERIAL_IMPORT_API_BASE_URL: apiBaseUrl",
+    "NOTICE_API_BASE_URL: apiBaseUrl",
+    "await runCommand(['run', 'backend:build'])",
+    "spawn(command.file, command.args",
+    "spawnSync('taskkill'",
+    'await waitForHealth(backend.output)'
+  ];
+  for (const snippet of apiAggregateRegressionSnippets) {
+    if (!apiAggregateRegressionScriptSource.includes(snippet)) {
+      addFailure(`verify-first-stage-api.cjs must keep self-contained API regression snippet: ${snippet}`);
+    }
   }
 
   const regressionSnippets = [
@@ -8052,6 +10009,10 @@ function verifyOrderExcelImportWorkflow() {
     'assertSubmitRejectsUnconfirmedMaterialIdentityConflict',
     'materialIdentityConfirmed: true',
     '发现同编码多套历史资料零件，提交生产前必须确认已核对',
+    'assertSubmitReturnsPendingProductionStatus',
+    'deleteSubmittedOrderStatusRegressionData',
+    "submittedOrder.status === 'PENDING_PRODUCTION'",
+    '订单提交生产后必须返回 PENDING_PRODUCTION',
     'assertSubmitRejectsInvalidPersistedComponentStructure',
     '所属组件 MISSING-COMPONENT 在当前订单内不存在',
     'await cleanup()',
@@ -8190,6 +10151,192 @@ function verifySeedStockReservationCoverage() {
   }
 }
 
+function verifyMaterialStockAlertWorkflow() {
+  const schemaPath = 'database/prisma/schema.prisma';
+  const dtoPath = 'backend/src/modules/inventory/dto.ts';
+  const servicePath = 'backend/src/modules/inventory/inventory.service.ts';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const typesPath = 'frontend/src/types/erp.ts';
+  const inventoryViewPath = 'frontend/src/views/InventoryView.vue';
+  const materialsViewPath = 'frontend/src/views/MaterialsView.vue';
+  const dashboardViewPath = 'frontend/src/views/MaterialsManagementView.vue';
+  const dataVerifierPath = 'database/prisma/verify-first-stage.ts';
+  const seedPath = 'database/prisma/seed.ts';
+
+  for (const projectPath of [
+    schemaPath,
+    dtoPath,
+    servicePath,
+    apiPath,
+    typesPath,
+    inventoryViewPath,
+    materialsViewPath,
+    dashboardViewPath,
+    dataVerifierPath,
+    seedPath
+  ]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing material stock alert source file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const schemaSource = readFile(schemaPath);
+  const dtoSource = readFile(dtoPath);
+  const serviceSource = readFile(servicePath);
+  const apiSource = readFile(apiPath);
+  const typesSource = readFile(typesPath);
+  const inventoryViewSource = readFile(inventoryViewPath);
+  const materialsViewSource = readFile(materialsViewPath);
+  const dashboardViewSource = readFile(dashboardViewPath);
+  const dataVerifierSource = readFile(dataVerifierPath);
+  const seedSource = readFile(seedPath);
+  const migrationSqlSource = readMigrationSqlSource();
+
+  const requiredSnippets = [
+    [schemaPath, schemaSource, 'stockAlertEnabled    Boolean'],
+    [schemaPath, schemaSource, 'stockAlertQuantity Decimal?'],
+    [schemaPath, schemaSource, 'stockAlertEnabled  Boolean?'],
+    [dtoPath, dtoSource, "export const stockAlertFilterValues = ['ALL', 'ENABLED', 'TRIGGERED', 'DISABLED'] as const"],
+    [dtoPath, dtoSource, 'stockAlert?: StockAlertFilter'],
+    [servicePath, serviceSource, 'private normalizeStockAlertQuantity(value: unknown)'],
+    [servicePath, serviceSource, '启用库存报警时必须填写最小库存数量'],
+    [servicePath, serviceSource, '库存报警筛选必须覆盖没有库存批次的零件'],
+    [servicePath, serviceSource, '库存报警导入只写 Material 基础资料提醒，不创建订单、生产任务或库存流水。'],
+    [servicePath, serviceSource, 'parseMaterialImportBoolean'],
+    [servicePath, serviceSource, 'DUPLICATE_STOCK_ALERT_CONFLICT'],
+    [servicePath, serviceSource, 'STOCK_ALERT_QUANTITY_REQUIRED'],
+    [servicePath, serviceSource, 'stockAlertTriggered: stockAlertEnabled && stockAlertQuantity !== null && row.availableQuantity <= stockAlertQuantity'],
+    [apiPath, apiSource, 'export type StockAlertFilter'],
+    [typesPath, typesSource, 'stockAlertTriggered: boolean'],
+    [typesPath, typesSource, 'stockAlertEnabled?: boolean | null'],
+    [typesPath, typesSource, 'stockAlertQuantity?: number | null'],
+    [inventoryViewPath, inventoryViewSource, '低库存报警'],
+    [inventoryViewPath, inventoryViewSource, '需要修改库存数量时，请到库存溯源里做盘点调整，系统会追加 InventoryTransaction。'],
+    [materialsViewPath, materialsViewSource, '库存报警仅用于基础资料提醒和筛选，不会自动生成订单、生产任务或库存流水。'],
+    [materialsViewPath, materialsViewSource, 'row.stockAlertEnabled === true'],
+    [dashboardViewPath, dashboardViewSource, 'stockAlertCounts'],
+    [dashboardViewPath, dashboardViewSource, '库存报警快捷筛选只切换列表视图，不自动补单、下单、提交生产或扣库存。'],
+    [dataVerifierPath, dataVerifierSource, 'await checkMaterialMasterData();'],
+    [dataVerifierPath, dataVerifierSource, 'async function checkMaterialMasterData()'],
+    [dataVerifierPath, dataVerifierSource, 'MATERIAL_IDENTITY_MISSING'],
+    [dataVerifierPath, dataVerifierSource, 'MATERIAL_APPLICABILITY_PROJECT_SCOPE_KEY_MISMATCH'],
+    [dataVerifierPath, dataVerifierSource, 'MATERIAL_APPLICABILITY_ENABLED_MATERIAL_DISABLED'],
+    [dataVerifierPath, dataVerifierSource, 'await checkMaterialStockAlerts();'],
+    [dataVerifierPath, dataVerifierSource, 'async function checkMaterialStockAlerts()'],
+    [dataVerifierPath, dataVerifierSource, 'MATERIAL_STOCK_ALERT_TRANSACTION_NOT_ALLOWED'],
+    [dataVerifierPath, dataVerifierSource, 'MATERIAL_STOCK_ALERT_RESERVED_OVER_AVAILABLE'],
+    [dataVerifierPath, dataVerifierSource, '库存报警只能提醒和筛选，不能生成 InventoryTransaction'],
+    [seedPath, seedSource, 'const stockAlertFixtures = ['],
+    [seedPath, seedSource, '库存报警 seed 只写 Material 基础资料的提醒线，不自动补单、下单、提交生产或扣库存。']
+  ];
+
+  for (const [projectPath, source, snippet] of requiredSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${projectPath} must keep first-stage material stock alert snippet: ${snippet}`);
+    }
+  }
+  const migrationSnippets = [
+    'Material_identity_not_blank',
+    'Material_optional_text_not_blank',
+    'Material_stock_alert_valid',
+    'MaterialApplicability_identity_not_blank',
+    'MaterialApplicability_optional_text_not_blank',
+    'MaterialApplicability_scope_keys_valid'
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep material master-data database guard snippet: ${snippet}`);
+    }
+  }
+  if (!/stockAlertEnabled\s+Boolean\s+@default\(false\)/.test(schemaSource)) {
+    addFailure('schema.prisma Material.stockAlertEnabled must default to false.');
+  }
+  if (!/stockAlertQuantity\s+Decimal\?\s+@db\.Decimal\(18,\s*3\)/.test(schemaSource)) {
+    addFailure('schema.prisma Material.stockAlertQuantity must use Decimal(18, 3).');
+  }
+  const materialImportRowBlock = schemaSource.match(/model MaterialImportRow \{[\s\S]*?\n\}/);
+  if (!materialImportRowBlock) {
+    addFailure('schema.prisma must keep MaterialImportRow for material Excel import preview rows.');
+  } else {
+    if (!/stockAlertEnabled\s+Boolean\?/.test(materialImportRowBlock[0])) {
+      addFailure('MaterialImportRow must store nullable stockAlertEnabled import preview value.');
+    }
+    if (!/stockAlertQuantity\s+Decimal\?\s+@db\.Decimal\(18,\s*3\)/.test(materialImportRowBlock[0])) {
+      addFailure('MaterialImportRow.stockAlertQuantity must store Decimal(18, 3) import preview value.');
+    }
+  }
+
+  const zeroInventoryAlertBlock = serviceSource.match(/private async findZeroInventoryMaterialRows\([\s\S]*?\n  private inventoryBatchSourceSearchValues/);
+  if (!zeroInventoryAlertBlock) {
+    addFailure('InventoryService must keep findZeroInventoryMaterialRows for zero-stock material search and stock alert rows.');
+    return;
+  }
+  const forbiddenStockMutationSnippets = ['inventoryTransaction', 'inventoryBatch.create', 'inventoryBatch.upsert', 'productionTask.create', 'customerOrder.create'];
+  for (const snippet of forbiddenStockMutationSnippets) {
+    if (zeroInventoryAlertBlock[0].includes(snippet)) {
+      addFailure(`findZeroInventoryMaterialRows must only return display rows and must not mutate stock/order/production data: ${snippet}`);
+    }
+  }
+}
+
+function verifyMaterialCommonProjectModelGuards() {
+  const verifierPath = 'database/prisma/verify-first-stage.ts';
+  const servicePath = 'backend/src/modules/materials/materials.service.ts';
+  if (!fileExists(verifierPath) || !fileExists(servicePath)) {
+    addFailure('Missing material common project model guard source files.');
+    return;
+  }
+
+  const verifierSource = readFile(verifierPath);
+  const serviceSource = readFile(servicePath);
+  const migrationSqlSource = readMigrationSqlSource();
+  const verifierSnippets = [
+    'await checkMaterialCommonProjectModels();',
+    'async function checkMaterialCommonProjectModels()',
+    'MATERIAL_COMMON_PROJECT_MODEL_EMPTY',
+    'MATERIAL_COMMON_PROJECT_MODEL_KEY_STALE',
+    'MATERIAL_COMMON_PROJECT_MODEL_SORT_INVALID',
+    'MATERIAL_COMMON_PROJECT_MODEL_SORT_DUPLICATE',
+    '常用机型只控制零件管理快捷入口顺序'
+  ];
+  for (const snippet of verifierSnippets) {
+    if (!verifierSource.includes(snippet)) {
+      addFailure(`verify-first-stage.ts must keep material common project model verification snippet: ${snippet}`);
+    }
+  }
+
+  const migrationSnippets = [
+    'MaterialCommonProjectModel_identity_not_blank',
+    'MaterialCommonProjectModel_normalized_key_valid',
+    'MaterialCommonProjectModel_sort_order_positive',
+    'MaterialCommonProjectModel_enabled_sortOrder_key',
+    'WHERE "status" = \'ENABLED\''
+  ];
+  for (const snippet of migrationSnippets) {
+    if (!migrationSqlSource.includes(snippet)) {
+      addFailure(`Prisma migrations must keep material common project model database guard snippet: ${snippet}`);
+    }
+  }
+
+  const serviceSnippets = [
+    'async saveCommonProjectModels',
+    '只控制零件管理快捷入口',
+    'await tx.materialCommonProjectModel.updateMany',
+    'this.commonProjectModelKey(projectModel)',
+    'projectModel.trim().toLocaleLowerCase(\'zh-CN\')'
+  ];
+  for (const snippet of serviceSnippets) {
+    if (!serviceSource.includes(snippet)) {
+      addFailure(`MaterialsService must keep common project model safety snippet: ${snippet}`);
+    }
+  }
+  const dashboardSource = readFile('frontend/src/views/MaterialsManagementView.vue');
+  if (/localStorage|commonProjectStorageKey|saveCommonProjectModelsToCache|本机缓存/.test(dashboardSource)) {
+    addFailure('MaterialsManagementView.vue must not store common project model business configuration in browser localStorage.');
+  }
+}
+
 function verifyRuntimeStorageIgnored() {
   const ignoreContracts = [
     { path: '.gitignore', label: 'Git ignore' },
@@ -8209,6 +10356,7 @@ function verifyRuntimeStorageIgnored() {
 }
 
 verifyRequiredFiles();
+verifyOrderStatusEnumContract();
 verifyNoMojibakeInUserFacingSources();
 verifyNavigation();
 verifyResponsiveMobileBaseline();
@@ -8217,6 +10365,7 @@ verifyNoElementPlusConfirmDialogs();
 verifyResponsiveElementPlusDialogs();
 verifyElementPlusChineseLocale();
 verifyCustomerSelectOnlyShowsName();
+verifyCustomerContactSoftDisableWorkflow();
 verifyOrderSelectDisplayContract();
 verifyOrderFilterOrder();
 verifyCaseInsensitiveBusinessKeyContracts();
@@ -8225,6 +10374,8 @@ verifyProductionOrderSummaryWorkflow();
 verifyProductionOperatorSearchWorkflow();
 verifyPlannerProcessAndSubmitGuard();
 verifyProcessPinyinSearchWorkflow();
+verifyProcessMemoryCoreDataGuards();
+verifyNoBusinessTextHardMaxLength();
 verifyMaterialSuggestionSearchWorkflow();
 verifyProcessEditDisabledReasonWorkflow();
 verifyProcessStepDragSortWorkflow();
@@ -8233,6 +10384,7 @@ verifyMaterialImportIssueReportWorkflow();
 verifyMobileCompactOrderCards();
 verifyProductionProcessCompletionSequenceWorkflow();
 verifyProductionReplenishmentAndWithdrawWorkflow();
+verifyProductionTaskCancelledStatusWorkflow();
 verifyOrderChangeAndCancellationWorkflow();
 verifyShortageReplenishmentClosureWorkflow();
 verifyWarehouseWorkflow();
@@ -8262,6 +10414,8 @@ verifyRepairScriptEntrypoint();
 verifyReadmeRepairSafetyDocs();
 verifyOrderExcelImportWorkflow();
 verifySeedStockReservationCoverage();
+verifyMaterialCommonProjectModelGuards();
+verifyMaterialStockAlertWorkflow();
 verifyRuntimeStorageIgnored();
 
 if (failures.length > 0) {

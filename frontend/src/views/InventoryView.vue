@@ -37,6 +37,15 @@
         <div class="stat-label">有库存仓库</div>
         <div class="stat-value">{{ stockedWarehouseCount }} 个</div>
       </div>
+      <button
+        class="stat-card stat-card-button"
+        :class="{ active: filters.stockAlert === 'TRIGGERED' }"
+        type="button"
+        @click="applyTriggeredStockAlertFilter"
+      >
+        <div class="stat-label">低库存报警</div>
+        <div class="stat-value">{{ triggeredStockAlertText }}</div>
+      </button>
     </div>
 
     <div class="filter-bar">
@@ -78,7 +87,17 @@
         <label>状态</label>
         <el-select v-model="filters.status" clearable placeholder="全部状态" style="width: 150px">
           <el-option label="可用" value="AVAILABLE" />
+          <el-option label="已预占" value="RESERVED" />
           <el-option label="已使用" value="USED" />
+          <el-option label="已报废" value="SCRAPPED" />
+        </el-select>
+      </div>
+      <div class="filter-field">
+        <label>库存报警</label>
+        <el-select v-model="filters.stockAlert" clearable placeholder="全部报警" style="width: 150px">
+          <el-option label="已触发" value="TRIGGERED" />
+          <el-option label="已启用" value="ENABLED" />
+          <el-option label="未启用" value="DISABLED" />
         </el-select>
       </div>
       <el-button type="primary" :loading="loading" @click="loadInventory">查询</el-button>
@@ -110,6 +129,11 @@
           <el-select v-model="materialMemoryFilters.status" placeholder="状态" style="width: 120px" @change="searchMaterialMemory">
             <el-option label="启用" value="ENABLED" />
             <el-option label="停用" value="DISABLED" />
+          </el-select>
+          <el-select v-model="materialMemoryFilters.stockAlert" clearable placeholder="库存报警" style="width: 140px" @change="searchMaterialMemory">
+            <el-option label="已触发" value="TRIGGERED" />
+            <el-option label="已启用" value="ENABLED" />
+            <el-option label="未启用" value="DISABLED" />
           </el-select>
           <el-button :loading="materialMemoryLoading" @click="searchMaterialMemory">查询</el-button>
         </div>
@@ -214,8 +238,18 @@
         <el-table-column label="当前可用库存" width="150">
           <template #default="{ row }">{{ formatQuantity(row.availableQuantity, row.unit) }}</template>
         </el-table-column>
+        <el-table-column label="库存报警" width="170">
+          <template #default="{ row }">
+            <div class="stock-alert-cell">
+              <el-tag :type="stockAlertTagType(row)" effect="plain">
+                {{ stockAlertText(row) }}
+              </el-tag>
+              <el-button link type="primary" :disabled="!row.materialId" @click="openStockAlertDialog(row)">设置</el-button>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="已预占" width="120">
-          <template #default="{ row }">{{ formatQuantity(row.reservedQuantity || 0, row.unit) }}</template>
+          <template #default="{ row }">{{ formatQuantity(row.reservedQuantity ?? 0, row.unit) }}</template>
         </el-table-column>
         <el-table-column label="订单库存" width="140">
           <template #default="{ row }">{{ formatQuantity(row.orderInventoryQuantity, row.unit) }}</template>
@@ -226,9 +260,9 @@
         <el-table-column label="备货来源构成" min-width="240">
           <template #default="{ row }">
             <div class="stock-source-breakdown">
-              <el-tag size="small" effect="plain">正常 {{ formatQuantity(row.normalOrderStockQuantity || 0, row.unit) }}</el-tag>
-              <el-tag size="small" effect="plain" type="warning">取消 {{ formatQuantity(row.cancelledOrderStockQuantity || 0, row.unit) }}</el-tag>
-              <el-tag size="small" effect="plain" type="info">变更 {{ formatQuantity(row.customerChangeStockQuantity || 0, row.unit) }}</el-tag>
+              <el-tag size="small" effect="plain">正常 {{ formatQuantity(row.normalOrderStockQuantity ?? 0, row.unit) }}</el-tag>
+              <el-tag size="small" effect="plain" type="warning">取消 {{ formatQuantity(row.cancelledOrderStockQuantity ?? 0, row.unit) }}</el-tag>
+              <el-tag size="small" effect="plain" type="info">变更 {{ formatQuantity(row.customerChangeStockQuantity ?? 0, row.unit) }}</el-tag>
             </div>
           </template>
         </el-table-column>
@@ -290,7 +324,7 @@
         <div class="mobile-card-compact-summary">
           <span>使用率 {{ formatInventoryUsageRate(row) }}</span>
           <span>可用 {{ formatQuantity(row.availableQuantity, row.unit) }}</span>
-          <span>预占 {{ formatQuantity(row.reservedQuantity || 0, row.unit) }}</span>
+          <span>预占 {{ formatQuantity(row.reservedQuantity ?? 0, row.unit) }}</span>
           <span>{{ row.batchCount }} 批 / {{ row.warehouseCount }} 仓</span>
         </div>
         <div v-show="isMobileInventoryCardExpanded(summaryCardKey(row))" class="mobile-card-fields">
@@ -303,8 +337,12 @@
             <strong>{{ formatQuantity(row.availableQuantity, row.unit) }}</strong>
           </div>
           <div class="mobile-field">
+            <label>库存报警</label>
+            <span>{{ stockAlertText(row) }}</span>
+          </div>
+          <div class="mobile-field">
             <label>已预占</label>
-            <span>{{ formatQuantity(row.reservedQuantity || 0, row.unit) }}</span>
+            <span>{{ formatQuantity(row.reservedQuantity ?? 0, row.unit) }}</span>
           </div>
           <div class="mobile-field">
             <label>批次 / 仓库</label>
@@ -339,6 +377,7 @@
           <el-button link type="primary" @click="openSummarySourceDetails(row)">
             {{ summarySourceDetailsButtonText(row) }}
           </el-button>
+          <el-button link type="primary" :disabled="!row.materialId" @click="openStockAlertDialog(row)">设置报警</el-button>
         </div>
       </article>
     </div>
@@ -422,6 +461,9 @@
             </el-button>
             <el-button link type="primary" :disabled="!canAdjustBatch(row)" :title="adjustmentDisabledReason(row)" @click="openAdjustDialog(row)">
               盘点调整
+            </el-button>
+            <el-button link type="danger" :disabled="!canScrapBatch(row)" :title="scrapBatchDisabledReason(row)" @click="openScrapInventoryDialog(row)">
+              销毁清零
             </el-button>
           </template>
         </el-table-column>
@@ -560,7 +602,7 @@
         <span>{{ selectedReservationBatch.partCode }} / {{ selectedReservationBatch.batchNo }}</span>
         <span>可用 {{ formatQuantity(batchAvailableQuantity(selectedReservationBatch), selectedReservationBatch.unit) }}</span>
         <span>账面 {{ formatQuantity(selectedReservationBatch.quantity, selectedReservationBatch.unit) }}</span>
-        <span>预占 {{ formatQuantity(selectedReservationBatch.reservedQuantity || 0, selectedReservationBatch.unit) }}</span>
+        <span>预占 {{ formatQuantity(selectedReservationBatch.reservedQuantity ?? 0, selectedReservationBatch.unit) }}</span>
       </div>
       <el-table v-loading="reservationHistoryLoading" :data="reservationHistory" max-height="420">
         <el-table-column label="状态" width="105">
@@ -715,6 +757,50 @@
     </el-dialog>
 
     <el-dialog
+      v-model="stockAlertDialogVisible"
+      class="responsive-dialog"
+      :title="stockAlertDialogTitle"
+      width="520px"
+      :close-on-click-modal="!stockAlertSaving"
+      :close-on-press-escape="!stockAlertSaving"
+      :before-close="handleStockAlertDialogBeforeClose"
+    >
+      <div v-if="stockAlertTarget" class="stock-alert-summary">
+        <strong>{{ stockAlertTarget.partName }}</strong>
+        <span>{{ stockAlertTarget.partCode }} / 当前可用 {{ formatQuantity(stockAlertTarget.availableQuantity, stockAlertTarget.unit) }}</span>
+      </div>
+      <el-form label-width="110px">
+        <el-form-item label="报警方式">
+          <el-radio-group v-model="stockAlertForm.enabled">
+            <el-radio-button :value="false">不报警</el-radio-button>
+            <el-radio-button :value="true">低库存报警</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="stockAlertForm.enabled" label="最小库存" required>
+          <el-input-number
+            v-model="stockAlertForm.quantity"
+            :min="0"
+            :precision="3"
+            :controls="false"
+            style="width: 180px"
+          />
+          <span class="unit-text">{{ stockAlertTarget?.unit || '件' }}</span>
+        </el-form-item>
+      </el-form>
+      <div class="material-memory-dialog-hint">
+        <strong>保存影响</strong>
+        <ul>
+          <li>只保存零件基础资料上的库存报警配置，不修改 InventoryBatch 数量。</li>
+          <li>报警判断使用零件库存汇总的当前可用库存；库存变动仍通过 InventoryTransaction 留痕。</li>
+        </ul>
+      </div>
+      <template #footer>
+        <el-button :disabled="stockAlertSaving" @click="closeStockAlertDialog">取消</el-button>
+        <el-button type="primary" :loading="stockAlertSaving" @click="saveStockAlert">保存报警设置</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="materialMemoryDialogVisible"
       class="responsive-dialog"
       title="编辑零件搜索记忆"
@@ -736,8 +822,24 @@
         <el-form-item label="规格">
           <el-input v-model="materialMemoryForm.partSpecification" clearable />
         </el-form-item>
+        <el-form-item label="库存报警">
+          <el-radio-group v-model="materialMemoryForm.stockAlertEnabled">
+            <el-radio-button :value="false">不报警</el-radio-button>
+            <el-radio-button :value="true">低库存报警</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="materialMemoryForm.stockAlertEnabled" label="最小库存" required>
+          <el-input-number
+            v-model="materialMemoryForm.stockAlertQuantity"
+            :min="0"
+            :precision="3"
+            :controls="false"
+            style="width: 180px"
+          />
+          <span class="unit-text">{{ materialMemoryForm.unit || '件' }}</span>
+        </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="materialMemoryForm.status" style="width: 160px">
+          <el-select v-model="materialMemoryForm.status" disabled style="width: 160px">
             <el-option label="启用" value="ENABLED" />
             <el-option label="停用" value="DISABLED" />
           </el-select>
@@ -747,6 +849,7 @@
         <strong>保存影响</strong>
         <ul>
           <li>只维护下单搜索记忆，用于后续订单选料、库存搜索和 0 库存零件展示。</li>
+          <li>状态请使用表格右侧的启用/停用动作，避免编辑保存时绕过专用状态流程。</li>
           <li>不会修改库存数量；库存仍然只从 InventoryBatch 实时计算。</li>
           <li>不会覆盖历史订单、BOM 明细、库存批次、库存流水或生产记录。</li>
           <li>需要修改库存数量时，请到库存溯源里做盘点调整，系统会追加 InventoryTransaction。</li>
@@ -762,7 +865,7 @@
     <el-dialog
       v-model="materialMemoryDisableDialogVisible"
       class="responsive-dialog"
-      title="停用零件搜索记忆"
+      :title="materialMemoryStatusDialogTitle"
       width="520px"
       :close-on-click-modal="!materialMemoryDisableSaving"
       :close-on-press-escape="!materialMemoryDisableSaving"
@@ -770,19 +873,25 @@
     >
       <div class="material-memory-disable-confirm" v-if="materialMemoryDisableTarget">
         <p>
-          确认停用
+          确认{{ materialMemoryStatusActionLabel }}
           <strong>{{ materialMemoryDisableTarget.partCode }} / {{ materialMemoryDisableTarget.partName }}</strong>
           的零件搜索记忆吗？
         </p>
         <ul>
-          <li>停用后不再作为后续订单选料、库存搜索和 0 库存零件展示的推荐项。</li>
-          <li>系统只会停用零件搜索记忆，不会删除历史订单、库存批次、库存数量和生产记录。</li>
-          <li>需要恢复时，可在库存使用总览切换到停用状态后重新启用。</li>
+          <li>{{ materialMemoryStatusPrimaryWarning }}</li>
+          <li>不会删除历史订单、库存批次、库存数量、库存流水和生产记录。</li>
+          <li>适用范围、BOM、默认图纸或来源加工关系仍需到对应维护页单独处理。</li>
         </ul>
       </div>
       <template #footer>
         <el-button :disabled="materialMemoryDisableSaving" @click="closeMaterialMemoryDisableDialog">取消</el-button>
-        <el-button type="danger" :loading="materialMemoryDisableSaving" @click="confirmDisableMaterialMemory">停用记忆</el-button>
+        <el-button
+          :type="materialMemoryStatusAction === 'enable' ? 'success' : 'danger'"
+          :loading="materialMemoryDisableSaving"
+          @click="confirmDisableMaterialMemory"
+        >
+          {{ materialMemoryStatusConfirmText }}
+        </el-button>
       </template>
     </el-dialog>
   </section>
@@ -791,7 +900,7 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus';
 import { computed, onMounted, reactive, ref } from 'vue';
-import { erpApi } from '../api/erp';
+import { erpApi, type StockAlertFilter } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import InventorySourceDetailsDialog from '../components/InventorySourceDetailsDialog.vue';
@@ -840,6 +949,7 @@ const materialMemoryDialogVisible = ref(false);
 const materialMemorySaving = ref(false);
 const materialMemoryDisableDialogVisible = ref(false);
 const materialMemoryDisableSaving = ref(false);
+const materialMemoryStatusAction = ref<'enable' | 'disable'>('disable');
 const materialMemoryDisableTarget = ref<MaterialMemory | null>(null);
 const materialMemoryOperationSavingId = ref('');
 const adjustmentFileInput = ref<HTMLInputElement>();
@@ -849,6 +959,7 @@ const adjustmentHistoryLoading = ref(false);
 const expandedMobileInventoryCardKeys = ref<string[]>([]);
 const adjustForm = reactive({
   afterQuantity: 0,
+  targetStatus: undefined as 'SCRAPPED' | undefined,
   countedBy: '',
   countedAt: '',
   signatureName: '',
@@ -871,10 +982,12 @@ const filters = reactive<{
   warehouseId?: string;
   orderNo?: string;
   status?: InventoryStatus;
+  stockAlert?: StockAlertFilter;
 }>({});
 const materialMemoryFilters = reactive<{
   keyword?: string;
   status: CommonStatus;
+  stockAlert?: StockAlertFilter;
 }>({
   status: 'ENABLED'
 });
@@ -889,6 +1002,8 @@ const materialMemoryForm = reactive<{
   partName: string;
   unit: string;
   partSpecification: string;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity: number | null;
   status: CommonStatus;
 }>({
   id: '',
@@ -896,8 +1011,30 @@ const materialMemoryForm = reactive<{
   partName: '',
   unit: '',
   partSpecification: '',
+  stockAlertEnabled: false,
+  stockAlertQuantity: null,
   status: 'ENABLED'
 });
+const stockAlertDialogVisible = ref(false);
+const stockAlertSaving = ref(false);
+const stockAlertTarget = ref<InventorySummaryRow | null>(null);
+const stockAlertForm = reactive({
+  enabled: false,
+  quantity: null as number | null
+});
+const stockAlertDialogTitle = computed(() => {
+  const target = stockAlertTarget.value;
+  return target ? `库存报警设置 - ${target.partCode}` : '库存报警设置';
+});
+const materialMemoryStatusActionLabel = computed(() => (materialMemoryStatusAction.value === 'enable' ? '启用' : '停用'));
+const materialMemoryStatusDialogTitle = computed(() => `${materialMemoryStatusActionLabel.value}零件搜索记忆`);
+const materialMemoryStatusConfirmText = computed(() => `${materialMemoryStatusActionLabel.value}记忆`);
+const materialMemoryStatusSavingText = computed(() => `零件搜索记忆正在${materialMemoryStatusActionLabel.value}，请等待操作完成`);
+const materialMemoryStatusPrimaryWarning = computed(() =>
+  materialMemoryStatusAction.value === 'enable'
+    ? '启用后只恢复 Material 后续可选状态，不会自动恢复已停用的适用范围、BOM、默认图纸或来源加工关系。'
+    : '停用后不再作为后续订单选料、库存搜索和 0 库存零件展示的推荐项。'
+);
 
 const availableQuantityText = computed(() => formatInventoryTotalByUnit('availableQuantity'));
 const averageInventoryUsageRateText = computed(() => {
@@ -913,7 +1050,9 @@ const averageInventoryUsageRateText = computed(() => {
 const stockedWarehouseCount = computed(
   () => new Set(inventory.value.filter((item) => item.status === 'AVAILABLE' && batchAvailableQuantity(item) > 0).map((item) => item.warehouseId)).size
 );
-const adjustmentReservedQuantity = computed(() => Number(selectedBatch.value?.reservedQuantity || 0));
+const triggeredStockAlertRows = computed(() => inventorySummary.value.filter((row) => row.stockAlertTriggered));
+const triggeredStockAlertText = computed(() => `${triggeredStockAlertRows.value.length} 种`);
+const adjustmentReservedQuantity = computed(() => Number(selectedBatch.value?.reservedQuantity ?? 0));
 const adjustmentMinQuantity = computed(() => adjustmentReservedQuantity.value);
 const adjustmentDelta = computed(() => (selectedBatch.value ? adjustForm.afterQuantity - selectedBatch.value.quantity : 0));
 const selectedWarehouseName = computed(() => warehouses.value.find((item) => item.id === filters.warehouseId)?.warehouseName);
@@ -934,7 +1073,7 @@ function formatInventoryTotalByUnit(field: 'availableQuantity') {
   const totalByUnit = new Map<string, number>();
   for (const row of inventorySummary.value) {
     const unit = row.unit || '件';
-    totalByUnit.set(unit, (totalByUnit.get(unit) || 0) + Number(row[field] || 0));
+    totalByUnit.set(unit, (totalByUnit.get(unit) ?? 0) + Number(row[field] ?? 0));
   }
   if (totalByUnit.size === 0) {
     return formatQuantity(0, '件');
@@ -1015,6 +1154,9 @@ function openMaterialMemoryDialog(row: MaterialMemory) {
   materialMemoryForm.partName = row.partName;
   materialMemoryForm.unit = row.unit;
   materialMemoryForm.partSpecification = row.partSpecification || '';
+  materialMemoryForm.stockAlertEnabled = Boolean(row.stockAlertEnabled);
+  materialMemoryForm.stockAlertQuantity =
+    row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : Number(row.stockAlertQuantity);
   materialMemoryForm.status = row.status;
   materialMemoryDialogVisible.value = true;
 }
@@ -1050,6 +1192,10 @@ async function saveMaterialMemory() {
     ElMessage.warning('零件编码、名称和单位不能为空');
     return;
   }
+  if (materialMemoryForm.stockAlertEnabled && !validStockAlertQuantity(materialMemoryForm.stockAlertQuantity)) {
+    ElMessage.warning('启用低库存报警时必须填写大于或等于 0 的最小库存');
+    return;
+  }
   materialMemorySaving.value = true;
   try {
     await erpApi.updateInventoryMaterial(materialMemoryForm.id, {
@@ -1057,11 +1203,12 @@ async function saveMaterialMemory() {
       partName: materialMemoryForm.partName.trim(),
       unit: materialMemoryForm.unit.trim(),
       partSpecification: materialMemoryForm.partSpecification.trim() || undefined,
-      status: materialMemoryForm.status
+      stockAlertEnabled: materialMemoryForm.stockAlertEnabled,
+      stockAlertQuantity: materialMemoryForm.stockAlertEnabled ? Number(materialMemoryForm.stockAlertQuantity) : null
     });
     ElMessage.success('零件搜索记忆已保存');
     materialMemoryDialogVisible.value = false;
-    await loadMaterialMemory();
+    await Promise.all([loadMaterialMemory(), loadInventory()]);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '零件搜索记忆保存失败');
   } finally {
@@ -1073,26 +1220,29 @@ async function disableMaterialMemory(row: MaterialMemory) {
   if (materialMemoryOperationSavingId.value) {
     return;
   }
+  materialMemoryStatusAction.value = 'disable';
   materialMemoryDisableTarget.value = row;
   materialMemoryDisableDialogVisible.value = true;
 }
 
 function closeMaterialMemoryDisableDialog() {
   if (materialMemoryDisableSaving.value) {
-    ElMessage.warning('零件搜索记忆正在停用，请等待操作完成');
+    ElMessage.warning(materialMemoryStatusSavingText.value);
     return;
   }
   materialMemoryDisableDialogVisible.value = false;
   materialMemoryDisableTarget.value = null;
+  materialMemoryStatusAction.value = 'disable';
 }
 
 function handleMaterialMemoryDisableDialogBeforeClose(done: () => void) {
   if (materialMemoryDisableSaving.value) {
-    ElMessage.warning('零件搜索记忆正在停用，请等待操作完成');
+    ElMessage.warning(materialMemoryStatusSavingText.value);
     return;
   }
   done();
   materialMemoryDisableTarget.value = null;
+  materialMemoryStatusAction.value = 'disable';
 }
 
 async function confirmDisableMaterialMemory() {
@@ -1100,16 +1250,24 @@ async function confirmDisableMaterialMemory() {
     return;
   }
   const target = materialMemoryDisableTarget.value;
+  const action = materialMemoryStatusAction.value;
   materialMemoryDisableSaving.value = true;
   materialMemoryOperationSavingId.value = target.id;
   try {
-    await erpApi.disableInventoryMaterial(target.id);
-    ElMessage.success('零件搜索记忆已停用');
+    if (action === 'enable') {
+      // 恢复搜索记忆只恢复后续可选状态，不自动恢复已停用的适用范围、BOM、默认图纸或来源加工关系。
+      await erpApi.restoreInventoryMaterial(target.id);
+      ElMessage.success('零件搜索记忆已启用');
+    } else {
+      await erpApi.disableInventoryMaterial(target.id);
+      ElMessage.success('零件搜索记忆已停用');
+    }
     materialMemoryDisableDialogVisible.value = false;
     materialMemoryDisableTarget.value = null;
+    materialMemoryStatusAction.value = 'disable';
     await loadMaterialMemory();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '零件搜索记忆停用失败');
+    ElMessage.error(error instanceof Error ? error.message : action === 'enable' ? '零件搜索记忆启用失败' : '零件搜索记忆停用失败');
   } finally {
     materialMemoryDisableSaving.value = false;
     if (materialMemoryOperationSavingId.value === target.id) {
@@ -1122,18 +1280,125 @@ async function enableMaterialMemory(row: MaterialMemory) {
   if (materialMemoryOperationSavingId.value) {
     return;
   }
-  materialMemoryOperationSavingId.value = row.id;
-  try {
-    await erpApi.updateInventoryMaterial(row.id, { status: 'ENABLED' });
-    ElMessage.success('零件搜索记忆已启用');
-    await loadMaterialMemory();
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '零件搜索记忆启用失败');
-  } finally {
-    if (materialMemoryOperationSavingId.value === row.id) {
-      materialMemoryOperationSavingId.value = '';
-    }
+  materialMemoryStatusAction.value = 'enable';
+  materialMemoryDisableTarget.value = row;
+  materialMemoryDisableDialogVisible.value = true;
+}
+
+function validStockAlertQuantity(value: number | null | undefined) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
+function stockAlertText(row: InventorySummaryRow) {
+  if (!row.materialId) {
+    return '未建零件资料';
   }
+  if (!row.stockAlertEnabled) {
+    return '不报警';
+  }
+  const quantityText = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? '-' : formatQuantity(row.stockAlertQuantity, row.unit);
+  return row.stockAlertTriggered ? `低库存：低于 ${quantityText}` : `正常：下限 ${quantityText}`;
+}
+
+function stockAlertTagType(row: InventorySummaryRow) {
+  if (!row.materialId || !row.stockAlertEnabled) {
+    return 'info';
+  }
+  return row.stockAlertTriggered ? 'danger' : 'success';
+}
+
+function openStockAlertDialog(row: InventorySummaryRow) {
+  if (!row.materialId) {
+    ElMessage.warning('该零件还没有 Material 基础资料，不能设置库存报警');
+    return;
+  }
+  stockAlertTarget.value = row;
+  stockAlertForm.enabled = Boolean(row.stockAlertEnabled);
+  stockAlertForm.quantity =
+    row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : Number(row.stockAlertQuantity);
+  stockAlertDialogVisible.value = true;
+}
+
+function warnStockAlertSavingClose() {
+  ElMessage.warning('库存报警设置正在保存，请等待保存完成');
+}
+
+function closeStockAlertDialog() {
+  if (stockAlertSaving.value) {
+    warnStockAlertSavingClose();
+    return;
+  }
+  stockAlertDialogVisible.value = false;
+}
+
+function handleStockAlertDialogBeforeClose(done: () => void) {
+  if (stockAlertSaving.value) {
+    warnStockAlertSavingClose();
+    return;
+  }
+  done();
+}
+
+async function saveStockAlert() {
+  const target = stockAlertTarget.value;
+  if (stockAlertSaving.value || !target?.materialId) {
+    return;
+  }
+  if (stockAlertForm.enabled && !validStockAlertQuantity(stockAlertForm.quantity)) {
+    ElMessage.warning('启用低库存报警时必须填写大于或等于 0 的最小库存');
+    return;
+  }
+  stockAlertSaving.value = true;
+  try {
+    // 库存报警只写入 Material 基础资料，不创建订单、生产任务或库存流水。
+    await erpApi.updateInventoryMaterial(target.materialId, {
+      stockAlertEnabled: stockAlertForm.enabled,
+      stockAlertQuantity: stockAlertForm.enabled ? Number(stockAlertForm.quantity) : null
+    });
+    ElMessage.success('库存报警设置已保存');
+    stockAlertDialogVisible.value = false;
+    await Promise.all([loadInventory(), loadMaterialMemory()]);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存报警设置保存失败');
+  } finally {
+    stockAlertSaving.value = false;
+  }
+}
+
+function canScrapBatch(row: InventoryBatch) {
+  return !isMobileLayout.value && canAdjustBatch(row) && Number(row.quantity ?? 0) > 0 && Number(row.reservedQuantity ?? 0) <= 0;
+}
+
+function scrapBatchDisabledReason(row?: InventoryBatch) {
+  if (!row) {
+    return '';
+  }
+  if (isMobileLayout.value) {
+    return '手机端只查看库存，销毁清零请在电脑端操作。';
+  }
+  if (!canAdjustBatch(row)) {
+    return adjustmentDisabledReason(row);
+  }
+  if (Number(row.reservedQuantity ?? 0) > 0) {
+    return '该批次已有订单预占，需先处理订单库存来源后再销毁清零。';
+  }
+  if (Number(row.quantity ?? 0) <= 0) {
+    return '该批次账面数量已为 0，无需销毁清零。';
+  }
+  return '';
+}
+
+function openScrapInventoryDialog(row: InventoryBatch) {
+  const disabledReason = scrapBatchDisabledReason(row);
+  if (disabledReason) {
+    ElMessage.warning(disabledReason);
+    return;
+  }
+  openAdjustDialog(row);
+  // 销毁清零仍走盘点调整流程，必须填写人员、签字和附件，后端会追加 InventoryTransaction。
+  adjustForm.afterQuantity = 0;
+  adjustForm.targetStatus = 'SCRAPPED';
+  adjustForm.remark = `销毁/报废清零：${row.batchNo}`;
 }
 
 function reset() {
@@ -1142,7 +1407,17 @@ function reset() {
   filters.warehouseId = undefined;
   filters.orderNo = undefined;
   filters.status = undefined;
+  filters.stockAlert = undefined;
   void loadInventory();
+}
+
+function applyTriggeredStockAlertFilter() {
+  const nextFilter = filters.stockAlert === 'TRIGGERED' ? undefined : 'TRIGGERED';
+  filters.stockAlert = nextFilter;
+  materialMemoryFilters.stockAlert = nextFilter;
+  // 库存报警只是提醒和筛选入口，不自动补单、下单、提交生产或扣库存。
+  void loadInventory();
+  searchMaterialMemory();
 }
 
 async function queryMaterialSuggestions(keyword: string, callback: (items: InventoryMaterialSuggestion[]) => void) {
@@ -1198,23 +1473,23 @@ function sourceKindLabel(kind?: string) {
 
 function stockSourceBreakdownText(row: InventorySummaryRow) {
   return [
-    `正常 ${formatQuantity(row.normalOrderStockQuantity || 0, row.unit)}`,
-    `取消 ${formatQuantity(row.cancelledOrderStockQuantity || 0, row.unit)}`,
-    `变更 ${formatQuantity(row.customerChangeStockQuantity || 0, row.unit)}`
+    `正常 ${formatQuantity(row.normalOrderStockQuantity ?? 0, row.unit)}`,
+    `取消 ${formatQuantity(row.cancelledOrderStockQuantity ?? 0, row.unit)}`,
+    `变更 ${formatQuantity(row.customerChangeStockQuantity ?? 0, row.unit)}`
   ].join(' / ');
 }
 
 function inventoryUsageRate(row: InventorySummaryRow) {
-  const totalQuantity = Number(row.totalQuantity || 0);
+  const totalQuantity = Number(row.totalQuantity ?? 0);
   if (totalQuantity <= 0) {
     return null;
   }
-  return Math.min(Math.max(Number(row.usedQuantity || 0) / totalQuantity, 0), 1);
+  return Math.min(Math.max(Number(row.usedQuantity ?? 0) / totalQuantity, 0), 1);
 }
 
 function isZeroInventorySummaryRow(row: InventorySummaryRow) {
   // 0 库存行来自零件搜索记忆匹配，表示当前筛选范围没有可用库存或历史批次。
-  return Number(row.batchCount || 0) === 0 && Number(row.availableQuantity || 0) <= 0 && Number(row.totalQuantity || 0) <= 0;
+  return Number(row.batchCount ?? 0) === 0 && Number(row.availableQuantity ?? 0) <= 0 && Number(row.totalQuantity ?? 0) <= 0;
 }
 
 function summarySourceDetailsButtonText(row: InventorySummaryRow) {
@@ -1345,7 +1620,7 @@ function adjustmentDisabledReason(row?: InventoryBatch) {
 }
 
 function batchAvailableQuantity(row: InventoryBatch) {
-  return Number(row.availableQuantity ?? Math.max(Number(row.quantity || 0) - Number(row.reservedQuantity || 0), 0));
+  return Number(row.availableQuantity ?? Math.max(Number(row.quantity ?? 0) - Number(row.reservedQuantity ?? 0), 0));
 }
 
 function reservationStatusText(status: InventoryReservationStatus) {
@@ -1440,7 +1715,8 @@ function openAdjustDialog(row: InventoryBatch) {
     return;
   }
   selectedBatch.value = row;
-  adjustForm.afterQuantity = Math.max(row.quantity, Number(row.reservedQuantity || 0));
+  adjustForm.afterQuantity = Math.max(row.quantity, Number(row.reservedQuantity ?? 0));
+  adjustForm.targetStatus = undefined;
   adjustForm.countedBy = '';
   adjustForm.countedAt = currentDateTimeValue();
   adjustForm.signatureName = '';
@@ -1478,6 +1754,7 @@ function handleAdjustDialogBeforeClose(done: () => void) {
 function resetAdjustDialog() {
   selectedBatch.value = undefined;
   adjustForm.afterQuantity = 0;
+  adjustForm.targetStatus = undefined;
   adjustForm.countedBy = '';
   adjustForm.countedAt = '';
   adjustForm.signatureName = '';
@@ -1560,6 +1837,10 @@ async function submitAdjustment() {
     );
     return;
   }
+  if (adjustForm.targetStatus === 'SCRAPPED' && Number(adjustForm.afterQuantity) !== 0) {
+    ElMessage.warning('报废或销毁清零后数量必须为 0');
+    return;
+  }
 
   adjustSaving.value = true;
   try {
@@ -1567,6 +1848,7 @@ async function submitAdjustment() {
 
     await erpApi.adjustInventoryBatch(selectedBatch.value.id, {
       afterQuantity: Number(adjustForm.afterQuantity),
+      targetStatus: adjustForm.targetStatus,
       countedBy: adjustForm.countedBy.trim(),
       countedAt: adjustForm.countedAt || undefined,
       signatureName: adjustForm.signatureName.trim(),

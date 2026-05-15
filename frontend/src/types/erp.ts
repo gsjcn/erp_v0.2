@@ -1,8 +1,8 @@
 export type CommonStatus = 'ENABLED' | 'DISABLED';
 export type CustomerRegionType = 'CHINA' | 'OVERSEAS';
-export type OrderStatus = 'DRAFT' | 'SUBMITTED' | 'IN_PRODUCTION' | 'COMPLETED' | 'CANCELLED';
+export type OrderStatus = 'DRAFT' | 'PENDING_PRODUCTION' | 'IN_PRODUCTION' | 'COMPLETED' | 'CANCELLED';
 export type OrderLineFulfillmentMode = 'PRODUCTION' | 'STOCK' | 'REWORK';
-export type ProductionStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED';
+export type ProductionStatus = 'PENDING' | 'IN_PROGRESS' | 'WAITING_CONFIRMATION' | 'COMPLETED' | 'STORED' | 'CANCELLED';
 export type OrderProductionFilterStatus =
   | 'ORDER_DRAFT'
   | 'WAITING_PRODUCTION'
@@ -17,7 +17,7 @@ export type ProductionReplenishmentRequestStatus = 'PENDING' | 'APPROVED' | 'REJ
 export type ProductionNoticeType = 'QUANTITY_INCREASE' | 'QUANTITY_DECREASE' | 'ORDER_CANCELLED' | 'MATERIAL_ADDED' | 'TASK_WITHDRAWN';
 export type ProductionNoticeStatus = 'PENDING' | 'ACKNOWLEDGED';
 export type ProductionNoticeTarget = 'PRODUCTION' | 'WAREHOUSE';
-export type InventoryStatus = 'AVAILABLE' | 'USED';
+export type InventoryStatus = 'AVAILABLE' | 'RESERVED' | 'USED' | 'SCRAPPED';
 export type InventorySourceType = 'ORDER' | 'STOCK';
 export type InventorySourceKind = 'NORMAL_ORDER' | 'CANCELLED_ORDER' | 'CUSTOMER_CHANGE';
 export type StatisticsPeriod = 'year' | 'quarter' | 'month';
@@ -104,6 +104,7 @@ export interface CustomerContact {
   title?: string;
   remark?: string;
   isPrimary?: boolean;
+  status?: CommonStatus;
 }
 
 export interface OrderSummary {
@@ -720,6 +721,7 @@ export interface InventorySummaryWarehouseRow {
 }
 
 export interface InventorySummaryRow {
+  materialId?: string;
   partCode: string;
   partName: string;
   unit: string;
@@ -735,6 +737,9 @@ export interface InventorySummaryRow {
   normalOrderStockQuantity: number;
   cancelledOrderStockQuantity: number;
   customerChangeStockQuantity: number;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity?: number | null;
+  stockAlertTriggered: boolean;
   warehouses: InventorySummaryWarehouseRow[];
 }
 
@@ -781,6 +786,8 @@ export interface MaterialMemory {
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity?: number | null;
   status: CommonStatus;
   availableQuantity: number;
   orderInventoryQuantity: number;
@@ -859,6 +866,9 @@ export interface MaterialDashboardRow {
   availableQuantity: number;
   orderInventoryQuantity: number;
   stockInventoryQuantity: number;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity?: number | null;
+  stockAlertTriggered: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -876,6 +886,7 @@ export interface MaterialDashboardSummary {
   relationCounts: Partial<Record<'BOM' | 'APPLICABILITY' | 'ORDER_HISTORY' | 'MATERIAL_ONLY', number>>;
   drawingSourceCounts: Partial<Record<'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST' | 'ORDER_HISTORY' | 'NONE', number>>;
   bomStructureCounts: Partial<Record<'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE', number>>;
+  stockAlertCounts: Partial<Record<'ENABLED' | 'TRIGGERED' | 'DISABLED', number>>;
 }
 
 export interface MaterialDashboardResponse {
@@ -957,6 +968,8 @@ export interface MaterialImportPreviewRow {
   drawingStatus?: string | null;
   partThickness?: number | null;
   projectModel?: string | null;
+  stockAlertEnabled?: boolean | null;
+  stockAlertQuantity?: number | null;
   remark?: string | null;
   issues: MaterialImportIssue[];
   errorCount: number;

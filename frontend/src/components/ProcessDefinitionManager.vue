@@ -93,15 +93,13 @@
     >
       <el-form label-width="86px">
         <el-form-item label="工序名称" required>
-          <el-input v-model="form.processName" maxlength="30" show-word-limit placeholder="例如 抛丸" />
+          <el-input v-model="form.processName" placeholder="例如 抛丸" />
         </el-form-item>
         <el-form-item label="备注">
           <el-input
             v-model="form.remark"
             type="textarea"
             :rows="3"
-            maxlength="200"
-            show-word-limit
             placeholder="可填写工序使用范围或注意事项"
           />
         </el-form-item>

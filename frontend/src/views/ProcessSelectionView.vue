@@ -353,7 +353,7 @@
           <span v-if="quickProcessFilterKeyword && filteredQuickProcessOptions.length === 0" class="process-empty-text">没有匹配工序</span>
         </div>
         <div v-if="!isMobileLayout" class="inline-process-create">
-          <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸、抛光" maxlength="30" :disabled="!canEditProcess" />
+          <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸、抛光" :disabled="!canEditProcess" />
           <el-tooltip :disabled="!processEditDisabledReason" :content="processEditDisabledReason" placement="top">
             <span class="action-tooltip-wrap">
               <el-button :loading="creatingProcess" :disabled="!canEditProcess" @click="createProcessDefinition">新建工序</el-button>
@@ -959,14 +959,14 @@ function lineProcessBadgeText(line: OrderLine) {
 }
 
 function selectedStockSourceQuantity(line: OrderLine) {
-  return (line.selectedStockSources || []).reduce((sum, source) => sum + Number(source.quantity || 0), 0);
+  return (line.selectedStockSources || []).reduce((sum, source) => sum + Number(source.quantity ?? 0), 0);
 }
 
 function reworkStockShortageQuantity(line: OrderLine) {
   if (line.fulfillmentMode !== 'REWORK') {
     return 0;
   }
-  return Math.max(Math.round((Number(line.productionPlanQuantity || 0) - selectedStockSourceQuantity(line) + Number.EPSILON) * 1000) / 1000, 0);
+  return Math.max(Math.round((Number(line.productionPlanQuantity ?? 0) - selectedStockSourceQuantity(line) + Number.EPSILON) * 1000) / 1000, 0);
 }
 
 function submitOrderLineWarning(line: OrderLine) {
@@ -1007,13 +1007,13 @@ function orderShortageActionText(order: OrderSummary) {
   if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
     const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
       ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
-      : formatQuantity(order.pendingProductionReplenishmentQuantity || 0, order.pendingProductionReplenishmentUnit || order.unit || '件');
-    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount || 0} 个 / ${quantityText}`;
+      : formatQuantity(order.pendingProductionReplenishmentQuantity ?? 0, order.pendingProductionReplenishmentUnit || order.unit || '件');
+    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount ?? 0} 个 / ${quantityText}`;
   }
   const quantityText = order.unresolvedShortageQuantityByUnit?.length
     ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
-    : formatQuantity(order.unresolvedShortageQuantity || 0, order.unresolvedShortageUnit || order.unit || '件');
-  return `需补单 ${order.unresolvedShortageLineCount || 0} 个 / ${quantityText}`;
+    : formatQuantity(order.unresolvedShortageQuantity ?? 0, order.unresolvedShortageUnit || order.unit || '件');
+  return `需补单 ${order.unresolvedShortageLineCount ?? 0} 个 / ${quantityText}`;
 }
 
 function orderNeedsShortageAttention(order: OrderSummary) {

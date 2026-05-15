@@ -1168,6 +1168,7 @@
           type="success"
           plain
           :loading="sourceBomDiffReviewSaving"
+          :disabled="!sourceBomReviewForm.reviewedBy.trim()"
           @click="confirmSourceBomDiffReviewed"
         >
           确认保留差异
@@ -1257,6 +1258,7 @@ import type {
   ModelBomScopeSummary,
   ProcessDefinition
 } from '../types/erp';
+import { formatDateTime, formatNumber, formatQuantity } from '../utils/format';
 import { filterPinyinSearchOptions, normalizeSearchKeyword, pinyinSearchMatches } from '../utils/pinyinSearch';
 
 type BomLineStructureType = 'STANDALONE_PART' | 'COMPONENT' | 'CHILD_PART';
@@ -1449,7 +1451,7 @@ const copyForm = reactive<{
 });
 
 const sourceBomReviewForm = reactive({
-  reviewedBy: '系统操作员',
+  reviewedBy: '',
   reviewRemark: ''
 });
 
@@ -1553,7 +1555,7 @@ function summarizeThicknessReviewLines(lines: ModelBomLine[]) {
     unconfirmedSourceCount: 0
   };
   for (const line of reviewLines) {
-    const thickness = Number(line.partThickness || 0);
+    const thickness = Number(line.partThickness ?? 0);
     if (thickness <= 0) {
       summary.noThicknessCount += 1;
     } else if (line.partThicknessSource === 'ORDER_HISTORY') {
@@ -1736,9 +1738,9 @@ function formatModelBomListLineSummary(row: ModelBom) {
   const effectiveCount = (row.lines || []).filter(lineCountsAsActiveBomContent).length;
   const inactiveCount = Math.max((row.lines || []).length - effectiveCount, 0);
   const activePartLines = (row.lines || []).filter((line) => lineCountsAsActiveBomContent(line) && line.lineType !== 'COMPONENT');
-  const confirmedThicknessCount = activePartLines.filter((line) => Number(line.partThickness || 0) > 0 && line.partThicknessSource === 'BOM_LINE').length;
-  const historyThicknessCount = activePartLines.filter((line) => Number(line.partThickness || 0) > 0 && line.partThicknessSource === 'ORDER_HISTORY').length;
-  const noThicknessCount = activePartLines.filter((line) => Number(line.partThickness || 0) <= 0).length;
+  const confirmedThicknessCount = activePartLines.filter((line) => Number(line.partThickness ?? 0) > 0 && line.partThicknessSource === 'BOM_LINE').length;
+  const historyThicknessCount = activePartLines.filter((line) => Number(line.partThickness ?? 0) > 0 && line.partThicknessSource === 'ORDER_HISTORY').length;
+  const noThicknessCount = activePartLines.filter((line) => Number(line.partThickness ?? 0) <= 0).length;
   return {
     effectiveCount,
     inactiveCount,
@@ -1925,7 +1927,7 @@ function lineNeedsThicknessReview(line: ModelBomLine) {
   return (
     lineCountsAsActiveBomContent(line) &&
     line.lineType !== 'COMPONENT' &&
-    (Number(line.partThickness || 0) <= 0 || line.partThicknessSource !== 'BOM_LINE')
+    (Number(line.partThickness ?? 0) <= 0 || line.partThicknessSource !== 'BOM_LINE')
   );
 }
 
@@ -3762,7 +3764,7 @@ async function deleteBom(row: ModelBom) {
       activeBomId.value = '';
     }
     ElMessage.success(
-      `已删除无效 BOM：${result.bomName}，清理 ${result.lineCount} 行明细、${result.customerScopeCount} 个适用客户、${result.diffReviewCount} 条差异核对记录`
+      `已删除无效空 BOM：${result.bomName}，确认明细 ${result.lineCount} 行、适用客户 ${result.customerScopeCount} 个、差异核对 ${result.diffReviewCount} 条`
     );
     await loadModelBoms();
   } catch (error) {
@@ -3785,9 +3787,9 @@ async function confirmDeleteBom(row: ModelBom) {
     title: '删除无效 BOM',
     message: `确定永久删除零件包 ${row.bomName} 吗？\n范围：${scopeText}`,
     details: [
-      '该操作会删除 BOM 表头、包内明细和差异核对记录。',
-      '仅用于误操作创建且没有客户副本引用的无效 BOM。',
-      '不会删除订单、生产或库存数据。'
+      '仅允许删除已停用、无包内明细、无适用客户、无差异核对记录且没有客户副本引用的无效空 BOM。',
+      '有明细、客户范围、差异核对记录或客户副本引用时，后端会阻断物理删除，请改为停用。',
+      '不会删除订单、生产、库存、BOM 行历史或客户 BOM 副本。'
     ],
     confirmButtonText: '永久删除',
     confirmButtonType: 'danger'
@@ -3826,8 +3828,8 @@ async function enableBom(row: ModelBom) {
 }
 
 function compareBomLines(left: ModelBomLine, right: ModelBomLine) {
-  const leftDisplayOrder = Number(left.displayOrder || 0);
-  const rightDisplayOrder = Number(right.displayOrder || 0);
+  const leftDisplayOrder = Number(left.displayOrder ?? 0);
+  const rightDisplayOrder = Number(right.displayOrder ?? 0);
   if (leftDisplayOrder > 0 && rightDisplayOrder > 0 && leftDisplayOrder !== rightDisplayOrder) {
     return leftDisplayOrder - rightDisplayOrder;
   }
@@ -3837,7 +3839,7 @@ function compareBomLines(left: ModelBomLine, right: ModelBomLine) {
   if (rightDisplayOrder > 0 && leftDisplayOrder <= 0) {
     return 1;
   }
-  return (left.sortOrder || 0) - (right.sortOrder || 0) || left.partCode.localeCompare(right.partCode);
+  return (left.sortOrder ?? 0) - (right.sortOrder ?? 0) || left.partCode.localeCompare(right.partCode);
 }
 
 function buildSourceBomDiffIssues(sourceBom: ModelBom, targetBom: ModelBom): BomDiffIssue[] {
@@ -3934,7 +3936,7 @@ function bomLineReviewFields(sourceLine?: ModelBomLine, targetLine?: ModelBomLin
     ['零件编码', sourceLine?.partCode || '', targetLine?.partCode || ''],
     ['零件名称', sourceLine?.partName || '', targetLine?.partName || ''],
     ['零件类型', sourceLine?.partCategory || '', targetLine?.partCategory || ''],
-    ['默认数量', sourceLine ? `${formatNumber(sourceLine.defaultQuantity)} ${sourceLine.unit || ''}` : '', targetLine ? `${formatNumber(targetLine.defaultQuantity)} ${targetLine.unit || ''}` : ''],
+    ['默认数量', sourceLine ? formatQuantity(sourceLine.defaultQuantity, sourceLine.unit) : '', targetLine ? formatQuantity(targetLine.defaultQuantity, targetLine.unit) : ''],
     ['默认图纸', sourceLine ? bomLineDrawingSignature(sourceLine) : '', targetLine ? bomLineDrawingSignature(targetLine) : ''],
     ['默认工艺', sourceLine?.defaultProcessRoute || '', targetLine?.defaultProcessRoute || ''],
     ['厚度', sourceLine?.partThickness ? formatNumber(sourceLine.partThickness) : '', targetLine?.partThickness ? formatNumber(targetLine.partThickness) : ''],
@@ -3965,7 +3967,7 @@ function bomLineDrawingSignature(line: ModelBomLine) {
 function openSourceBomDiffReviewDialog(issue: BomDiffIssue) {
   selectedSourceBomDiffIssue.value = issue;
   const review = sourceBomDiffReviewRow(issue);
-  sourceBomReviewForm.reviewedBy = review?.reviewedBy || sourceBomReviewForm.reviewedBy || '系统操作员';
+  sourceBomReviewForm.reviewedBy = review?.reviewedBy || '';
   sourceBomReviewForm.reviewRemark = review?.reviewRemark || '';
   sourceBomReviewDialogVisible.value = true;
 }
@@ -4017,7 +4019,7 @@ function sourceBomDiffReviewRecordText(issue?: BomDiffIssue | null) {
 }
 
 function formatSourceBomReviewAt(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '';
+  return value ? formatDateTime(value) : '';
 }
 
 async function confirmSourceBomDiffReviewed() {
@@ -4155,13 +4157,13 @@ async function createCustomerLineFromSourceBomReview() {
   lineForm.parentComponentNo = lineForm.structureType === 'CHILD_PART' ? normalizeComponentNo(sourceLine.parentComponentNo) : '';
   lineForm.defaultDrawingRevisionId = sourceLine.defaultDrawingRevisionId || '';
   lineForm.defaultProcessRouteSteps = splitDefaultProcessRoute(sourceLine.defaultProcessRoute || '');
-  lineForm.partThickness = sourceLine.lineType === 'COMPONENT' ? 0 : Number(sourceLine.partThickness || 0);
-  lineFormOriginalPartThickness.value = Number(sourceLine.partThickness || 0);
+  lineForm.partThickness = sourceLine.lineType === 'COMPONENT' ? 0 : Number(sourceLine.partThickness ?? 0);
+  lineFormOriginalPartThickness.value = Number(sourceLine.partThickness ?? 0);
   lineFormOriginalPartThicknessSource.value = sourceLine.partThicknessSource || null;
   resetDefaultProcessDragState();
   lineDefaultProcessFilterKeyword.value = '';
   lineForm.defaultQuantity = sourceLine.defaultQuantity;
-  lineForm.sortOrder = sourceLine.sortOrder || ((activeBom.value.lines || []).reduce((max, item) => Math.max(max, item.sortOrder || 0), 0) || 0) + 10;
+  lineForm.sortOrder = sourceLine.sortOrder ?? (activeBom.value.lines || []).reduce((max, item) => Math.max(max, item.sortOrder ?? 0), 0) + 10;
   lineForm.remark = sourceLine.remark || `从来源 BOM ${activeSourceBomName.value} 核对补入`;
   lineForm.status = sourceLine.materialStatus === 'DISABLED' ? 'DISABLED' : 'ENABLED';
   sourceBomReviewDialogVisible.value = false;
@@ -4255,7 +4257,7 @@ function formatLineDrawing(row: ModelBomLine) {
 }
 
 function displayBomLineOrder(row: ModelBomLine) {
-  return activeBomLineDisplayOrderMap.value.get(row.id) || row.displayOrder || 0;
+  return activeBomLineDisplayOrderMap.value.get(row.id) ?? row.displayOrder ?? 0;
 }
 
 function formatLineOrderTitle(row: ModelBomLine) {
@@ -4275,7 +4277,7 @@ function formatLineThickness(row: ModelBomLine) {
   if (row.lineType === 'COMPONENT') {
     return '不适用（父级组件由子零件维护）';
   }
-  const thickness = Number(row.partThickness || 0);
+  const thickness = Number(row.partThickness ?? 0);
   if (thickness <= 0) {
     return '需核对';
   }
@@ -4292,7 +4294,7 @@ function formatLineThicknessSourceForText(row: ModelBomLine) {
   if (row.lineType === 'COMPONENT') {
     return '父级组件不适用';
   }
-  const thickness = Number(row.partThickness || 0);
+  const thickness = Number(row.partThickness ?? 0);
   if (thickness > 0 && row.partThicknessSource === 'BOM_LINE') {
     return '当前BOM明细';
   }
@@ -4306,7 +4308,7 @@ function formatLineThicknessSourceLabel(row: ModelBomLine) {
   if (row.lineType === 'COMPONENT') {
     return '父级组件';
   }
-  const thickness = Number(row.partThickness || 0);
+  const thickness = Number(row.partThickness ?? 0);
   if (thickness <= 0) {
     return '未填写';
   }
@@ -4323,7 +4325,7 @@ function lineThicknessSourceTagType(row: ModelBomLine) {
   if (row.lineType === 'COMPONENT') {
     return 'info';
   }
-  const thickness = Number(row.partThickness || 0);
+  const thickness = Number(row.partThickness ?? 0);
   if (thickness <= 0) {
     return 'danger';
   }
@@ -4340,7 +4342,7 @@ function formatLineThicknessReviewReason(row: ModelBomLine) {
   if (row.lineType === 'COMPONENT') {
     return '父级组件由子零件拼接，不需要维护自身厚度';
   }
-  const thickness = Number(row.partThickness || 0);
+  const thickness = Number(row.partThickness ?? 0);
   if (thickness <= 0) {
     return '当前 BOM 明细未填写厚度，请核对后保存';
   }
@@ -4765,7 +4767,7 @@ function resetLineForm() {
   lineDefaultProcessFilterKeyword.value = '';
   lineForm.partThickness = 0;
   lineForm.defaultQuantity = 1;
-  lineForm.sortOrder = ((activeBom.value?.lines || []).reduce((max, item) => Math.max(max, item.sortOrder || 0), 0) || 0) + 10;
+  lineForm.sortOrder = (activeBom.value?.lines || []).reduce((max, item) => Math.max(max, item.sortOrder ?? 0), 0) + 10;
   lineForm.remark = '';
   lineForm.status = 'ENABLED';
   lineDrawingRevisions.value = [];
@@ -4840,11 +4842,11 @@ async function openLineEditDialog(row: ModelBomLine, options: { thicknessReview?
   lineForm.defaultProcessRouteSteps = splitDefaultProcessRoute(row.defaultProcessRoute || '');
   resetDefaultProcessDragState();
   lineDefaultProcessFilterKeyword.value = '';
-  lineForm.partThickness = row.lineType === 'COMPONENT' ? 0 : Number(row.partThickness || 0);
-  lineFormOriginalPartThickness.value = Number(row.partThickness || 0);
+  lineForm.partThickness = row.lineType === 'COMPONENT' ? 0 : Number(row.partThickness ?? 0);
+  lineFormOriginalPartThickness.value = Number(row.partThickness ?? 0);
   lineFormOriginalPartThicknessSource.value = row.partThicknessSource || null;
   lineForm.defaultQuantity = row.defaultQuantity;
-  lineForm.sortOrder = row.sortOrder || 0;
+  lineForm.sortOrder = row.sortOrder ?? 0;
   lineForm.remark = row.remark || '';
   lineForm.status = row.status;
   lineDialogVisible.value = true;
@@ -4906,7 +4908,7 @@ async function selectMaterial(item: InventoryMaterialSuggestion) {
   lineForm.selectedMaterialKeyword = keyword;
   lineForm.materialStatus = 'ENABLED';
   lineForm.defaultDrawingRevisionId = '';
-  lineForm.partThickness = Number(item.partThickness || 0) > 0 ? Number(item.partThickness) : 0;
+  lineForm.partThickness = Number(item.partThickness ?? 0) > 0 ? Number(item.partThickness) : 0;
   lineFormOriginalPartThickness.value = null;
   lineFormOriginalPartThicknessSource.value = null;
   void loadLineDrawingRevisions(materialId);
@@ -5099,7 +5101,7 @@ function formatLineFormThicknessStatusText() {
   if (lineForm.structureType === 'COMPONENT') {
     return '父级组件不维护自身厚度';
   }
-  const thickness = Number(lineForm.partThickness || 0);
+  const thickness = Number(lineForm.partThickness ?? 0);
   if (thickness <= 0) {
     return '当前厚度需要核对';
   }
@@ -5124,7 +5126,7 @@ function shouldSubmitLinePartThickness(lineThickness: number) {
   if (lineFormOriginalPartThicknessSource.value !== 'ORDER_HISTORY') {
     return true;
   }
-  const originalThickness = Number(lineFormOriginalPartThickness.value || 0);
+  const originalThickness = Number(lineFormOriginalPartThickness.value ?? 0);
   const unchangedHistoryThickness = Math.abs(lineThickness - originalThickness) < 0.0001;
   // 历史订单厚度只做普通编辑的参考值，不能因为保存其它字段而静默确认为当前 BOM 明细厚度。
   return !unchangedHistoryThickness;
@@ -5177,7 +5179,7 @@ async function saveLine() {
     ElMessage.warning('默认数量必须大于 0');
     return;
   }
-  const lineThickness = Number(lineForm.partThickness || 0);
+  const lineThickness = Number(lineForm.partThickness ?? 0);
   if (lineForm.structureType !== 'COMPONENT' && (!Number.isFinite(lineThickness) || lineThickness < 0)) {
     ElMessage.warning('默认厚度不能小于 0');
     return;
@@ -5198,7 +5200,7 @@ async function saveLine() {
   const shouldKeepHistoryThicknessPending =
     lineForm.structureType !== 'COMPONENT' &&
     lineFormOriginalPartThicknessSource.value === 'ORDER_HISTORY' &&
-    Number(lineForm.partThickness || 0) > 0 &&
+    Number(lineForm.partThickness ?? 0) > 0 &&
     !shouldSubmitPartThickness;
   const savedFromThicknessReview = Boolean(lineForm.id && lineForm.id === thicknessReviewLineId.value);
   const thicknessReviewBomIdBeforeSave = savedFromThicknessReview ? thicknessReviewBomId.value || activeBom.value.id : '';
@@ -5332,13 +5334,6 @@ async function enableLine(row: ModelBomLine) {
   }
 }
 
-function formatQuantity(value: number | undefined, unit?: string) {
-  return `${formatNumber(value || 0)} ${unit || ''}`.trim();
-}
-
-function formatNumber(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/\.?0+$/, '');
-}
 </script>
 
 <style scoped>

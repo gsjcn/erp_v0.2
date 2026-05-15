@@ -38,6 +38,7 @@ import type {
   ProductionNotice,
   ProductionNoticeStatus,
   ProductionNoticeTarget,
+  ProductionNoticeType,
   ProductionOperator,
   ProductionOrderSummary,
   ProductionReplenishmentRequest,
@@ -48,6 +49,7 @@ import type {
   ProductionStatus,
   ProductionTask,
   Warehouse,
+  WarehouseLocation,
   WarehouseShipment,
   WarehouseTransaction,
   WarehouseReceipt
@@ -136,9 +138,12 @@ export interface SaveProcessDefinitionPayload {
 export interface MaterialMemoryFilters {
   keyword?: string;
   status?: CommonStatus;
+  stockAlert?: StockAlertFilter;
   limit?: number;
   offset?: number;
 }
+
+export type StockAlertFilter = 'ALL' | 'ENABLED' | 'TRIGGERED' | 'DISABLED';
 
 export interface MaterialDashboardFilters {
   keyword?: string;
@@ -152,6 +157,7 @@ export interface MaterialDashboardFilters {
   bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE';
   bomPresence?: 'WITH_BOM' | 'WITHOUT_BOM';
   recentOrderPresence?: 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER';
+  stockAlert?: StockAlertFilter;
   drawingDateFrom?: string;
   drawingDateTo?: string;
   lastOrderDateFrom?: string;
@@ -168,7 +174,8 @@ export interface UpdateMaterialMemoryPayload {
   partName?: string;
   unit?: string;
   partSpecification?: string;
-  status?: CommonStatus;
+  stockAlertEnabled?: boolean;
+  stockAlertQuantity?: number | null;
 }
 
 export interface CreateMaterialMemoryPayload {
@@ -176,6 +183,8 @@ export interface CreateMaterialMemoryPayload {
   partName: string;
   unit: string;
   partSpecification?: string;
+  stockAlertEnabled?: boolean;
+  stockAlertQuantity?: number | null;
   status?: CommonStatus;
 }
 
@@ -185,6 +194,8 @@ export interface SaveMaterialApplicabilityPayload {
   remark?: string;
   status?: CommonStatus;
 }
+
+export type UpdateMaterialApplicabilityPayload = Omit<SaveMaterialApplicabilityPayload, 'status'>;
 
 export interface ModelBomFilters {
   keyword?: string;
@@ -232,6 +243,8 @@ export interface SaveMaterialDrawingRevisionPayload {
   status?: CommonStatus;
 }
 
+export type UpdateMaterialDrawingRevisionPayload = Omit<SaveMaterialDrawingRevisionPayload, 'status'>;
+
 export interface SaveModelBomLinePayload {
   materialId: string;
   lineType?: 'PART' | 'COMPONENT';
@@ -276,7 +289,7 @@ export interface ConfirmModelBomDiffReviewPayload {
   issueDetail?: string;
   diffFingerprint: string;
   fieldsJson?: Record<string, unknown>;
-  reviewedBy?: string;
+  reviewedBy: string;
   reviewRemark?: string;
 }
 
@@ -308,6 +321,8 @@ export interface SaveMaterialTransformRulePayload {
   remark?: string;
   status?: CommonStatus;
 }
+
+export type UpdateMaterialTransformRulePayload = Omit<SaveMaterialTransformRulePayload, 'status'>;
 
 export interface DrawingUploadResponse {
   fileName: string;
@@ -606,6 +621,7 @@ export interface InventoryFilters {
   warehouseId?: string;
   orderNo?: string;
   status?: InventoryStatus;
+  stockAlert?: StockAlertFilter;
   excludeOrderNo?: string;
   excludeOrderId?: string;
 }
@@ -621,6 +637,7 @@ export interface InventorySourceDetailFilters {
 
 export interface AdjustInventoryBatchPayload {
   afterQuantity: number;
+  targetStatus?: 'SCRAPPED';
   countedBy: string;
   countedAt?: string;
   signatureName: string;
@@ -657,6 +674,20 @@ export interface ProductionReplenishmentRequestFilters {
   dateTo?: string;
 }
 
+export interface ProductionNoticeFilters {
+  status?: ProductionNoticeStatus;
+  target?: ProductionNoticeTarget;
+  noticeType?: ProductionNoticeType;
+  keyword?: string;
+  customerId?: string;
+  customerKeyword?: string;
+  orderNo?: string;
+  productionTaskNo?: string;
+  partCode?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
 export interface WarehouseWorkFilters {
   customerId?: string;
   orderNo?: string;
@@ -677,9 +708,18 @@ export interface ConfirmShipmentItemPayload {
 export interface ConfirmShipmentPayload {
   shipmentQuantity?: number;
   batchShipments?: ConfirmShipmentItemPayload[];
+  warehouseConfirmedByCode?: string;
   warehouseConfirmedBy?: string;
   salesConfirmedBy?: string;
   overShipmentReason?: string;
+  remark?: string;
+}
+
+export interface ConfirmReceiptPayload {
+  warehouseId: string;
+  locationId: string;
+  warehouseConfirmedByCode?: string;
+  warehouseConfirmedBy?: string;
   remark?: string;
 }
 
@@ -797,6 +837,7 @@ export interface CancelOrderHandlingPlanItemPayload {
 }
 
 export interface AcknowledgeWarehouseNoticePayload {
+  acknowledgedByCode?: string;
   acknowledgedBy: string;
   handlingMode?: 'STOCK' | 'SCRAP' | 'NONE';
   handlingQuantity?: number;
@@ -826,9 +867,21 @@ export interface CreateWarehousePayload {
   warehouseName: string;
 }
 
+export interface UpdateWarehousePayload {
+  warehouseCode?: string;
+  warehouseName?: string;
+  status?: CommonStatus;
+}
+
 export interface CreateWarehouseLocationPayload {
   locationCode: string;
   locationName?: string;
+}
+
+export interface UpdateWarehouseLocationPayload {
+  locationCode?: string;
+  locationName?: string;
+  status?: CommonStatus;
 }
 
 export interface ProductionScrapFilters {
@@ -860,9 +913,6 @@ async function uploadErrorMessage(response: Response, fallback: string) {
 }
 
 export const erpApi = {
-  customers(keyword?: string, status?: CommonStatus) {
-    return request<Customer[]>(`/customers${toQuery({ keyword, status })}`);
-  },
   customersPage(keyword?: string, status?: CommonStatus, limit = 50, offset = 0) {
     return request<CustomerListResponse>(
       `/customers${toQuery({
@@ -1160,8 +1210,39 @@ export const erpApi = {
   productionOperators(keyword?: string) {
     return request<ProductionOperator[]>(`/production/tasks/operators${toQuery({ keyword })}`);
   },
-  productionNotices(status?: ProductionNoticeStatus, target?: ProductionNoticeTarget) {
-    return request<ProductionNotice[]>(`/production/tasks/notices${toQuery({ status, target })}`);
+  productionNotices(status?: ProductionNoticeStatus, target?: ProductionNoticeTarget, filters: ProductionNoticeFilters = {}) {
+    return request<ProductionNotice[]>(
+      `/production/tasks/notices${toQuery({
+        status: filters.status || status,
+        target: filters.target || target,
+        noticeType: filters.noticeType,
+        keyword: filters.keyword?.trim() || undefined,
+        customerId: filters.customerId,
+        customerKeyword: filters.customerKeyword?.trim() || undefined,
+        orderNo: filters.orderNo?.trim() || undefined,
+        productionTaskNo: filters.productionTaskNo?.trim() || undefined,
+        partCode: filters.partCode?.trim() || undefined,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo
+      })}`
+    );
+  },
+  adminProductionNotices(filters: ProductionNoticeFilters = {}) {
+    return request<ProductionNotice[]>(
+      `/production/tasks/notices/admin${toQuery({
+        status: filters.status,
+        target: filters.target,
+        noticeType: filters.noticeType,
+        keyword: filters.keyword?.trim() || undefined,
+        customerId: filters.customerId,
+        customerKeyword: filters.customerKeyword?.trim() || undefined,
+        orderNo: filters.orderNo?.trim() || undefined,
+        productionTaskNo: filters.productionTaskNo?.trim() || undefined,
+        partCode: filters.partCode?.trim() || undefined,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo
+      })}`
+    );
   },
   productionReplenishmentRequests(filters: ProductionReplenishmentRequestFilters = {}) {
     return request<ProductionReplenishmentRequest[]>(
@@ -1255,8 +1336,23 @@ export const erpApi = {
   createWarehouse(payload: CreateWarehousePayload) {
     return request<Warehouse>('/warehouses', { method: 'POST', body: JSON.stringify(payload) });
   },
+  updateWarehouse(warehouseId: string, payload: UpdateWarehousePayload) {
+    return request<Warehouse>(`/warehouses/${warehouseId}`, { method: 'PATCH', body: JSON.stringify(payload) });
+  },
+  deleteWarehouse(warehouseId: string) {
+    return request<{ deleted: boolean }>(`/warehouses/${warehouseId}`, { method: 'DELETE' });
+  },
   createWarehouseLocation(warehouseId: string, payload: CreateWarehouseLocationPayload) {
     return request(`/warehouses/${warehouseId}/locations`, { method: 'POST', body: JSON.stringify(payload) });
+  },
+  updateWarehouseLocation(warehouseId: string, locationId: string, payload: UpdateWarehouseLocationPayload) {
+    return request<WarehouseLocation>(`/warehouses/${warehouseId}/locations/${locationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteWarehouseLocation(warehouseId: string, locationId: string) {
+    return request<{ deleted: boolean }>(`/warehouses/${warehouseId}/locations/${locationId}`, { method: 'DELETE' });
   },
   pendingReceipts(filters: WarehouseWorkFilters = {}) {
     return request<WarehouseReceipt[]>(
@@ -1268,10 +1364,20 @@ export const erpApi = {
       })}`
     );
   },
-  confirmReceipt(productionTaskId: string, warehouseId: string, locationId: string, remark?: string) {
+  // compatibility: confirmReceipt(productionTaskId: string, warehouseId: string, locationId: string, remark?: string)
+  confirmReceipt(
+    productionTaskId: string,
+    warehouseIdOrPayload: string | ConfirmReceiptPayload,
+    locationId?: string,
+    remark?: string
+  ) {
+    const body =
+      typeof warehouseIdOrPayload === 'string'
+        ? { warehouseId: warehouseIdOrPayload, locationId, remark }
+        : warehouseIdOrPayload;
     return request(`/warehouse/receipts/${productionTaskId}/confirm`, {
       method: 'POST',
-      body: JSON.stringify({ warehouseId, locationId, remark })
+      body: JSON.stringify(body)
     });
   },
   pendingShipments(filters: WarehouseWorkFilters = {}) {
@@ -1305,8 +1411,21 @@ export const erpApi = {
       body: JSON.stringify(body)
     });
   },
-  warehouseNotices(status?: ProductionNoticeStatus) {
-    return request<ProductionNotice[]>(`/warehouse/notices${toQuery({ status })}`);
+  warehouseNotices(status?: ProductionNoticeStatus, filters: Omit<ProductionNoticeFilters, 'target'> = {}) {
+    return request<ProductionNotice[]>(
+      `/warehouse/notices${toQuery({
+        status: filters.status || status,
+        noticeType: filters.noticeType,
+        keyword: filters.keyword?.trim() || undefined,
+        customerId: filters.customerId,
+        customerKeyword: filters.customerKeyword?.trim() || undefined,
+        orderNo: filters.orderNo?.trim() || undefined,
+        productionTaskNo: filters.productionTaskNo?.trim() || undefined,
+        partCode: filters.partCode?.trim() || undefined,
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo
+      })}`
+    );
   },
   acknowledgeWarehouseNotice(id: string, payload: AcknowledgeWarehouseNoticePayload | string) {
     const body = typeof payload === 'string' ? { acknowledgedBy: payload } : payload;
@@ -1334,6 +1453,7 @@ export const erpApi = {
         warehouseId: filters.warehouseId,
         orderNo: filters.orderNo,
         status: filters.status,
+        stockAlert: filters.stockAlert,
         excludeOrderNo: filters.excludeOrderNo,
         excludeOrderId: filters.excludeOrderId
       })}`
@@ -1347,6 +1467,7 @@ export const erpApi = {
         warehouseId: filters.warehouseId,
         orderNo: filters.orderNo,
         status: filters.status,
+        stockAlert: filters.stockAlert,
         excludeOrderNo: filters.excludeOrderNo,
         excludeOrderId: filters.excludeOrderId
       })}`
@@ -1377,7 +1498,8 @@ export const erpApi = {
     return request<MaterialMemory[]>(
       `/inventory/materials${toQuery({
         keyword: filters.keyword,
-        status: filters.status
+        status: filters.status,
+        stockAlert: filters.stockAlert
       })}`
     );
   },
@@ -1386,6 +1508,7 @@ export const erpApi = {
       `/inventory/materials${toQuery({
         keyword: filters.keyword,
         status: filters.status,
+        stockAlert: filters.stockAlert,
         limit: filters.limit ? String(filters.limit) : undefined,
         offset: filters.offset ? String(filters.offset) : undefined,
         withPage: 'true'
@@ -1406,6 +1529,7 @@ export const erpApi = {
         bomStructureType: filters.bomStructureType,
         bomPresence: filters.bomPresence,
         recentOrderPresence: filters.recentOrderPresence,
+        stockAlert: filters.stockAlert,
         drawingDateFrom: filters.drawingDateFrom,
         drawingDateTo: filters.drawingDateTo,
         lastOrderDateFrom: filters.lastOrderDateFrom,
@@ -1512,10 +1636,15 @@ export const erpApi = {
       body: JSON.stringify(payload)
     });
   },
-  updateMaterialDrawingRevision(revisionId: string, payload: SaveMaterialDrawingRevisionPayload) {
+  updateMaterialDrawingRevision(revisionId: string, payload: UpdateMaterialDrawingRevisionPayload) {
     return request<MaterialDrawingRevision>(`/inventory/material-drawing-revisions/${revisionId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload)
+    });
+  },
+  restoreMaterialDrawingRevision(revisionId: string) {
+    return request<MaterialDrawingRevision>(`/inventory/material-drawing-revisions/${revisionId}/restore`, {
+      method: 'PATCH'
     });
   },
   disableMaterialDrawingRevision(revisionId: string) {
@@ -1532,10 +1661,15 @@ export const erpApi = {
       body: JSON.stringify(payload)
     });
   },
-  updateMaterialApplicability(applicabilityId: string, payload: SaveMaterialApplicabilityPayload) {
+  updateMaterialApplicability(applicabilityId: string, payload: UpdateMaterialApplicabilityPayload) {
     return request<MaterialApplicability>(`/inventory/material-applicabilities/${applicabilityId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload)
+    });
+  },
+  restoreMaterialApplicability(applicabilityId: string) {
+    return request<MaterialApplicability>(`/inventory/material-applicabilities/${applicabilityId}/restore`, {
+      method: 'PATCH'
     });
   },
   disableMaterialApplicability(applicabilityId: string) {
@@ -1672,10 +1806,15 @@ export const erpApi = {
       body: JSON.stringify(payload)
     });
   },
-  updateMaterialTransformRule(ruleId: string, payload: SaveMaterialTransformRulePayload) {
+  updateMaterialTransformRule(ruleId: string, payload: UpdateMaterialTransformRulePayload) {
     return request<MaterialTransformRule>(`/inventory/material-transform-rules/${ruleId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload)
+    });
+  },
+  restoreMaterialTransformRule(ruleId: string) {
+    return request<MaterialTransformRule>(`/inventory/material-transform-rules/${ruleId}/restore`, {
+      method: 'PATCH'
     });
   },
   disableMaterialTransformRule(ruleId: string) {
@@ -1687,6 +1826,11 @@ export const erpApi = {
     return request<MaterialMemory>(`/inventory/materials/${materialId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload)
+    });
+  },
+  restoreInventoryMaterial(materialId: string) {
+    return request<MaterialMemory>(`/inventory/materials/${materialId}/restore`, {
+      method: 'PATCH'
     });
   },
   disableInventoryMaterial(materialId: string) {

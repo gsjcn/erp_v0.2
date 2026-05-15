@@ -278,7 +278,7 @@ function formatTotalQuantity(field: QuantitySummaryField) {
   const totalByUnit = new Map<string, number>();
   for (const row of summaryRows.value) {
     const unit = row.unit || '件';
-    totalByUnit.set(unit, (totalByUnit.get(unit) || 0) + Number(row[field] || 0));
+    totalByUnit.set(unit, (totalByUnit.get(unit) ?? 0) + Number(row[field] ?? 0));
   }
   if (totalByUnit.size === 0) {
     return formatQuantity(0, '件');

@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { ProductionNoticeStatus, ProductionNoticeTarget, ProductionStatus } from '@prisma/client';
+import { ProductionNoticeStatus, ProductionNoticeTarget, ProductionNoticeType, ProductionStatus } from '@prisma/client';
 import {
   ArrayMinSize,
   IsArray,
@@ -34,6 +34,42 @@ export class ProductionNoticeQueryDto {
   @IsOptional()
   @IsEnum(ProductionNoticeTarget)
   target?: ProductionNoticeTarget;
+
+  @IsOptional()
+  @IsEnum(ProductionNoticeType)
+  noticeType?: ProductionNoticeType;
+
+  @IsOptional()
+  @IsString()
+  keyword?: string;
+
+  @IsOptional()
+  @IsString()
+  customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  customerKeyword?: string;
+
+  @IsOptional()
+  @IsString()
+  orderNo?: string;
+
+  @IsOptional()
+  @IsString()
+  productionTaskNo?: string;
+
+  @IsOptional()
+  @IsString()
+  partCode?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
 }
 
 export class AcknowledgeProductionNoticeDto {

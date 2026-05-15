@@ -309,6 +309,15 @@ const productionOperatorSeeds = [
     idCardBound: false
   },
   {
+    accountId: 'WH-001',
+    name: '周仓管',
+    role: '仓库管理员',
+    pinyin: 'zhoucangguan',
+    pinyinInitials: 'zcg',
+    keywords: ['zhou', 'cangguan', 'zcg', '仓库', '仓管', '库管', '入库', '发货'],
+    idCardBound: false
+  },
+  {
     accountId: 'TECH-001',
     name: '王工艺',
     role: '技术工艺员',
@@ -449,7 +458,7 @@ function seedProductionTaskState(
   // 003：未开始生产，用于测试“开始生产”。
   if (orderNo === 'SO-20260506-005') {
     if (lineIndex === 0) {
-      return { taskStatus: ProductionStatus.IN_PROGRESS, partialCompletedStepCount: processSteps.length };
+      return { taskStatus: ProductionStatus.WAITING_CONFIRMATION, partialCompletedStepCount: processSteps.length };
     }
     if (lineIndex === 1) {
       return { taskStatus: ProductionStatus.IN_PROGRESS, partialCompletedStepCount: 1 };
@@ -607,7 +616,7 @@ async function seedOrders() {
       customer: customer1,
       orderDate: new Date('2026-05-06T00:00:00.000Z'),
       deliveryDate: new Date('2026-05-18T00:00:00.000Z'),
-      status: OrderStatus.SUBMITTED,
+      status: OrderStatus.PENDING_PRODUCTION,
       lines: [
         { partCode: 'P-1001', partName: '侧板支架', drawingNo: 'DRW-1001', quantity: 200, productionPlanQuantity: 200, unit: '件' },
         { partCode: 'P-1002', partName: '电控箱底板', drawingNo: 'DRW-1002', quantity: 80, productionPlanQuantity: 80, unit: '件' },
@@ -1110,7 +1119,7 @@ async function seedTaskProcessCompletions({
           completionId: completion.id,
           productionTaskId,
           processName,
-          action: 'SEED_COMPLETE',
+          action: 'TASK_FINAL_CONFIRM',
           operatorCode: operator.operatorCode,
           operatorName: operator.operatorName,
           afterSnapshot: {
@@ -1132,11 +1141,25 @@ async function seedTaskProcessCompletions({
   }
 }
 
-async function upsertMaterial(data: { partCode: string; partName: string; unit: string; partSpecification?: string | null }) {
+async function upsertMaterial(data: {
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  stockAlertEnabled?: boolean;
+  stockAlertQuantity?: number | null;
+}) {
   const existing = await prisma.material.findFirst({
     where: { partCode: { equals: data.partCode, mode: 'insensitive' } },
     select: { id: true, partSpecification: true }
   });
+  const stockAlertData =
+    data.stockAlertEnabled === undefined
+      ? {}
+      : {
+          stockAlertEnabled: data.stockAlertEnabled,
+          stockAlertQuantity: data.stockAlertEnabled ? (data.stockAlertQuantity ?? null) : null
+        };
 
   if (existing) {
     await prisma.material.update({
@@ -1145,7 +1168,8 @@ async function upsertMaterial(data: { partCode: string; partName: string; unit: 
         partName: data.partName,
         unit: data.unit,
         partSpecification: data.partSpecification ?? existing.partSpecification,
-        status: 'ENABLED'
+        status: 'ENABLED',
+        ...stockAlertData
       }
     });
     return;
@@ -1156,7 +1180,9 @@ async function upsertMaterial(data: { partCode: string; partName: string; unit: 
       partCode: data.partCode,
       partName: data.partName,
       unit: data.unit,
-      partSpecification: data.partSpecification || null
+      partSpecification: data.partSpecification || null,
+      stockAlertEnabled: data.stockAlertEnabled ?? false,
+      stockAlertQuantity: data.stockAlertEnabled ? (data.stockAlertQuantity ?? null) : null
     }
   });
 }
@@ -1192,6 +1218,22 @@ async function seedMaterials() {
   // 这些物料只进入物料清单，不创建库存批次，用于验证库存页 0 库存搜索结果。
   for (const material of demoZeroStockMaterials) {
     await upsertMaterial(material);
+  }
+
+  const stockAlertFixtures = [
+    { partCode: 'P-4101', stockAlertQuantity: 20 },
+    { partCode: 'P-4102', stockAlertQuantity: 50 },
+    { partCode: 'B3-0001', stockAlertQuantity: 5 }
+  ];
+  for (const fixture of stockAlertFixtures) {
+    // 库存报警 seed 只写 Material 基础资料的提醒线，不自动补单、下单、提交生产或扣库存。
+    await prisma.material.updateMany({
+      where: { partCode: { equals: fixture.partCode, mode: 'insensitive' } },
+      data: {
+        stockAlertEnabled: true,
+        stockAlertQuantity: fixture.stockAlertQuantity
+      }
+    });
   }
 
   const drawingLines = await prisma.orderLine.findMany({
@@ -1738,6 +1780,11 @@ async function seedInventory() {
         }
       });
     }
+
+    await prisma.productionTask.update({
+      where: { id: task.id },
+      data: { status: ProductionStatus.STORED }
+    });
   }
 
   const stockSeedItems = [
@@ -2102,7 +2149,7 @@ async function seedStockFulfillmentOrder(options: {
       },
       orderDate: options.orderDate,
       deliveryDate: options.deliveryDate,
-      status: OrderStatus.SUBMITTED
+      status: OrderStatus.PENDING_PRODUCTION
     },
     create: {
       orderNo: options.orderNo,
@@ -2117,7 +2164,7 @@ async function seedStockFulfillmentOrder(options: {
       },
       orderDate: options.orderDate,
       deliveryDate: options.deliveryDate,
-      status: OrderStatus.SUBMITTED
+      status: OrderStatus.PENDING_PRODUCTION
     }
   });
 

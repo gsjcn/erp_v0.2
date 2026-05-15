@@ -11,6 +11,7 @@ export const router = createRouter({
     { path: '/processes', component: () => import('./views/ProcessSelectionView.vue'), meta: { title: '零件生产流程选择' } },
     { path: '/process-templates', component: () => import('./views/ProcessTemplatesView.vue'), meta: { title: '流程记忆' } },
     { path: '/production', component: () => import('./views/ProductionView.vue'), meta: { title: '生产页面' } },
+    { path: '/notices', component: () => import('./views/AdminNoticesView.vue'), meta: { title: '通知中心' } },
     { path: '/statistics', component: () => import('./views/StatisticsView.vue'), meta: { title: '统计表' } },
     { path: '/warehouses', alias: '/warehouse', component: () => import('./views/WarehouseView.vue'), meta: { title: '仓库页面' } },
     { path: '/inventory/materials', component: () => import('./views/MaterialsView.vue'), meta: { title: '零件基础库' } },

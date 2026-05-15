@@ -77,6 +77,17 @@ type ProductionOperatorSearchRow = {
 
 const quantityTolerance = 0.0001;
 const stockCompatibilityStatuses = new Set(['MATCHED', 'NEEDS_CONFIRMATION', 'INCOMPLETE', 'UNKNOWN']);
+const processCompletionLogActions = new Set([
+  'CREATE',
+  'UPDATE',
+  'BATCH_CREATE',
+  'BATCH_UPDATE',
+  'TASK_FINAL_CONFIRM',
+  'TASK_FINAL_UPDATE',
+  'TASK_WITHDRAWN',
+  'APPROVE_REPLENISHMENT_REQUEST',
+  'REJECT_REPLENISHMENT_REQUEST'
+]);
 const historyBackfillOperatorCode = 'HISTORY-BACKFILL';
 
 loadRootEnv();
@@ -88,12 +99,18 @@ async function main() {
   await checkMasterDataUniqueness();
   await checkProcessMemoryData();
   await checkModelBomData();
+  await checkMaterialMasterData();
+  await checkMaterialCommonProjectModels();
+  await checkMaterialDrawingRevisions();
   await checkFirstStageVerificationFixtures();
+  await checkMaterialStockAlerts();
+  await checkMaterialImportData();
   await checkMaterialTransformRuleData();
   await checkProductionOperators();
   await checkCustomerContacts();
   await checkOrderNoReservations();
   await checkOrderLineComponentStructure();
+  await checkOrderImportData();
   await checkCommittedOrderImportRowComponentStructure();
   await checkOrderLinePlans();
   await checkOrderLineProcessSteps();
@@ -118,6 +135,16 @@ async function main() {
 async function checkModelBomData() {
   const boms = await prisma.modelBom.findMany({
     include: {
+      customerScopes: {
+        select: {
+          id: true,
+          bomId: true,
+          customerId: true,
+          customerNameSnapshot: true,
+          status: true
+        },
+        orderBy: [{ status: 'asc' }, { customerNameSnapshot: 'asc' }]
+      },
       lines: {
         include: {
           material: {
@@ -143,6 +170,59 @@ async function checkModelBomData() {
         ? actualCustomerScopeKey
         : bom.customerId || 'ALL';
     const expectedProjectModelScopeKey = stringValue(bom.projectModel).toLocaleUpperCase() || 'ALL';
+
+    // BOM 范围决定下单推荐边界，必须明确区分全部客户、客户私有和指定客户可用，不能依赖备注或模糊字段。
+    const missingBomIdentityFields = [
+      ['bomName', bom.bomName],
+      ['customerScopeMode', bom.customerScopeMode],
+      ['customerScopeKey', bom.customerScopeKey],
+      ['projectModelScopeKey', bom.projectModelScopeKey]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingBomIdentityFields.length > 0) {
+      addIssue('ERROR', 'MODEL_BOM_IDENTITY_MISSING', `BOM ${bom.id} 缺少身份或适用范围字段：${missingBomIdentityFields.map(([field]) => field).join(', ')}`);
+    }
+    if (!['ALL', 'PRIVATE', 'SELECTED'].includes(bom.customerScopeMode)) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_MODE_INVALID', `BOM ${bom.bomName} customerScopeMode=${bom.customerScopeMode} 不在允许范围内`);
+    }
+    if (bom.customerScopeMode === 'ALL' && (bom.customerId || actualCustomerScopeKey !== 'ALL' || bom.customerNameSnapshot !== null)) {
+      addIssue('ERROR', 'MODEL_BOM_ALL_CUSTOMER_SCOPE_MISMATCH', `BOM ${bom.bomName} 全部客户范围必须 customerId 为空、customerScopeKey=ALL 且不保存 customerNameSnapshot`);
+    }
+    if (bom.customerScopeMode === 'PRIVATE' && (!bom.customerId || actualCustomerScopeKey !== bom.customerId || !stringValue(bom.customerNameSnapshot))) {
+      addIssue('ERROR', 'MODEL_BOM_PRIVATE_CUSTOMER_SCOPE_MISMATCH', `BOM ${bom.bomName} 客户私有范围必须绑定 customerId、customerScopeKey 和 customerNameSnapshot`);
+    }
+    if (bom.customerScopeMode === 'SELECTED') {
+      if (bom.customerId || !actualCustomerScopeKey.startsWith('SELECTED:') || bom.customerNameSnapshot !== null) {
+        addIssue('ERROR', 'MODEL_BOM_SELECTED_CUSTOMER_SCOPE_MISMATCH', `BOM ${bom.bomName} 指定客户范围必须 customerId 为空、customerScopeKey 以 SELECTED: 开头且不保存 customerNameSnapshot`);
+      }
+      const enabledCustomerScopes = bom.customerScopes.filter((scope) => scope.status === CommonStatus.ENABLED);
+      if (enabledCustomerScopes.length === 0) {
+        addIssue('ERROR', 'MODEL_BOM_SELECTED_CUSTOMER_SCOPE_MISSING', `BOM ${bom.bomName} 指定客户范围缺少启用的 ModelBomCustomerScope`);
+      }
+    }
+    if (bom.isCommon && (!bom.commonSortOrder || bom.commonSortOrder <= 0)) {
+      addIssue('ERROR', 'MODEL_BOM_COMMON_SORT_INVALID', `BOM ${bom.bomName} 标记为常用 BOM 时 commonSortOrder 必须大于 0`);
+    }
+    if (!bom.isCommon && bom.commonSortOrder !== null) {
+      addIssue('ERROR', 'MODEL_BOM_COMMON_SORT_INVALID', `BOM ${bom.bomName} 非常用 BOM 不能保存 commonSortOrder`);
+    }
+    const blankBomOptionalFields = [
+      ['customerNameSnapshot', bom.customerNameSnapshot],
+      ['sourceBomNameSnapshot', bom.sourceBomNameSnapshot],
+      ['remark', bom.remark]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankBomOptionalFields.length > 0) {
+      addIssue('ERROR', 'MODEL_BOM_OPTIONAL_TEXT_BLANK', `BOM ${bom.bomName} 可选文本不能保存空字符串：${blankBomOptionalFields.map(([field]) => field).join(', ')}`);
+    }
+    for (const scope of bom.customerScopes) {
+      const missingScopeFields = [
+        ['bomId', scope.bomId],
+        ['customerId', scope.customerId],
+        ['customerNameSnapshot', scope.customerNameSnapshot]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingScopeFields.length > 0) {
+        addIssue('ERROR', 'MODEL_BOM_CUSTOMER_SCOPE_ROW_IDENTITY_MISSING', `BOM ${bom.bomName} / customerScope ${scope.id} 缺少字段：${missingScopeFields.map(([field]) => field).join(', ')}`);
+      }
+    }
 
     if (actualCustomerScopeKey !== expectedCustomerScopeKey) {
       addIssue(
@@ -192,6 +272,39 @@ async function checkModelBomData() {
       const label = `BOM ${bom.bomName} / ${line.partCodeSnapshot}`;
       const componentNo = stringValue(line.componentNo);
       const parentComponentNo = stringValue(line.parentComponentNo);
+
+      // BOM 行是订单带入 DRAFT 明细的来源，默认数量、结构和快照字段必须可追溯。
+      const missingLineIdentityFields = [
+        ['bomId', line.bomId],
+        ['materialId', line.materialId],
+        ['partCodeSnapshot', line.partCodeSnapshot],
+        ['partNameSnapshot', line.partNameSnapshot],
+        ['unitSnapshot', line.unitSnapshot],
+        ['lineType', line.lineType]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingLineIdentityFields.length > 0) {
+        addIssue('ERROR', 'MODEL_BOM_LINE_IDENTITY_MISSING', `${label} 缺少 BOM 行身份字段：${missingLineIdentityFields.map(([field]) => field).join(', ')}`);
+      }
+      if (!['PART', 'COMPONENT'].includes(line.lineType)) {
+        addIssue('ERROR', 'MODEL_BOM_LINE_TYPE_INVALID', `${label} lineType=${line.lineType} 不在允许范围内`);
+      }
+      if (decimalToNumber(line.defaultQuantity) <= 0) {
+        addIssue('ERROR', 'MODEL_BOM_LINE_DEFAULT_QUANTITY_INVALID', `${label} defaultQuantity 必须大于 0`);
+      }
+      if (line.partThicknessSnapshot !== null && decimalToNumber(line.partThicknessSnapshot) < 0) {
+        addIssue('ERROR', 'MODEL_BOM_LINE_THICKNESS_INVALID', `${label} partThicknessSnapshot 不能小于 0`);
+      }
+      const blankLineOptionalFields = [
+        ['partSpecificationSnapshot', line.partSpecificationSnapshot],
+        ['partCategory', line.partCategory],
+        ['componentNo', line.componentNo],
+        ['parentComponentNo', line.parentComponentNo],
+        ['defaultProcessRoute', line.defaultProcessRoute],
+        ['remark', line.remark]
+      ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+      if (blankLineOptionalFields.length > 0) {
+        addIssue('ERROR', 'MODEL_BOM_LINE_OPTIONAL_TEXT_BLANK', `${label} 可选文本不能保存空字符串：${blankLineOptionalFields.map(([field]) => field).join(', ')}`);
+      }
 
       if (line.status === CommonStatus.ENABLED && line.material.status !== CommonStatus.ENABLED) {
         addIssue(
@@ -266,6 +379,47 @@ async function checkModelBomData() {
 
   for (const review of diffReviews) {
     const label = `BOM 差异核对 ${review.issueTitle || review.reviewKey}`;
+    const allowedIssueKinds = new Set(['MISSING_IN_CUSTOMER', 'CHANGED', 'CUSTOMER_EXTRA']);
+    const requiredReviewFields = [
+      ['targetBomId', review.targetBomId],
+      ['sourceBomId', review.sourceBomId],
+      ['reviewKey', review.reviewKey],
+      ['issueKind', review.issueKind],
+      ['issueTitle', review.issueTitle],
+      ['diffFingerprint', review.diffFingerprint],
+      ['reviewedBy', review.reviewedBy]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (requiredReviewFields.length > 0) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_IDENTITY_MISSING', `${label} 缺少核对记录字段：${requiredReviewFields.map(([field]) => field).join(', ')}`);
+    }
+    const blankReviewOptionalFields = [
+      ['sourceLineId', review.sourceLineId],
+      ['targetLineId', review.targetLineId],
+      ['issueDetail', review.issueDetail],
+      ['reviewRemark', review.reviewRemark]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankReviewOptionalFields.length > 0) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_OPTIONAL_TEXT_BLANK', `${label} 可选文本不能保存空字符串：${blankReviewOptionalFields.map(([field]) => field).join(', ')}`);
+    }
+    if (review.targetBomId === review.sourceBomId) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_SOURCE_TARGET_SAME', `${label} targetBomId 和 sourceBomId 不能相同`);
+    }
+    if (!allowedIssueKinds.has(review.issueKind)) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_KIND_INVALID', `${label} issueKind=${review.issueKind} 不在允许范围内`);
+    }
+    if (!review.reviewKey.startsWith(`${review.targetBomId}|${review.sourceBomId}|`)) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_KEY_SCOPE_INVALID', `${label} reviewKey 未以 targetBomId/sourceBomId 开头`);
+    }
+    const lineShapeInvalid =
+      (review.issueKind === 'MISSING_IN_CUSTOMER' && (!review.sourceLineId || review.targetLineId)) ||
+      (review.issueKind === 'CHANGED' && (!review.sourceLineId || !review.targetLineId)) ||
+      (review.issueKind === 'CUSTOMER_EXTRA' && (review.sourceLineId || !review.targetLineId));
+    if (lineShapeInvalid) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_LINE_SHAPE_INVALID', `${label} 的 sourceLineId / targetLineId 与 issueKind 不匹配`);
+    }
+    if (review.fieldsJson !== null && !isJsonRecord(review.fieldsJson)) {
+      addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_FIELDS_JSON_INVALID', `${label} fieldsJson 必须是对象或 null`);
+    }
     if (review.targetBom.sourceBomId !== review.sourceBomId) {
       addIssue(
         'ERROR',
@@ -289,6 +443,259 @@ async function checkModelBomData() {
     }
     if (!stringValue(review.diffFingerprint)) {
       addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_FINGERPRINT_MISSING', `${label} 缺少 diffFingerprint，无法判断后续差异是否已经变化`);
+    }
+  }
+}
+
+async function checkMaterialMasterData() {
+  const materials = await prisma.material.findMany({
+    select: {
+      id: true,
+      partCode: true,
+      partName: true,
+      unit: true,
+      partSpecification: true,
+      status: true,
+      applicabilities: {
+        select: {
+          id: true,
+          customerId: true,
+          customerNameSnapshot: true,
+          projectModel: true,
+          customerScopeKey: true,
+          projectModelScopeKey: true,
+          remark: true,
+          status: true
+        },
+        orderBy: [{ status: 'asc' }, { customerScopeKey: 'asc' }, { projectModelScopeKey: 'asc' }]
+      }
+    },
+    orderBy: { partCode: 'asc' }
+  });
+
+  const materialRowsByCode = new Map<string, typeof materials>();
+  for (const material of materials) {
+    const key = normalizeCaseInsensitiveKey(material.partCode);
+    materialRowsByCode.set(key, [...(materialRowsByCode.get(key) || []), material]);
+
+    const label = `Material ${material.partCode || material.id}`;
+    // 零件基础资料只保存身份字段和推荐配置，不保存库存数量；空身份字段会破坏订单、BOM 和库存追溯。
+    const missingMaterialFields = [
+      ['partCode', material.partCode],
+      ['partName', material.partName],
+      ['unit', material.unit]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingMaterialFields.length > 0) {
+      addIssue('ERROR', 'MATERIAL_IDENTITY_MISSING', `${label} 缺少零件基础字段：${missingMaterialFields.map(([field]) => field).join(', ')}`);
+    }
+    if (material.partSpecification !== null && !material.partSpecification.trim()) {
+      addIssue('ERROR', 'MATERIAL_OPTIONAL_TEXT_BLANK', `${label} partSpecification 不能保存空字符串`);
+    }
+
+    for (const applicability of material.applicabilities) {
+      const applicabilityLabel = `${label} / applicability ${applicability.id}`;
+      const missingScopeFields = [
+        ['customerScopeKey', applicability.customerScopeKey],
+        ['projectModelScopeKey', applicability.projectModelScopeKey]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingScopeFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_SCOPE_KEY_MISSING', `${applicabilityLabel} 缺少适用范围 key：${missingScopeFields.map(([field]) => field).join(', ')}`);
+      }
+      if (applicability.customerId) {
+        if (applicability.customerScopeKey !== applicability.customerId) {
+          addIssue('ERROR', 'MATERIAL_APPLICABILITY_CUSTOMER_SCOPE_KEY_MISMATCH', `${applicabilityLabel} customerScopeKey 必须等于 customerId`);
+        }
+        if (!stringValue(applicability.customerNameSnapshot)) {
+          addIssue('ERROR', 'MATERIAL_APPLICABILITY_CUSTOMER_SNAPSHOT_MISSING', `${applicabilityLabel} 指定客户适用范围缺少 customerNameSnapshot`);
+        }
+      } else {
+        if (applicability.customerScopeKey !== 'ALL') {
+          addIssue('ERROR', 'MATERIAL_APPLICABILITY_ALL_CUSTOMER_SCOPE_MISMATCH', `${applicabilityLabel} 全部客户适用范围 customerScopeKey 必须为 ALL`);
+        }
+        if (applicability.customerNameSnapshot !== null) {
+          addIssue('ERROR', 'MATERIAL_APPLICABILITY_ALL_CUSTOMER_SNAPSHOT_STALE', `${applicabilityLabel} 全部客户适用范围不能保存 customerNameSnapshot`);
+        }
+      }
+
+      const expectedProjectScopeKey = stringValue(applicability.projectModel).toLocaleUpperCase() || 'ALL';
+      if (applicability.projectModelScopeKey !== expectedProjectScopeKey) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_APPLICABILITY_PROJECT_SCOPE_KEY_MISMATCH',
+          `${applicabilityLabel} projectModelScopeKey=${applicability.projectModelScopeKey}，应为 ${expectedProjectScopeKey}`
+        );
+      }
+      if (applicability.projectModel !== null && !applicability.projectModel.trim()) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_OPTIONAL_TEXT_BLANK', `${applicabilityLabel} projectModel 不能保存空字符串`);
+      }
+      if (applicability.remark !== null && !applicability.remark.trim()) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_OPTIONAL_TEXT_BLANK', `${applicabilityLabel} remark 不能保存空字符串`);
+      }
+      if (applicability.status === CommonStatus.ENABLED && material.status !== CommonStatus.ENABLED) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_ENABLED_MATERIAL_DISABLED', `${applicabilityLabel} 仍启用，但所属 Material 已停用`);
+      }
+    }
+  }
+
+  for (const [key, rows] of materialRowsByCode.entries()) {
+    if (!key) {
+      continue;
+    }
+    if (rows.length > 1) {
+      addIssue('ERROR', 'MATERIAL_CODE_DUPLICATE', `零件编码大小写不敏感重复：${key}，记录：${rows.map((row) => row.partCode).join('，')}`);
+    }
+  }
+}
+
+async function checkMaterialCommonProjectModels() {
+  const rows = await prisma.materialCommonProjectModel.findMany({
+    orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { projectModel: 'asc' }]
+  });
+  const enabledSortOrders = new Map<number, string[]>();
+
+  for (const row of rows) {
+    const label = `常用机型 ${row.projectModel || row.id}`;
+    const projectModel = row.projectModel.trim();
+    const expectedKey = normalizeCaseInsensitiveKey(projectModel);
+
+    // 常用机型只控制零件管理快捷入口顺序，不能依赖空 key 或重复排序导致下单前筛选误导。
+    if (!projectModel) {
+      addIssue('ERROR', 'MATERIAL_COMMON_PROJECT_MODEL_EMPTY', `${label} projectModel 为空`);
+    }
+    if (row.projectModel !== projectModel) {
+      addIssue('ERROR', 'MATERIAL_COMMON_PROJECT_MODEL_HAS_SPACES', `${label} projectModel 存在首尾空格`);
+    }
+    if (!row.projectModelNormalized.trim()) {
+      addIssue('ERROR', 'MATERIAL_COMMON_PROJECT_MODEL_KEY_EMPTY', `${label} projectModelNormalized 为空`);
+    }
+    if (row.projectModelNormalized !== expectedKey) {
+      addIssue(
+        'ERROR',
+        'MATERIAL_COMMON_PROJECT_MODEL_KEY_STALE',
+        `${label} 的 projectModelNormalized=${row.projectModelNormalized}，应为 ${expectedKey}`
+      );
+    }
+    if (row.sortOrder <= 0) {
+      addIssue('ERROR', 'MATERIAL_COMMON_PROJECT_MODEL_SORT_INVALID', `${label} sortOrder 必须大于 0`);
+    }
+    if (row.status === CommonStatus.ENABLED) {
+      const sortRows = enabledSortOrders.get(row.sortOrder) || [];
+      sortRows.push(row.projectModel);
+      enabledSortOrders.set(row.sortOrder, sortRows);
+    }
+  }
+
+  for (const [sortOrder, projectModels] of enabledSortOrders.entries()) {
+    if (projectModels.length > 1) {
+      addIssue(
+        'ERROR',
+        'MATERIAL_COMMON_PROJECT_MODEL_SORT_DUPLICATE',
+        `启用常用机型 sortOrder=${sortOrder} 重复：${projectModels.join('，')}`
+      );
+    }
+  }
+}
+
+async function checkMaterialDrawingRevisions() {
+  const materials = await prisma.material.findMany({
+    select: {
+      id: true,
+      partCode: true,
+      partName: true,
+      drawingRevisions: {
+        select: {
+          id: true,
+          drawingNo: true,
+          drawingVersion: true,
+          drawingStatus: true,
+          drawingFileName: true,
+          drawingFileUrl: true,
+          isDefault: true,
+          defaultChangedBy: true,
+          defaultChangedAt: true,
+          remark: true,
+          status: true
+        },
+        orderBy: [{ status: 'asc' }, { isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
+      }
+    },
+    orderBy: { partCode: 'asc' }
+  });
+
+  for (const material of materials) {
+    const label = `Material ${material.partCode} / ${material.partName}`;
+    const enabledDefaults = material.drawingRevisions.filter((revision) => revision.status === CommonStatus.ENABLED && revision.isDefault);
+    if (enabledDefaults.length > 1) {
+      addIssue(
+        'ERROR',
+        'MATERIAL_DRAWING_DEFAULT_DUPLICATE',
+        `${label} 存在 ${enabledDefaults.length} 个启用默认图纸版本；同一个零件只能有一个启用默认图纸`
+      );
+    }
+
+    const drawingIdentityRows = new Map<string, (typeof material.drawingRevisions)[number]>();
+    for (const revision of material.drawingRevisions) {
+      const drawingNo = stringValue(revision.drawingNo);
+      const drawingVersion = stringValue(revision.drawingVersion);
+      const revisionLabel = `${label} / drawing ${drawingNo || '-'} / ${drawingVersion || '-'}`;
+      if (!drawingNo || !drawingVersion) {
+        addIssue('ERROR', 'MATERIAL_DRAWING_REVISION_IDENTITY_MISSING', `${revisionLabel} 缺少 drawingNo 或 drawingVersion`);
+      }
+      if (revision.drawingNo !== drawingNo || revision.drawingVersion !== drawingVersion) {
+        addIssue('ERROR', 'MATERIAL_DRAWING_REVISION_IDENTITY_HAS_SPACES', `${revisionLabel} drawingNo 或 drawingVersion 存在首尾空格`);
+      }
+      const blankDrawingOptionalFields = [
+        ['drawingStatus', revision.drawingStatus],
+        ['drawingFileName', revision.drawingFileName],
+        ['drawingFileUrl', revision.drawingFileUrl],
+        ['defaultChangedBy', revision.defaultChangedBy],
+        ['remark', revision.remark]
+      ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+      if (blankDrawingOptionalFields.length > 0) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_DRAWING_REVISION_OPTIONAL_TEXT_BLANK',
+          `${revisionLabel} 可选文本不能保存空字符串：${blankDrawingOptionalFields.map(([field]) => field).join(', ')}`
+        );
+      }
+      const untrimmedDrawingOptionalFields = [
+        ['drawingStatus', revision.drawingStatus],
+        ['drawingFileName', revision.drawingFileName],
+        ['drawingFileUrl', revision.drawingFileUrl],
+        ['defaultChangedBy', revision.defaultChangedBy],
+        ['remark', revision.remark]
+      ].filter(([, value]) => value !== null && value !== undefined && String(value) !== String(value).trim());
+      if (untrimmedDrawingOptionalFields.length > 0) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_DRAWING_REVISION_OPTIONAL_TEXT_HAS_SPACES',
+          `${revisionLabel} 可选文本存在首尾空格：${untrimmedDrawingOptionalFields.map(([field]) => field).join(', ')}`
+        );
+      }
+
+      const identityKey = `${normalizeCaseInsensitiveKey(drawingNo)}|${normalizeCaseInsensitiveKey(drawingVersion)}`;
+      if (identityKey !== '|') {
+        const existing = drawingIdentityRows.get(identityKey);
+        if (existing) {
+          addIssue(
+            'ERROR',
+            'MATERIAL_DRAWING_REVISION_DUPLICATE',
+            `${label} 存在大小写不敏感重复图纸版本：${existing.drawingNo} / ${existing.drawingVersion} 与 ${drawingNo} / ${drawingVersion}`
+          );
+        } else {
+          drawingIdentityRows.set(identityKey, revision);
+        }
+      }
+
+      if (revision.status !== CommonStatus.ENABLED && revision.isDefault) {
+        addIssue('ERROR', 'MATERIAL_DRAWING_DISABLED_IS_DEFAULT', `${revisionLabel} 已停用但仍被标记为默认图纸`);
+      }
+      if (revision.status === CommonStatus.ENABLED && revision.isDefault && !stringValue(revision.defaultChangedBy)) {
+        addIssue('ERROR', 'MATERIAL_DRAWING_DEFAULT_OPERATOR_MISSING', `${revisionLabel} 是默认图纸但缺少 defaultChangedBy`);
+      }
+      if (revision.status === CommonStatus.ENABLED && revision.isDefault && !revision.defaultChangedAt) {
+        addIssue('ERROR', 'MATERIAL_DRAWING_DEFAULT_TIME_MISSING', `${revisionLabel} 是默认图纸但缺少 defaultChangedAt`);
+      }
     }
   }
 }
@@ -431,6 +838,506 @@ async function checkFirstStageVerificationFixtures() {
   }
 }
 
+async function checkMaterialStockAlerts() {
+  const materials = await prisma.material.findMany({
+    select: {
+      partCode: true,
+      partName: true,
+      stockAlertEnabled: true,
+      stockAlertQuantity: true
+    },
+    orderBy: { partCode: 'asc' }
+  });
+
+  const enabledAlertMaterials = materials.filter((material) => material.stockAlertEnabled);
+  for (const material of materials) {
+    const label = `Material ${material.partCode} / ${material.partName}`;
+    const stockAlertQuantity =
+      material.stockAlertQuantity === null || material.stockAlertQuantity === undefined ? null : decimalToNumber(material.stockAlertQuantity);
+    if (material.stockAlertEnabled && stockAlertQuantity === null) {
+      addIssue('ERROR', 'MATERIAL_STOCK_ALERT_QUANTITY_MISSING', `${label} 启用了库存报警但缺少 stockAlertQuantity`);
+    }
+    if (material.stockAlertEnabled && stockAlertQuantity !== null && stockAlertQuantity < 0) {
+      addIssue('ERROR', 'MATERIAL_STOCK_ALERT_QUANTITY_NEGATIVE', `${label} 的 stockAlertQuantity=${stockAlertQuantity}，不能小于 0`);
+    }
+    if (!material.stockAlertEnabled && stockAlertQuantity !== null) {
+      addIssue('WARN', 'MATERIAL_STOCK_ALERT_DISABLED_HAS_QUANTITY', `${label} 未启用库存报警但仍保留 stockAlertQuantity=${stockAlertQuantity}`);
+    }
+  }
+
+  if (enabledAlertMaterials.length > 0) {
+    await checkMaterialStockAlertRuntimeQuantities(enabledAlertMaterials);
+  }
+
+  const alertTransactions = await prisma.inventoryTransaction.findMany({
+    where: {
+      OR: [
+        { sourceRecordType: { contains: 'StockAlert', mode: 'insensitive' } },
+        { remark: { contains: '库存报警', mode: 'insensitive' } },
+        { remark: { contains: '低库存', mode: 'insensitive' } }
+      ]
+    },
+    select: {
+      transactionNo: true,
+      sourceRecordType: true,
+      remark: true
+    },
+    orderBy: { transactionNo: 'asc' }
+  });
+  for (const transaction of alertTransactions) {
+    addIssue(
+      'ERROR',
+      'MATERIAL_STOCK_ALERT_TRANSACTION_NOT_ALLOWED',
+      `库存报警只能提醒和筛选，不能生成 InventoryTransaction：${transaction.transactionNo} / ${transaction.sourceRecordType || '-'} / ${transaction.remark || '-'}`
+    );
+  }
+}
+
+async function checkMaterialStockAlertRuntimeQuantities(
+  materials: Array<{
+    partCode: string;
+    partName: string;
+    stockAlertQuantity: Prisma.Decimal | null;
+  }>
+) {
+  const partCodes = [...new Set(materials.map((material) => material.partCode.trim()).filter(Boolean))];
+  if (partCodes.length === 0) {
+    return;
+  }
+  const batches = await prisma.inventoryBatch.findMany({
+    where: {
+      status: 'AVAILABLE',
+      quantity: { gt: 0 },
+      OR: partCodes.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } }))
+    },
+    select: {
+      id: true,
+      partCode: true,
+      quantity: true,
+      sourceOrderId: true
+    }
+  });
+  const reservations = batches.length
+    ? await prisma.inventoryReservation.findMany({
+        where: {
+          status: InventoryReservationStatus.ACTIVE,
+          batchId: { in: batches.filter((batch) => !batch.sourceOrderId).map((batch) => batch.id) }
+        },
+        select: {
+          batchId: true,
+          quantity: true
+        }
+      })
+    : [];
+  const reservedQuantityByBatchId = new Map<string, number>();
+  for (const reservation of reservations) {
+    reservedQuantityByBatchId.set(
+      reservation.batchId,
+      roundQuantity((reservedQuantityByBatchId.get(reservation.batchId) || 0) + decimalToNumber(reservation.quantity))
+    );
+  }
+
+  const availableQuantityByCode = new Map<string, number>();
+  for (const batch of batches) {
+    const key = normalizeCaseInsensitiveKey(batch.partCode);
+    const physicalQuantity = decimalToNumber(batch.quantity);
+    const reservedQuantity = batch.sourceOrderId ? 0 : reservedQuantityByBatchId.get(batch.id) || 0;
+    if (!batch.sourceOrderId && reservedQuantity - physicalQuantity > quantityTolerance) {
+      addIssue(
+        'ERROR',
+        'MATERIAL_STOCK_ALERT_RESERVED_OVER_AVAILABLE',
+        `库存报警可用量核对发现 ${batch.partCode} 批次 ${batch.id} 的 active reservation=${reservedQuantity} 超过批次数量 ${physicalQuantity}`
+      );
+    }
+    const availableQuantity = Math.max(roundQuantity(physicalQuantity - reservedQuantity), 0);
+    availableQuantityByCode.set(key, roundQuantity((availableQuantityByCode.get(key) || 0) + availableQuantity));
+  }
+
+  for (const material of materials) {
+    const threshold = decimalToNumber(material.stockAlertQuantity);
+    const availableQuantity = availableQuantityByCode.get(normalizeCaseInsensitiveKey(material.partCode)) || 0;
+    if (threshold < 0) {
+      continue;
+    }
+    if (availableQuantity <= threshold) {
+      // 低库存报警只由 Material 阈值和 InventoryBatch 实时可用数量计算，不保存第二份库存汇总数量。
+      continue;
+    }
+  }
+}
+
+async function checkMaterialImportData() {
+  const sessions = await prisma.materialImportSession.findMany({
+    select: {
+      id: true,
+      status: true,
+      createdBy: true,
+      committedAt: true,
+      committedMaterialCodes: true,
+      files: {
+        select: {
+          id: true,
+          sessionId: true,
+          fileName: true,
+          storedFileName: true,
+          fileHash: true,
+          sheetName: true,
+          rowCount: true,
+          materialRowCount: true,
+          scopeRowCount: true,
+          transformRowCount: true,
+          acceptedRowCount: true,
+          duplicateRowCount: true
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+      },
+      rows: {
+        select: {
+          id: true,
+          sessionId: true,
+          fileId: true,
+          sourceRowNo: true,
+          rowHash: true,
+          partCode: true,
+          partName: true,
+          unit: true,
+          partSpecification: true,
+          drawingNo: true,
+          drawingVersion: true,
+          drawingStatus: true,
+          partThickness: true,
+          projectModel: true,
+          stockAlertEnabled: true,
+          stockAlertQuantity: true,
+          remark: true,
+          raw: true,
+          issues: true,
+          errorCount: true,
+          warningCount: true
+        },
+        orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }]
+      },
+      applicabilityRows: {
+        select: {
+          id: true,
+          sessionId: true,
+          fileId: true,
+          sourceRowNo: true,
+          rowHash: true,
+          partCode: true,
+          customerCode: true,
+          customerName: true,
+          projectModel: true,
+          remark: true,
+          status: true,
+          raw: true,
+          issues: true,
+          errorCount: true,
+          warningCount: true
+        },
+        orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }]
+      },
+      transformRows: {
+        select: {
+          id: true,
+          sessionId: true,
+          fileId: true,
+          sourceRowNo: true,
+          rowHash: true,
+          sourcePartCode: true,
+          targetPartCode: true,
+          customerCode: true,
+          customerName: true,
+          projectModel: true,
+          multiplier: true,
+          lossRate: true,
+          defaultProcessRoute: true,
+          conversionDescription: true,
+          remark: true,
+          status: true,
+          raw: true,
+          issues: true,
+          errorCount: true,
+          warningCount: true
+        },
+        orderBy: [{ createdAt: 'asc' }, { sourceRowNo: 'asc' }]
+      }
+    },
+    orderBy: { createdAt: 'asc' }
+  });
+
+  const countStoredImportIssues = (value: Prisma.JsonValue | null | undefined) => {
+    const rows = Array.isArray(value) ? value : [];
+    return {
+      errorCount: rows.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'ERROR').length,
+      warningCount: rows.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'WARNING').length
+    };
+  };
+  const storedImportIssueCodes = (value: Prisma.JsonValue | null | undefined) => {
+    const rows = Array.isArray(value) ? value : [];
+    return new Set(
+      rows
+        .filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && typeof issue.code === 'string')
+        .map((issue) => String((issue as Prisma.JsonObject).code))
+    );
+  };
+
+  for (const session of sessions) {
+    const sessionLabel = `零件库导入会话 ${session.id}`;
+    // 零件库导入只写基础资料和规则，不能借导入会话生成订单、生产任务或库存流水。
+    if (!['DRAFT', 'COMMITTED'].includes(session.status)) {
+      addIssue('ERROR', 'MATERIAL_IMPORT_SESSION_STATUS_INVALID', `${sessionLabel} status=${session.status} 不在允许范围内`);
+    }
+    if (session.createdBy !== null && !session.createdBy.trim()) {
+      addIssue('ERROR', 'MATERIAL_IMPORT_SESSION_OPTIONAL_TEXT_BLANK', `${sessionLabel} createdBy 不能保存空字符串`);
+    }
+    if (session.status === 'DRAFT' && (session.committedAt !== null || session.committedMaterialCodes !== null)) {
+      addIssue('ERROR', 'MATERIAL_IMPORT_DRAFT_COMMIT_FIELDS_STALE', `${sessionLabel} 仍为 DRAFT，但保存了 committedAt 或 committedMaterialCodes`);
+    }
+    if (session.status === 'COMMITTED') {
+      if (!session.committedAt) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_COMMITTED_AT_MISSING', `${sessionLabel} 已提交但缺少 committedAt`);
+      }
+      if (!Array.isArray(session.committedMaterialCodes)) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_COMMITTED_CODES_INVALID', `${sessionLabel} 已提交但 committedMaterialCodes 不是数组`);
+      }
+    }
+
+    const materialRowCountByFileId = new Map<string, number>();
+    const scopeRowCountByFileId = new Map<string, number>();
+    const transformRowCountByFileId = new Map<string, number>();
+    for (const row of session.rows) {
+      materialRowCountByFileId.set(row.fileId, (materialRowCountByFileId.get(row.fileId) || 0) + 1);
+    }
+    for (const row of session.applicabilityRows) {
+      scopeRowCountByFileId.set(row.fileId, (scopeRowCountByFileId.get(row.fileId) || 0) + 1);
+    }
+    for (const row of session.transformRows) {
+      transformRowCountByFileId.set(row.fileId, (transformRowCountByFileId.get(row.fileId) || 0) + 1);
+    }
+
+    for (const file of session.files) {
+      const fileLabel = `${sessionLabel} / 文件 ${file.fileName || file.id}`;
+      const missingFileFields = [
+        ['sessionId', file.sessionId],
+        ['fileName', file.fileName],
+        ['fileHash', file.fileHash],
+        ['sheetName', file.sheetName]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingFileFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_FILE_IDENTITY_MISSING', `${fileLabel} 缺少文件追溯字段：${missingFileFields.map(([field]) => field).join(', ')}`);
+      }
+      if (file.storedFileName !== null && !file.storedFileName.trim()) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_FILE_OPTIONAL_TEXT_BLANK', `${fileLabel} storedFileName 不能保存空字符串`);
+      }
+      const rowCounts = [file.rowCount, file.materialRowCount, file.scopeRowCount, file.transformRowCount, file.acceptedRowCount, file.duplicateRowCount];
+      if (rowCounts.some((count) => count < 0)) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_FILE_COUNT_NEGATIVE', `${fileLabel} 行数统计不能小于 0`);
+      }
+      if (file.materialRowCount + file.scopeRowCount + file.transformRowCount !== file.rowCount) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_FILE_ROW_COUNT_MISMATCH', `${fileLabel} rowCount 必须等于 materialRowCount + scopeRowCount + transformRowCount`);
+      }
+      if (file.acceptedRowCount + file.duplicateRowCount !== file.rowCount) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_FILE_ACCEPTED_COUNT_MISMATCH', `${fileLabel} rowCount 必须等于 acceptedRowCount + duplicateRowCount`);
+      }
+      const actualMaterialRows = materialRowCountByFileId.get(file.id) || 0;
+      const actualScopeRows = scopeRowCountByFileId.get(file.id) || 0;
+      const actualTransformRows = transformRowCountByFileId.get(file.id) || 0;
+      if (actualMaterialRows !== file.materialRowCount || actualScopeRows !== file.scopeRowCount || actualTransformRows !== file.transformRowCount) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_IMPORT_FILE_TYPED_ROW_COUNT_MISMATCH',
+          `${fileLabel} 类型行数与实际保存行不一致：${file.materialRowCount}/${file.scopeRowCount}/${file.transformRowCount}，实际 ${actualMaterialRows}/${actualScopeRows}/${actualTransformRows}`
+        );
+      }
+      const actualAcceptedRows = actualMaterialRows + actualScopeRows + actualTransformRows;
+      if (actualAcceptedRows !== file.acceptedRowCount) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_FILE_ACCEPTED_ROW_COUNT_MISMATCH', `${fileLabel} acceptedRowCount=${file.acceptedRowCount}，实际保存行数=${actualAcceptedRows}`);
+      }
+    }
+
+    for (const row of session.rows) {
+      const rowLabel = `${sessionLabel} / 零件行 ${row.sourceRowNo || '-'} / ${row.partCode || '-'}`;
+      const issueCodes = storedImportIssueCodes(row.issues);
+      const missingFields = [
+        ['sessionId', row.sessionId],
+        ['fileId', row.fileId],
+        ['rowHash', row.rowHash]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_IDENTITY_MISSING', `${rowLabel} 缺少行追溯字段：${missingFields.map(([field]) => field).join(', ')}`);
+      }
+      const missingBusinessIssues = [
+        ['partCode', row.partCode, 'REQUIRED_PART_CODE'],
+        ['partName', row.partName, 'REQUIRED_PART_NAME'],
+        ['unit', row.unit, 'REQUIRED_UNIT']
+      ].filter(([, value, issueCode]) => !String(value || '').trim() && !issueCodes.has(String(issueCode)));
+      if (missingBusinessIssues.length > 0) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_IMPORT_ROW_REQUIRED_FIELD_MISSING_WITHOUT_ISSUE',
+          `${rowLabel} 缺少业务必填字段但未保存对应 issues：${missingBusinessIssues.map(([field]) => field).join(', ')}`
+        );
+      }
+      if (row.sourceRowNo <= 0) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_SOURCE_ROW_INVALID', `${rowLabel} sourceRowNo 必须大于 0`);
+      }
+      if (row.partThickness !== null && decimalToNumber(row.partThickness) < 0 && !issueCodes.has('INVALID_PART_THICKNESS')) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} partThickness 不能小于 0`);
+      }
+      if (row.stockAlertQuantity !== null && decimalToNumber(row.stockAlertQuantity) < 0 && !issueCodes.has('INVALID_STOCK_ALERT_QUANTITY')) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} stockAlertQuantity 不能小于 0`);
+      }
+      if (row.stockAlertEnabled === true && row.stockAlertQuantity === null && !issueCodes.has('STOCK_ALERT_QUANTITY_REQUIRED')) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_STOCK_ALERT_QUANTITY_MISSING', `${rowLabel} 启用库存报警时必须填写 stockAlertQuantity`);
+      }
+      if (row.errorCount < 0 || row.warningCount < 0) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_ISSUE_COUNT_INVALID', `${rowLabel} errorCount / warningCount 不能小于 0`);
+      }
+      if (!isJsonRecord(row.raw)) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_RAW_INVALID', `${rowLabel} raw 必须是对象快照`);
+      }
+      if (row.issues !== null && !Array.isArray(row.issues)) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_ISSUES_INVALID', `${rowLabel} issues 必须为空或数组`);
+      }
+      const issueCounts = countStoredImportIssues(row.issues);
+      if (row.errorCount !== issueCounts.errorCount || row.warningCount !== issueCounts.warningCount) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_IMPORT_ROW_ISSUE_COUNT_MISMATCH',
+          `${rowLabel} errorCount/warningCount 与 issues 快照不一致：${row.errorCount}/${row.warningCount}，实际 ${issueCounts.errorCount}/${issueCounts.warningCount}`
+        );
+      }
+      const blankOptionalFields = [
+        ['partSpecification', row.partSpecification],
+        ['drawingNo', row.drawingNo],
+        ['drawingVersion', row.drawingVersion],
+        ['drawingStatus', row.drawingStatus],
+        ['projectModel', row.projectModel],
+        ['remark', row.remark]
+      ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+      if (blankOptionalFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_IMPORT_ROW_OPTIONAL_TEXT_BLANK', `${rowLabel} 可选文本不能保存空字符串：${blankOptionalFields.map(([field]) => field).join(', ')}`);
+      }
+    }
+
+    for (const row of session.applicabilityRows) {
+      const rowLabel = `${sessionLabel} / 适用范围行 ${row.sourceRowNo || '-'} / ${row.partCode || '-'}`;
+      const missingFields = [
+        ['sessionId', row.sessionId],
+        ['fileId', row.fileId],
+        ['rowHash', row.rowHash]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_IDENTITY_MISSING', `${rowLabel} 缺少行追溯字段：${missingFields.map(([field]) => field).join(', ')}`);
+      }
+      if (row.sourceRowNo <= 0) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_SOURCE_ROW_INVALID', `${rowLabel} sourceRowNo 必须大于 0`);
+      }
+      if (!String(row.partCode || '').trim() && !storedImportIssueCodes(row.issues).has('REQUIRED_PART_CODE')) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_APPLICABILITY_IMPORT_ROW_REQUIRED_FIELD_MISSING_WITHOUT_ISSUE',
+          `${rowLabel} 缺少业务必填字段但未保存对应 issues：partCode`
+        );
+      }
+      if (row.status !== CommonStatus.ENABLED && row.status !== CommonStatus.DISABLED) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_STATUS_INVALID', `${rowLabel} status=${row.status} 不在允许范围内`);
+      }
+      if (row.errorCount < 0 || row.warningCount < 0) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_ISSUE_COUNT_INVALID', `${rowLabel} errorCount / warningCount 不能小于 0`);
+      }
+      if (!isJsonRecord(row.raw)) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_RAW_INVALID', `${rowLabel} raw 必须是对象快照`);
+      }
+      if (row.issues !== null && !Array.isArray(row.issues)) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_ISSUES_INVALID', `${rowLabel} issues 必须为空或数组`);
+      }
+      const issueCounts = countStoredImportIssues(row.issues);
+      if (row.errorCount !== issueCounts.errorCount || row.warningCount !== issueCounts.warningCount) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_ISSUE_COUNT_MISMATCH', `${rowLabel} errorCount/warningCount 与 issues 快照不一致`);
+      }
+      const blankOptionalFields = [
+        ['customerCode', row.customerCode],
+        ['customerName', row.customerName],
+        ['projectModel', row.projectModel],
+        ['remark', row.remark]
+      ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+      if (blankOptionalFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_APPLICABILITY_IMPORT_ROW_OPTIONAL_TEXT_BLANK', `${rowLabel} 可选文本不能保存空字符串：${blankOptionalFields.map(([field]) => field).join(', ')}`);
+      }
+    }
+
+    for (const row of session.transformRows) {
+      const rowLabel = `${sessionLabel} / 来源加工行 ${row.sourceRowNo || '-'} / ${row.sourcePartCode || '-'} -> ${row.targetPartCode || '-'}`;
+      const missingFields = [
+        ['sessionId', row.sessionId],
+        ['fileId', row.fileId],
+        ['rowHash', row.rowHash]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_IDENTITY_MISSING', `${rowLabel} 缺少行追溯字段：${missingFields.map(([field]) => field).join(', ')}`);
+      }
+      const issueCodes = storedImportIssueCodes(row.issues);
+      const missingTransformBusinessIssues = [
+        ['sourcePartCode', row.sourcePartCode, 'REQUIRED_SOURCE_PART_CODE'],
+        ['targetPartCode', row.targetPartCode, 'REQUIRED_TARGET_PART_CODE']
+      ].filter(([, value, issueCode]) => !String(value || '').trim() && !issueCodes.has(String(issueCode)));
+      if (missingTransformBusinessIssues.length > 0) {
+        addIssue(
+          'ERROR',
+          'MATERIAL_TRANSFORM_IMPORT_ROW_REQUIRED_FIELD_MISSING_WITHOUT_ISSUE',
+          `${rowLabel} 缺少业务必填字段但未保存对应 issues：${missingTransformBusinessIssues.map(([field]) => field).join(', ')}`
+        );
+      }
+      if (
+        normalizeCaseInsensitiveKey(row.sourcePartCode) === normalizeCaseInsensitiveKey(row.targetPartCode) &&
+        String(row.sourcePartCode || '').trim() &&
+        String(row.targetPartCode || '').trim() &&
+        !issueCodes.has('SAME_SOURCE_TARGET')
+      ) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_SOURCE_TARGET_SAME', `${rowLabel} 来源零件和目标零件不能相同`);
+      }
+      if (row.sourceRowNo <= 0) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_SOURCE_ROW_INVALID', `${rowLabel} sourceRowNo 必须大于 0`);
+      }
+      if (row.multiplier !== null && decimalToNumber(row.multiplier) <= 0 && !issueCodes.has('INVALID_MULTIPLIER')) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} multiplier 必须大于 0`);
+      }
+      if (row.lossRate !== null && decimalToNumber(row.lossRate) < 0 && !issueCodes.has('INVALID_LOSS_RATE')) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} lossRate 不能小于 0`);
+      }
+      if (row.status !== CommonStatus.ENABLED && row.status !== CommonStatus.DISABLED) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_STATUS_INVALID', `${rowLabel} status=${row.status} 不在允许范围内`);
+      }
+      if (row.errorCount < 0 || row.warningCount < 0) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_ISSUE_COUNT_INVALID', `${rowLabel} errorCount / warningCount 不能小于 0`);
+      }
+      if (!isJsonRecord(row.raw)) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_RAW_INVALID', `${rowLabel} raw 必须是对象快照`);
+      }
+      if (row.issues !== null && !Array.isArray(row.issues)) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_ISSUES_INVALID', `${rowLabel} issues 必须为空或数组`);
+      }
+      const issueCounts = countStoredImportIssues(row.issues);
+      if (row.errorCount !== issueCounts.errorCount || row.warningCount !== issueCounts.warningCount) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_ISSUE_COUNT_MISMATCH', `${rowLabel} errorCount/warningCount 与 issues 快照不一致`);
+      }
+      const blankOptionalFields = [
+        ['customerCode', row.customerCode],
+        ['customerName', row.customerName],
+        ['projectModel', row.projectModel],
+        ['defaultProcessRoute', row.defaultProcessRoute],
+        ['conversionDescription', row.conversionDescription],
+        ['remark', row.remark]
+      ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+      if (blankOptionalFields.length > 0) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_IMPORT_ROW_OPTIONAL_TEXT_BLANK', `${rowLabel} 可选文本不能保存空字符串：${blankOptionalFields.map(([field]) => field).join(', ')}`);
+      }
+    }
+  }
+}
+
 async function checkOrderLineComponentStructure() {
   const orders = await prisma.customerOrder.findMany({
     select: {
@@ -501,6 +1408,210 @@ async function checkOrderLineComponentStructure() {
           'ORDER_LINE_CHILD_PARENT_MISSING',
           `订单 ${order.orderNo} / line ${line.lineNo || '-'} / ${line.partCode} 所属组件 ${parentComponentNo} 在当前订单内不存在`
         );
+      }
+    }
+  }
+}
+
+async function checkOrderImportData() {
+  const sessions = await prisma.orderImportSession.findMany({
+    select: {
+      id: true,
+      status: true,
+      createdBy: true,
+      committedAt: true,
+      committedOrderNos: true,
+      files: {
+        select: {
+          id: true,
+          sessionId: true,
+          fileName: true,
+          storedFileName: true,
+          fileHash: true,
+          sheetName: true,
+          rowCount: true,
+          acceptedRowCount: true,
+          duplicateRowCount: true
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
+      },
+      rows: {
+        select: {
+          id: true,
+          sessionId: true,
+          fileId: true,
+          sourceRowNo: true,
+          rowHash: true,
+          orderBlock: true,
+          orderNo: true,
+          customerName: true,
+          projectModel: true,
+          lineType: true,
+          importSequence: true,
+          partCategory: true,
+          componentNo: true,
+          parentComponentNo: true,
+          partCode: true,
+          drawingNo: true,
+          partName: true,
+          partSpecification: true,
+          partThickness: true,
+          orderQuantity: true,
+          unitUsage: true,
+          demandQuantity: true,
+          unit: true,
+          processRoute: true,
+          processRemark: true,
+          drawingStatus: true,
+          raw: true,
+          issues: true,
+          errorCount: true,
+          warningCount: true
+        },
+        orderBy: [{ orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+      }
+    },
+    orderBy: { createdAt: 'asc' }
+  });
+
+  for (const session of sessions) {
+    const sessionLabel = `导入会话 ${session.id}`;
+    // Excel 导入会话只允许 DRAFT 或 COMMITTED；提交后只保留来源记忆，不自动提交生产。
+    if (!['DRAFT', 'COMMITTED'].includes(session.status)) {
+      addIssue('ERROR', 'ORDER_IMPORT_SESSION_STATUS_INVALID', `${sessionLabel} status=${session.status} 不在允许范围内`);
+    }
+    if (session.createdBy !== null && !session.createdBy.trim()) {
+      addIssue('ERROR', 'ORDER_IMPORT_SESSION_OPTIONAL_TEXT_BLANK', `${sessionLabel} createdBy 不能保存空字符串`);
+    }
+    const committedOrderNos = committedOrderNoSet(session.committedOrderNos);
+    if (session.status === 'DRAFT' && (session.committedAt !== null || session.committedOrderNos !== null)) {
+      addIssue('ERROR', 'ORDER_IMPORT_DRAFT_COMMIT_FIELDS_STALE', `${sessionLabel} 仍为 DRAFT，但保存了 committedAt 或 committedOrderNos`);
+    }
+    if (session.status === 'COMMITTED') {
+      if (!session.committedAt) {
+        addIssue('ERROR', 'ORDER_IMPORT_COMMITTED_AT_MISSING', `${sessionLabel} 已提交但缺少 committedAt`);
+      }
+      if (!Array.isArray(session.committedOrderNos) || committedOrderNos.size === 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_COMMITTED_ORDER_NOS_INVALID', `${sessionLabel} 已提交但 committedOrderNos 不是有效订单号数组`);
+      }
+    }
+
+    const rowCountByFileId = new Map<string, number>();
+    for (const row of session.rows) {
+      rowCountByFileId.set(row.fileId, (rowCountByFileId.get(row.fileId) || 0) + 1);
+    }
+    for (const file of session.files) {
+      const fileLabel = `${sessionLabel} / 文件 ${file.fileName || file.id}`;
+      const missingFileFields = [
+        ['sessionId', file.sessionId],
+        ['fileName', file.fileName],
+        ['fileHash', file.fileHash],
+        ['sheetName', file.sheetName]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingFileFields.length > 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_FILE_IDENTITY_MISSING', `${fileLabel} 缺少文件追溯字段：${missingFileFields.map(([field]) => field).join(', ')}`);
+      }
+      if (file.storedFileName !== null && !file.storedFileName.trim()) {
+        addIssue('ERROR', 'ORDER_IMPORT_FILE_OPTIONAL_TEXT_BLANK', `${fileLabel} storedFileName 不能保存空字符串`);
+      }
+      if (file.rowCount < 0 || file.acceptedRowCount < 0 || file.duplicateRowCount < 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_FILE_COUNT_NEGATIVE', `${fileLabel} rowCount / acceptedRowCount / duplicateRowCount 不能小于 0`);
+      }
+      if (file.acceptedRowCount + file.duplicateRowCount > file.rowCount) {
+        addIssue('ERROR', 'ORDER_IMPORT_FILE_COUNT_OVERFLOW', `${fileLabel} acceptedRowCount + duplicateRowCount 不能大于 rowCount`);
+      }
+      if (file.acceptedRowCount + file.duplicateRowCount !== file.rowCount) {
+        addIssue('ERROR', 'ORDER_IMPORT_FILE_COUNT_MISMATCH', `${fileLabel} rowCount 必须等于 acceptedRowCount + duplicateRowCount`);
+      }
+      const actualAcceptedRows = rowCountByFileId.get(file.id) || 0;
+      if (actualAcceptedRows !== file.acceptedRowCount) {
+        addIssue('ERROR', 'ORDER_IMPORT_FILE_ACCEPTED_ROW_COUNT_MISMATCH', `${fileLabel} acceptedRowCount=${file.acceptedRowCount}，实际保存行数=${actualAcceptedRows}`);
+      }
+    }
+
+    for (const row of session.rows) {
+      const rowLabel = `${sessionLabel} / 订单 ${row.orderNo || '-'} / Excel 行 ${row.sourceRowNo || '-'} / ${row.partCode || '-'}`;
+      const missingRowFields = [
+        ['sessionId', row.sessionId],
+        ['fileId', row.fileId],
+        ['rowHash', row.rowHash],
+        ['lineType', row.lineType],
+        ['unit', row.unit]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingRowFields.length > 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_IDENTITY_MISSING', `${rowLabel} 缺少行追溯字段：${missingRowFields.map(([field]) => field).join(', ')}`);
+      }
+      if (!['PART', 'COMPONENT'].includes(row.lineType)) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_LINE_TYPE_INVALID', `${rowLabel} lineType=${row.lineType} 不在 PART / COMPONENT 范围内`);
+      }
+      if (row.sourceRowNo <= 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_SOURCE_ROW_INVALID', `${rowLabel} sourceRowNo 必须大于 0`);
+      }
+      if (decimalToNumber(row.partThickness) < 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} partThickness 不能小于 0`);
+      }
+      if (row.orderQuantity !== null && decimalToNumber(row.orderQuantity) < 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} orderQuantity 不能小于 0`);
+      }
+      if (row.unitUsage !== null && decimalToNumber(row.unitUsage) < 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} unitUsage 不能小于 0`);
+      }
+      if (decimalToNumber(row.demandQuantity) < 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_QUANTITY_INVALID', `${rowLabel} demandQuantity 不能小于 0`);
+      }
+      if (row.errorCount < 0 || row.warningCount < 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_ISSUE_COUNT_INVALID', `${rowLabel} errorCount / warningCount 不能小于 0`);
+      }
+      if (!isJsonRecord(row.raw)) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_RAW_INVALID', `${rowLabel} raw 必须是对象快照`);
+      }
+      if (row.issues !== null && !Array.isArray(row.issues)) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_ISSUES_INVALID', `${rowLabel} issues 必须为空或数组`);
+      }
+      const storedIssues = Array.isArray(row.issues) ? row.issues : [];
+      const storedErrorCount = storedIssues.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'ERROR').length;
+      const storedWarningCount = storedIssues.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'WARNING').length;
+      if (row.errorCount !== storedErrorCount || row.warningCount !== storedWarningCount) {
+        addIssue(
+          'ERROR',
+          'ORDER_IMPORT_ROW_ISSUE_COUNT_MISMATCH',
+          `${rowLabel} errorCount/warningCount 与 issues 快照不一致：${row.errorCount}/${row.warningCount}，实际 ${storedErrorCount}/${storedWarningCount}`
+        );
+      }
+      if (row.errorCount === 0) {
+        const missingCleanFields = [
+          ['orderNo', row.orderNo],
+          ['customerName', row.customerName],
+          ['partCode', row.partCode],
+          ['partName', row.partName]
+        ].filter(([, value]) => !String(value || '').trim());
+        if (missingCleanFields.length > 0 || decimalToNumber(row.demandQuantity) <= 0) {
+          addIssue('ERROR', 'ORDER_IMPORT_CLEAN_ROW_REQUIRED_FIELDS_MISSING', `${rowLabel} 无错误行必须保留订单号、客户、零件和正数 demandQuantity`);
+        }
+        const componentNo = normalizeComponentNo(row.componentNo);
+        const parentComponentNo = normalizeComponentNo(row.parentComponentNo);
+        if (row.lineType === 'COMPONENT' && (!componentNo || parentComponentNo)) {
+          addIssue('ERROR', 'ORDER_IMPORT_CLEAN_COMPONENT_SHAPE_INVALID', `${rowLabel} 无错误组件行必须有 componentNo 且不能填写 parentComponentNo`);
+        }
+        if (row.lineType === 'PART' && componentNo) {
+          addIssue('ERROR', 'ORDER_IMPORT_CLEAN_PART_SHAPE_INVALID', `${rowLabel} 无错误零件行不能填写 componentNo`);
+        }
+      }
+      const blankOptionalFields = [
+        ['orderBlock', row.orderBlock],
+        ['projectModel', row.projectModel],
+        ['importSequence', row.importSequence],
+        ['partCategory', row.partCategory],
+        ['componentNo', row.componentNo],
+        ['parentComponentNo', row.parentComponentNo],
+        ['drawingNo', row.drawingNo],
+        ['partSpecification', row.partSpecification],
+        ['processRoute', row.processRoute],
+        ['processRemark', row.processRemark],
+        ['drawingStatus', row.drawingStatus]
+      ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+      if (blankOptionalFields.length > 0) {
+        addIssue('ERROR', 'ORDER_IMPORT_ROW_OPTIONAL_TEXT_BLANK', `${rowLabel} 可选文本不能保存空字符串：${blankOptionalFields.map(([field]) => field).join(', ')}`);
       }
     }
   }
@@ -605,11 +1716,21 @@ async function checkCommittedOrderImportRowComponentStructure() {
 
 async function checkMaterialTransformRuleData() {
   const rules = await prisma.materialTransformRule.findMany({
-    where: { status: CommonStatus.ENABLED },
     select: {
       id: true,
+      sourceMaterialId: true,
+      targetMaterialId: true,
+      customerId: true,
       customerNameSnapshot: true,
       projectModel: true,
+      customerScopeKey: true,
+      projectModelScopeKey: true,
+      conversionDescription: true,
+      defaultProcessRoute: true,
+      multiplier: true,
+      lossRate: true,
+      remark: true,
+      status: true,
       sourceMaterial: { select: { partCode: true, status: true } },
       targetMaterial: { select: { partCode: true, status: true } }
     },
@@ -619,7 +1740,62 @@ async function checkMaterialTransformRuleData() {
   for (const rule of rules) {
     const scopeText = [rule.customerNameSnapshot, rule.projectModel].filter(Boolean).join(' / ') || '全部范围';
     const label = `来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode} / ${scopeText}`;
-    if (rule.sourceMaterial.status !== CommonStatus.ENABLED || rule.targetMaterial.status !== CommonStatus.ENABLED) {
+    // 来源加工关系只做库存来源建议，不得保存缺失身份、非法倍率或模糊适用范围。
+    const missingIdentityFields = [
+      ['sourceMaterialId', rule.sourceMaterialId],
+      ['targetMaterialId', rule.targetMaterialId],
+      ['customerScopeKey', rule.customerScopeKey],
+      ['projectModelScopeKey', rule.projectModelScopeKey]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingIdentityFields.length > 0) {
+      addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_IDENTITY_MISSING', `${label} 缺少身份或适用范围 key：${missingIdentityFields.map(([field]) => field).join(', ')}`);
+    }
+    if (rule.sourceMaterialId === rule.targetMaterialId) {
+      addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_SOURCE_TARGET_SAME', `${label} sourceMaterialId 和 targetMaterialId 不能相同`);
+    }
+    if (decimalToNumber(rule.multiplier) <= 0) {
+      addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_MULTIPLIER_INVALID', `${label} multiplier 必须大于 0`);
+    }
+    if (rule.lossRate !== null && decimalToNumber(rule.lossRate) < 0) {
+      addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_LOSS_RATE_INVALID', `${label} lossRate 不能小于 0`);
+    }
+
+    if (rule.customerId) {
+      if (rule.customerScopeKey !== rule.customerId) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_CUSTOMER_SCOPE_KEY_MISMATCH', `${label} customerScopeKey 必须等于 customerId`);
+      }
+      if (!stringValue(rule.customerNameSnapshot)) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_CUSTOMER_SNAPSHOT_MISSING', `${label} 指定客户来源加工关系缺少 customerNameSnapshot`);
+      }
+    } else {
+      if (rule.customerScopeKey !== 'ALL') {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_ALL_CUSTOMER_SCOPE_MISMATCH', `${label} 全部客户范围 customerScopeKey 必须为 ALL`);
+      }
+      if (rule.customerNameSnapshot !== null) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_ALL_CUSTOMER_SNAPSHOT_STALE', `${label} 全部客户范围不能保存 customerNameSnapshot`);
+      }
+    }
+
+    const expectedProjectScopeKey = stringValue(rule.projectModel).toLocaleUpperCase() || 'ALL';
+    if (rule.projectModelScopeKey !== expectedProjectScopeKey) {
+      addIssue(
+        'ERROR',
+        'MATERIAL_TRANSFORM_RULE_PROJECT_SCOPE_KEY_MISMATCH',
+        `${label} projectModelScopeKey=${rule.projectModelScopeKey}，应为 ${expectedProjectScopeKey}`
+      );
+    }
+    const blankOptionalFields = [
+      ['customerNameSnapshot', rule.customerNameSnapshot],
+      ['projectModel', rule.projectModel],
+      ['conversionDescription', rule.conversionDescription],
+      ['defaultProcessRoute', rule.defaultProcessRoute],
+      ['remark', rule.remark]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankOptionalFields.length > 0) {
+      addIssue('ERROR', 'MATERIAL_TRANSFORM_RULE_OPTIONAL_TEXT_BLANK', `${label} 可选文本不能保存空字符串：${blankOptionalFields.map(([field]) => field).join(', ')}`);
+    }
+
+    if (rule.status === CommonStatus.ENABLED && (rule.sourceMaterial.status !== CommonStatus.ENABLED || rule.targetMaterial.status !== CommonStatus.ENABLED)) {
       addIssue(
         'ERROR',
         'MATERIAL_TRANSFORM_RULE_DISABLED_MATERIAL_ENABLED',
@@ -715,8 +1891,8 @@ function normalizeComponentNo(value: string | null | undefined) {
 }
 
 function isComponentNoRangeInvalid(value: string | null | undefined) {
-  const matched = /^C(\d+)$/i.exec(normalizeComponentNo(value));
-  return !!matched && (Number(matched[1]) < 1 || Number(matched[1]) > 9999);
+  const componentNo = normalizeComponentNo(value);
+  return /^C\d+$/i.test(componentNo) && !/^C(00[1-9]|0[1-9][0-9]|[1-9][0-9]{2}|[1-9][0-9]{3})$/i.test(componentNo);
 }
 
 function sameText(left: string | null | undefined, right: string | null | undefined) {
@@ -797,6 +1973,10 @@ function stockSourceRawRows(value: Prisma.JsonValue | null | undefined) {
 
 function stringValue(value: unknown) {
   return value ? String(value).trim() : '';
+}
+
+function isJsonRecord(value: Prisma.JsonValue | null | undefined): value is Prisma.JsonObject {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
 function selectedStockSourceQuantity(stockSourceSelections: Prisma.JsonValue | null | undefined) {
@@ -1029,14 +2209,16 @@ async function checkMasterDataUniqueness() {
       select: { id: true, customerCode: true, customerName: true }
     }),
     prisma.warehouse.findMany({
-      select: { id: true, warehouseCode: true }
+      select: { id: true, warehouseCode: true, warehouseName: true, status: true }
     }),
     prisma.warehouseLocation.findMany({
       select: {
         id: true,
         warehouseId: true,
         locationCode: true,
-        warehouse: { select: { warehouseCode: true } }
+        locationName: true,
+        status: true,
+        warehouse: { select: { warehouseCode: true, status: true } }
       }
     })
   ]);
@@ -1080,6 +2262,13 @@ async function checkMasterDataUniqueness() {
 
   for (const warehouse of warehouses) {
     const normalized = warehouse.warehouseCode.trim().toUpperCase();
+    const missingWarehouseFields = [
+      ['warehouseCode', warehouse.warehouseCode],
+      ['warehouseName', warehouse.warehouseName]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingWarehouseFields.length > 0) {
+      addIssue('ERROR', 'WAREHOUSE_IDENTITY_MISSING', `仓库 ${warehouse.warehouseCode || warehouse.id} 缺少基础字段：${missingWarehouseFields.map(([field]) => field).join(', ')}`);
+    }
     if (warehouse.warehouseCode !== normalized) {
       addIssue('ERROR', 'WAREHOUSE_CODE_NOT_NORMALIZED', `仓库编码 ${warehouse.warehouseCode} 未按大写规范保存，应为 ${normalized}`);
     }
@@ -1087,12 +2276,27 @@ async function checkMasterDataUniqueness() {
 
   for (const location of locations) {
     const normalized = location.locationCode.trim().toUpperCase();
+    const missingLocationFields = [
+      ['warehouseId', location.warehouseId],
+      ['locationCode', location.locationCode],
+      ['locationName', location.locationName]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingLocationFields.length > 0) {
+      addIssue(
+        'ERROR',
+        'WAREHOUSE_LOCATION_IDENTITY_MISSING',
+        `仓库 ${location.warehouse.warehouseCode} / 库位 ${location.locationCode || location.id} 缺少基础字段：${missingLocationFields.map(([field]) => field).join(', ')}`
+      );
+    }
     if (location.locationCode !== normalized) {
       addIssue(
         'ERROR',
         'LOCATION_CODE_NOT_NORMALIZED',
         `仓库 ${location.warehouse.warehouseCode} / 库位编码 ${location.locationCode} 未按大写规范保存，应为 ${normalized}`
       );
+    }
+    if (location.status === CommonStatus.ENABLED && location.warehouse.status !== CommonStatus.ENABLED) {
+      addIssue('ERROR', 'WAREHOUSE_LOCATION_ENABLED_UNDER_DISABLED_WAREHOUSE', `仓库 ${location.warehouse.warehouseCode} 已停用，但库位 ${location.locationCode} 仍为 ENABLED`);
     }
   }
 }
@@ -1141,7 +2345,8 @@ async function checkProcessMemoryData() {
         templateNameNormalized: true,
         steps: true,
         searchText: true,
-        remark: true
+        remark: true,
+        status: true
       },
       orderBy: { templateName: 'asc' }
     }),
@@ -1202,6 +2407,15 @@ async function checkProcessMemoryData() {
     if (definition.processName !== normalizedName) {
       addIssue('ERROR', 'PROCESS_DEFINITION_NAME_HAS_SPACES', `${label} 名称存在首尾空格`);
     }
+    if (definition.remark !== null && definition.remark.trim() === '') {
+      addIssue('ERROR', 'PROCESS_DEFINITION_OPTIONAL_TEXT_BLANK', `${label} 的 remark 只能为 null，不能保存空白字符串`);
+    }
+    if (!definition.searchText.trim()) {
+      addIssue('ERROR', 'PROCESS_DEFINITION_SEARCH_TEXT_EMPTY', `${label} 的 searchText 为空，无法支持拼音搜索`);
+    }
+    if (definition.searchText !== definition.searchText.trim()) {
+      addIssue('ERROR', 'PROCESS_DEFINITION_SEARCH_TEXT_HAS_SPACES', `${label} 的 searchText 存在首尾空格`);
+    }
     if (definition.processNameNormalized !== normalizedKey) {
       addIssue(
         'ERROR',
@@ -1218,6 +2432,7 @@ async function checkProcessMemoryData() {
     const label = `流程记忆 ${template.templateName}`;
     const normalizedName = template.templateName.trim();
     const normalizedKey = normalizeSearchKeyword(normalizedName);
+    const stepsIsArray = Array.isArray(template.steps);
     const steps = processSnapshotToSteps(template.steps);
     const stepKeys = new Set<string>();
     const expectedSearchText = buildPinyinSearchText([
@@ -1232,17 +2447,41 @@ async function checkProcessMemoryData() {
     if (template.templateName !== normalizedName) {
       addIssue('ERROR', 'PROCESS_TEMPLATE_NAME_HAS_SPACES', `${label} 名称存在首尾空格`);
     }
-    if (template.templateNameNormalized !== normalizedKey) {
+    if (template.remark !== null && template.remark.trim() === '') {
+      addIssue('ERROR', 'PROCESS_TEMPLATE_OPTIONAL_TEXT_BLANK', `${label} 的 remark 只能为 null，不能保存空白字符串`);
+    }
+    if (template.status === CommonStatus.DISABLED) {
+      if (template.searchText !== '') {
+        addIssue('ERROR', 'PROCESS_TEMPLATE_STATUS_SEARCH_MISMATCH', `${label} 已停用但 searchText 未清空，可能继续污染搜索结果`);
+      }
+      if (!template.templateNameNormalized.startsWith(`disabled:${template.id}:`)) {
+        addIssue('ERROR', 'PROCESS_TEMPLATE_DISABLED_KEY_INVALID', `${label} 已停用但 templateNameNormalized 未释放为 disabled:${template.id}:*`);
+      }
+    } else {
+      if (template.templateNameNormalized.startsWith('disabled:')) {
+        addIssue('ERROR', 'PROCESS_TEMPLATE_ENABLED_KEY_DISABLED', `${label} 启用状态下仍使用 disabled:* 查重键`);
+      }
+      if (!template.searchText.trim()) {
+        addIssue('ERROR', 'PROCESS_TEMPLATE_SEARCH_TEXT_EMPTY', `${label} 的 searchText 为空，无法支持拼音搜索`);
+      }
+      if (template.searchText !== template.searchText.trim()) {
+        addIssue('ERROR', 'PROCESS_TEMPLATE_SEARCH_TEXT_HAS_SPACES', `${label} 的 searchText 存在首尾空格`);
+      }
+    }
+    if (template.status === CommonStatus.ENABLED && template.templateNameNormalized !== normalizedKey) {
       addIssue(
         'ERROR',
         'PROCESS_TEMPLATE_NORMALIZED_STALE',
         `${label} 的 templateNameNormalized=${template.templateNameNormalized}，应为 ${normalizedKey}`
       );
     }
+    if (!stepsIsArray) {
+      addIssue('ERROR', 'PROCESS_TEMPLATE_STEPS_NOT_ARRAY', `${label} 的 steps 不是 JSON 数组`);
+    }
     if (steps.length === 0) {
       addIssue('ERROR', 'PROCESS_TEMPLATE_STEPS_EMPTY', `${label} 没有任何工序步骤`);
     }
-    if (template.searchText !== expectedSearchText) {
+    if (template.status === CommonStatus.ENABLED && template.searchText !== expectedSearchText) {
       addIssue('ERROR', 'PROCESS_TEMPLATE_SEARCH_TEXT_STALE', `${label} 的 searchText 未按当前拼音规则生成`);
     }
 
@@ -1258,9 +2497,6 @@ async function checkProcessMemoryData() {
       if (step.processName !== stepName) {
         addIssue('ERROR', 'PROCESS_TEMPLATE_STEP_NAME_HAS_SPACES', `${stepLabel} 工序名称存在首尾空格`);
       }
-      if (step.processRemark && step.processRemark.length > 120) {
-        addIssue('ERROR', 'PROCESS_TEMPLATE_STEP_REMARK_TOO_LONG', `${stepLabel} 参数备注超过 120 个字符`);
-      }
       if (stepKeys.has(stepKey)) {
         addIssue('ERROR', 'PROCESS_TEMPLATE_STEP_DUPLICATE', `${stepLabel} 在同一流程记忆中重复`);
       }
@@ -1273,8 +2509,13 @@ async function checkProcessMemoryData() {
 
   for (const line of bomLines) {
     const label = `BOM ${line.bom.bomName} / ${line.partCodeSnapshot}`;
+    const processKeys = new Set<string>();
     for (const processName of splitDefaultProcessRoute(line.defaultProcessRoute)) {
       const processKey = normalizeSearchKeyword(processName);
+      if (processKeys.has(processKey)) {
+        addIssue('ERROR', 'MODEL_BOM_DEFAULT_PROCESS_DUPLICATE', `${label} 默认工艺 ${processName} 在同一 BOM 行中重复`);
+      }
+      processKeys.add(processKey);
       if (!enabledDefinitionNames.has(processKey)) {
         addIssue('ERROR', 'MODEL_BOM_DEFAULT_PROCESS_DEFINITION_MISSING', `${label} 默认工艺 ${processName} 没有对应的启用标准工序`);
       }
@@ -1284,8 +2525,13 @@ async function checkProcessMemoryData() {
   for (const rule of transformRules) {
     const scopeText = [rule.customerNameSnapshot, rule.projectModel].filter(Boolean).join(' / ') || '全部范围';
     const label = `来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode} / ${scopeText}`;
+    const processKeys = new Set<string>();
     for (const processName of splitDefaultProcessRoute(rule.defaultProcessRoute)) {
       const processKey = normalizeSearchKeyword(processName);
+      if (processKeys.has(processKey)) {
+        addIssue('ERROR', 'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DUPLICATE', `${label} 默认工艺 ${processName} 在同一来源加工关系中重复`);
+      }
+      processKeys.add(processKey);
       if (!enabledDefinitionNames.has(processKey)) {
         addIssue('ERROR', 'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DEFINITION_MISSING', `${label} 默认工艺 ${processName} 没有对应的启用标准工序`);
       }
@@ -1340,6 +2586,14 @@ async function checkProductionOperators() {
     if (operator.role !== operator.role.trim()) {
       addIssue('ERROR', 'PRODUCTION_OPERATOR_ROLE_HAS_SPACES', `${label} role 存在首尾空格`);
     }
+    const blankOptionalOperatorFields = [
+      ['pinyin', operator.pinyin],
+      ['pinyinInitials', operator.pinyinInitials],
+      ['idCardMasked', operator.idCardMasked]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankOptionalOperatorFields.length > 0) {
+      addIssue('ERROR', 'PRODUCTION_OPERATOR_OPTIONAL_TEXT_BLANK', `${label} 可选文本不能保存空字符串：${blankOptionalOperatorFields.map(([field]) => field).join(', ')}`);
+    }
 
     if (operator.idCardBound) {
       if (!operator.idCardMasked?.trim()) {
@@ -1348,6 +2602,8 @@ async function checkProductionOperators() {
       if (operator.idCardMasked && /\d{8,}/.test(operator.idCardMasked)) {
         addIssue('ERROR', 'PRODUCTION_OPERATOR_ID_CARD_EXPOSED', `${label} idCardMasked 疑似暴露了连续完整身份证号码`);
       }
+    } else if (operator.idCardMasked) {
+      addIssue('ERROR', 'PRODUCTION_OPERATOR_ID_CARD_MASK_STALE', `${label} 未绑定身份证但仍保存 idCardMasked`);
     }
 
     if (operator.status !== CommonStatus.ENABLED) {
@@ -1428,16 +2684,82 @@ async function checkCustomerContacts() {
   const customers = await prisma.customer.findMany({
     include: {
       contacts: {
+        where: { status: CommonStatus.ENABLED },
         orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }]
       }
     },
     orderBy: { customerCode: 'asc' }
   });
+  const disabledPrimaryContacts = await prisma.customerContact.findMany({
+    where: { status: CommonStatus.DISABLED, isPrimary: true },
+    include: { customer: { select: { customerCode: true, customerName: true } } }
+  });
+  const allContacts = await prisma.customerContact.findMany({
+    include: { customer: { select: { customerCode: true, customerName: true } } },
+    orderBy: [{ customerId: 'asc' }, { createdAt: 'asc' }]
+  });
+
+  for (const contact of disabledPrimaryContacts) {
+    addIssue(
+      'ERROR',
+      'CUSTOMER_DISABLED_CONTACT_PRIMARY',
+      `客户 ${contact.customer.customerName}（${contact.customer.customerCode}）存在已停用但仍标记主联系人的联系人 ${contact.contactName}`
+    );
+  }
+
+  for (const contact of allContacts) {
+    const label = `客户 ${contact.customer.customerName}（${contact.customer.customerCode}）/ 联系人 ${contact.contactName || contact.id}`;
+    const missingContactFields = [
+      ['customerId', contact.customerId],
+      ['contactName', contact.contactName]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingContactFields.length > 0) {
+      addIssue('ERROR', 'CUSTOMER_CONTACT_IDENTITY_MISSING', `${label} 缺少联系人基础字段：${missingContactFields.map(([field]) => field).join(', ')}`);
+    }
+    const blankContactOptionalFields = [
+      ['contactPhone', contact.contactPhone],
+      ['title', contact.title],
+      ['remark', contact.remark]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankContactOptionalFields.length > 0) {
+      addIssue('ERROR', 'CUSTOMER_CONTACT_OPTIONAL_TEXT_BLANK', `${label} 可选文本不能保存空字符串：${blankContactOptionalFields.map(([field]) => field).join(', ')}`);
+    }
+    if (contact.status === CommonStatus.DISABLED && contact.isPrimary) {
+      addIssue('ERROR', 'CUSTOMER_DISABLED_CONTACT_PRIMARY', `${label} 已停用但仍标记为主联系人`);
+    }
+  }
 
   for (const customer of customers) {
     const label = `${customer.customerName}（${customer.customerCode}）`;
     const primaryContacts = customer.contacts.filter((contact) => contact.isPrimary);
     const normalizedCustomerCode = customer.customerCode.trim();
+
+    // 客户主表是下单和历史追溯快照来源，基础身份、地区和联系人快照不能保存空字符串。
+    const missingCustomerFields = [
+      ['customerCode', customer.customerCode],
+      ['customerName', customer.customerName],
+      ['country', customer.country]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingCustomerFields.length > 0) {
+      addIssue('ERROR', 'CUSTOMER_IDENTITY_MISSING', `${label} 缺少客户基础字段：${missingCustomerFields.map(([field]) => field).join(', ')}`);
+    }
+    const blankCustomerOptionalFields = [
+      ['contactName', customer.contactName],
+      ['contactPhone', customer.contactPhone],
+      ['address', customer.address],
+      ['province', customer.province],
+      ['state', customer.state],
+      ['district', customer.district],
+      ['city', customer.city],
+      ['detailAddress', customer.detailAddress],
+      ['remark', customer.remark]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankCustomerOptionalFields.length > 0) {
+      addIssue('ERROR', 'CUSTOMER_OPTIONAL_TEXT_BLANK', `${label} 可选文本不能保存空字符串：${blankCustomerOptionalFields.map(([field]) => field).join(', ')}`);
+    }
+    if (!customer.contactName && customer.contactPhone) {
+      addIssue('ERROR', 'CUSTOMER_CONTACT_SNAPSHOT_PHONE_WITHOUT_NAME', `${label} 主表保留了 contactPhone，但缺少 contactName`);
+    }
 
     if (customer.customerCode !== normalizedCustomerCode) {
       addIssue('ERROR', 'CUSTOMER_CODE_HAS_SPACES', `${label} 的 customerCode 存在首尾空格`);
@@ -1484,10 +2806,10 @@ async function checkCustomerContacts() {
 async function checkOrderNoReservations() {
   const [orders, reservations] = await Promise.all([
     prisma.customerOrder.findMany({
-      select: { id: true, orderNo: true }
+      select: { id: true, orderNo: true, customerCode: true, customerName: true, customerSnapshot: true }
     }),
     prisma.orderNoReservation.findMany({
-      select: { orderNo: true, orderNoNormalized: true, sourceOrderId: true }
+      select: { id: true, orderNo: true, orderNoNormalized: true, sourceOrderId: true, reservedReason: true }
     })
   ]);
 
@@ -1495,6 +2817,18 @@ async function checkOrderNoReservations() {
   const orderNoRows = new Map<string, string[]>();
   for (const order of orders) {
     const normalized = normalizeOrderNo(order.orderNo);
+    // 订单主表快照必须可独立追溯，避免后续客户资料修改后历史订单失去可读身份。
+    const missingOrderFields = [
+      ['orderNo', order.orderNo],
+      ['customerCode', order.customerCode],
+      ['customerName', order.customerName]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingOrderFields.length > 0) {
+      addIssue('ERROR', 'CUSTOMER_ORDER_IDENTITY_MISSING', `订单 ${order.orderNo || order.id} 缺少身份字段：${missingOrderFields.map(([field]) => field).join(', ')}`);
+    }
+    if (!isJsonRecord(order.customerSnapshot)) {
+      addIssue('ERROR', 'CUSTOMER_ORDER_SNAPSHOT_INVALID', `订单 ${order.orderNo || order.id} 的 customerSnapshot 必须是对象快照`);
+    }
     if (order.orderNo !== normalized) {
       addIssue('ERROR', 'ORDER_NO_NOT_NORMALIZED', `订单号 ${order.orderNo} 未按大写规范保存，应为 ${normalized}`);
     }
@@ -1528,6 +2862,31 @@ async function checkOrderNoReservations() {
 
   for (const reservation of reservations) {
     const normalized = normalizeOrderNo(reservation.orderNo);
+    const reservationLabel = `订单号占用记录 ${reservation.orderNo || reservation.id}`;
+    const allowedReservationReasons = new Set([
+      'ORDER_CREATED',
+      'ORDER_IMPORTED',
+      'EXISTING_ORDER_RESERVED',
+      'CANCELLED_ORDER_RESERVED',
+      'DRAFT_ORDER_RENUMBERED',
+      'SEED_ORDER_RESERVED',
+      'SEED_DRAFT_STOCK_RESERVED',
+      'SEED_STOCK_ORDER_RESERVED'
+    ]);
+    const missingReservationFields = [
+      ['orderNo', reservation.orderNo],
+      ['orderNoNormalized', reservation.orderNoNormalized],
+      ['reservedReason', reservation.reservedReason]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingReservationFields.length > 0) {
+      addIssue('ERROR', 'ORDER_NO_RESERVATION_IDENTITY_MISSING', `${reservationLabel} 缺少字段：${missingReservationFields.map(([field]) => field).join(', ')}`);
+    }
+    if (reservation.reservedReason !== reservation.reservedReason.trim()) {
+      addIssue('ERROR', 'ORDER_NO_RESERVATION_REASON_HAS_SPACES', `${reservationLabel} reservedReason 存在首尾空格`);
+    }
+    if (!allowedReservationReasons.has(reservation.reservedReason)) {
+      addIssue('ERROR', 'ORDER_NO_RESERVATION_REASON_INVALID', `${reservationLabel} reservedReason=${reservation.reservedReason} 不在允许范围内`);
+    }
     if (reservation.orderNo !== normalized) {
       addIssue('ERROR', 'ORDER_NO_RESERVATION_ORDER_NO_NOT_NORMALIZED', `订单号占用记录 ${reservation.orderNo} 未按大写规范保存，应为 ${normalized}`);
     }
@@ -1614,6 +2973,11 @@ async function checkOrderLinePlans() {
     const label = `${line.order.orderNo} / ${line.partCode} / line ${line.lineNo}`;
     const orderQuantity = decimalToNumber(line.quantity);
     const planQuantity = decimalToNumber(line.productionPlanQuantity);
+    const suggestedPlanQuantity =
+      line.productionPlanSuggestedQuantity === null || line.productionPlanSuggestedQuantity === undefined
+        ? null
+        : decimalToNumber(line.productionPlanSuggestedQuantity);
+    const partThickness = decimalToNumber(line.partThickness);
     const selectedSources = selectedSourcesByLineId.get(line.id) || [];
     const selectedQuantity = selectedSources.reduce((sum, source) => sum + source.quantity, 0);
     const suggestedQuantity =
@@ -1624,6 +2988,57 @@ async function checkOrderLinePlans() {
       selectedQuantity + quantityTolerance >= orderQuantity;
     const staleFullStockPlanWithoutOverride =
       stockCoversCustomerQuantity && planQuantity > quantityTolerance && !productionPlanOverrideComplete(line);
+
+    const missingLineFields = [
+      ['partCode', line.partCode],
+      ['partName', line.partName],
+      ['unit', line.unit],
+      ['lineType', line.lineType]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingLineFields.length > 0) {
+      addIssue('ERROR', 'ORDER_LINE_IDENTITY_MISSING', `${label} 缺少订单明细身份字段：${missingLineFields.map(([field]) => field).join(', ')}`);
+    }
+    if (line.lineNo <= 0) {
+      addIssue('ERROR', 'ORDER_LINE_LINE_NO_INVALID', `${label} lineNo 必须大于 0`);
+    }
+    if (orderQuantity <= 0) {
+      addIssue('ERROR', 'ORDER_LINE_QUANTITY_INVALID', `${label} quantity 必须大于 0`);
+    }
+    if (planQuantity < 0) {
+      addIssue('ERROR', 'ORDER_LINE_PLAN_NEGATIVE', `${label} productionPlanQuantity 不能为负数`);
+    }
+    if (suggestedPlanQuantity !== null && suggestedPlanQuantity < 0) {
+      addIssue('ERROR', 'ORDER_LINE_SUGGESTION_NEGATIVE', `${label} productionPlanSuggestedQuantity 不能为负数`);
+    }
+    const isImportDraftMissingThickness =
+      line.order.status === OrderStatus.DRAFT && Boolean(line.sourceImportSessionId) && line.lineType === 'PART' && partThickness === 0;
+    if (line.lineType === 'PART' && partThickness <= 0 && !isImportDraftMissingThickness) {
+      addIssue('ERROR', 'ORDER_LINE_PART_THICKNESS_MISSING', `${label} 零件行 partThickness 必须大于 0`);
+    }
+    if (line.lineType === 'COMPONENT' && partThickness !== 0) {
+      addIssue('ERROR', 'ORDER_LINE_COMPONENT_THICKNESS_NOT_ZERO', `${label} 组件行 partThickness 必须为 0，厚度只核对子零件`);
+    }
+    const blankOptionalFields = [
+      ['drawingNo', line.drawingNo],
+      ['drawingVersion', line.drawingVersion],
+      ['drawingFileName', line.drawingFileName],
+      ['drawingFileUrl', line.drawingFileUrl],
+      ['partSpecification', line.partSpecification],
+      ['componentNo', line.componentNo],
+      ['parentComponentNo', line.parentComponentNo],
+      ['sourceImportSessionId', line.sourceImportSessionId],
+      ['sourceImportFileId', line.sourceImportFileId],
+      ['sourceImportFileName', line.sourceImportFileName],
+      ['projectModel', line.projectModel],
+      ['drawingStatus', line.drawingStatus],
+      ['productionPlanOverrideByCode', line.productionPlanOverrideByCode],
+      ['productionPlanOverrideByName', line.productionPlanOverrideByName],
+      ['productionPlanOverrideByRole', line.productionPlanOverrideByRole],
+      ['productionPlanOverrideReason', line.productionPlanOverrideReason]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankOptionalFields.length > 0) {
+      addIssue('ERROR', 'ORDER_LINE_OPTIONAL_TEXT_BLANK', `${label} 可选文本字段不能保存空字符串：${blankOptionalFields.map(([field]) => field).join(', ')}`);
+    }
 
     for (const rawSource of stockSourceRawRows(line.stockSourceSelections)) {
       const volatileFields = volatileStockSourceFields.filter((field) => Object.prototype.hasOwnProperty.call(rawSource, field));
@@ -1698,7 +3113,7 @@ async function checkOrderLinePlans() {
         addIssue('ERROR', 'STOCK_SOURCE_OVER_ORDER_QUANTITY', `${label} 已选库存 ${selectedQuantity} 超过客户订单数量 ${orderQuantity}`);
       }
       if (line.order.status !== OrderStatus.DRAFT && selectedQuantity <= 0) {
-        addIssue('ERROR', 'SUBMITTED_STOCK_LINE_NO_SOURCE', `${label} 已提交但没有 selectedStockSources`);
+        addIssue('ERROR', 'PENDING_PRODUCTION_STOCK_LINE_NO_SOURCE', `${label} 已提交但没有 selectedStockSources`);
       }
     }
 
@@ -1707,7 +3122,7 @@ async function checkOrderLinePlans() {
         addIssue('ERROR', 'REWORK_SOURCE_OVER_PLAN_QUANTITY', `${label} 已选库存 ${selectedQuantity} 超过生产计划领料数量 ${planQuantity}`);
       }
       if (line.order.status !== OrderStatus.DRAFT && selectedQuantity + quantityTolerance < planQuantity) {
-        addIssue('ERROR', 'SUBMITTED_REWORK_SOURCE_SHORTAGE', `${label} 已提交但库存再加工领料未选满`);
+        addIssue('ERROR', 'PENDING_PRODUCTION_REWORK_SOURCE_SHORTAGE', `${label} 已提交但库存再加工领料未选满`);
       }
     }
 
@@ -1803,6 +3218,7 @@ async function checkOrderLineProcessSteps() {
     const snapshotSteps = processSnapshotToSteps(line.processSnapshot);
     const requiresFinalizedProcess = line.order.status !== OrderStatus.DRAFT && line.order.status !== OrderStatus.CANCELLED;
     const shouldHaveProcessSteps = requiresFinalizedProcess && planQuantity > quantityTolerance;
+    const processStepKeys = new Set<string>();
 
     if (shouldHaveProcessSteps && rowSteps.length === 0) {
       addIssue('ERROR', 'ORDER_LINE_PROCESS_STEPS_EMPTY', `${label} 需要生产，但没有保存任何订单零件工序明细`);
@@ -1828,13 +3244,15 @@ async function checkOrderLineProcessSteps() {
         addIssue('ERROR', 'ORDER_LINE_PROCESS_STEP_NAME_EMPTY', `${stepLabel} 工序名称为空`);
         continue;
       }
+      const processKey = normalizeSearchKeyword(processName);
+      if (processStepKeys.has(processKey)) {
+        addIssue('ERROR', 'ORDER_LINE_PROCESS_STEP_DUPLICATE', `${stepLabel} 在同一订单零件中重复`);
+      }
+      processStepKeys.add(processKey);
       if (step.processName !== processName) {
         addIssue('ERROR', 'ORDER_LINE_PROCESS_STEP_NAME_HAS_SPACES', `${stepLabel} 工序名称存在首尾空格`);
       }
-      if (step.processRemark && step.processRemark.length > 120) {
-        addIssue('ERROR', 'ORDER_LINE_PROCESS_STEP_REMARK_TOO_LONG', `${stepLabel} 参数备注超过 120 个字符`);
-      }
-      if (!enabledProcessKeys.has(normalizeSearchKeyword(processName))) {
+      if (!enabledProcessKeys.has(processKey)) {
         addIssue(
           requiresFinalizedProcess ? 'ERROR' : 'WARN',
           'ORDER_LINE_PROCESS_DEFINITION_MISSING',
@@ -1846,35 +3264,48 @@ async function checkOrderLineProcessSteps() {
 }
 
 async function checkProductionTaskConsistency() {
-  const lines = await prisma.orderLine.findMany({
-    include: {
-      order: { select: { orderNo: true, status: true } },
-      processSteps: { orderBy: { stepNo: 'asc' } },
-      productionTasks: {
-        include: {
-          processCompletions: { orderBy: { stepNo: 'asc' } },
-          inventoryBatch: { select: { id: true, batchNo: true, quantity: true, status: true } }
+  const [lines, definitions] = await Promise.all([
+    prisma.orderLine.findMany({
+      include: {
+        order: { select: { orderNo: true, status: true } },
+        processSteps: { orderBy: { stepNo: 'asc' } },
+        productionTasks: {
+          include: {
+            processCompletions: {
+              orderBy: { stepNo: 'asc' },
+              include: {
+                logs: { orderBy: { createdAt: 'asc' } }
+              }
+            },
+            inventoryBatch: { select: { id: true, batchNo: true, quantity: true, status: true } }
+          },
+          orderBy: { productionTaskNo: 'asc' }
         },
-        orderBy: { productionTaskNo: 'asc' }
-      },
-      inventoryBatches: {
-        select: {
-          id: true,
-          batchNo: true,
-          sourceOrderId: true,
-          sourceOrderLineId: true,
-          status: true
+        inventoryBatches: {
+          select: {
+            id: true,
+            batchNo: true,
+            sourceOrderId: true,
+            sourceOrderLineId: true,
+            status: true
+          }
         }
-      }
-    },
-    orderBy: [{ orderId: 'asc' }, { lineNo: 'asc' }]
-  });
+      },
+      orderBy: [{ orderId: 'asc' }, { lineNo: 'asc' }]
+    }),
+    prisma.processDefinition.findMany({
+      where: { status: CommonStatus.ENABLED },
+      select: { processNameNormalized: true }
+    })
+  ]);
+  const enabledProcessKeys = new Set(definitions.map((definition) => definition.processNameNormalized));
 
   for (const line of lines) {
     const label = `${line.order.orderNo} / ${line.partCode} / line ${line.lineNo}`;
     const planQuantity = decimalToNumber(line.productionPlanQuantity);
     const shouldHaveProductionTask = line.order.status !== OrderStatus.DRAFT && line.order.status !== OrderStatus.CANCELLED && planQuantity > quantityTolerance;
-    const normalTasks = line.productionTasks.filter((task) => !task.isReplenishment);
+    const activeProductionTasks = line.productionTasks.filter((task) => task.status !== ProductionStatus.CANCELLED);
+    const normalTasks = activeProductionTasks.filter((task) => !task.isReplenishment);
     const lineSteps = processRowsToSteps(line.processSteps);
     const lineStepSignature = processStepsSignature(lineSteps);
     const selectedStockQuantity = normalizeStockSourceSelections(line.stockSourceSelections).reduce((sum, source) => sum + source.quantity, 0);
@@ -1889,7 +3320,7 @@ async function checkProductionTaskConsistency() {
       addIssue('ERROR', 'PRODUCTION_TASK_MISSING', `${label} 已提交且生产计划数量为 ${planQuantity}，但没有普通 ProductionTask`);
     }
 
-    if (line.order.status !== OrderStatus.DRAFT && planQuantity <= quantityTolerance && normalTasks.length > 0) {
+    if (line.order.status !== OrderStatus.DRAFT && line.order.status !== OrderStatus.CANCELLED && planQuantity <= quantityTolerance && normalTasks.length > 0) {
       addIssue('ERROR', 'ZERO_PLAN_HAS_NORMAL_TASK', `${label} 生产计划数量为 ${planQuantity}，但仍存在普通生产任务`);
     }
 
@@ -1931,6 +3362,42 @@ async function checkProductionTaskConsistency() {
       if (taskCompletedQuantity < 0) {
         addIssue('ERROR', 'PRODUCTION_TASK_NEGATIVE_COMPLETED', `${taskLabel} completedQuantity 为负数`);
       }
+      // 生产任务快照字段必须可独立追溯，避免历史订单、入库和通知只剩外键不可读。
+      const missingIdentityFields = [
+        ['productionTaskNo', task.productionTaskNo],
+        ['orderNo', task.orderNo],
+        ['customerName', task.customerName],
+        ['partCode', task.partCode],
+        ['partName', task.partName],
+        ['unit', task.unit]
+      ].filter(([, value]) => !String(value || '').trim());
+      if (missingIdentityFields.length > 0) {
+        addIssue('ERROR', 'PRODUCTION_TASK_IDENTITY_MISSING', `${taskLabel} 缺少生产任务快照字段：${missingIdentityFields.map(([field]) => field).join(', ')}`);
+      }
+      if (task.startedAt && task.completedAt && task.completedAt.getTime() < task.startedAt.getTime()) {
+        addIssue('ERROR', 'PRODUCTION_TASK_COMPLETED_BEFORE_STARTED', `${taskLabel} completedAt 早于 startedAt`);
+      }
+      if (task.status === ProductionStatus.CANCELLED) {
+        if (task.startedAt || task.completedAt || taskCompletedQuantity > quantityTolerance || completedCompletions.length > 0) {
+          addIssue('ERROR', 'CANCELLED_TASK_HAS_PRODUCTION_PROGRESS', `${taskLabel} 已取消，但仍有生产开始、完成数量或工序完成记录`);
+        }
+        if (!task.remark?.trim()) {
+          addIssue('ERROR', 'CANCELLED_TASK_REMARK_MISSING', `${taskLabel} 已取消，但缺少取消原因 remark`);
+        }
+        continue;
+      }
+      const taskProcessKeys = new Set<string>();
+      for (const [stepIndex, step] of taskSteps.entries()) {
+        const processKey = normalizeSearchKeyword(step.processName);
+        const taskStepLabel = `${taskLabel} / processSnapshot 第 ${stepIndex + 1} 道 ${step.processName || '-'}`;
+        if (taskProcessKeys.has(processKey)) {
+          addIssue('ERROR', 'PRODUCTION_TASK_PROCESS_STEP_DUPLICATE', `${taskStepLabel} 在同一生产任务中重复`);
+        }
+        taskProcessKeys.add(processKey);
+        if (!enabledProcessKeys.has(processKey)) {
+          addIssue('ERROR', 'PRODUCTION_TASK_PROCESS_DEFINITION_MISSING', `${taskStepLabel} 没有对应的启用标准工序`);
+        }
+      }
       if (taskSteps.length === 0) {
         addIssue('ERROR', 'PRODUCTION_TASK_PROCESS_SNAPSHOT_EMPTY', `${taskLabel} 缺少 processSnapshot 工序快照`);
       }
@@ -1959,6 +3426,23 @@ async function checkProductionTaskConsistency() {
           addIssue('ERROR', 'IN_PROGRESS_TASK_HAS_COMPLETED_AT', `${taskLabel} 状态为 IN_PROGRESS，但已经存在 completedAt`);
         }
       }
+      if (task.status === ProductionStatus.WAITING_CONFIRMATION) {
+        if (!task.startedAt) {
+          addIssue('ERROR', 'WAITING_CONFIRMATION_TASK_MISSING_STARTED_AT', `${taskLabel} 状态为 WAITING_CONFIRMATION，但缺少 startedAt`);
+        }
+        if (task.completedAt) {
+          addIssue('ERROR', 'WAITING_CONFIRMATION_TASK_HAS_COMPLETED_AT', `${taskLabel} 状态为 WAITING_CONFIRMATION，但已经存在 completedAt`);
+        }
+        if (taskCompletedQuantity > quantityTolerance) {
+          addIssue('ERROR', 'WAITING_CONFIRMATION_TASK_HAS_COMPLETED_QUANTITY', `${taskLabel} 状态为 WAITING_CONFIRMATION，但 completedQuantity=${taskCompletedQuantity}`);
+        }
+        for (let stepNo = 1; stepNo <= taskSteps.length; stepNo += 1) {
+          const completion = completionByStepNo.get(stepNo);
+          if (!completion?.isCompleted) {
+            addIssue('ERROR', 'WAITING_CONFIRMATION_TASK_PROCESS_INCOMPLETE', `${taskLabel} 待最终确认，但第 ${stepNo} 道工序没有确认完成`);
+          }
+        }
+      }
       if (task.status === ProductionStatus.COMPLETED) {
         if (!task.startedAt) {
           addIssue('ERROR', 'COMPLETED_TASK_MISSING_STARTED_AT', `${taskLabel} 状态为 COMPLETED，但缺少 startedAt`);
@@ -1969,6 +3453,10 @@ async function checkProductionTaskConsistency() {
         if (taskCompletedQuantity <= 0) {
           addIssue('ERROR', 'COMPLETED_TASK_ZERO_QUANTITY', `${taskLabel} 状态为 COMPLETED，但 completedQuantity 不大于 0`);
         }
+        if (task.inventoryBatch) {
+          // 已有入库批次的任务必须进入 STORED，避免待入库和已入库状态混用。
+          addIssue('ERROR', 'COMPLETED_TASK_HAS_INVENTORY_BATCH', `${taskLabel} 状态为 COMPLETED，但已经关联入库批次，应回填为 STORED`);
+        }
         for (let stepNo = 1; stepNo <= taskSteps.length; stepNo += 1) {
           const completion = completionByStepNo.get(stepNo);
           if (!completion?.isCompleted) {
@@ -1976,9 +3464,24 @@ async function checkProductionTaskConsistency() {
           }
         }
       }
+      if (task.status === ProductionStatus.STORED) {
+        if (!task.startedAt || !task.completedAt || taskCompletedQuantity <= 0) {
+          addIssue('ERROR', 'STORED_TASK_FINAL_FIELDS_MISSING', `${taskLabel} 状态为 STORED，但生产开始、完成时间或完成数量不完整`);
+        }
+        if (!task.inventoryBatch) {
+          addIssue('ERROR', 'STORED_TASK_MISSING_INVENTORY_BATCH', `${taskLabel} 状态为 STORED，但没有关联入库批次`);
+        }
+        for (let stepNo = 1; stepNo <= taskSteps.length; stepNo += 1) {
+          const completion = completionByStepNo.get(stepNo);
+          if (!completion?.isCompleted) {
+            addIssue('ERROR', 'STORED_TASK_PROCESS_INCOMPLETE', `${taskLabel} 已入库，但第 ${stepNo} 道工序没有确认完成`);
+          }
+        }
+      }
       for (const completion of task.processCompletions) {
         const completionQuantity = decimalToNumber(completion.completedQuantity);
         const expectedStep = taskSteps[completion.stepNo - 1];
+        checkProductionProcessCompletionLogs(taskLabel, task.id, completion);
         if (completion.stepNo <= 0 || completion.stepNo > taskSteps.length) {
           addIssue('ERROR', 'PROCESS_COMPLETION_STEP_OUT_OF_RANGE', `${taskLabel} / ${completion.processName} stepNo=${completion.stepNo} 超出任务工序范围`);
         }
@@ -2022,6 +3525,53 @@ async function checkProductionTaskConsistency() {
   }
 }
 
+function checkProductionProcessCompletionLogs(taskLabel: string, productionTaskId: string, completion: any) {
+  const logs = Array.isArray(completion.logs) ? completion.logs : [];
+  for (const log of logs) {
+    const logLabel = `${taskLabel} / ${completion.processName} / log ${log.id}`;
+    // 工序完成日志是生产执行追溯链路，不能留下空动作或不可解析快照。
+    const missingLogFields = [
+      ['productionTaskId', log.productionTaskId],
+      ['completionId', log.completionId],
+      ['processName', log.processName],
+      ['action', log.action]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingLogFields.length > 0) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_IDENTITY_MISSING', `${logLabel} 缺少日志身份字段：${missingLogFields.map(([field]) => field).join(', ')}`);
+    }
+    if (!processCompletionLogActions.has(log.action)) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_ACTION_INVALID', `${logLabel} action=${log.action} 不在允许的工序日志动作中`);
+    }
+    if (log.productionTaskId !== productionTaskId) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_TASK_MISMATCH', `${logLabel} productionTaskId 与所属 ProductionTask 不一致`);
+    }
+    if (log.completionId !== completion.id) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_COMPLETION_MISMATCH', `${logLabel} completionId 与所属 ProductionProcessCompletion 不一致`);
+    }
+    if (log.processName !== completion.processName) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_PROCESS_MISMATCH', `${logLabel} processName 与所属 ProductionProcessCompletion 不一致`);
+    }
+    if (!isJsonRecord(log.afterSnapshot)) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_AFTER_SNAPSHOT_INVALID', `${logLabel} afterSnapshot 必须是对象快照`);
+    } else {
+      const afterSnapshotProcessName = stringValue(log.afterSnapshot.processName);
+      const afterSnapshotStepNo = Number(log.afterSnapshot.stepNo);
+      if (!afterSnapshotProcessName || !Number.isFinite(afterSnapshotStepNo)) {
+        addIssue('ERROR', 'PROCESS_COMPLETION_LOG_AFTER_SNAPSHOT_INCOMPLETE', `${logLabel} afterSnapshot 缺少 processName 或 stepNo`);
+      }
+      if (afterSnapshotProcessName && afterSnapshotProcessName !== log.processName) {
+        addIssue('ERROR', 'PROCESS_COMPLETION_LOG_AFTER_PROCESS_MISMATCH', `${logLabel} afterSnapshot.processName 与日志 processName 不一致`);
+      }
+      if (Number.isFinite(afterSnapshotStepNo) && afterSnapshotStepNo > 0 && afterSnapshotStepNo !== completion.stepNo) {
+        addIssue('ERROR', 'PROCESS_COMPLETION_LOG_AFTER_STEP_MISMATCH', `${logLabel} afterSnapshot.stepNo 与工序记录 stepNo 不一致`);
+      }
+    }
+    if (log.beforeSnapshot !== null && !isJsonRecord(log.beforeSnapshot)) {
+      addIssue('ERROR', 'PROCESS_COMPLETION_LOG_BEFORE_SNAPSHOT_INVALID', `${logLabel} beforeSnapshot 只能为空或对象快照`);
+    }
+  }
+}
+
 async function checkInventoryReservations() {
   const [batches, reservations] = await Promise.all([
     prisma.inventoryBatch.findMany({
@@ -2047,18 +3597,39 @@ async function checkInventoryReservations() {
     })
   ]);
 
+  const validInventoryBatchStatuses = new Set(['AVAILABLE', 'RESERVED', 'USED', 'SCRAPPED']);
+
   for (const batch of batches) {
     const batchQuantity = decimalToNumber(batch.quantity);
     const activeReservedQuantity = batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0);
 
+    if (!validInventoryBatchStatuses.has(String(batch.status))) {
+      addIssue('ERROR', 'INVENTORY_BATCH_STATUS_INVALID', `库存批次 ${batch.batchNo} 状态 ${batch.status} 不在第一阶段允许范围内`);
+    }
     if (batchQuantity < 0) {
       addIssue('ERROR', 'NEGATIVE_BATCH_QUANTITY', `库存批次 ${batch.batchNo} 当前剩余为负数 ${batchQuantity}`);
     }
     if (batch.status === 'AVAILABLE' && batchQuantity <= 0) {
       addIssue('WARN', 'AVAILABLE_ZERO_BATCH', `库存批次 ${batch.batchNo} 状态为 AVAILABLE，但当前剩余 ${batchQuantity}`);
     }
+    if (batch.status === 'RESERVED' && batchQuantity <= 0) {
+      addIssue('ERROR', 'RESERVED_BATCH_ZERO_QUANTITY', `库存批次 ${batch.batchNo} 状态为 RESERVED，但当前剩余 ${batchQuantity}`);
+    }
+    if (batch.status === 'RESERVED' && activeReservedQuantity <= quantityTolerance) {
+      addIssue('ERROR', 'RESERVED_BATCH_WITHOUT_ACTIVE_RESERVATION', `库存批次 ${batch.batchNo} 状态为 RESERVED，但没有 ACTIVE 库存预占`);
+    }
+    if (batch.status === 'RESERVED' && batchQuantity > quantityTolerance && quantityDiffers(batchQuantity, activeReservedQuantity)) {
+      addIssue(
+        'ERROR',
+        'RESERVED_BATCH_QUANTITY_MISMATCH',
+        `库存批次 ${batch.batchNo} 状态为 RESERVED，当前剩余 ${batchQuantity}，ACTIVE 预占 ${roundQuantity(activeReservedQuantity)}，二者必须一致`
+      );
+    }
     if (batch.status === 'USED' && batchQuantity > quantityTolerance) {
       addIssue('WARN', 'USED_BATCH_HAS_QUANTITY', `库存批次 ${batch.batchNo} 状态为 USED，但当前剩余 ${batchQuantity}`);
+    }
+    if (batch.status === 'SCRAPPED' && batchQuantity > quantityTolerance) {
+      addIssue('ERROR', 'SCRAPPED_BATCH_HAS_QUANTITY', `库存批次 ${batch.batchNo} 状态为 SCRAPPED，但当前剩余 ${batchQuantity}`);
     }
     if (activeReservedQuantity > batchQuantity + quantityTolerance) {
       addIssue(
@@ -2103,6 +3674,20 @@ async function checkInventoryReservations() {
     if (quantity <= 0) {
       addIssue('ERROR', 'RESERVATION_NON_POSITIVE', `${label} quantity 必须大于 0`);
     }
+    // 库存预占快照必须能独立说明订单、零件和单位，避免批次或订单删除后失去追溯文字。
+    const missingReservationFields = [
+      ['orderNo', reservation.orderNo],
+      ['partCode', reservation.partCode],
+      ['partName', reservation.partName],
+      ['unit', reservation.unit]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingReservationFields.length > 0) {
+      addIssue(
+        'ERROR',
+        'RESERVATION_IDENTITY_MISSING',
+        `${label} 缺少库存预占快照字段：${missingReservationFields.map(([field]) => field).join(', ')}`
+      );
+    }
     if (reservation.orderNo !== reservation.order.orderNo) {
       addIssue('ERROR', 'RESERVATION_ORDER_NO_MISMATCH', `${label} 的 orderNo 与绑定订单不一致`);
     }
@@ -2139,13 +3724,16 @@ async function checkInventoryReservations() {
         addIssue('ERROR', 'CONSUMED_RESERVATION_TIME_MISSING', `${label} 已 CONSUMED，但缺少 consumedAt`);
       }
       if (reservation.releasedAt) {
-        addIssue('WARN', 'CONSUMED_RESERVATION_HAS_RELEASE_TIME', `${label} 已 CONSUMED，但仍存在 releasedAt`);
+        addIssue('ERROR', 'CONSUMED_RESERVATION_HAS_RELEASE_TIME', `${label} 已 CONSUMED，但仍存在 releasedAt`);
       }
     }
 
     if (reservation.status === InventoryReservationStatus.RELEASED) {
       if (!reservation.releasedAt) {
         addIssue('ERROR', 'RELEASED_RESERVATION_TIME_MISSING', `${label} 已 RELEASED，但缺少 releasedAt`);
+      }
+      if (reservation.consumedAt) {
+        addIssue('ERROR', 'RELEASED_RESERVATION_HAS_CONSUMED_TIME', `${label} 已 RELEASED，但仍存在 consumedAt`);
       }
       if (!reservation.statusReason?.trim()) {
         addIssue('WARN', 'RELEASED_RESERVATION_REASON_MISSING', `${label} 已 RELEASED，但缺少 statusReason`);
@@ -2250,16 +3838,25 @@ async function checkInventoryTransactionBalances() {
   const [batches, orphanTransactions] = await Promise.all([
     prisma.inventoryBatch.findMany({
       include: {
+        warehouse: { select: { id: true, warehouseCode: true } },
+        location: { select: { id: true, locationCode: true } },
         transactions: {
-          orderBy: { transactionTime: 'asc' }
+          orderBy: { transactionTime: 'asc' },
+          include: {
+            warehouse: { select: { id: true, warehouseCode: true } },
+            location: { select: { id: true, locationCode: true } }
+          }
         }
       },
       orderBy: { batchNo: 'asc' }
     }),
-    prisma.inventoryTransaction.findMany({
-      where: { batchId: null },
-      orderBy: { transactionNo: 'asc' }
-    })
+    // InventoryTransaction.batchId 在 Prisma schema 中已是必填；这里用 raw SQL 保留数据库漂移检查。
+    prisma.$queryRaw<Array<{ transactionNo: string }>>`
+      SELECT "transactionNo"
+      FROM "InventoryTransaction"
+      WHERE "batchId" IS NULL
+      ORDER BY "transactionNo" ASC
+    `
   ]);
 
   for (const transaction of orphanTransactions) {
@@ -2268,6 +3865,12 @@ async function checkInventoryTransactionBalances() {
 
   for (const batch of batches) {
     const batchQuantity = decimalToNumber(batch.quantity);
+    if (!batch.warehouse) {
+      addIssue('ERROR', 'INVENTORY_BATCH_WAREHOUSE_MISSING', `库存批次 ${batch.batchNo} 关联的仓库基础资料不存在`);
+    }
+    if (batch.locationId && !batch.location) {
+      addIssue('ERROR', 'INVENTORY_BATCH_LOCATION_MISSING', `库存批次 ${batch.batchNo} 关联的库位基础资料不存在`);
+    }
     if (batch.transactions.length === 0) {
       addIssue('ERROR', 'INVENTORY_BATCH_NO_TRANSACTION', `库存批次 ${batch.batchNo} 没有任何 InventoryTransaction 流水`);
       continue;
@@ -2276,6 +3879,12 @@ async function checkInventoryTransactionBalances() {
     let ledgerQuantity = 0;
     for (const transaction of batch.transactions) {
       const transactionQuantity = decimalToNumber(transaction.quantity);
+      if (!transaction.warehouse) {
+        addIssue('ERROR', 'INVENTORY_TRANSACTION_WAREHOUSE_MISSING', `库存流水 ${transaction.transactionNo} 关联的仓库基础资料不存在`);
+      }
+      if (transaction.locationId && !transaction.location) {
+        addIssue('ERROR', 'INVENTORY_TRANSACTION_LOCATION_MISSING', `库存流水 ${transaction.transactionNo} 关联的库位基础资料不存在`);
+      }
       if (transactionQuantity <= 0) {
         addIssue('ERROR', 'INVENTORY_TRANSACTION_NON_POSITIVE', `库存流水 ${transaction.transactionNo} 数量必须大于 0`);
       }
@@ -2720,13 +4329,30 @@ async function checkProductionNotices() {
     if (!notice.reason?.trim()) {
       addIssue('ERROR', 'PRODUCTION_NOTICE_REASON_MISSING', `${label} 缺少 reason`);
     }
+    if (!notice.noticeNo?.trim() || !notice.orderNo?.trim()) {
+      addIssue('ERROR', 'PRODUCTION_NOTICE_IDENTITY_MISSING', `${label} 缺少 noticeNo 或 orderNo`);
+    }
+    const blankOptionalFields = [
+      ['productionTaskNo', notice.productionTaskNo],
+      ['partCode', notice.partCode],
+      ['partName', notice.partName],
+      ['unit', notice.unit],
+      ['managerName', notice.managerName]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankOptionalFields.length > 0) {
+      addIssue(
+        'ERROR',
+        'PRODUCTION_NOTICE_OPTIONAL_TEXT_BLANK',
+        `${label} 存在空白快照字段：${blankOptionalFields.map(([field]) => field).join(', ')}`
+      );
+    }
 
     if (notice.status === ProductionNoticeStatus.ACKNOWLEDGED) {
       if (!notice.acknowledgedBy?.trim() || !notice.acknowledgedAt || Number.isNaN(new Date(notice.acknowledgedAt).getTime())) {
         addIssue('ERROR', 'PRODUCTION_NOTICE_ACK_MISSING', `${label} 已确认，但缺少 acknowledgedBy 或 acknowledgedAt`);
       }
     } else if (notice.acknowledgedBy || notice.acknowledgedAt) {
-      addIssue('WARN', 'PRODUCTION_NOTICE_PENDING_ACK_STALE', `${label} 仍是 PENDING，但已经存在确认人或确认时间`);
+      addIssue('ERROR', 'PRODUCTION_NOTICE_PENDING_ACK_STALE', `${label} 仍是 PENDING，但已经存在确认人或确认时间`);
     }
 
     if (notice.orderId && !order) {
@@ -2780,10 +4406,22 @@ async function checkProductionNotices() {
       }
     }
 
-    if (notice.beforeQuantity !== null && notice.afterQuantity !== null && notice.deltaQuantity !== null) {
+    const noticeQuantityValues = [notice.beforeQuantity, notice.afterQuantity, notice.deltaQuantity];
+    const hasNoticeQuantity = noticeQuantityValues.some((value) => value !== null);
+    const hasCompleteNoticeQuantity = noticeQuantityValues.every((value) => value !== null);
+    if (hasNoticeQuantity && !hasCompleteNoticeQuantity) {
+      addIssue('ERROR', 'PRODUCTION_NOTICE_QUANTITY_FIELDS_INCOMPLETE', `${label} beforeQuantity、afterQuantity 和 deltaQuantity 必须同时存在或同时为空`);
+    }
+    if (hasCompleteNoticeQuantity) {
       const beforeQuantity = decimalToNumber(notice.beforeQuantity);
       const afterQuantity = decimalToNumber(notice.afterQuantity);
       const deltaQuantity = decimalToNumber(notice.deltaQuantity);
+      if (beforeQuantity < 0 || afterQuantity < 0) {
+        addIssue('ERROR', 'PRODUCTION_NOTICE_QUANTITY_NEGATIVE', `${label} beforeQuantity 或 afterQuantity 不能为负数`);
+      }
+      if (!notice.unit?.trim()) {
+        addIssue('ERROR', 'PRODUCTION_NOTICE_QUANTITY_UNIT_MISSING', `${label} 写入数量变化时必须保留 unit`);
+      }
       if (quantityDiffers(roundQuantity(afterQuantity - beforeQuantity), deltaQuantity)) {
         addIssue(
           'ERROR',
@@ -2934,11 +4572,34 @@ async function checkProductionReplenishmentRequests() {
     if (!validStatuses.has(request.status)) {
       addIssue('ERROR', 'REPLENISHMENT_STATUS_INVALID', `${label} 的 status=${request.status} 不在 PENDING / APPROVED / REJECTED 内`);
     }
+    const blankSnapshotFields = [
+      ['requestNo', request.requestNo],
+      ['sourceType', request.sourceType],
+      ['status', request.status],
+      ['orderNo', request.orderNo],
+      ['productionTaskNo', request.productionTaskNo],
+      ['partCode', request.partCode],
+      ['partName', request.partName],
+      ['unit', request.unit],
+      ['reason', request.reason],
+      ['requestedByCode', request.requestedByCode],
+      ['requestedByName', request.requestedByName],
+      ['supervisorName', request.supervisorName],
+      ['supervisorRemark', request.supervisorRemark],
+      ['replenishmentTaskNo', request.replenishmentTaskNo]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankSnapshotFields.length > 0) {
+      addIssue(
+        'ERROR',
+        'REPLENISHMENT_IDENTITY_BLANK',
+        `${label} 存在空白快照字段：${blankSnapshotFields.map(([field]) => field).join(', ')}`
+      );
+    }
     if (requestQuantity <= 0) {
       addIssue('ERROR', 'REPLENISHMENT_REQUEST_NON_POSITIVE', `${label} requestQuantity 必须大于 0`);
     }
-    if (scrapQuantity < 0) {
-      addIssue('ERROR', 'REPLENISHMENT_SCRAP_NEGATIVE', `${label} scrapQuantity 为负数`);
+    if (scrapQuantity <= 0) {
+      addIssue('ERROR', 'REPLENISHMENT_SCRAP_NON_POSITIVE', `${label} scrapQuantity 必须大于 0`);
     }
     if (!request.reason?.trim()) {
       addIssue('ERROR', 'REPLENISHMENT_REASON_MISSING', `${label} 缺少 reason`);
@@ -3021,7 +4682,7 @@ async function checkProductionReplenishmentRequests() {
       if (task?.inventoryBatch) {
         addIssue('ERROR', 'PENDING_REPLENISHMENT_TASK_RECEIVED', `${label} 仍是 PENDING，但来源任务 ${task.productionTaskNo} 已入库`);
       }
-      if (request.replenishmentTaskNo || request.approvedAt || request.reviewedAt || request.supervisorName) {
+      if (request.replenishmentTaskNo || request.approvedAt || request.reviewedAt || request.supervisorName || request.supervisorRemark) {
         addIssue('ERROR', 'PENDING_REPLENISHMENT_REVIEW_FIELDS_STALE', `${label} 仍是 PENDING，但已经存在主管确认字段或补单任务号`);
       }
       if (completion && completion.shortageMode !== 'REPLENISHMENT_REQUEST') {
@@ -3070,8 +4731,8 @@ async function checkProductionReplenishmentRequests() {
       if (request.approvedAt || request.replenishmentTaskNo) {
         addIssue('ERROR', 'REJECTED_REPLENISHMENT_APPROVAL_FIELDS_STALE', `${label} 已驳回，但仍保留 approvedAt 或 replenishmentTaskNo`);
       }
-      if (completion && completion.shortageMode !== 'MANAGER_APPROVED') {
-        addIssue('ERROR', 'REJECTED_REPLENISHMENT_COMPLETION_MODE', `${label} 已驳回，但工序完成表 shortageMode 不是 MANAGER_APPROVED`);
+      if (completion && completion.shortageMode === 'REPLENISHMENT_REQUEST') {
+        addIssue('ERROR', 'REJECTED_REPLENISHMENT_COMPLETION_MODE', `${label} 已驳回，但工序完成表仍是 REPLENISHMENT_REQUEST`);
       }
     }
   }
@@ -3144,7 +4805,7 @@ async function checkProductionShortageResolutions() {
       orderChangeTaskNosByLineId.set(task.orderLineId, rows);
     }
 
-    const taskFinished = task.status === ProductionStatus.COMPLETED || Boolean(task.inventoryBatch);
+    const taskFinished = task.status === ProductionStatus.COMPLETED || task.status === ProductionStatus.STORED || Boolean(task.inventoryBatch);
     if (!taskFinished) {
       continue;
     }
@@ -3332,7 +4993,13 @@ async function checkProductionScrapRecords() {
   );
   const completionById = new Map(completions.map((completion) => [completion.id, completion] as const));
   const noticeById = new Map(notices.map((notice) => [notice.id, notice] as const));
-  const validSourceTypes = new Set(['ProductionProcessCompletion', 'ProductionTaskWithdraw', 'CustomerChangeWarehouseScrap']);
+  const validSourceTypes = new Set([
+    'ProductionProcessCompletion',
+    'ProductionProcessCompletionScrapCancelled',
+    'ProductionProcessCompletionWithdrawSnapshot',
+    'ProductionTaskWithdraw',
+    'CustomerChangeWarehouseScrap'
+  ]);
 
   for (const record of records) {
     const label = `报废记录 ${record.scrapNo}`;
@@ -3344,6 +5011,24 @@ async function checkProductionScrapRecords() {
       : record.productionTaskNo
         ? taskByNo.get(record.productionTaskNo)
         : null;
+    const blankSnapshotFields = [
+      ['scrapNo', record.scrapNo],
+      ['orderNo', record.orderNo],
+      ['productionTaskNo', record.productionTaskNo],
+      ['partCode', record.partCode],
+      ['partName', record.partName],
+      ['unit', record.unit],
+      ['reason', record.reason],
+      ['sourceRecordType', record.sourceRecordType],
+      ['sourceRecordId', record.sourceRecordId]
+    ].filter(([, value]) => value !== null && value !== undefined && !String(value).trim());
+    if (blankSnapshotFields.length > 0) {
+      addIssue(
+        'ERROR',
+        'SCRAP_RECORD_IDENTITY_BLANK',
+        `${label} 存在空白快照字段：${blankSnapshotFields.map(([field]) => field).join(', ')}`
+      );
+    }
 
     if (quantity <= 0) {
       addIssue('ERROR', 'SCRAP_RECORD_NON_POSITIVE', `${label} quantity 必须大于 0`);
@@ -3354,7 +5039,7 @@ async function checkProductionScrapRecords() {
     if (!record.sourceRecordType?.trim() || !record.sourceRecordId?.trim()) {
       addIssue('ERROR', 'SCRAP_RECORD_SOURCE_MISSING', `${label} 缺少 sourceRecordType 或 sourceRecordId`);
     } else if (!validSourceTypes.has(record.sourceRecordType)) {
-      addIssue('WARN', 'SCRAP_RECORD_SOURCE_TYPE_UNKNOWN', `${label} 的 sourceRecordType=${record.sourceRecordType} 不是第一阶段已知来源`);
+      addIssue('ERROR', 'SCRAP_RECORD_SOURCE_TYPE_UNKNOWN', `${label} 的 sourceRecordType=${record.sourceRecordType} 不是第一阶段已知来源`);
     }
 
     if (record.orderId && !order) {
@@ -3422,6 +5107,14 @@ async function checkProductionScrapRecords() {
       if (!record.sourceRecordId.startsWith(`${record.productionTaskId}:`)) {
         addIssue('ERROR', 'SCRAP_RECORD_WITHDRAW_SOURCE_MISMATCH', `${label} 的撤回来源 sourceRecordId 与 productionTaskId 不一致`);
       }
+    }
+
+    if (record.sourceRecordType === 'ProductionProcessCompletionScrapCancelled' && !record.sourceRecordId.includes(':scrap-cancel:')) {
+      addIssue('ERROR', 'SCRAP_RECORD_CANCELLED_SOURCE_MISMATCH', `${label} 的报废取消归档来源缺少 scrap-cancel 标记`);
+    }
+
+    if (record.sourceRecordType === 'ProductionProcessCompletionWithdrawSnapshot' && !record.sourceRecordId.includes(':withdraw:')) {
+      addIssue('ERROR', 'SCRAP_RECORD_WITHDRAW_ARCHIVE_SOURCE_MISMATCH', `${label} 的撤回归档来源缺少 withdraw 标记`);
     }
 
     if (record.sourceRecordType === 'CustomerChangeWarehouseScrap') {
@@ -3602,11 +5295,11 @@ async function checkOrderStatisticsStatuses() {
         `订单 ${order.orderNo} 仍是待提交生产，但已经形成可发货订单库存批次：${availableShipmentBatches.map((batch) => batch.batchNo).join('，')}`
       );
     }
-    if (statisticsStatus === 'ORDER_IN_PRODUCTION' && order.status === OrderStatus.SUBMITTED) {
+    if (statisticsStatus === 'ORDER_IN_PRODUCTION' && order.status === OrderStatus.PENDING_PRODUCTION) {
       addIssue(
         'ERROR',
         'IN_PROGRESS_ORDER_STATUS_STALE',
-        `订单 ${order.orderNo} 已有生产中或已完成任务，但 CustomerOrder.status 仍是 SUBMITTED`
+        `订单 ${order.orderNo} 已有生产中或已完成任务，但 CustomerOrder.status 仍是 PENDING_PRODUCTION`
       );
     }
   }
@@ -3651,11 +5344,18 @@ function resolveExpectedStatisticsStatus(
   }
   if (
     orderStatus === OrderStatus.IN_PRODUCTION ||
-    tasks.some((task) => task.status === ProductionStatus.IN_PROGRESS || task.status === ProductionStatus.COMPLETED)
+    tasks.some((task) =>
+      new Set<ProductionStatus>([
+        ProductionStatus.IN_PROGRESS,
+        ProductionStatus.WAITING_CONFIRMATION,
+        ProductionStatus.COMPLETED,
+        ProductionStatus.STORED
+      ]).has(task.status)
+    )
   ) {
     return 'ORDER_IN_PRODUCTION';
   }
-  if (tasks.length > 0 || orderStatus === OrderStatus.SUBMITTED) {
+  if (tasks.length > 0 || orderStatus === OrderStatus.PENDING_PRODUCTION) {
     return 'WAITING_PRODUCTION';
   }
   return orderStatus;
@@ -3674,7 +5374,8 @@ async function checkInventoryAdjustments() {
       countedBy: true,
       signatureName: true,
       attachmentFileUrl: true,
-      attachmentFileName: true
+      attachmentFileName: true,
+      attachmentSize: true
     }
   });
   const adjustmentIds = adjustments.map((adjustment) => adjustment.id);
@@ -3708,6 +5409,13 @@ async function checkInventoryAdjustments() {
     const afterQuantity = decimalToNumber(adjustment.afterQuantity);
     const deltaQuantity = decimalToNumber(adjustment.deltaQuantity);
     const expectedDeltaQuantity = roundQuantity(afterQuantity - beforeQuantity);
+    if (beforeQuantity < 0 || afterQuantity < 0) {
+      addIssue(
+        'ERROR',
+        'INVENTORY_ADJUSTMENT_NEGATIVE_QUANTITY',
+        `盘点调整 ${adjustment.adjustmentNo} beforeQuantity=${beforeQuantity}、afterQuantity=${afterQuantity}，盘点数量不能为负数`
+      );
+    }
     if (quantityDiffers(deltaQuantity, expectedDeltaQuantity)) {
       addIssue(
         'ERROR',
@@ -3754,9 +5462,12 @@ async function checkInventoryAdjustments() {
     if (!adjustment.countedBy?.trim() || !adjustment.signatureName?.trim()) {
       addIssue('ERROR', 'INVENTORY_ADJUSTMENT_SIGN_MISSING', `盘点调整 ${adjustment.adjustmentNo} 缺少清点人或签字`);
     }
-    if (!adjustment.attachmentFileUrl?.startsWith(inventoryAdjustmentPrefix)) {
+    if (!adjustment.attachmentFileName?.trim() || !adjustment.attachmentFileUrl?.startsWith(inventoryAdjustmentPrefix)) {
       addIssue('ERROR', 'INVENTORY_ADJUSTMENT_ATTACHMENT_MISSING', `盘点调整 ${adjustment.adjustmentNo} 缺少有效附件路径`);
       continue;
+    }
+    if (adjustment.attachmentSize !== null && adjustment.attachmentSize < 0) {
+      addIssue('ERROR', 'INVENTORY_ADJUSTMENT_ATTACHMENT_SIZE_INVALID', `盘点调整 ${adjustment.adjustmentNo} attachmentSize 不能为负数`);
     }
     const storedFileName = basename(adjustment.attachmentFileUrl);
     const filePath = resolve(uploadRoot, 'inventory-adjustments', storedFileName);

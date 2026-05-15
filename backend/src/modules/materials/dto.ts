@@ -2,6 +2,9 @@ import { CommonStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsArray, IsEnum, IsIn, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
 
+const materialStockAlertFilterValues = ['ALL', 'ENABLED', 'TRIGGERED', 'DISABLED'] as const;
+export type MaterialStockAlertFilter = (typeof materialStockAlertFilterValues)[number];
+
 export class MaterialDashboardQueryDto {
   @IsOptional()
   @IsString()
@@ -46,6 +49,10 @@ export class MaterialDashboardQueryDto {
   @IsOptional()
   @IsIn(['WITH_RECENT_ORDER', 'WITHOUT_RECENT_ORDER'])
   recentOrderPresence?: 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER';
+
+  @IsOptional()
+  @IsIn(materialStockAlertFilterValues)
+  stockAlert?: MaterialStockAlertFilter;
 
   @IsOptional()
   @IsString()

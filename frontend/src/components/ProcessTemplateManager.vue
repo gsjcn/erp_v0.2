@@ -106,8 +106,6 @@
           <el-input
             v-model="templateForm.templateName"
             placeholder="例如 激光折弯包装"
-            :maxlength="templateNameMaxLength"
-            show-word-limit
           />
         </el-form-item>
         <el-form-item label="流程备注">
@@ -116,8 +114,6 @@
             type="textarea"
             :rows="2"
             placeholder="说明适用范围、注意事项或特殊要求"
-            :maxlength="templateRemarkMaxLength"
-            show-word-limit
           />
         </el-form-item>
         <el-form-item label="流程步骤" required>
@@ -168,8 +164,6 @@
               <el-input
                 v-model="step.processRemark"
                 placeholder="参数备注，例如 4次 / M6孔"
-                :maxlength="processRemarkMaxLength"
-                show-word-limit
               />
               <div class="template-step-actions">
                 <el-button link :disabled="index === 0" @click="moveTemplateStep(index, -1)">上移</el-button>
@@ -191,7 +185,7 @@
               <el-button @click="addTemplateStep">添加工序</el-button>
             </div>
             <div class="template-process-create">
-              <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸" maxlength="30" />
+              <el-input v-model="newProcessName" placeholder="新建标准工序，例如 抛丸" />
               <el-button :loading="creatingProcess" @click="createProcessDefinition">新建标准工序</el-button>
             </div>
           </div>
@@ -292,9 +286,6 @@ const emit = defineEmits<{
 }>();
 
 const dynamicProcessOptions = ref<string[]>([]);
-const templateNameMaxLength = 60;
-const templateRemarkMaxLength = 300;
-const processRemarkMaxLength = 120;
 const templates = ref<ProcessTemplate[]>([]);
 const keyword = ref('');
 const statusFilter = ref<'ENABLED' | 'DISABLED' | 'ALL'>('ENABLED');
@@ -797,25 +788,12 @@ async function saveTemplate() {
     ElMessage.warning('请填写流程名称');
     return;
   }
-  if (templateName.length > templateNameMaxLength) {
-    ElMessage.warning(`流程名称不能超过 ${templateNameMaxLength} 个字符`);
-    return;
-  }
   const templateNameKey = normalizeTemplateNameKey(templateName);
   const duplicatedTemplate = templates.value.find(
     (template) => template.id !== editingTemplateId.value && normalizeTemplateNameKey(template.templateName) === templateNameKey
   );
   if (duplicatedTemplate) {
     ElMessage.warning(`流程记忆“${duplicatedTemplate.templateName}”已存在，请勿重复创建`);
-    return;
-  }
-  if (templateForm.remark.trim().length > templateRemarkMaxLength) {
-    ElMessage.warning(`流程备注不能超过 ${templateRemarkMaxLength} 个字符`);
-    return;
-  }
-  const longRemarkStep = templateForm.steps.find((step) => (step.processRemark || '').trim().length > processRemarkMaxLength);
-  if (longRemarkStep) {
-    ElMessage.warning(`工序“${longRemarkStep.processName}”的参数备注不能超过 ${processRemarkMaxLength} 个字符`);
     return;
   }
   if (templateForm.steps.length === 0) {
@@ -862,7 +840,7 @@ function cloneProcessSteps(steps: ProcessStepDetail[]) {
 }
 
 function nextAvailableName(name: string) {
-  const baseName = truncateTemplateName(name.trim() || '流程记忆');
+  const baseName = name.trim() || '流程记忆';
   const usedNames = new Set(templates.value.map((template) => normalizeTemplateNameKey(template.templateName)));
   if (!usedNames.has(normalizeTemplateNameKey(baseName))) {
     return baseName;
@@ -877,14 +855,8 @@ function nextAvailableName(name: string) {
   return candidate;
 }
 
-function truncateTemplateName(name: string) {
-  return name.length > templateNameMaxLength ? name.slice(0, templateNameMaxLength).trim() : name;
-}
-
 function buildNumberedTemplateName(baseName: string, index: number) {
-  const suffix = ` ${index}`;
-  const head = baseName.slice(0, templateNameMaxLength - suffix.length).trim();
-  return `${head}${suffix}`;
+  return `${baseName} ${index}`;
 }
 
 function normalizeTemplateNameKey(templateName: string) {

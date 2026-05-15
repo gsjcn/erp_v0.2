@@ -136,6 +136,11 @@ export class InventoryController {
     return this.inventoryService.updateMaterialDrawingRevision(revisionId, dto);
   }
 
+  @Patch('material-drawing-revisions/:revisionId/restore')
+  restoreMaterialDrawingRevision(@Param('revisionId') revisionId: string) {
+    return this.inventoryService.restoreMaterialDrawingRevision(revisionId);
+  }
+
   @Delete('material-drawing-revisions/:revisionId')
   disableMaterialDrawingRevision(@Param('revisionId') revisionId: string) {
     return this.inventoryService.disableMaterialDrawingRevision(revisionId);
@@ -230,6 +235,11 @@ export class InventoryController {
     return this.inventoryService.updateMaterialApplicability(applicabilityId, dto);
   }
 
+  @Patch('material-applicabilities/:applicabilityId/restore')
+  restoreMaterialApplicability(@Param('applicabilityId') applicabilityId: string) {
+    return this.inventoryService.restoreMaterialApplicability(applicabilityId);
+  }
+
   @Delete('material-applicabilities/:applicabilityId')
   disableMaterialApplicability(@Param('applicabilityId') applicabilityId: string) {
     return this.inventoryService.disableMaterialApplicability(applicabilityId);
@@ -238,6 +248,11 @@ export class InventoryController {
   @Patch('materials/:materialId')
   updateMaterial(@Param('materialId') materialId: string, @Body() dto: UpdateMaterialDto) {
     return this.inventoryService.updateMaterial(materialId, dto);
+  }
+
+  @Patch('materials/:materialId/restore')
+  restoreMaterial(@Param('materialId') materialId: string) {
+    return this.inventoryService.restoreMaterial(materialId);
   }
 
   @Delete('materials/:materialId')
@@ -343,6 +358,11 @@ export class InventoryController {
   @Patch('material-transform-rules/:ruleId')
   updateMaterialTransformRule(@Param('ruleId') ruleId: string, @Body() dto: SaveMaterialTransformRuleDto) {
     return this.inventoryService.updateMaterialTransformRule(ruleId, dto);
+  }
+
+  @Patch('material-transform-rules/:ruleId/restore')
+  restoreMaterialTransformRule(@Param('ruleId') ruleId: string) {
+    return this.inventoryService.restoreMaterialTransformRule(ruleId);
   }
 
   @Delete('material-transform-rules/:ruleId')

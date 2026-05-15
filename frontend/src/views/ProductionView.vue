@@ -3,6 +3,7 @@
     <div class="page-header">
       <h2 class="page-title">生产管理</h2>
       <div class="page-actions">
+        <el-button v-if="isMobileLayout" :icon="Camera" plain @click="showMobileScanReserved">扫码</el-button>
         <el-badge :value="pendingNoticeCount" :hidden="pendingNoticeCount === 0" class="notice-badge">
           <el-button :icon="Bell" @click="openNotices">通知</el-button>
         </el-badge>
@@ -77,7 +78,6 @@
         <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
         <el-button size="small" @click="backToOrderSummary">返回订单汇总</el-button>
         <el-button
-          v-if="!isMobileLayout"
           type="primary"
           plain
           size="small"
@@ -87,7 +87,6 @@
           批量开始待确认生产
         </el-button>
         <el-button
-          v-if="!isMobileLayout"
           type="primary"
           size="small"
           :disabled="selectedStartableTasks.length === 0"
@@ -278,15 +277,12 @@
           </div>
           <div class="mobile-card-actions">
             <el-button link type="primary" @click="openOrderProductionDetail(summary)">进入生产详情</el-button>
-            <template v-if="!isMobileLayout">
             <el-button v-if="orderSummaryNeedsShortageAttention(summary)" link type="warning" @click="goOrderShortageDetail(summary)">
               处理补单
             </el-button>
             <el-button v-if="summary.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(summary)">
               批量开始生产
             </el-button>
-            </template>
-            <span v-else class="mobile-readonly-note">手机端只查看生产概况</span>
           </div>
         </article>
         <div v-if="!filteredOrderSummaries.length && !loading" class="mobile-empty">暂无生产订单</div>
@@ -455,7 +451,7 @@
           </div>
           <div class="mobile-card-header-actions production-task-header-actions">
             <el-checkbox
-              v-if="selectedProductionOrderNo && !isMobileLayout && shouldShowStartAction(task)"
+              v-if="selectedProductionOrderNo && shouldShowStartAction(task)"
               :model-value="selectedStartableTaskIds.includes(task.id)"
               :value="task.id"
               class="mobile-start-checkbox"
@@ -521,11 +517,11 @@
                   {
                     completed: isProcessCompleted(task, step),
                     current: isCurrentProcess(task, step),
-                    locked: isMobileLayout || !canOpenProcess(task, step)
+                    locked: !canOpenProcess(task, step)
                   }
                 ]"
-                :disabled="isMobileLayout || !canOpenProcess(task, step)"
-                :title="isMobileLayout ? '手机端只查看工序进度' : processButtonTitle(task, step)"
+                :disabled="!canOpenProcess(task, step)"
+                :title="processButtonTitle(task, step)"
                 @click="openProcessCompletion(task, step)"
               >
                 {{ processStepDisplay(task, step) }}
@@ -542,7 +538,6 @@
           </div>
         </div>
         <div v-show="isMobileProductionTaskExpanded(task.id)" class="mobile-card-actions">
-          <template v-if="!isMobileLayout">
           <el-button
             v-if="pendingProductionReplenishmentRequest(task)"
             link
@@ -569,9 +564,7 @@
           <el-button v-if="canWithdrawProduction(task)" link type="danger" @click="withdrawProduction(task)">
             管理撤回
           </el-button>
-          </template>
-          <span v-if="isMobileLayout" class="mobile-readonly-note">手机端只查看生产进度</span>
-          <span v-else-if="effectiveProductionStatus(task) === 'RECEIVED'" class="muted">已入库</span>
+          <span v-if="effectiveProductionStatus(task) === 'RECEIVED'" class="muted">已入库</span>
           <span v-else-if="effectiveProductionStatus(task) === 'COMPLETED'" class="muted">已完成</span>
         </div>
       </article>
@@ -747,10 +740,30 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="noticeVisible" title="生产通知" width="min(760px, calc(100vw - 32px))" class="responsive-dialog">
+    <el-dialog v-model="noticeVisible" title="生产通知" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-loading="noticeLoading" class="notice-list">
-        <div v-if="productionNotices.length === 0" class="muted">暂无生产通知</div>
-        <article v-for="notice in productionNotices" :key="notice.id" class="notice-item">
+        <div class="notice-toolbar">
+          <el-radio-group v-model="productionNoticeStatusFilter" size="small">
+            <el-radio-button value="PENDING">待处理 {{ productionNoticeCounts.PENDING }}</el-radio-button>
+            <el-radio-button value="ACKNOWLEDGED">历史 {{ productionNoticeCounts.ACKNOWLEDGED }}</el-radio-button>
+            <el-radio-button value="ALL">全部 {{ productionNoticeCounts.ALL }}</el-radio-button>
+          </el-radio-group>
+        </div>
+        <div class="notice-filter-grid">
+          <CustomerSelect v-model="productionNoticeFilters.customerId" placeholder="通知客户" width="180px" @change="loadProductionNotices" />
+          <el-input v-model="productionNoticeFilters.orderNo" clearable placeholder="订单号" @keyup.enter="loadProductionNotices" />
+          <el-input v-model="productionNoticeFilters.partCode" clearable placeholder="零件编码" @keyup.enter="loadProductionNotices" />
+          <el-select v-model="productionNoticeFilters.noticeType" placeholder="通知类型">
+            <el-option label="全部类型" value="ALL" />
+            <el-option v-for="item in productionNoticeTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+          <DateRangeFilter v-model="productionNoticeDateRange" start-placeholder="通知开始" end-placeholder="通知结束" width="220px" />
+          <el-input v-model="productionNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="loadProductionNotices" />
+          <el-button type="primary" @click="loadProductionNotices">查询</el-button>
+          <el-button @click="resetProductionNoticeFilters">重置</el-button>
+        </div>
+        <div v-if="filteredProductionNotices.length === 0" class="muted">暂无生产通知</div>
+        <article v-for="notice in filteredProductionNotices" :key="notice.id" class="notice-item">
           <div>
             <strong>{{ productionNoticeTitle(notice) }}</strong>
             <p>{{ notice.reason }}</p>
@@ -760,7 +773,7 @@
             </small>
           </div>
           <el-button
-            v-if="notice.status === 'PENDING' && !isMobileLayout"
+            v-if="notice.status === 'PENDING'"
             size="small"
             type="primary"
             @click="acknowledgeNotice(notice)"
@@ -840,28 +853,25 @@
           </div>
           <div class="replenishment-request-actions">
             <template v-if="request.status === 'PENDING'">
-              <template v-if="!isMobileLayout">
-                <el-button
-                  type="primary"
-                  size="small"
-                  :disabled="!canReviewReplenishmentRequest(request)"
-                  :title="replenishmentRequestLockedReason(request)"
-                  @click="openReplenishmentApprovalFromRequest(request)"
-                >
-                  主管确认
-                </el-button>
-                <el-button
-                  type="danger"
-                  size="small"
-                  plain
-                  :disabled="!canReviewReplenishmentRequest(request)"
-                  :title="replenishmentRequestLockedReason(request)"
-                  @click="openReplenishmentReject(request)"
-                >
-                  驳回申请
-                </el-button>
-              </template>
-              <span v-else class="mobile-readonly-note">手机端只查看补单申请</span>
+              <el-button
+                type="primary"
+                size="small"
+                :disabled="!canReviewReplenishmentRequest(request)"
+                :title="replenishmentRequestLockedReason(request)"
+                @click="openReplenishmentApprovalFromRequest(request)"
+              >
+                主管确认
+              </el-button>
+              <el-button
+                type="danger"
+                size="small"
+                plain
+                :disabled="!canReviewReplenishmentRequest(request)"
+                :title="replenishmentRequestLockedReason(request)"
+                @click="openReplenishmentReject(request)"
+              >
+                驳回申请
+              </el-button>
             </template>
             <span v-else class="muted">{{ replenishmentRequestStatusText(request.status) }}</span>
           </div>
@@ -1191,7 +1201,7 @@
                   :remote-method="(keyword: string) => searchOperatorsForProcess(processName, keyword)"
                   :loading="isOperatorLoading(operatorScopeForProcess(processName))"
                   :disabled="activeProcessReadonly"
-                  placeholder="可不填，输入姓名 / 拼音 / 账号ID"
+                  placeholder="必填，输入姓名 / 拼音 / 账号ID"
                   class="process-operator-select"
                   @visible-change="(visible: boolean) => handleProcessOperatorSelectVisible(processName, visible)"
                 >
@@ -1209,7 +1219,7 @@
                   </el-option>
                 </el-select>
               </div>
-              <div class="process-help-text">可多选，也可以不填写；批量确认时每道工序会分别保存自己的操作人员。</div>
+              <div class="process-help-text">确认工序完成时必须选择操作人员；批量确认时每道工序会分别保存自己的操作人员。</div>
             </div>
           </el-form-item>
           <el-form-item label="记录时间">
@@ -1486,11 +1496,11 @@
           </div>
           <div>
             <label>报废数量</label>
-            <strong>{{ formatQuantity(activeReplenishmentApprovalCompletion.scrapQuantity || 0, activeReplenishmentApprovalTask.unit) }}</strong>
+            <strong>{{ formatQuantity(activeReplenishmentApprovalCompletion.scrapQuantity ?? 0, activeReplenishmentApprovalTask.unit) }}</strong>
           </div>
           <div>
             <label>申请补齐</label>
-            <strong>{{ formatQuantity(activeReplenishmentApprovalCompletion.shortageQuantity || 0, activeReplenishmentApprovalTask.unit) }}</strong>
+            <strong>{{ formatQuantity(activeReplenishmentApprovalCompletion.shortageQuantity ?? 0, activeReplenishmentApprovalTask.unit) }}</strong>
           </div>
         </div>
         <el-alert
@@ -1567,7 +1577,7 @@
         </div>
 
         <el-alert
-          title="撤回会清空当前任务的工序完成记录并退回待确认生产。请选择已经做出的零件转库存、报废，或确认无实物处理。保存前可以反复修改本表单，确认后再提交。"
+          title="撤回会重置当前任务的工序完成状态并退回待确认生产，系统会保留撤回前工序摘要和日志。请选择已经做出的零件转库存、报废，或确认无实物处理。保存前可以反复修改本表单，确认后再提交。"
           type="warning"
           :closable="false"
           class="mt-16"
@@ -1604,12 +1614,16 @@
             <el-input-number
               v-model="withdrawForm.handlingQuantity"
               :min="0"
+              :max="withdrawHandlingQuantityMax || undefined"
               :precision="3"
               :controls="false"
               :disabled="withdrawForm.handlingMode === 'NONE'"
               style="width: 180px"
             />
             <span class="unit-text">{{ activeWithdrawTask.unit }}</span>
+            <small v-if="withdrawHandlingQuantityMax > 0" class="withdraw-quantity-limit">
+              最多 {{ formatQuantity(withdrawHandlingQuantityMax, activeWithdrawTask.unit) }}
+            </small>
           </el-form-item>
           <el-form-item label="其它说明">
             <el-input
@@ -1765,7 +1779,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { Bell, Document, Download, Printer, Refresh } from '@element-plus/icons-vue';
+import { Bell, Camera, Document, Download, Printer, Refresh } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
@@ -1778,6 +1792,8 @@ import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
   OrderSummary,
   ProductionNotice,
+  ProductionNoticeStatus,
+  ProductionNoticeType,
   ProductionOperator,
   ProductionOrderSummary,
   ProductionOrderSummaryTask,
@@ -1789,7 +1805,7 @@ import type {
   ProductionTask
 } from '../types/erp';
 import { normalizeDisplayFileName } from '../utils/fileNames';
-import { formatDate, formatQuantity } from '../utils/format';
+import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
 import { downloadHtmlAsExcel, escapeHtml, formatFileDateTime, openPrintHtml } from '../utils/tableExport';
 
 type ProductionDisplayStatus = ProductionOrderSummaryStatus;
@@ -1817,6 +1833,8 @@ const startSaving = ref(false);
 const batchStartVisible = ref(false);
 const batchStartSaving = ref(false);
 const productionNotices = ref<ProductionNotice[]>([]);
+const productionNoticeStatusFilter = ref<ProductionNoticeStatus | 'ALL'>('PENDING');
+const productionNoticeDateRange = ref<string[]>([]);
 const activeProductionNotice = ref<ProductionNotice>();
 const replenishmentRequestVisible = ref(false);
 const replenishmentRequestLoading = ref(false);
@@ -1879,6 +1897,28 @@ const filters = reactive<{
   orderNo?: string;
 }>({});
 
+const productionNoticeFilters = reactive<{
+  customerId?: string;
+  orderNo: string;
+  partCode: string;
+  keyword: string;
+  noticeType: ProductionNoticeType | 'ALL';
+}>({
+  customerId: undefined,
+  orderNo: '',
+  partCode: '',
+  keyword: '',
+  noticeType: 'ALL'
+});
+
+const productionNoticeTypeOptions: Array<{ label: string; value: ProductionNoticeType }> = [
+  { label: '数量增加', value: 'QUANTITY_INCREASE' },
+  { label: '数量减少', value: 'QUANTITY_DECREASE' },
+  { label: '订单取消', value: 'ORDER_CANCELLED' },
+  { label: '新增零件', value: 'MATERIAL_ADDED' },
+  { label: '管理撤回', value: 'TASK_WITHDRAWN' }
+];
+
 const scrapFilters = reactive<{
   customerId?: string;
   orderNo?: string;
@@ -1936,16 +1976,32 @@ const scopedTasks = computed(() => {
 const selectedProductionOrderOption = computed(() =>
   selectedProductionOrderNo.value ? orderOptions.value.find((item) => item.orderNo === selectedProductionOrderNo.value) : undefined
 );
+const withdrawHandlingQuantityMax = computed(() =>
+  activeWithdrawTask.value ? defaultWithdrawHandlingQuantity(activeWithdrawTask.value) : 0
+);
 
 const counts = computed(() => productionTaskStatusCounts(scopedTasks.value));
 const orderCounts = computed(() => ({
   PENDING: orderSummaries.value.filter((summary) => summary.status === 'PENDING').length,
   IN_PROGRESS: orderSummaries.value.filter((summary) => summary.status === 'IN_PROGRESS').length,
+  WAITING_CONFIRMATION: orderSummaries.value.filter((summary) => summary.status === 'WAITING_CONFIRMATION').length,
   READY_TO_COMPLETE: orderSummaries.value.filter((summary) => summary.status === 'READY_TO_COMPLETE').length,
   COMPLETED: orderSummaries.value.filter((summary) => summary.status === 'COMPLETED').length,
-  RECEIVED: orderSummaries.value.filter((summary) => summary.status === 'RECEIVED').length
+  RECEIVED: orderSummaries.value.filter((summary) => summary.status === 'RECEIVED').length,
+  STORED: orderSummaries.value.filter((summary) => summary.status === 'STORED').length,
+  CANCELLED: orderSummaries.value.filter((summary) => summary.status === 'CANCELLED').length
 }));
 const pendingNoticeCount = computed(() => productionNotices.value.filter((notice) => notice.status === 'PENDING').length);
+const productionNoticeCounts = computed(() => {
+  const pending = productionNotices.value.filter((notice) => notice.status === 'PENDING').length;
+  const acknowledged = productionNotices.value.filter((notice) => notice.status === 'ACKNOWLEDGED').length;
+  return { ALL: productionNotices.value.length, PENDING: pending, ACKNOWLEDGED: acknowledged };
+});
+const filteredProductionNotices = computed(() =>
+  productionNoticeStatusFilter.value === 'ALL'
+    ? productionNotices.value
+    : productionNotices.value.filter((notice) => notice.status === productionNoticeStatusFilter.value)
+);
 const pendingReplenishmentRequestCount = computed(
   () => productionReplenishmentRequests.value.filter((request) => request.status === 'PENDING').length
 );
@@ -2210,7 +2266,9 @@ const activeProcessCompletion = computed(() => {
 });
 
 const activeProcessLogs = computed(() => activeProcessCompletion.value?.logs || []);
-const activeProcessReadonly = computed(() => Boolean(activeTask.value?.inventoryBatchNo || activeTask.value?.orderStatus === 'COMPLETED'));
+const activeProcessReadonly = computed(() =>
+  Boolean(activeTask.value?.inventoryBatchNo || activeTask.value?.status === 'STORED' || activeTask.value?.orderStatus === 'COMPLETED')
+);
 const activeProcessReadonlyText = computed(() =>
   activeTask.value?.orderStatus === 'COMPLETED'
     ? '该订单已完成发货，工序完成表只能查看，不能再修改。'
@@ -2253,7 +2311,7 @@ const shouldShowProcessQuantityNotice = computed(
 const shouldShowQuantityOverridePanel = computed(
   () =>
     shouldShowProcessQuantityNotice.value &&
-    Number(processForm.completedQuantity || 0) > activeExpectedProcessQuantity.value &&
+    Number(processForm.completedQuantity ?? 0) > activeExpectedProcessQuantity.value &&
     !activeProcessReadonly.value
 );
 
@@ -2279,37 +2337,37 @@ const shortageQuantity = computed(() => {
   if (!activeTask.value || !isFinalProcessSelected.value) {
     return 0;
   }
-  return roundQuantity(activeTask.value.plannedQuantity - Number(processForm.completedQuantity || 0));
+  return roundQuantity(activeTask.value.plannedQuantity - Number(processForm.completedQuantity ?? 0));
 });
 
-const shouldShowShortagePanel = computed(() => false);
+const shouldShowShortagePanel = computed(() => shortageQuantity.value > 0);
 
 const finalShortageQuantity = computed(() => {
   if (!activeFinalTask.value) {
     return 0;
   }
-  return Math.max(roundQuantity(activeFinalTask.value.plannedQuantity - Number(finalForm.completedQuantity || 0)), 0);
+  return Math.max(roundQuantity(activeFinalTask.value.plannedQuantity - Number(finalForm.completedQuantity ?? 0)), 0);
 });
 
 const finalOverageQuantity = computed(() => {
   if (!activeFinalTask.value) {
     return 0;
   }
-  return Math.max(roundQuantity(Number(finalForm.completedQuantity || 0) - activeFinalTask.value.plannedQuantity), 0);
+  return Math.max(roundQuantity(Number(finalForm.completedQuantity ?? 0) - activeFinalTask.value.plannedQuantity), 0);
 });
 
 const finalOrderReceiptQuantityEstimate = computed(() => {
   if (!activeFinalTask.value) {
     return 0;
   }
-  return Math.min(Number(finalForm.completedQuantity || 0), activeFinalTask.value.customerOrderQuantity || activeFinalTask.value.plannedQuantity);
+  return Math.min(Number(finalForm.completedQuantity ?? 0), activeFinalTask.value.customerOrderQuantity ?? activeFinalTask.value.plannedQuantity);
 });
 
 const finalStockQuantityEstimate = computed(() => {
   if (!activeFinalTask.value) {
     return 0;
   }
-  return Math.max(roundQuantity(Number(finalForm.completedQuantity || 0) - finalOrderReceiptQuantityEstimate.value), 0);
+  return Math.max(roundQuantity(Number(finalForm.completedQuantity ?? 0) - finalOrderReceiptQuantityEstimate.value), 0);
 });
 
 const finalShouldShowShortagePanel = computed(() => finalShortageQuantity.value > 0);
@@ -2399,7 +2457,16 @@ async function loadOrderSummaries() {
 async function loadProductionNotices() {
   noticeLoading.value = true;
   try {
-    productionNotices.value = await erpApi.productionNotices(undefined, 'PRODUCTION');
+    productionNotices.value = await erpApi.productionNotices(undefined, 'PRODUCTION', {
+      target: 'PRODUCTION',
+      customerId: productionNoticeFilters.customerId,
+      orderNo: productionNoticeFilters.orderNo,
+      partCode: productionNoticeFilters.partCode,
+      keyword: productionNoticeFilters.keyword,
+      noticeType: productionNoticeFilters.noticeType === 'ALL' ? undefined : productionNoticeFilters.noticeType,
+      dateFrom: productionNoticeDateRange.value[0],
+      dateTo: productionNoticeDateRange.value[1]
+    });
   } catch (error) {
     productionNotices.value = [];
     ElMessage.error(error instanceof Error ? error.message : '生产通知加载失败，请确认后端服务');
@@ -2409,8 +2476,23 @@ async function loadProductionNotices() {
 }
 
 async function openNotices() {
+  productionNoticeFilters.customerId = filters.customerId;
+  productionNoticeFilters.orderNo = filters.orderNo || '';
+  productionNoticeDateRange.value = [...dateRange.value];
   noticeVisible.value = true;
   await loadProductionNotices();
+  productionNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+}
+
+async function resetProductionNoticeFilters() {
+  productionNoticeFilters.customerId = undefined;
+  productionNoticeFilters.orderNo = '';
+  productionNoticeFilters.partCode = '';
+  productionNoticeFilters.keyword = '';
+  productionNoticeFilters.noticeType = 'ALL';
+  productionNoticeDateRange.value = [];
+  await loadProductionNotices();
+  productionNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
 }
 
 async function loadProductionReplenishmentRequests(showLoading = false, useServerKeyword = false) {
@@ -2640,11 +2722,14 @@ async function resetFilters() {
 }
 
 function guardDesktopProductionMutation(actionLabel: string) {
-  if (!isMobileLayout.value) {
-    return false;
-  }
-  ElMessage.warning(`手机端仅查看生产进度和通知，${actionLabel}请在电脑端操作`);
-  return true;
+  void actionLabel;
+  // 生产页属于现场执行端：手机端允许开始生产、工序确认、完成确认、生产通知和补单审核。
+  // 订单提交生产仍由订单页控制，手机端不开放下单、导入或提交生产。
+  return false;
+}
+
+function showMobileScanReserved() {
+  ElMessage.info('扫码入口已预留，第一阶段暂不启用');
 }
 
 function productionNoticeTitle(notice: ProductionNotice) {
@@ -2956,6 +3041,10 @@ function withdrawProduction(row: ProductionTask) {
   if (guardDesktopProductionMutation('管理撤回生产任务')) {
     return;
   }
+  if (!canWithdrawProduction(row)) {
+    ElMessage.warning('已取消、待生产或已入库任务不能管理撤回');
+    return;
+  }
   activeWithdrawTask.value = row;
   const defaultQuantity = defaultWithdrawHandlingQuantity(row);
   withdrawForm.managerName = '';
@@ -2998,6 +3087,10 @@ async function saveWithdrawProduction() {
   if (!task) {
     return;
   }
+  if (!canWithdrawProduction(task)) {
+    ElMessage.warning('已取消、待生产或已入库任务不能管理撤回');
+    return;
+  }
   if (!withdrawForm.managerName.trim()) {
     ElMessage.warning('请输入管理人员姓名');
     return;
@@ -3012,8 +3105,14 @@ async function saveWithdrawProduction() {
   }
   if (withdrawForm.handlingMode === 'NONE') {
     withdrawForm.handlingQuantity = 0;
+  } else if (withdrawHandlingQuantityMax.value <= 0) {
+    ElMessage.warning('当前生产任务没有已记录产出数量，不能转库存或报废');
+    return;
   } else if (!withdrawForm.handlingQuantity || withdrawForm.handlingQuantity <= 0) {
     ElMessage.warning('零件入库存或报废时，处理数量必须大于 0');
+    return;
+  } else if (withdrawHandlingQuantityMax.value > 0 && withdrawForm.handlingQuantity > withdrawHandlingQuantityMax.value) {
+    ElMessage.warning(`撤回处理数量不能超过已记录产出数量 ${formatQuantity(withdrawHandlingQuantityMax.value, task.unit)}`);
     return;
   }
 
@@ -3062,7 +3161,7 @@ function currentProcessText(row: ProductionTask) {
   if (status === 'READY_TO_COMPLETE') {
     return '待确认完成';
   }
-  if (status === 'COMPLETED' || status === 'RECEIVED') {
+  if (status === 'COMPLETED' || status === 'RECEIVED' || status === 'CANCELLED') {
     return productionStatusLabel(status);
   }
   const current = nextIncompleteProcess(row);
@@ -3072,22 +3171,22 @@ function currentProcessText(row: ProductionTask) {
 function expectedProcessQuantity(row: ProductionTask, processName: string) {
   const activeIndex = row.processSteps.indexOf(processName);
   if (activeIndex <= 0) {
-    return Number(row.plannedQuantity || 0);
+    return Number(row.plannedQuantity ?? 0);
   }
   const previousProcessName = row.processSteps[activeIndex - 1];
   const previousCompletion = getProcessCompletion(row, previousProcessName);
   if (!previousCompletion?.isCompleted) {
-    return Number(row.plannedQuantity || 0);
+    return Number(row.plannedQuantity ?? 0);
   }
-  return Number(previousCompletion.completedQuantity || 0);
+  return Number(previousCompletion.completedQuantity ?? 0);
 }
 
 function isProcessCompleted(row: ProductionTask, processName: string) {
-  return row.status === 'COMPLETED' || Boolean(getProcessCompletion(row, processName)?.isCompleted);
+  return row.status === 'COMPLETED' || row.status === 'STORED' || Boolean(getProcessCompletion(row, processName)?.isCompleted);
 }
 
 function isAllProcessConfirmed(row: ProductionTask) {
-  if (row.status === 'COMPLETED') {
+  if (row.status === 'COMPLETED' || row.status === 'STORED' || row.status === 'WAITING_CONFIRMATION') {
     return true;
   }
   if (row.processSteps.length === 0) {
@@ -3098,8 +3197,15 @@ function isAllProcessConfirmed(row: ProductionTask) {
 }
 
 function effectiveProductionStatus(row: ProductionTask): ProductionDisplayStatus {
-  if (row.inventoryBatchNo) {
+  if (row.inventoryBatchNo || row.status === 'STORED') {
     return 'RECEIVED';
+  }
+  if (row.status === 'CANCELLED') {
+    // 已取消任务只保留历史状态，不能因工序完成或历史无工序快照被重新算成待确认完成。
+    return 'CANCELLED';
+  }
+  if (row.status === 'WAITING_CONFIRMATION') {
+    return 'READY_TO_COMPLETE';
   }
   // 工序全部确认只代表流程走完；必须点击“确认完成”后，任务才真正进入待入库的 COMPLETED。
   if (row.status !== 'PENDING' && row.status !== 'COMPLETED' && isAllProcessConfirmed(row)) {
@@ -3113,7 +3219,7 @@ function nextIncompleteProcess(row: ProductionTask) {
 }
 
 function isCurrentProcess(row: ProductionTask, processName: string) {
-  return row.status !== 'COMPLETED' && nextIncompleteProcess(row) === processName;
+  return row.status !== 'COMPLETED' && row.status !== 'STORED' && nextIncompleteProcess(row) === processName;
 }
 
 function isFinalProcess(row: ProductionTask, processName: string) {
@@ -3140,11 +3246,20 @@ function canModifyFinalCompletion(row: ProductionTask) {
 }
 
 function canWithdrawProduction(row: ProductionTask) {
-  return row.orderStatus !== 'CANCELLED' && row.orderStatus !== 'COMPLETED' && !row.inventoryBatchNo && row.status !== 'PENDING';
+  const status = effectiveProductionStatus(row);
+  // 已取消任务只保留历史，不允许从生产端再次管理撤回。
+  return (
+    row.orderStatus !== 'CANCELLED' &&
+    row.orderStatus !== 'COMPLETED' &&
+    !row.inventoryBatchNo &&
+    status !== 'PENDING' &&
+    status !== 'CANCELLED' &&
+    status !== 'RECEIVED'
+  );
 }
 
 function defaultWithdrawHandlingQuantity(row: ProductionTask) {
-  const processQuantity = Math.max(0, ...(row.processCompletions || []).map((item) => Number(item.completedQuantity || 0)));
+  const processQuantity = Math.max(0, ...(row.processCompletions || []).map((item) => Number(item.completedQuantity ?? 0)));
   return row.completedQuantity > 0 ? row.completedQuantity : processQuantity;
 }
 
@@ -3152,11 +3267,14 @@ function handleWithdrawModeChange() {
   if (withdrawForm.handlingMode === 'NONE') {
     withdrawForm.handlingQuantity = 0;
   } else if (withdrawForm.handlingQuantity <= 0 && activeWithdrawTask.value) {
-    withdrawForm.handlingQuantity = defaultWithdrawHandlingQuantity(activeWithdrawTask.value) || 1;
+    withdrawForm.handlingQuantity = withdrawHandlingQuantityMax.value;
+  } else if (withdrawHandlingQuantityMax.value > 0 && withdrawForm.handlingQuantity > withdrawHandlingQuantityMax.value) {
+    withdrawForm.handlingQuantity = withdrawHandlingQuantityMax.value;
   }
 }
 
 function canOpenProcess(row: ProductionTask, processName: string) {
+  const status = effectiveProductionStatus(row);
   if (row.orderStatus === 'CANCELLED') {
     return false;
   }
@@ -3166,15 +3284,22 @@ function canOpenProcess(row: ProductionTask, processName: string) {
   if (row.inventoryBatchNo) {
     return isProcessCompleted(row, processName);
   }
-  if (effectiveProductionStatus(row) === 'PENDING') {
+  if (status === 'RECEIVED') {
+    return isProcessCompleted(row, processName);
+  }
+  if (status === 'PENDING' || status === 'CANCELLED') {
     return false;
   }
   return row.status === 'COMPLETED' || isProcessCompleted(row, processName) || isCurrentProcess(row, processName);
 }
 
 function processButtonTitle(row: ProductionTask, processName: string) {
+  const status = effectiveProductionStatus(row);
   if (row.orderStatus === 'CANCELLED') {
     return '订单已取消，只能做管理撤回或查看通知';
+  }
+  if (status === 'CANCELLED') {
+    return '生产任务已取消，只能查看历史记录';
   }
   if (row.orderStatus === 'COMPLETED') {
     return isProcessCompleted(row, processName) ? '订单已完成发货，只能查看工序记录' : '订单已完成发货，不能新增工序记录';
@@ -3182,7 +3307,10 @@ function processButtonTitle(row: ProductionTask, processName: string) {
   if (row.inventoryBatchNo) {
     return isProcessCompleted(row, processName) ? '已入库，只能查看工序记录' : '已入库，不能新增工序记录';
   }
-  if (effectiveProductionStatus(row) === 'PENDING') {
+  if (status === 'RECEIVED') {
+    return isProcessCompleted(row, processName) ? '已入库，只能查看工序记录' : '已入库，不能新增工序记录';
+  }
+  if (status === 'PENDING') {
     return '请先开始生产';
   }
   if (!canOpenProcess(row, processName)) {
@@ -3217,7 +3345,7 @@ function openProcessCompletion(row: ProductionTask, processName: string) {
   // 打开当前未完成工序时默认选择“已完成”，避免操作人员点击“确认完成”却再次保存成未完成。
   processForm.isCompleted = true;
   processForm.completedQuantity = completion?.isCompleted ? completion.completedQuantity : expectedProcessQuantity(row, processName);
-  processForm.scrapQuantity = completion?.scrapQuantity || 0;
+  processForm.scrapQuantity = completion?.scrapQuantity ?? 0;
   processForm.shortageMode = completion?.shortageMode || 'REPLENISHMENT_REQUEST';
   processForm.managerName = completion?.managerName || '';
   processForm.shortageReason = completion?.shortageReason || '';
@@ -3517,6 +3645,10 @@ function validateShortageHandling() {
     ElMessage.warning('报废数量不能大于缺少数量');
     return false;
   }
+  if (processForm.shortageMode === 'REPLENISHMENT_REQUEST' && scrapQuantity <= 0) {
+    ElMessage.warning('生产报废补单申请必须填写大于 0 的报废数量');
+    return false;
+  }
   if (processForm.shortageMode === 'MANAGER_APPROVED') {
     if (!processForm.managerName.trim()) {
       ElMessage.warning('请填写车间管理人员');
@@ -3603,9 +3735,9 @@ async function confirmCompletedTask(row: ProductionTask) {
 
   const finalCompletion = finalProcessCompletion(row);
   activeFinalTask.value = row;
-  finalForm.completedQuantity = finalCompletion?.completedQuantity || row.completedQuantity || row.plannedQuantity;
+  finalForm.completedQuantity = finalCompletion?.completedQuantity ?? row.completedQuantity ?? row.plannedQuantity;
   finalForm.operatorCodes = operatorCodesFromCompletion(finalCompletion);
-  finalForm.scrapQuantity = finalCompletion?.scrapQuantity || 0;
+  finalForm.scrapQuantity = finalCompletion?.scrapQuantity ?? 0;
   finalForm.shortageMode = finalCompletion?.shortageMode || 'REPLENISHMENT_REQUEST';
   finalForm.managerName = finalCompletion?.managerName || '';
   finalForm.shortageReason = finalCompletion?.shortageReason || '';
@@ -3666,6 +3798,10 @@ function validateFinalCompletion() {
   }
   if (scrapQuantity > finalShortageQuantity.value) {
     ElMessage.warning('报废数量不能大于缺少数量');
+    return false;
+  }
+  if (finalForm.shortageMode === 'REPLENISHMENT_REQUEST' && scrapQuantity <= 0) {
+    ElMessage.warning('生产报废补单申请必须填写大于 0 的报废数量');
     return false;
   }
   if (finalForm.shortageMode === 'MANAGER_APPROVED') {
@@ -3746,6 +3882,13 @@ async function saveProcessCompletion() {
   if (!validateShortageHandling()) {
     return;
   }
+  if (processForm.isCompleted) {
+    const missingOperatorProcessNames = selectedProcessNames.filter((processName) => operatorCodesForProcess(processName).length === 0);
+    if (missingOperatorProcessNames.length > 0) {
+      ElMessage.warning(`请选择${missingOperatorProcessNames.join('、')}的操作人员`);
+      return;
+    }
+  }
   if (!(await confirmProcessQuantityOverride())) {
     return;
   }
@@ -3796,9 +3939,12 @@ function productionStatusLabel(status: ProductionDisplayStatus) {
   const labels: Record<ProductionDisplayStatus, string> = {
     PENDING: '待确认生产',
     IN_PROGRESS: '生产中',
+    WAITING_CONFIRMATION: '待确认完成',
     READY_TO_COMPLETE: '待确认完成',
     COMPLETED: '已完成',
-    RECEIVED: '已入库'
+    RECEIVED: '已入库',
+    STORED: '已入库',
+    CANCELLED: '已取消'
   };
   return labels[status] || status;
 }
@@ -3807,9 +3953,12 @@ function productionStatusTagType(status: ProductionDisplayStatus) {
   const types: Record<ProductionDisplayStatus, 'success' | 'warning' | 'info' | 'primary' | 'danger'> = {
     PENDING: 'info',
     IN_PROGRESS: 'warning',
+    WAITING_CONFIRMATION: 'primary',
     READY_TO_COMPLETE: 'primary',
     COMPLETED: 'success',
-    RECEIVED: 'success'
+    RECEIVED: 'success',
+    STORED: 'success',
+    CANCELLED: 'danger'
   };
   return types[status] || 'info';
 }
@@ -3832,7 +3981,7 @@ function formatCompletedQuantity(row: ProductionTask) {
 
 function formatCustomerOrderQuantity(row: ProductionTask) {
   // 生产现场要同时看到客户订单数量和生产计划数量，避免把多做库存误认为客户要发货数量。
-  return formatQuantity(row.customerOrderQuantity || row.plannedQuantity, row.unit);
+  return formatQuantity(row.customerOrderQuantity ?? row.plannedQuantity, row.unit);
 }
 
 function formatProductionTaskThickness(row: ProductionTask) {
@@ -3850,9 +3999,12 @@ function productionTaskStatusCounts(rows: ProductionTask[]) {
   return {
     PENDING: rows.filter((task) => effectiveProductionStatus(task) === 'PENDING').length,
     IN_PROGRESS: rows.filter((task) => effectiveProductionStatus(task) === 'IN_PROGRESS').length,
+    WAITING_CONFIRMATION: rows.filter((task) => effectiveProductionStatus(task) === 'WAITING_CONFIRMATION').length,
     READY_TO_COMPLETE: rows.filter((task) => effectiveProductionStatus(task) === 'READY_TO_COMPLETE').length,
     COMPLETED: rows.filter((task) => effectiveProductionStatus(task) === 'COMPLETED').length,
-    RECEIVED: rows.filter((task) => effectiveProductionStatus(task) === 'RECEIVED').length
+    RECEIVED: rows.filter((task) => effectiveProductionStatus(task) === 'RECEIVED').length,
+    STORED: rows.filter((task) => effectiveProductionStatus(task) === 'STORED').length,
+    CANCELLED: rows.filter((task) => effectiveProductionStatus(task) === 'CANCELLED').length
   };
 }
 
@@ -3880,13 +4032,13 @@ function orderSummaryShortageActionText(row: ProductionOrderSummary) {
   if (row.needsProductionReplenishmentReview && !row.needsReplenishmentAction) {
     const quantityText = row.pendingProductionReplenishmentQuantityByUnit?.length
       ? row.pendingProductionReplenishmentQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join('、')
-      : formatQuantity(row.pendingProductionReplenishmentQuantity || 0, row.pendingProductionReplenishmentUnit || row.unit || '件');
-    return `生产报废补单待确认 ${row.pendingProductionReplenishmentLineCount || 0} 个零件 / ${quantityText}`;
+      : formatQuantity(row.pendingProductionReplenishmentQuantity ?? 0, row.pendingProductionReplenishmentUnit || row.unit || '件');
+    return `生产报废补单待确认 ${row.pendingProductionReplenishmentLineCount ?? 0} 个零件 / ${quantityText}`;
   }
   const quantityText = row.unresolvedShortageQuantityByUnit?.length
     ? row.unresolvedShortageQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join('、')
-    : formatQuantity(row.unresolvedShortageQuantity || 0, row.unresolvedShortageUnit || row.unit || '件');
-  return `需补单 ${row.unresolvedShortageLineCount || 0} 个零件 / ${quantityText}`;
+    : formatQuantity(row.unresolvedShortageQuantity ?? 0, row.unresolvedShortageUnit || row.unit || '件');
+  return `需补单 ${row.unresolvedShortageLineCount ?? 0} 个零件 / ${quantityText}`;
 }
 
 function orderSummaryNeedsShortageAttention(row: ProductionOrderSummary) {
@@ -3901,10 +4053,13 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
   const counts = {
     PENDING: 0,
     IN_PROGRESS: 0,
+    WAITING_CONFIRMATION: 0,
     READY_TO_COMPLETE: 0,
     COMPLETED: 0,
-    RECEIVED: 0
-  };
+    RECEIVED: 0,
+    STORED: 0,
+    CANCELLED: 0
+  } satisfies Record<ProductionDisplayStatus, number>;
   const partKeys = new Set<string>();
   const quantityByUnit = new Map<
     string,
@@ -3937,11 +4092,11 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
       };
     const customerOrderLineKey = task.orderLineId || `${task.partCode}__${task.partName}__${task.unit}`;
     if (!customerOrderLineKeys.has(customerOrderLineKey)) {
-      quantityRow.customerOrderQuantity += Number(task.customerOrderQuantity || 0);
+      quantityRow.customerOrderQuantity += Number(task.customerOrderQuantity ?? 0);
       customerOrderLineKeys.add(customerOrderLineKey);
     }
-    quantityRow.plannedQuantity += Number(task.plannedQuantity || 0);
-    quantityRow.completedQuantity += Number(task.completedQuantity || 0);
+    quantityRow.plannedQuantity += Number(task.plannedQuantity ?? 0);
+    quantityRow.completedQuantity += Number(task.completedQuantity ?? 0);
     quantityByUnit.set(task.unit, quantityRow);
     if (status === 'PENDING') {
       pendingTasks.push({
@@ -3958,12 +4113,12 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
         processStepDetails: task.processStepDetails
       });
     }
-    if (Number(task.unresolvedShortageQuantity || 0) > 0) {
+    if (Number(task.unresolvedShortageQuantity ?? 0) > 0) {
       unresolvedShortageLineKeys.add(task.orderLineId || task.id);
       const unit = task.unresolvedShortageUnit || task.unit || '件';
       unresolvedShortageQuantityByUnit.set(
         unit,
-        (unresolvedShortageQuantityByUnit.get(unit) || 0) + Number(task.unresolvedShortageQuantity || 0)
+        (unresolvedShortageQuantityByUnit.get(unit) ?? 0) + Number(task.unresolvedShortageQuantity ?? 0)
       );
       shortageActionTasks.push({
         id: task.id,
@@ -3971,23 +4126,23 @@ function buildOrderSummaryFromTasks(rows: ProductionTask[]): ProductionOrderSumm
         productionTaskNo: task.productionTaskNo,
         partCode: task.partCode,
         partName: task.partName,
-        shortageQuantity: Number(task.unresolvedShortageQuantity || 0),
+        shortageQuantity: Number(task.unresolvedShortageQuantity ?? 0),
         unit
       });
     }
-    if (Number(task.pendingProductionReplenishmentQuantity || 0) > 0) {
+    if (Number(task.pendingProductionReplenishmentQuantity ?? 0) > 0) {
       pendingProductionReplenishmentLineKeys.add(task.orderLineId || task.id);
       const unit = task.pendingProductionReplenishmentUnit || task.unit || '件';
       pendingProductionReplenishmentQuantityByUnit.set(
         unit,
-        (pendingProductionReplenishmentQuantityByUnit.get(unit) || 0) +
-          Number(task.pendingProductionReplenishmentQuantity || 0)
+        (pendingProductionReplenishmentQuantityByUnit.get(unit) ?? 0) +
+          Number(task.pendingProductionReplenishmentQuantity ?? 0)
       );
     }
   }
 
-  const totalPlannedQuantity = rows.reduce((sum, task) => sum + Number(task.plannedQuantity || 0), 0);
-  const totalCompletedQuantity = rows.reduce((sum, task) => sum + Number(task.completedQuantity || 0), 0);
+  const totalPlannedQuantity = rows.reduce((sum, task) => sum + Number(task.plannedQuantity ?? 0), 0);
+  const totalCompletedQuantity = rows.reduce((sum, task) => sum + Number(task.completedQuantity ?? 0), 0);
   const doneCount = counts.COMPLETED + counts.RECEIVED;
   return {
     orderId: first.orderId,
@@ -4055,6 +4210,9 @@ function resolveOrderSummaryStatusFromCounts(
   taskCount: number,
   counts: Record<ProductionDisplayStatus, number>
 ): ProductionOrderSummaryStatus {
+  if (taskCount > 0 && counts.CANCELLED === taskCount) {
+    return 'CANCELLED';
+  }
   if (taskCount > 0 && counts.RECEIVED === taskCount) {
     return 'RECEIVED';
   }
@@ -4085,7 +4243,7 @@ function orderSummaryProgressItems(row: ProductionOrderSummary) {
     if (count <= 0) {
       return;
     }
-    buckets.set(label, (buckets.get(label) || 0) + count);
+    buckets.set(label, (buckets.get(label) ?? 0) + count);
   };
 
   if (sourceTasks.length === 0) {
@@ -4399,7 +4557,7 @@ function shortageSummary(row: ProductionTask) {
   }
 
   const shortage = formatQuantity(completion.shortageQuantity, row.unit);
-  const scrap = formatQuantity(completion.scrapQuantity || 0, row.unit);
+  const scrap = formatQuantity(completion.scrapQuantity ?? 0, row.unit);
   if (completion.shortageMode === 'REPLENISHMENT_REQUEST' && !completion.replenishmentTaskNo) {
     return `缺 ${shortage}，报废 ${scrap}，生产报废补单申请待主管确认${completion.replenishmentRequestNo ? `：${completion.replenishmentRequestNo}` : ''}`;
   }
@@ -4436,22 +4594,15 @@ function isPdfDrawing(url?: string) {
   return Boolean(url && /\.pdf$/i.test(url));
 }
 
-function formatDateTime(value?: string) {
-  if (!value) {
-    return '-';
-  }
-  return new Date(value).toLocaleString('zh-CN', { hour12: false });
-}
-
 function formatProcessLog(snapshot?: Record<string, unknown> | null) {
   if (!snapshot) {
     return '-';
   }
   const status = snapshot.isCompleted ? '已完成' : '未完成';
-  const quantity = formatQuantity(Number(snapshot.completedQuantity || 0), String(snapshot.unit || '件'));
+  const quantity = formatQuantity(Number(snapshot.completedQuantity ?? 0), String(snapshot.unit || '件'));
   const role = snapshot.operatorRole ? ` / ${snapshot.operatorRole}` : '';
   const completedAt = snapshot.completedAt ? `，时间 ${formatDateTime(String(snapshot.completedAt))}` : '';
-  const shortageQuantity = Number(snapshot.shortageQuantity || 0);
+  const shortageQuantity = Number(snapshot.shortageQuantity ?? 0);
   const shortageMode =
     snapshot.shortageMode === 'REPLENISHMENT_REQUEST'
       ? '生产报废补单申请'
@@ -4465,7 +4616,7 @@ function formatProcessLog(snapshot?: Record<string, unknown> | null) {
   const shortage =
     shortageQuantity > 0
       ? `，缺少 ${formatQuantity(shortageQuantity, String(snapshot.unit || '件'))}，报废 ${formatQuantity(
-          Number(snapshot.scrapQuantity || 0),
+          Number(snapshot.scrapQuantity ?? 0),
           String(snapshot.unit || '件')
         )}，处理 ${shortageMode}${requestNo}${replenishmentTaskNo}${manager}${reason}`
       : '';
@@ -4475,7 +4626,7 @@ function formatProcessLog(snapshot?: Record<string, unknown> | null) {
 }
 
 function refreshPrintDateTime() {
-  printDateTime.value = new Date().toLocaleString('zh-CN', { hour12: false });
+  printDateTime.value = formatDateTime(new Date());
 }
 
 function productionPlanRows() {
@@ -4807,6 +4958,12 @@ onMounted(async () => {
   color: #64748b;
 }
 
+.withdraw-quantity-limit {
+  margin-left: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
 .cell-main {
   color: #0f172a;
   font-weight: 600;
@@ -5054,6 +5211,27 @@ onMounted(async () => {
 .notice-list {
   display: grid;
   gap: 10px;
+}
+
+.notice-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.notice-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  align-items: center;
+}
+
+.notice-filter-grid :deep(.el-input),
+.notice-filter-grid :deep(.el-select),
+.notice-filter-grid :deep(.date-range-filter) {
+  width: 100%;
 }
 
 .start-confirm-panel {

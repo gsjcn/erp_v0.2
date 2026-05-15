@@ -31,7 +31,6 @@ export class ProcessTemplatesService {
     const templateNameNormalized = this.normalizeTemplateNameKey(templateName);
     const steps = await this.normalizeSteps(dto.steps, true);
     const remark = dto.remark?.trim() || null;
-    this.validateRemarkLength(remark);
     await this.ensureTemplateNameAvailable(templateNameNormalized);
 
     try {
@@ -59,7 +58,6 @@ export class ProcessTemplatesService {
     const templateNameNormalized = this.normalizeTemplateNameKey(templateName);
     const steps = dto.steps !== undefined ? await this.normalizeSteps(dto.steps, true) : processSnapshotToDetails(existing.steps);
     const remark = dto.remark !== undefined ? dto.remark.trim() || null : existing.remark;
-    this.validateRemarkLength(remark);
 
     if (templateNameNormalized !== existing.templateNameNormalized) {
       await this.ensureTemplateNameAvailable(templateNameNormalized, id);
@@ -140,9 +138,6 @@ export class ProcessTemplatesService {
     if (!normalized) {
       throw new BadRequestException(message);
     }
-    if (normalized.length > 60) {
-      throw new BadRequestException('流程记忆名称不能超过 60 个字符');
-    }
     return normalized;
   }
 
@@ -154,12 +149,6 @@ export class ProcessTemplatesService {
     return `disabled:${id}:${templateNameNormalized}`;
   }
 
-  private validateRemarkLength(remark?: string | null) {
-    if (remark && remark.length > 300) {
-      throw new BadRequestException('流程记忆备注不能超过 300 个字符');
-    }
-  }
-
   private async normalizeSteps(steps: Array<{ processName: string; processRemark?: string }> | undefined, requireOne = false) {
     const normalized = processSnapshotToDetails(steps || []);
     if (requireOne && normalized.length === 0) {
@@ -168,9 +157,6 @@ export class ProcessTemplatesService {
 
     const seen = new Set<string>();
     const result = normalized.map((step) => {
-      if (step.processRemark && step.processRemark.length > 120) {
-        throw new BadRequestException(`工序“${step.processName}”的参数备注不能超过 120 个字符`);
-      }
       const key = normalizeSearchKeyword(step.processName);
       if (seen.has(key)) {
         throw new BadRequestException(`流程记忆存在重复工序：${step.processName}`);

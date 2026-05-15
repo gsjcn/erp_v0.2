@@ -404,7 +404,7 @@
           </el-table-column>
           <el-table-column label="完成数量" width="120">
             <template #default="{ row }">
-              {{ row.completedQuantity ? formatQuantity(row.completedQuantity, row.unit) : '-' }}
+              {{ row.completedQuantity != null ? formatQuantity(row.completedQuantity, row.unit) : '-' }}
             </template>
           </el-table-column>
           <el-table-column label="短缺 / 补单" min-width="220">
@@ -535,6 +535,7 @@
           :exclude-order-no="order?.orderNo || ''"
           :exclude-order-id="order?.id || ''"
           :inventory-summary="inventorySummary"
+          :read-only="isMobileLayout"
           @remove="removeLine"
           @quantity-change="syncPlanQuantity"
         />
@@ -619,6 +620,7 @@
           :exclude-order-no="order?.orderNo || ''"
           :exclude-order-id="order?.id || ''"
           :inventory-summary="inventorySummary"
+          :read-only="isMobileLayout"
           @remove="removeAdditionalMaterialLine"
           @quantity-change="syncPlanQuantity"
         />
@@ -641,7 +643,7 @@
                 </span>
               </div>
               <div class="additional-process-create">
-                <el-input v-model="newAdditionalProcessName" placeholder="新建标准工序，例如 抛丸、抛光" maxlength="30" />
+                <el-input v-model="newAdditionalProcessName" placeholder="新建标准工序，例如 抛丸、抛光" />
                 <el-button :loading="creatingProcess" @click="createAdditionalProcessDefinition">新建工序</el-button>
                 <el-button @click="processDefinitionManagerVisible = true">管理工序</el-button>
               </div>
@@ -871,7 +873,7 @@
           </p>
           <p>
             <span>待处理短缺</span>
-            <strong>{{ formatQuantity(activeLine.unresolvedShortageQuantity || 0, activeLine.unit) }}</strong>
+            <strong>{{ formatQuantity(activeLine.unresolvedShortageQuantity ?? 0, activeLine.unit) }}</strong>
           </p>
           <p>
             <span>当前进度</span>
@@ -883,7 +885,7 @@
             <strong>{{ record.productionTaskNo || activeLine.productionTaskNo }}</strong>
             <span>
               短缺 {{ formatQuantity(record.shortageQuantity, record.unit || activeLine.unit) }}，
-              报废 {{ formatQuantity(record.scrapQuantity || 0, record.unit || activeLine.unit) }}
+              报废 {{ formatQuantity(record.scrapQuantity ?? 0, record.unit || activeLine.unit) }}
             </span>
             <small>{{ record.managerName || '-' }}确认：{{ record.shortageReason || '-' }}</small>
           </article>
@@ -1114,7 +1116,7 @@
                 class="cancel-handling-quantity"
                 :disabled="row.handlingMode === 'NONE'"
               />
-              <el-input v-model="row.remark" maxlength="120" show-word-limit placeholder="处理说明，可修改" />
+              <el-input v-model="row.remark" placeholder="处理说明，可修改" />
             </article>
           </div>
           <el-alert v-else title="该订单未发现已开始生产的零件；请选择“未生产取消”或刷新订单后重试。" type="warning" :closable="false" />
@@ -1463,11 +1465,11 @@ const cancelOrderNoticeText = computed(() => {
   if (!order.value) {
     return '';
   }
-  const hasStartedProduction = order.value.lines.some((line) => line.productionStatus && line.productionStatus !== 'PENDING');
+  const hasStartedProduction = order.value.lines.some((line) => lineHasStartedProductionProgress(line));
   if (hasStartedProduction) {
-    return '取消后客户订单数量归零，未开始的生产任务会删除，已开始生产的任务会通知生产和仓库确认转库存或销毁。';
+    return '取消后客户订单数量归零，未开始的生产任务会标记为已取消并保留历史，已开始生产的任务会通知生产和仓库确认转库存或销毁。';
   }
-  return '订单尚未开始生产，取消后系统会删除未开工生产任务，并释放已占用的订单库存。';
+  return '订单尚未开始生产，取消后系统会把未开工生产任务标记为已取消并保留历史，同时释放已占用的订单库存。';
 });
 const productionChangeBlockingText = computed(() => {
   if (
@@ -1490,7 +1492,7 @@ const showProductionChangeHelp = computed(() =>
   )
 );
 const orderProgressHint = computed(() => {
-  const startedLines = order.value?.lines.filter((line) => line.productionStatus && line.productionStatus !== 'PENDING') || [];
+  const startedLines = order.value?.lines.filter((line) => lineHasStartedProductionProgress(line)) || [];
   if (startedLines.length === 0) {
     return '尚未开始生产';
   }
@@ -1534,12 +1536,12 @@ const replenishmentDialogNotice = computed(() =>
     : '这里用于销售或计划决定的客户追加、订单数量增加。生产过程中因报废缺件需要补齐时，必须在生产页面提交生产报废补单申请，由车间主管确认。'
 );
 const quantityChangeSuggestedProductionQuantity = computed(() => {
-  const orderQuantity = Math.max(Number(quantityChangeForm.value.quantity || 0), 0);
+  const orderQuantity = Math.max(Number(quantityChangeForm.value.quantity ?? 0), 0);
   if (activeLine.value?.fulfillmentMode !== 'STOCK') {
     return orderQuantity;
   }
   const selectedStockQuantity = (activeLine.value.selectedStockSources || []).reduce(
-    (sum, source) => sum + Number(source.quantity || 0),
+    (sum, source) => sum + Number(source.quantity ?? 0),
     0
   );
   return Math.max(orderQuantity - selectedStockQuantity, 0);
@@ -1547,14 +1549,14 @@ const quantityChangeSuggestedProductionQuantity = computed(() => {
 const quantityChangeNeedsPlanOverride = computed(
   () =>
     Math.abs(
-      Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0) -
+      Math.max(Number(quantityChangeForm.value.productionPlanQuantity ?? 0), 0) -
         quantityChangeSuggestedProductionQuantity.value
     ) > 0.0001
 );
 const quantityChangePlanHint = computed(() => {
   const unit = activeLine.value?.unit || '件';
   const suggested = quantityChangeSuggestedProductionQuantity.value;
-  const current = Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0);
+  const current = Math.max(Number(quantityChangeForm.value.productionPlanQuantity ?? 0), 0);
   if (quantityChangeNeedsPlanOverride.value) {
     return `建议生产 ${formatQuantity(suggested, unit)}，当前计划 ${formatQuantity(current, unit)}；必须记录操作人员账号和说明。`;
   }
@@ -1656,7 +1658,7 @@ async function openEdit() {
     drawingVersion: line.drawingVersion || 'A',
     drawingFileName: line.drawingFileName || '',
     drawingFileUrl: line.drawingFileUrl || '',
-    partThickness: line.lineType === 'COMPONENT' ? 0 : line.partThickness || 1,
+    partThickness: line.lineType === 'COMPONENT' ? 0 : (line.partThickness ?? 1),
     partSpecification: line.partSpecification || '',
     quantity: line.quantity,
     productionPlanQuantity: line.productionPlanQuantity,
@@ -1692,8 +1694,13 @@ function canCreateProductionChange(line: OrderLine) {
       order.value.status !== 'CANCELLED' &&
       order.value.status !== 'COMPLETED' &&
       line.productionTaskNo &&
-      line.productionStatus !== 'PENDING'
+      lineHasStartedProductionProgress(line)
   );
+}
+
+function lineHasStartedProductionProgress(line: OrderLine) {
+  // 已取消生产任务只保留历史，不参与“已开始生产”判断，也不能作为订单变更入口。
+  return Boolean(line.productionStatus && line.productionStatus !== 'PENDING' && line.productionStatus !== 'CANCELLED');
 }
 
 function orderProductionChangeDisabledReason(actionName: string) {
@@ -1733,6 +1740,9 @@ function productionChangeDisabledReason(line: OrderLine) {
   }
   if (line.productionStatus === 'PENDING') {
     return '该零件尚未开始生产，请修改订单，不要创建补单或生产数量变更';
+  }
+  if (line.productionStatus === 'CANCELLED') {
+    return '该零件生产任务已取消，只保留历史，不能创建补单或生产数量变更';
   }
   return '';
 }
@@ -2045,7 +2055,7 @@ function syncQuantityChangePlanWithSuggestion() {
   }
   const nextSuggestedQuantity = quantityChangeSuggestedProductionQuantity.value;
   const previousSuggestedQuantity = quantityChangeLastSuggestedQuantity.value;
-  const currentPlanQuantity = Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0);
+  const currentPlanQuantity = Math.max(Number(quantityChangeForm.value.productionPlanQuantity ?? 0), 0);
   const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
   quantityChangeLastSuggestedQuantity.value = nextSuggestedQuantity;
   if (!planWasFollowingSuggestion) {
@@ -2069,6 +2079,7 @@ function canCancelReplenishmentTask(task: OrderLineProductionTask) {
 function cancelReplenishmentDisabledReason(task: OrderLineProductionTask) {
   if (task.canCancelReplenishment) return '';
   if (task.replenishmentSourceType === 'PRODUCTION_SCRAP') return '生产报废补单请到生产页面处理';
+  if (task.status === 'CANCELLED') return '补单任务已取消，只保留历史';
   if (task.status !== 'PENDING') return '补单已经开始生产或已完成，请到生产页面使用管理撤回';
   return '当前补单不能在订单明细直接取消，请到生产页面处理';
 }
@@ -2219,7 +2230,8 @@ async function deleteDraftOrder() {
 }
 
 function taskHasProductionProgress(task: OrderLineProductionTask) {
-  return task.status !== 'PENDING' || task.completedQuantity > 0;
+  // 已取消任务只保留历史，不参与订单取消时的已生产处理计划。
+  return task.status !== 'CANCELLED' && (task.status !== 'PENDING' || task.completedQuantity > 0);
 }
 
 function buildCancelHandlingPlanRows(orderDetail: OrderDetail) {
@@ -2460,7 +2472,7 @@ async function saveAdditionalMaterial() {
     ElMessage.warning('请补齐新增零件、厚度、数量等必填信息');
     return;
   }
-  if (Number(line.productionPlanQuantity || 0) <= 0) {
+  if (Number(line.productionPlanQuantity ?? 0) <= 0) {
     ElMessage.warning('新增零件生产计划数量必须大于 0');
     return;
   }
@@ -2632,7 +2644,7 @@ function normalizedLines(lines = editableOrderLines()) {
 }
 
 function lineRequiresProductionProcess(line: OrderLine | CreateOrderLinePayload) {
-  return Number(line.productionPlanQuantity || 0) > 0;
+  return Number(line.productionPlanQuantity ?? 0) > 0;
 }
 
 function reworkStockShortageQuantity(line: OrderLine | CreateOrderLinePayload) {
@@ -2641,7 +2653,7 @@ function reworkStockShortageQuantity(line: OrderLine | CreateOrderLinePayload) {
   }
   return Math.max(
     Math.round(
-      (Number(line.productionPlanQuantity || 0) -
+      (Number(line.productionPlanQuantity ?? 0) -
         selectedStockSourceQuantity(line as unknown as CreateOrderLinePayload) +
         Number.EPSILON) *
         1000
@@ -2826,14 +2838,14 @@ function orderLineRequiresThickness(line: Pick<OrderLine | CreateOrderLinePayloa
 }
 
 function orderLineNeedsThicknessReview(line: OrderLine | CreateOrderLinePayload) {
-  return orderLineRequiresThickness(line) && Number(line.partThickness || 0) <= 0;
+  return orderLineRequiresThickness(line) && Number(line.partThickness ?? 0) <= 0;
 }
 
 function formatOrderLineThickness(line: OrderLine | CreateOrderLinePayload) {
   if (!orderLineRequiresThickness(line)) {
     return '不适用（父级组件由子零件维护）';
   }
-  const thickness = Number(line.partThickness || 0);
+  const thickness = Number(line.partThickness ?? 0);
   return thickness > 0 ? `${line.partThickness} mm` : '待核对';
 }
 
@@ -3034,8 +3046,8 @@ function stockFulfillmentHint(line: OrderLine | CreateOrderLinePayload) {
   if (selectedQuantity <= 0) {
     return '';
   }
-  const orderQuantity = Number(line.quantity || 0);
-  const planQuantity = Math.max(Number(line.productionPlanQuantity || 0), 0);
+  const orderQuantity = Number(line.quantity ?? 0);
+  const planQuantity = Math.max(Number(line.productionPlanQuantity ?? 0), 0);
   if (planQuantity <= 0) {
     return `客户要求 ${formatQuantity(orderQuantity, line.unit || '件')}，库存已覆盖，不生成生产任务`;
   }
@@ -3119,7 +3131,7 @@ function formatLineShortageText(line: OrderLine) {
   }
 
   const shortage = formatQuantity(line.productionShortageQuantity, line.unit);
-  const scrap = formatQuantity(line.productionScrapQuantity || 0, line.unit);
+  const scrap = formatQuantity(line.productionScrapQuantity ?? 0, line.unit);
   const completedReplenishmentText = lineCompletedReplenishmentText(line);
   if (line.productionShortageMode === 'REPLENISHMENT_REQUEST') {
     const requestNos = line.productionReplenishmentRequestNos?.length ? line.productionReplenishmentRequestNos.join('、') : '-';
@@ -3140,13 +3152,16 @@ function formatLineShortageText(line: OrderLine) {
 
 function lineCompletedReplenishmentText(line: OrderLine) {
   const completedTasks = (line.productionTasks || []).filter(
-    (task) => task.isReplenishment && task.status === 'COMPLETED' && Number(task.completedQuantity || task.plannedQuantity || 0) > 0
+    (task) =>
+      task.isReplenishment &&
+      ['COMPLETED', 'STORED'].includes(task.status) &&
+      Number(task.completedQuantity ?? task.plannedQuantity ?? 0) > 0
   );
   if (completedTasks.length === 0) {
     return '';
   }
   const quantity = completedTasks.reduce(
-    (sum, task) => sum + Number(task.completedQuantity || task.plannedQuantity || 0),
+    (sum, task) => sum + Number(task.completedQuantity ?? task.plannedQuantity ?? 0),
     0
   );
   const taskNos = completedTasks.map((task) => task.productionTaskNo).join('、');
@@ -3158,7 +3173,7 @@ function lineNeedsReplenishmentAction(line: OrderLine) {
 }
 
 function formatLineReplenishmentActionText(line: OrderLine) {
-  return `需要补单处理：${formatQuantity(line.unresolvedShortageQuantity || 0, line.unit)}`;
+  return `需要补单处理：${formatQuantity(line.unresolvedShortageQuantity ?? 0, line.unit)}`;
 }
 
 function formatShortageQuantityByUnit(
@@ -3169,7 +3184,7 @@ function formatShortageQuantityByUnit(
   if (rows?.length) {
     return rows.map((row) => formatQuantity(row.quantity, row.unit)).join('、');
   }
-  return formatQuantity(fallbackQuantity || 0, fallbackUnit);
+  return formatQuantity(fallbackQuantity ?? 0, fallbackUnit);
 }
 
 function lineShortageAnchorId(line: OrderLine) {
@@ -3233,7 +3248,7 @@ function createReplenishmentFromShortage() {
   const line = activeLine.value;
   shortageResolutionVisible.value = false;
   replenishmentForm.value = {
-    quantity: Math.max(Number(line.unresolvedShortageQuantity || 0), 0.001),
+    quantity: Math.max(Number(line.unresolvedShortageQuantity ?? 0), 0.001),
     managerName: '',
     reason: `生产短缺补单：${formatLineShortageText(line) || formatLineReplenishmentActionText(line)}`
   };
@@ -3250,10 +3265,10 @@ function openQuantityChangeFromShortage() {
   const line = activeLine.value;
   shortageResolutionVisible.value = false;
   openQuantityChange(line);
-  const nextQuantity = Math.max(Number(line.quantity || 0) - Number(line.unresolvedShortageQuantity || 0), 0);
+  const nextQuantity = Math.max(Number(line.quantity ?? 0) - Number(line.unresolvedShortageQuantity ?? 0), 0);
   quantityChangeForm.value.quantity = nextQuantity;
   quantityChangeForm.value.productionPlanQuantity = Math.min(
-    Math.max(Number(quantityChangeForm.value.productionPlanQuantity || 0), 0),
+    Math.max(Number(quantityChangeForm.value.productionPlanQuantity ?? 0), 0),
     nextQuantity
   );
   quantityChangeForm.value.reason = `客户确认减少生产短缺数量：${formatLineShortageText(line) || formatLineReplenishmentActionText(line)}`;

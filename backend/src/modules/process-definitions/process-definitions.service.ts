@@ -31,21 +31,12 @@ export class ProcessDefinitionsService {
     const processName = this.normalizeProcessName(dto.processName);
     const processNameNormalized = this.normalizeProcessNameKey(processName);
     const remark = dto.remark?.trim() || null;
-    this.validateRemark(remark);
 
     const existing = await this.prisma.processDefinition.findUnique({ where: { processNameNormalized } });
     if (existing) {
       if (existing.status === CommonStatus.DISABLED) {
-        const restored = await this.prisma.processDefinition.update({
-          where: { id: existing.id },
-          data: {
-            processName,
-            remark,
-            status: CommonStatus.ENABLED,
-            searchText: this.buildSearchText(processName, remark)
-          }
-        });
-        return this.mapDefinition(restored);
+        // 同名停用工序必须走 restore；新建入口不能悄悄恢复状态或改写原备注。
+        throw new BadRequestException(`标准工序“${existing.processName}”已停用，请在状态筛选中查看停用工序并恢复启用`);
       }
       throw new BadRequestException(`标准工序“${existing.processName}”已存在，请勿重复创建`);
     }
@@ -63,17 +54,22 @@ export class ProcessDefinitionsService {
 
   async update(id: string, dto: UpdateProcessDefinitionDto) {
     const existing = await this.ensureExists(id);
+    if (dto.status !== undefined) {
+      // 标准工序状态变更必须走 delete / restore，避免普通编辑绕过停用引用检查和恢复边界。
+      throw new BadRequestException('标准工序状态请使用专用启用/停用接口');
+    }
+    if (existing.status !== CommonStatus.ENABLED) {
+      throw new BadRequestException('已停用的标准工序需先恢复启用后再编辑');
+    }
     const processName = dto.processName !== undefined ? this.normalizeProcessName(dto.processName) : existing.processName;
     const processNameNormalized = this.normalizeProcessNameKey(processName);
     const remark = dto.remark !== undefined ? dto.remark.trim() || null : existing.remark;
-    const nextStatus = dto.status || existing.status;
-    this.validateRemark(remark);
 
-    // 标准工序被订单流程、流程记忆、BOM 或来源加工关系引用后，不能改名或停用，避免默认工艺建议失效。
-    if (processNameNormalized !== existing.processNameNormalized || nextStatus === CommonStatus.DISABLED) {
+    // 标准工序被订单流程、流程记忆、BOM 或来源加工关系引用后，不能改名，避免默认工艺建议失效。
+    if (processNameNormalized !== existing.processNameNormalized) {
       const references = await this.findProcessDefinitionReferences(existing.processNameNormalized);
       if (references.total > 0) {
-        throw this.referencedProcessDefinitionError(existing.processName, references, nextStatus === CommonStatus.DISABLED ? '停用' : '改名');
+        throw this.referencedProcessDefinitionError(existing.processName, references, '改名');
       }
     }
 
@@ -90,7 +86,6 @@ export class ProcessDefinitionsService {
         processName,
         processNameNormalized,
         remark,
-        status: nextStatus,
         searchText: this.buildSearchText(processName, remark)
       }
     });
@@ -126,7 +121,18 @@ export class ProcessDefinitionsService {
   }
 
   async ensureActiveNames(processNames: string[]) {
-    const normalizedNames = [...new Set(processNames.map((name) => this.normalizeProcessNameKey(name)))];
+    const normalizedRows = processNames
+      .map((name) => ({ name, key: this.normalizeProcessNameKey(name) }))
+      .filter((row) => row.key);
+    const seenKeys = new Set<string>();
+    for (const row of normalizedRows) {
+      if (seenKeys.has(row.key)) {
+        // 同一个零件流程不能重复保存同名工序；次数或参数差异请写入 processRemark，避免生产统计混乱。
+        throw new BadRequestException(`标准工序“${row.name}”重复，请把次数或参数写入工序备注`);
+      }
+      seenKeys.add(row.key);
+    }
+    const normalizedNames = [...new Set(normalizedRows.map((row) => row.key))];
     if (normalizedNames.length === 0) {
       return;
     }
@@ -259,20 +265,11 @@ export class ProcessDefinitionsService {
     if (!normalized) {
       throw new BadRequestException('请填写标准工序名称');
     }
-    if (normalized.length > 30) {
-      throw new BadRequestException('标准工序名称不能超过 30 个字符');
-    }
     return normalized;
   }
 
   private normalizeProcessNameKey(processName: string) {
     return normalizeSearchKeyword(processName);
-  }
-
-  private validateRemark(remark?: string | null) {
-    if (remark && remark.length > 200) {
-      throw new BadRequestException('标准工序备注不能超过 200 个字符');
-    }
   }
 
   private buildSearchText(processName: string, remark?: string | null) {

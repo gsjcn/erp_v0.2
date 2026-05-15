@@ -23,7 +23,7 @@ function normalize(value?: string | number | null) {
 
 export function stockSourceRequiredQuantity(line: CreateOrderLinePayload) {
   if (line.fulfillmentMode === 'STOCK') {
-    return Number(line.quantity || 0);
+    return Number(line.quantity ?? 0);
   }
   if (line.fulfillmentMode === 'REWORK') {
     return Number(line.productionPlanQuantity ?? line.quantity ?? 0);
@@ -335,13 +335,13 @@ export function selectedStockSourceQuantity(line: CreateOrderLinePayload) {
 }
 
 export function stockSuggestedProductionQuantity(line: CreateOrderLinePayload) {
-  return Math.max(Number(line.quantity || 0) - selectedStockSourceQuantity(line), 0);
+  return Math.max(Number(line.quantity ?? 0) - selectedStockSourceQuantity(line), 0);
 }
 
 export function suggestedProductionPlanQuantity(line: CreateOrderLinePayload) {
   return line.fulfillmentMode === 'STOCK'
     ? stockSuggestedProductionQuantity(line)
-    : Math.max(Number(line.quantity || 0), 0);
+    : Math.max(Number(line.quantity ?? 0), 0);
 }
 
 export function productionPlanOverrideRequired(line: CreateOrderLinePayload) {
@@ -446,7 +446,7 @@ export function findOverusedSelectedStockBatchIssue(lines: CreateOrderLinePayloa
       row.unit = source.unit || row.unit;
       row.selectedQuantity += source.quantity;
       if (source.availableQuantity !== undefined) {
-        const sourceAvailableQuantity = Number(source.availableQuantity || 0);
+        const sourceAvailableQuantity = Number(source.availableQuantity ?? 0);
         row.availableQuantity =
           row.availableQuantity === undefined
             ? sourceAvailableQuantity
@@ -496,7 +496,7 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
   >();
   for (const source of line.selectedStockSources || []) {
     const batchId = source.batchId?.trim();
-    const quantity = Number(source.quantity || 0);
+    const quantity = Number(source.quantity ?? 0);
     if (!batchId || quantity <= 0) {
       continue;
     }
@@ -510,7 +510,7 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
       batchNo: source.batchNo?.trim() || current?.batchNo,
       partCode: source.partCode?.trim() || current?.partCode,
       partName: source.partName?.trim() || current?.partName,
-      quantity: (current?.quantity || 0) + quantity,
+      quantity: (current?.quantity ?? 0) + quantity,
       availableQuantity,
       unit: source.unit?.trim() || current?.unit,
       replenishmentSourceType: source.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
@@ -607,7 +607,7 @@ export function stockSourceMissingOrderInfo(line: CreateOrderLinePayload) {
     !String(line.drawingNo || '').trim() ? '图号' : '',
     !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
     !String(line.partSpecification || '').trim() ? '成品规格' : '',
-    line.lineType !== 'COMPONENT' && Number(line.partThickness || 0) <= 0 ? '零件厚度' : ''
+    line.lineType !== 'COMPONENT' && Number(line.partThickness ?? 0) <= 0 ? '零件厚度' : ''
   ].filter(Boolean);
 }
 
@@ -640,11 +640,11 @@ function requiredTextMatches(required?: string | null, actual?: string | null) {
 }
 
 function requiredNumberMatches(required?: number | null, actual?: number | null) {
-  const requiredNumber = Number(required || 0);
+  const requiredNumber = Number(required ?? 0);
   if (!requiredNumber) {
     return true;
   }
-  const actualNumber = Number(actual || 0);
+  const actualNumber = Number(actual ?? 0);
   if (!actualNumber) {
     return false;
   }
@@ -653,7 +653,7 @@ function requiredNumberMatches(required?: number | null, actual?: number | null)
 
 export function sanitizeOrderLinePayload(line: CreateOrderLinePayload, fallbackDeliveryDate?: string): CreateOrderLinePayload {
   const fulfillmentMode = line.fulfillmentMode || 'PRODUCTION';
-  const quantity = Number(line.quantity || 0);
+  const quantity = Number(line.quantity ?? 0);
   const suggestedQuantity = suggestedProductionPlanQuantity(line);
   const productionPlanQuantity = Math.max(Number(line.productionPlanQuantity ?? suggestedQuantity), 0);
   const planOverrideRequired = Math.abs(productionPlanQuantity - suggestedQuantity) > 0.0001;
@@ -676,7 +676,7 @@ export function sanitizeOrderLinePayload(line: CreateOrderLinePayload, fallbackD
     drawingVersion: line.drawingVersion,
     drawingFileName: line.drawingFileName,
     drawingFileUrl: line.drawingFileUrl,
-    partThickness: Number(line.partThickness || 0),
+    partThickness: Number(line.partThickness ?? 0),
     partSpecification: line.partSpecification,
     quantity,
     productionPlanQuantity,

@@ -154,6 +154,14 @@ type ModelBomComponentThicknessRepair = {
   previousThickness: number;
 };
 
+type WarehouseLocationStatusRepair = {
+  id: string;
+  warehouseCode: string;
+  warehouseName: string;
+  locationCode: string;
+  locationName: string;
+};
+
 const quantityTolerance = 0.0001;
 const serializableRepairRetryCount = 3;
 const volatileStockSourceFields = ['availableQuantity', 'reservedQuantity', 'currentQuantity', 'physicalQuantity'];
@@ -260,6 +268,7 @@ async function main() {
   const componentStructureBlocks = await collectComponentStructureBlocks();
   const modelBomScopeBlocks = await collectModelBomScopeBlocks();
   const modelBomComponentThicknessRepairs = await collectModelBomComponentThicknessRepairs();
+  const warehouseLocationStatusRepairs = await collectWarehouseLocationStatusRepairs();
 
   printPlanRepairs(planRepairs);
   printStockSourceVolatileFieldRepairs(stockSourceVolatileFieldRepairs);
@@ -274,6 +283,7 @@ async function main() {
   printComponentStructureBlocks(componentStructureBlocks);
   printModelBomScopeBlocks(modelBomScopeBlocks);
   printModelBomComponentThicknessRepairs(modelBomComponentThicknessRepairs);
+  printWarehouseLocationStatusRepairs(warehouseLocationStatusRepairs);
 
   if (!writeMode) {
     console.log('当前为 dry-run，只报告将修复的记录。确认后执行：npm run backend:repair:first-stage -- --write');
@@ -416,6 +426,16 @@ async function main() {
           await tx.modelBomLine.update({
             where: { id: repair.id },
             data: { partThicknessSnapshot: null }
+          });
+        }
+      }
+
+      if (warehouseLocationStatusRepairs.length > 0) {
+        for (const repair of warehouseLocationStatusRepairs) {
+          // 停用仓库下的库位不能继续作为后续入库或转库存候选；只改基础状态，不修改历史库存批次和流水。
+          await tx.warehouseLocation.update({
+            where: { id: repair.id },
+            data: { status: CommonStatus.DISABLED }
           });
         }
       }
@@ -1979,6 +1999,45 @@ function printModelBomComponentThicknessRepairs(repairs: ModelBomComponentThickn
     console.log(
       `[${writeMode ? 'write' : 'dry-run'}] BOM ${repair.bomName} / ${repair.partCode}: ` +
         `父级组件 partThicknessSnapshot=${repair.previousThickness} -> null`
+    );
+  }
+}
+
+async function collectWarehouseLocationStatusRepairs(): Promise<WarehouseLocationStatusRepair[]> {
+  const locations = await prisma.warehouseLocation.findMany({
+    where: {
+      status: CommonStatus.ENABLED,
+      warehouse: { status: CommonStatus.DISABLED }
+    },
+    select: {
+      id: true,
+      locationCode: true,
+      locationName: true,
+      warehouse: {
+        select: {
+          warehouseCode: true,
+          warehouseName: true
+        }
+      }
+    },
+    orderBy: [{ warehouseId: 'asc' }, { locationCode: 'asc' }]
+  });
+
+  return locations.map((location) => ({
+    id: location.id,
+    warehouseCode: location.warehouse.warehouseCode,
+    warehouseName: location.warehouse.warehouseName,
+    locationCode: location.locationCode,
+    locationName: location.locationName
+  }));
+}
+
+function printWarehouseLocationStatusRepairs(repairs: WarehouseLocationStatusRepair[]) {
+  console.log(`第一阶段历史数据修复检查：停用仓库下启用库位 ${repairs.length} 条需要停用。`);
+  for (const repair of repairs) {
+    console.log(
+      `[${writeMode ? 'write' : 'dry-run'}] 仓库 ${repair.warehouseName} / ${repair.warehouseCode} 下库位 ` +
+        `${repair.locationName} / ${repair.locationCode}: ENABLED -> DISABLED`
     );
   }
 }

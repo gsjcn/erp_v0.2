@@ -3,6 +3,7 @@
     <div class="page-header">
       <h2 class="page-title">仓库操作</h2>
       <div class="page-actions">
+        <el-button v-if="isMobileLayout" :icon="Camera" plain @click="showMobileScanReserved">扫码</el-button>
         <el-badge :value="pendingNoticeCount" :hidden="pendingNoticeCount === 0" class="notice-badge">
           <el-button :icon="Bell" @click="openWarehouseNotices">通知</el-button>
         </el-badge>
@@ -102,12 +103,12 @@
         </el-table-column>
         <el-table-column label="完成 / 生产计划" width="150">
           <template #default="{ row }">
-            {{ formatQuantity(row.completedQuantity || row.quantity, row.unit) }} /
-            {{ formatQuantity(row.plannedQuantity || row.quantity, row.unit) }}
+            {{ formatQuantity(row.completedQuantity ?? row.quantity, row.unit) }} /
+            {{ formatQuantity(row.plannedQuantity ?? row.quantity, row.unit) }}
           </template>
         </el-table-column>
         <el-table-column label="客户订单数量" width="125">
-          <template #default="{ row }">{{ formatQuantity(row.customerOrderQuantity || row.quantity, row.unit) }}</template>
+          <template #default="{ row }">{{ formatQuantity(row.customerOrderQuantity ?? row.quantity, row.unit) }}</template>
         </el-table-column>
         <el-table-column label="订单剩余" width="115">
           <template #default="{ row }">{{ formatQuantity(row.remainingOrderQuantity ?? row.quantity, row.unit) }}</template>
@@ -117,8 +118,8 @@
         </el-table-column>
         <el-table-column label="多做库存" width="105">
           <template #default="{ row }">
-            <span :class="{ 'stock-extra': (row.stockQuantity || 0) > 0 }">
-              {{ row.stockQuantity ? formatQuantity(row.stockQuantity, row.unit) : '-' }}
+            <span :class="{ 'stock-extra': (row.stockQuantity ?? 0) > 0 }">
+              {{ (row.stockQuantity ?? 0) > 0 ? formatQuantity(row.stockQuantity ?? 0, row.unit) : '-' }}
             </span>
           </template>
         </el-table-column>
@@ -157,7 +158,7 @@
         </div>
         <div class="mobile-card-compact-summary">
           <span>{{ receipt.customerName }}</span>
-          <span>订单 {{ formatQuantity(receipt.customerOrderQuantity || receipt.quantity, receipt.unit) }}</span>
+          <span>订单 {{ formatQuantity(receipt.customerOrderQuantity ?? receipt.quantity, receipt.unit) }}</span>
           <span>入库 {{ formatQuantity(receipt.orderReceiptQuantity ?? receipt.quantity, receipt.unit) }}</span>
         </div>
         <div v-show="isMobileWarehouseCardExpanded(receiptCardKey(receipt))" class="mobile-card-fields">
@@ -192,13 +193,13 @@
           <div class="mobile-field">
             <label>完成 / 生产计划</label>
             <span>
-              {{ formatQuantity(receipt.completedQuantity || receipt.quantity, receipt.unit) }} /
-              {{ formatQuantity(receipt.plannedQuantity || receipt.quantity, receipt.unit) }}
+              {{ formatQuantity(receipt.completedQuantity ?? receipt.quantity, receipt.unit) }} /
+              {{ formatQuantity(receipt.plannedQuantity ?? receipt.quantity, receipt.unit) }}
             </span>
           </div>
           <div class="mobile-field">
             <label>客户订单数量</label>
-            <span>{{ formatQuantity(receipt.customerOrderQuantity || receipt.quantity, receipt.unit) }}</span>
+            <span>{{ formatQuantity(receipt.customerOrderQuantity ?? receipt.quantity, receipt.unit) }}</span>
           </div>
           <div class="mobile-field">
             <label>订单剩余</label>
@@ -210,8 +211,8 @@
           </div>
           <div class="mobile-field">
             <label>多做库存</label>
-            <span :class="{ 'stock-extra': (receipt.stockQuantity || 0) > 0 }">
-              {{ receipt.stockQuantity ? formatQuantity(receipt.stockQuantity, receipt.unit) : '-' }}
+            <span :class="{ 'stock-extra': (receipt.stockQuantity ?? 0) > 0 }">
+              {{ (receipt.stockQuantity ?? 0) > 0 ? formatQuantity(receipt.stockQuantity ?? 0, receipt.unit) : '-' }}
             </span>
           </div>
         </div>
@@ -222,7 +223,7 @@
             link-text="打开图纸"
             :title="`${receipt.partName} 入库图纸`"
           />
-          <span class="mobile-readonly-note">手机端只查看待入库信息</span>
+          <el-button link type="primary" @click="openConfirm(receipt)">确认入库</el-button>
         </div>
       </article>
       <div v-if="!receipts.length && !loading" class="mobile-empty">暂无待入库任务</div>
@@ -315,13 +316,13 @@
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
         </el-table-column>
         <el-table-column label="已发货" width="110">
-          <template #default="{ row }">{{ formatQuantity(row.shippedQuantity || 0, row.unit) }}</template>
+          <template #default="{ row }">{{ formatQuantity(row.shippedQuantity ?? 0, row.unit) }}</template>
         </el-table-column>
         <el-table-column label="未发货" width="110">
-          <template #default="{ row }">{{ formatQuantity(row.remainingQuantity || 0, row.unit) }}</template>
+          <template #default="{ row }">{{ formatQuantity(row.remainingQuantity ?? 0, row.unit) }}</template>
         </el-table-column>
         <el-table-column label="本次建议" width="110">
-          <template #default="{ row }">{{ formatQuantity(row.suggestedShipmentQuantity || 0, row.unit) }}</template>
+          <template #default="{ row }">{{ formatQuantity(row.suggestedShipmentQuantity ?? 0, row.unit) }}</template>
         </el-table-column>
         <el-table-column label="仓库 / 库位" min-width="160">
           <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
@@ -394,7 +395,15 @@
             </div>
           </div>
           <div class="mobile-card-actions">
-            <span class="mobile-readonly-note">手机端只查看待发货汇总</span>
+            <el-button
+              link
+              type="primary"
+              :disabled="!canShipWarehouseShipment(group.rows[0])"
+              :title="shipmentLockedText(group.rows[0])"
+              @click="openOrderShipmentConfirm(group.rows[0])"
+            >
+              订单发货
+            </el-button>
           </div>
         </article>
       </div>
@@ -419,8 +428,8 @@
         </div>
         <div class="mobile-card-compact-summary">
           <span>{{ shipment.customerName || '-' }}</span>
-          <span>未发 {{ formatQuantity(shipment.remainingQuantity || 0, shipment.unit) }}</span>
-          <span>建议 {{ formatQuantity(shipment.suggestedShipmentQuantity || 0, shipment.unit) }}</span>
+          <span>未发 {{ formatQuantity(shipment.remainingQuantity ?? 0, shipment.unit) }}</span>
+          <span>建议 {{ formatQuantity(shipment.suggestedShipmentQuantity ?? 0, shipment.unit) }}</span>
         </div>
         <div v-show="isMobileWarehouseCardExpanded(shipmentCardKey(shipment))" class="mobile-card-fields">
           <div class="mobile-field">
@@ -457,15 +466,15 @@
           </div>
           <div class="mobile-field">
             <label>已发货</label>
-            <span>{{ formatQuantity(shipment.shippedQuantity || 0, shipment.unit) }}</span>
+            <span>{{ formatQuantity(shipment.shippedQuantity ?? 0, shipment.unit) }}</span>
           </div>
           <div class="mobile-field">
             <label>未发货</label>
-            <span>{{ formatQuantity(shipment.remainingQuantity || 0, shipment.unit) }}</span>
+            <span>{{ formatQuantity(shipment.remainingQuantity ?? 0, shipment.unit) }}</span>
           </div>
           <div class="mobile-field">
             <label>本次建议</label>
-            <span>{{ formatQuantity(shipment.suggestedShipmentQuantity || 0, shipment.unit) }}</span>
+            <span>{{ formatQuantity(shipment.suggestedShipmentQuantity ?? 0, shipment.unit) }}</span>
           </div>
           <div class="mobile-field">
             <label>仓库 / 库位</label>
@@ -479,8 +488,25 @@
             link-text="打开图纸"
             :title="`${shipment.partName} 发货图纸`"
           />
+          <el-button
+            link
+            type="primary"
+            :disabled="!canShipWarehouseShipment(shipment)"
+            :title="shipmentLockedText(shipment)"
+            @click="openOrderShipmentConfirm(shipment)"
+          >
+            订单发货
+          </el-button>
           <el-button link type="primary" @click="openShipmentSourceDetails(shipment)">库存来源/图纸</el-button>
-          <span class="mobile-readonly-note">手机端只查看发货信息</span>
+          <el-button
+            link
+            type="primary"
+            :disabled="!canShipWarehouseShipment(shipment) || Boolean(shipmentShortageText(shipment))"
+            :title="shipmentLockedText(shipment) || shipmentShortageText(shipment)"
+            @click="openShipmentConfirm(shipment)"
+          >
+            确认发货
+          </el-button>
         </div>
       </article>
       <div v-if="!shipments.length && !loading" class="mobile-empty">暂无待发货库存</div>
@@ -493,11 +519,38 @@
       <el-table :data="warehouseRows" max-height="clamp(220px, 26vh, 320px)">
         <el-table-column prop="warehouseCode" label="仓库编码" width="140" />
         <el-table-column prop="warehouseName" label="仓库名称" min-width="180" />
+        <el-table-column label="仓库状态" width="110">
+          <template #default="{ row }">
+            <StatusTag :value="row.warehouseStatus" />
+          </template>
+        </el-table-column>
         <el-table-column prop="locationCode" label="库位编码" width="140" />
         <el-table-column prop="locationName" label="库位名称" width="140" />
-        <el-table-column label="状态" width="120">
+        <el-table-column label="库位状态" width="110">
           <template #default="{ row }">
-            <StatusTag :value="row.status" />
+            <StatusTag v-if="row.locationId" :value="row.locationStatus" />
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" fixed="right" width="360">
+          <template #default="{ row }">
+            <div class="table-actions">
+              <el-button link type="primary" @click="openEditWarehouseDialog(row)">编辑仓库</el-button>
+              <el-button link :type="row.warehouseStatus === 'ENABLED' ? 'danger' : 'success'" @click="toggleWarehouseStatus(row)">
+                {{ row.warehouseStatus === 'ENABLED' ? '停用仓库' : '启用仓库' }}
+              </el-button>
+              <el-button link type="danger" @click="requestDeleteWarehouse(row)">删除仓库</el-button>
+              <el-button v-if="row.locationId" link type="primary" @click="openEditLocationDialog(row)">编辑库位</el-button>
+              <el-button
+                v-if="row.locationId"
+                link
+                :type="row.locationStatus === 'ENABLED' ? 'danger' : 'success'"
+                @click="toggleLocationStatus(row)"
+              >
+                {{ row.locationStatus === 'ENABLED' ? '停用库位' : '启用库位' }}
+              </el-button>
+              <el-button v-if="row.locationId" link type="danger" @click="requestDeleteLocation(row)">删除库位</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -525,12 +578,19 @@
         <div class="mobile-card-compact-summary">
           <span>{{ row.locationCode }}</span>
           <span>{{ row.locationName }}</span>
-          <span><StatusTag :value="row.status" compact /></span>
+          <span><StatusTag :value="row.warehouseStatus" compact /></span>
         </div>
         <div v-show="isMobileWarehouseCardExpanded(warehouseLocationCardKey(row))" class="mobile-card-fields">
           <div class="mobile-field">
-            <label>状态</label>
-            <span><StatusTag :value="row.status" /></span>
+            <label>仓库状态</label>
+            <span><StatusTag :value="row.warehouseStatus" /></span>
+          </div>
+          <div class="mobile-field">
+            <label>库位状态</label>
+            <span>
+              <StatusTag v-if="row.locationId" :value="row.locationStatus" />
+              <span v-else>-</span>
+            </span>
           </div>
           <div class="mobile-field">
             <label>库位编码</label>
@@ -572,8 +632,8 @@
               <span>可用 {{ formatQuantity(row.availableQuantity ?? 0, row.unit) }}</span>
               <small class="muted">
                 账面 {{ formatQuantity(row.physicalQuantity ?? 0, row.unit) }}
-                <template v-if="(row.reservedQuantity || 0) > 0">
-                  / 预占 {{ formatQuantity(row.reservedQuantity || 0, row.unit) }}
+                <template v-if="(row.reservedQuantity ?? 0) > 0">
+                  / 预占 {{ formatQuantity(row.reservedQuantity ?? 0, row.unit) }}
                 </template>
               </small>
             </div>
@@ -648,8 +708,8 @@
               可用 {{ formatQuantity(transaction.availableQuantity ?? 0, transaction.unit) }}
               <small class="muted">
                 账面 {{ formatQuantity(transaction.physicalQuantity ?? 0, transaction.unit) }}
-                <template v-if="(transaction.reservedQuantity || 0) > 0">
-                  / 预占 {{ formatQuantity(transaction.reservedQuantity || 0, transaction.unit) }}
+                <template v-if="(transaction.reservedQuantity ?? 0) > 0">
+                  / 预占 {{ formatQuantity(transaction.reservedQuantity ?? 0, transaction.unit) }}
                 </template>
               </small>
             </span>
@@ -719,16 +779,16 @@
           {{ taskRelationText(activeReceipt) }}
         </el-form-item>
         <el-form-item label="实际完成">
-          {{ activeReceipt ? formatQuantity(activeReceipt.completedQuantity || activeReceipt.quantity, activeReceipt.unit) : '-' }}
+          {{ activeReceipt ? formatQuantity(activeReceipt.completedQuantity ?? activeReceipt.quantity, activeReceipt.unit) : '-' }}
         </el-form-item>
         <el-form-item label="生产计划">
-          {{ activeReceipt ? formatQuantity(activeReceipt.plannedQuantity || activeReceipt.quantity, activeReceipt.unit) : '-' }}
+          {{ activeReceipt ? formatQuantity(activeReceipt.plannedQuantity ?? activeReceipt.quantity, activeReceipt.unit) : '-' }}
         </el-form-item>
         <el-form-item label="客户订单">
-          {{ activeReceipt ? formatQuantity(activeReceipt.customerOrderQuantity || activeReceipt.quantity, activeReceipt.unit) : '-' }}
+          {{ activeReceipt ? formatQuantity(activeReceipt.customerOrderQuantity ?? activeReceipt.quantity, activeReceipt.unit) : '-' }}
         </el-form-item>
         <el-form-item label="已入订单">
-          {{ activeReceipt ? formatQuantity(activeReceipt.receivedOrderQuantity || 0, activeReceipt.unit) : '-' }}
+          {{ activeReceipt ? formatQuantity(activeReceipt.receivedOrderQuantity ?? 0, activeReceipt.unit) : '-' }}
         </el-form-item>
         <el-form-item label="订单剩余">
           {{ activeReceipt ? formatQuantity(activeReceipt.remainingOrderQuantity ?? activeReceipt.quantity, activeReceipt.unit) : '-' }}
@@ -741,7 +801,7 @@
         </el-form-item>
         <el-form-item label="仓库">
           <el-select v-model="receiptForm.warehouseId" placeholder="选择仓库" style="width: 260px" @change="resetLocation">
-            <el-option v-for="item in warehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
+            <el-option v-for="item in enabledWarehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="库位" required>
@@ -749,13 +809,32 @@
             <el-option v-for="item in currentLocations" :key="item.id" :label="item.locationName" :value="item.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="仓库确认" required>
+          <el-select
+            v-model="receiptForm.warehouseConfirmedByCode"
+            filterable
+            remote
+            clearable
+            reserve-keyword
+            placeholder="选择仓库管理员"
+            style="width: 260px"
+            :remote-method="searchWarehouseOperators"
+            :loading="warehouseOperatorLoading"
+            @visible-change="handleWarehouseOperatorSelectVisible"
+          >
+            <el-option
+              v-for="operator in warehouseOperatorOptionRows"
+              :key="operator.code"
+              :label="warehouseOperatorOptionLabel(operator)"
+              :value="operator.code"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="备注">
           <el-input
             v-model="receiptForm.remark"
             type="textarea"
             :rows="3"
-            maxlength="120"
-            show-word-limit
             placeholder="例如：订单数量入库，多做数量转库存"
           />
         </el-form-item>
@@ -824,16 +903,16 @@
           {{ activeShipment ? formatQuantity(activeShipment.quantity, activeShipment.unit) : '-' }}
         </el-form-item>
         <el-form-item label="已发货">
-          {{ activeShipment ? formatQuantity(activeShipment.shippedQuantity || 0, activeShipment.unit) : '-' }}
+          {{ activeShipment ? formatQuantity(activeShipment.shippedQuantity ?? 0, activeShipment.unit) : '-' }}
         </el-form-item>
         <el-form-item label="未发货">
-          {{ activeShipment ? formatQuantity(activeShipment.remainingQuantity || 0, activeShipment.unit) : '-' }}
+          {{ activeShipment ? formatQuantity(activeShipment.remainingQuantity ?? 0, activeShipment.unit) : '-' }}
         </el-form-item>
         <el-form-item label="本次发货" required>
           <el-input-number
             v-model="shipmentForm.shipmentQuantity"
             :min="0"
-            :max="activeShipment?.quantity || 0"
+            :max="activeShipment?.quantity ?? 0"
             :precision="3"
             :step="1"
             style="width: 220px"
@@ -844,7 +923,25 @@
           </small>
         </el-form-item>
         <el-form-item label="仓库确认" required>
-          <el-input v-model="shipmentForm.warehouseConfirmedBy" maxlength="30" placeholder="填写仓库管理确认人" />
+          <el-select
+            v-model="shipmentForm.warehouseConfirmedByCode"
+            filterable
+            remote
+            clearable
+            reserve-keyword
+            placeholder="选择仓库管理员"
+            style="width: 260px"
+            :remote-method="searchWarehouseOperators"
+            :loading="warehouseOperatorLoading"
+            @visible-change="handleWarehouseOperatorSelectVisible"
+          >
+            <el-option
+              v-for="operator in warehouseOperatorOptionRows"
+              :key="operator.code"
+              :label="warehouseOperatorOptionLabel(operator)"
+              :value="operator.code"
+            />
+          </el-select>
         </el-form-item>
         <el-alert
           v-if="activeShipmentOverQuantity > 0"
@@ -854,15 +951,13 @@
           :title="`本次超出未发货数量 ${formatQuantity(activeShipmentOverQuantity, activeShipment?.unit || '件')}，需要销售确认和说明。`"
         />
         <el-form-item v-if="activeShipmentOverQuantity > 0" label="销售确认" required>
-          <el-input v-model="shipmentForm.salesConfirmedBy" maxlength="30" placeholder="填写销售确认人" />
+          <el-input v-model="shipmentForm.salesConfirmedBy" placeholder="填写销售确认人" />
         </el-form-item>
         <el-form-item v-if="activeShipmentOverQuantity > 0" label="超发说明" required>
           <el-input
             v-model="shipmentForm.overShipmentReason"
             type="textarea"
             :rows="2"
-            maxlength="160"
-            show-word-limit
             placeholder="例如：客户临时要求多发，已由销售确认。"
           />
         </el-form-item>
@@ -889,8 +984,6 @@
             v-model="shipmentForm.remark"
             type="textarea"
             :rows="3"
-            maxlength="120"
-            show-word-limit
             placeholder="例如：按订单发货"
           />
         </el-form-item>
@@ -933,18 +1026,34 @@
           <strong>{{ batchShipmentCustomerName || '-' }}</strong>
         </el-form-item>
         <el-form-item label="仓库确认" required>
-          <el-input v-model="batchShipmentForm.warehouseConfirmedBy" maxlength="30" placeholder="填写仓库管理确认人" />
+          <el-select
+            v-model="batchShipmentForm.warehouseConfirmedByCode"
+            filterable
+            remote
+            clearable
+            reserve-keyword
+            placeholder="选择仓库管理员"
+            style="width: 260px"
+            :remote-method="searchWarehouseOperators"
+            :loading="warehouseOperatorLoading"
+            @visible-change="handleWarehouseOperatorSelectVisible"
+          >
+            <el-option
+              v-for="operator in warehouseOperatorOptionRows"
+              :key="operator.code"
+              :label="warehouseOperatorOptionLabel(operator)"
+              :value="operator.code"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="销售确认">
-          <el-input v-model="batchShipmentForm.salesConfirmedBy" maxlength="30" placeholder="如存在超发，请填写销售确认人" />
+          <el-input v-model="batchShipmentForm.salesConfirmedBy" placeholder="如存在超发，请填写销售确认人" />
         </el-form-item>
         <el-form-item label="超发说明">
           <el-input
             v-model="batchShipmentForm.overShipmentReason"
             type="textarea"
             :rows="2"
-            maxlength="160"
-            show-word-limit
             placeholder="如存在超发，必须填写原因"
           />
         </el-form-item>
@@ -1002,13 +1111,13 @@
             <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
           </el-table-column>
           <el-table-column label="已发货" width="110">
-            <template #default="{ row }">{{ formatQuantity(row.shippedQuantity || 0, row.unit) }}</template>
+            <template #default="{ row }">{{ formatQuantity(row.shippedQuantity ?? 0, row.unit) }}</template>
           </el-table-column>
           <el-table-column label="未发货" width="110">
-            <template #default="{ row }">{{ formatQuantity(row.remainingQuantity || 0, row.unit) }}</template>
+            <template #default="{ row }">{{ formatQuantity(row.remainingQuantity ?? 0, row.unit) }}</template>
           </el-table-column>
           <el-table-column label="本次建议" width="110">
-            <template #default="{ row }">{{ formatQuantity(row.suggestedShipmentQuantity || 0, row.unit) }}</template>
+            <template #default="{ row }">{{ formatQuantity(row.suggestedShipmentQuantity ?? 0, row.unit) }}</template>
           </el-table-column>
           <el-table-column label="本次发货" width="170">
             <template #default="{ row }">
@@ -1054,8 +1163,6 @@
             v-model="batchShipmentForm.remark"
             type="textarea"
             :rows="3"
-            maxlength="120"
-            show-word-limit
             :placeholder="batchShipmentRemarkPlaceholder"
           />
         </el-form-item>
@@ -1076,7 +1183,7 @@
 
     <el-dialog
       v-model="warehouseVisible"
-      title="新增仓库"
+      :title="warehouseDialogTitle"
       width="min(420px, calc(100vw - 32px))"
       class="responsive-dialog"
       :close-on-click-modal="!saving"
@@ -1099,7 +1206,7 @@
 
     <el-dialog
       v-model="locationVisible"
-      title="新增库位"
+      :title="locationDialogTitle"
       width="min(420px, calc(100vw - 32px))"
       class="responsive-dialog"
       :close-on-click-modal="!saving"
@@ -1108,8 +1215,14 @@
     >
       <el-form label-width="92px">
         <el-form-item label="仓库">
-          <el-select v-model="locationForm.warehouseId" placeholder="选择仓库" style="width: 260px">
-            <el-option v-for="item in warehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
+          <el-select v-model="locationForm.warehouseId" :disabled="Boolean(locationEditId)" placeholder="选择仓库" style="width: 260px">
+            <el-option
+              v-for="item in locationWarehouseOptions"
+              :key="item.id"
+              :label="`${item.warehouseName} / ${item.warehouseCode}`"
+              :value="item.id"
+              :disabled="item.status === 'DISABLED'"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="库位编码">
@@ -1125,10 +1238,92 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="noticeVisible" title="仓库通知" width="min(760px, calc(100vw - 32px))" class="responsive-dialog">
+    <el-dialog
+      v-model="warehouseDeleteVisible"
+      title="删除确认"
+      width="min(520px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleSavingDialogBeforeClose"
+    >
+      <div v-if="activeWarehouseDeleteTarget" class="delete-confirm-body">
+        <p>
+          确认删除
+          <strong>{{ activeWarehouseDeleteTarget.title }}</strong>
+          ？
+        </p>
+        <el-alert
+          type="warning"
+          show-icon
+          :closable="false"
+          :title="activeWarehouseDeleteTarget.warning"
+        />
+      </div>
+      <template #footer>
+        <el-button :disabled="saving" @click="warehouseDeleteVisible = false">取消</el-button>
+        <el-button type="danger" :loading="saving" @click="confirmDeleteWarehouseTarget">确认删除</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="warehouseStatusVisible"
+      :title="activeWarehouseStatusTarget?.actionLabel || '状态确认'"
+      width="min(540px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :before-close="handleWarehouseStatusDialogBeforeClose"
+    >
+      <div v-if="activeWarehouseStatusTarget" class="delete-confirm-body">
+        <p>
+          确认{{ activeWarehouseStatusTarget.actionLabel }}
+          <strong>{{ activeWarehouseStatusTarget.title }}</strong>
+          ？
+        </p>
+        <el-alert
+          :type="activeWarehouseStatusTarget.nextStatus === 'ENABLED' ? 'success' : 'warning'"
+          show-icon
+          :closable="false"
+          :title="activeWarehouseStatusTarget.warning"
+        />
+      </div>
+      <template #footer>
+        <el-button :disabled="saving" @click="closeWarehouseStatusDialog">取消</el-button>
+        <el-button
+          :type="activeWarehouseStatusTarget?.nextStatus === 'ENABLED' ? 'success' : 'danger'"
+          :loading="saving"
+          @click="confirmWarehouseStatusTarget"
+        >
+          {{ activeWarehouseStatusTarget?.actionLabel || '确认' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="noticeVisible" title="仓库通知" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-loading="noticeLoading" class="notice-list">
-        <div v-if="warehouseNotices.length === 0" class="muted">暂无仓库通知</div>
-        <article v-for="notice in warehouseNotices" :key="notice.id" class="notice-item">
+        <div class="notice-toolbar">
+          <el-radio-group v-model="warehouseNoticeStatusFilter" size="small">
+            <el-radio-button value="PENDING">待处理 {{ warehouseNoticeCounts.PENDING }}</el-radio-button>
+            <el-radio-button value="ACKNOWLEDGED">历史 {{ warehouseNoticeCounts.ACKNOWLEDGED }}</el-radio-button>
+            <el-radio-button value="ALL">全部 {{ warehouseNoticeCounts.ALL }}</el-radio-button>
+          </el-radio-group>
+        </div>
+        <div class="notice-filter-grid">
+          <CustomerSelect v-model="warehouseNoticeFilters.customerId" placeholder="通知客户" width="180px" @change="loadWarehouseNotices" />
+          <el-input v-model="warehouseNoticeFilters.orderNo" clearable placeholder="订单号" @keyup.enter="loadWarehouseNotices" />
+          <el-input v-model="warehouseNoticeFilters.partCode" clearable placeholder="零件编码" @keyup.enter="loadWarehouseNotices" />
+          <el-select v-model="warehouseNoticeFilters.noticeType" placeholder="通知类型">
+            <el-option label="全部类型" value="ALL" />
+            <el-option v-for="item in warehouseNoticeTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+          <DateRangeFilter v-model="warehouseNoticeDateRange" start-placeholder="通知开始" end-placeholder="通知结束" width="220px" />
+          <el-input v-model="warehouseNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="loadWarehouseNotices" />
+          <el-button type="primary" @click="loadWarehouseNotices">查询</el-button>
+          <el-button @click="resetWarehouseNoticeFilters">重置</el-button>
+        </div>
+        <div v-if="filteredWarehouseNotices.length === 0" class="muted">暂无仓库通知</div>
+        <article v-for="notice in filteredWarehouseNotices" :key="notice.id" class="notice-item">
           <div>
             <strong>{{ warehouseNoticeTitle(notice) }}</strong>
             <p>{{ notice.reason }}</p>
@@ -1138,7 +1333,7 @@
             </small>
           </div>
           <el-button
-            v-if="notice.status === 'PENDING' && !isMobileLayout"
+            v-if="notice.status === 'PENDING'"
             size="small"
             type="primary"
             @click="acknowledgeWarehouseNotice(notice)"
@@ -1162,6 +1357,12 @@
       :notice-reason="activeWarehouseNotice?.reason"
       :created-at-text="activeWarehouseNotice ? formatDateTime(activeWarehouseNotice.createdAt) : ''"
       :loading="acknowledgeSaving"
+      :use-select="true"
+      :select-options="warehouseOperatorSelectOptions"
+      :select-loading="warehouseOperatorLoading"
+      select-placeholder="选择仓库管理员"
+      @search="searchWarehouseOperators"
+      @visible-change="handleWarehouseOperatorSelectVisible"
       @confirm="saveWarehouseNoticeAcknowledge"
     />
 
@@ -1187,7 +1388,7 @@
           <p>{{ activeWarehouseNotice.reason }}</p>
           <span>
             {{ activeWarehouseNotice.partName || '-' }} /
-            {{ formatQuantity(activeWarehouseNotice.afterQuantity || 0, activeWarehouseNotice.unit || '件') }}
+            {{ stockNoticeQuantityText }}
           </span>
         </div>
         <div v-if="activeWarehouseNotice.handlingPlan" class="notice-plan-card">
@@ -1197,7 +1398,25 @@
         </div>
         <el-form label-width="116px" class="mt-16">
           <el-form-item label="仓库确认人员" required>
-            <el-input v-model="stockNoticeForm.acknowledgedBy" maxlength="30" show-word-limit placeholder="请输入仓库确认人员姓名" />
+            <el-select
+              v-model="stockNoticeForm.acknowledgedByCode"
+              filterable
+              remote
+              clearable
+              reserve-keyword
+              placeholder="选择仓库管理员"
+              style="width: 260px"
+              :remote-method="searchWarehouseOperators"
+              :loading="warehouseOperatorLoading"
+              @visible-change="handleWarehouseOperatorSelectVisible"
+            >
+              <el-option
+                v-for="operator in warehouseOperatorOptionRows"
+                :key="operator.code"
+                :label="warehouseOperatorOptionLabel(operator)"
+                :value="operator.code"
+              />
+            </el-select>
           </el-form-item>
           <el-form-item label="确认时间">
             <el-input :model-value="stockNoticeConfirmTimeText" disabled />
@@ -1210,12 +1429,22 @@
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="showCustomerChangeHandlingFields && stockNoticeForm.handlingMode !== 'NONE'" label="处理数量" required>
-            <el-input-number v-model="stockNoticeForm.handlingQuantity" :min="0" :precision="3" :controls="false" style="width: 180px" />
+            <el-input-number
+              v-model="stockNoticeForm.handlingQuantity"
+              :min="0"
+              :max="stockNoticeHandlingQuantityMax || undefined"
+              :precision="3"
+              :controls="false"
+              style="width: 180px"
+            />
             <span class="unit-text">{{ activeWarehouseNotice.unit || '件' }}</span>
+            <small v-if="stockNoticeHandlingQuantityMax > 0" class="notice-quantity-limit">
+              最多 {{ formatQuantity(stockNoticeHandlingQuantityMax, activeWarehouseNotice.unit || '件') }}
+            </small>
           </el-form-item>
           <el-form-item v-if="stockNoticeNeedsWarehouse" label="转入仓库" required>
             <el-select v-model="stockNoticeForm.warehouseId" placeholder="选择转入仓库" style="width: 260px" @change="resetStockNoticeLocation">
-              <el-option v-for="item in warehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
+              <el-option v-for="item in enabledWarehouses" :key="item.id" :label="item.warehouseName" :value="item.id" />
             </el-select>
           </el-form-item>
           <el-form-item v-if="stockNoticeNeedsWarehouse" label="库位" required>
@@ -1233,8 +1462,6 @@
               v-model="stockNoticeForm.remark"
               type="textarea"
               :rows="3"
-              maxlength="160"
-              show-word-limit
               placeholder="例如：管理撤回实物已清点，转入备货库存"
             />
           </el-form-item>
@@ -1253,7 +1480,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Bell } from '@element-plus/icons-vue';
+import { Bell, Camera } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
@@ -1266,21 +1493,55 @@ import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import StatusTag from '../components/StatusTag.vue';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
+  CommonStatus,
   InventorySourceBatchDetail,
   InventorySourceDetailResponse,
   OrderSummary,
   ProductionNotice,
+  ProductionNoticeStatus,
+  ProductionNoticeType,
+  ProductionOperator,
   Warehouse,
   WarehouseReceipt,
   WarehouseShipment,
   WarehouseTransaction
 } from '../types/erp';
-import { formatDate, formatQuantity } from '../utils/format';
+import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
 
 type EditableWarehouseShipment = WarehouseShipment & {
   currentShipmentQuantity?: number;
   isStockOverShipment?: boolean;
   targetOrderLineId?: string;
+};
+
+type WarehouseLocationRow = {
+  warehouseId: string;
+  warehouseCode: string;
+  warehouseName: string;
+  warehouseStatus: CommonStatus;
+  locationId: string;
+  locationCode: string;
+  locationName: string;
+  locationStatus: CommonStatus;
+  status: CommonStatus;
+};
+
+type WarehouseDeleteTarget = {
+  type: 'warehouse' | 'location';
+  warehouseId: string;
+  locationId?: string;
+  title: string;
+  warning: string;
+};
+
+type WarehouseStatusTarget = {
+  type: 'warehouse' | 'location';
+  warehouseId: string;
+  locationId?: string;
+  nextStatus: CommonStatus;
+  title: string;
+  actionLabel: string;
+  warning: string;
 };
 
 const route = useRoute();
@@ -1294,6 +1555,8 @@ const selectedShipments = ref<WarehouseShipment[]>([]);
 const batchShipmentRows = ref<EditableWarehouseShipment[]>([]);
 const transactions = ref<WarehouseTransaction[]>([]);
 const warehouseNotices = ref<ProductionNotice[]>([]);
+const warehouseNoticeStatusFilter = ref<ProductionNoticeStatus | 'ALL'>('PENDING');
+const warehouseNoticeDateRange = ref<string[]>([]);
 const dateRange = ref<string[]>([]);
 const transactionType = ref<'ALL' | 'IN' | 'OUT'>('ALL');
 const loading = ref(false);
@@ -1306,6 +1569,7 @@ const stockSourceLoading = ref(false);
 const stockSourceRequestSeq = ref(0);
 const stockNoticeConfirmTime = ref('');
 const saving = ref(false);
+const warehouseOperatorLoading = ref(false);
 const noticeVisible = ref(false);
 const confirmVisible = ref(false);
 const shipmentVisible = ref(false);
@@ -1316,39 +1580,71 @@ const batchShipmentVisible = ref(false);
 const batchShipmentIsOrderMode = ref(false);
 const warehouseVisible = ref(false);
 const locationVisible = ref(false);
+const warehouseDeleteVisible = ref(false);
+const warehouseStatusVisible = ref(false);
+const warehouseEditId = ref('');
+const locationEditId = ref('');
 const activeReceipt = ref<WarehouseReceipt>();
 const activeShipment = ref<WarehouseShipment>();
 const activeWarehouseNotice = ref<ProductionNotice>();
+const activeWarehouseDeleteTarget = ref<WarehouseDeleteTarget>();
+const activeWarehouseStatusTarget = ref<WarehouseStatusTarget>();
 const shipmentSourceDetails = ref<InventorySourceDetailResponse | null>(null);
 const shipmentSourceFocusBatchId = ref('');
 const shipmentSourceFocusBatchNo = ref('');
 const shipmentTableRef = ref();
 const expandedMobileWarehouseCardKeys = ref<string[]>([]);
+const warehouseOperatorOptions = ref<ProductionOperator[]>([]);
+const warehouseOperatorCache = reactive<Record<string, ProductionOperator>>({});
+let warehouseOperatorRequestSeq = 0;
 
 const filters = reactive<{
   customerId?: string;
   orderNo?: string;
 }>({});
+
+const warehouseNoticeFilters = reactive<{
+  customerId?: string;
+  orderNo: string;
+  partCode: string;
+  keyword: string;
+  noticeType: ProductionNoticeType | 'ALL';
+}>({
+  customerId: undefined,
+  orderNo: '',
+  partCode: '',
+  keyword: '',
+  noticeType: 'ALL'
+});
+
+const warehouseNoticeTypeOptions: Array<{ label: string; value: ProductionNoticeType }> = [
+  { label: '数量增加', value: 'QUANTITY_INCREASE' },
+  { label: '数量减少', value: 'QUANTITY_DECREASE' },
+  { label: '订单取消', value: 'ORDER_CANCELLED' },
+  { label: '新增零件', value: 'MATERIAL_ADDED' },
+  { label: '管理撤回', value: 'TASK_WITHDRAWN' }
+];
 const receiptForm = reactive({
   warehouseId: '',
   locationId: '',
+  warehouseConfirmedByCode: '',
   remark: ''
 });
 const shipmentForm = reactive({
   shipmentQuantity: 0,
-  warehouseConfirmedBy: '',
+  warehouseConfirmedByCode: '',
   salesConfirmedBy: '',
   overShipmentReason: '',
   remark: ''
 });
 const batchShipmentForm = reactive({
-  warehouseConfirmedBy: '',
+  warehouseConfirmedByCode: '',
   salesConfirmedBy: '',
   overShipmentReason: '',
   remark: ''
 });
 const stockNoticeForm = reactive({
-  acknowledgedBy: '',
+  acknowledgedByCode: '',
   handlingMode: 'STOCK' as 'STOCK' | 'SCRAP' | 'NONE',
   handlingQuantity: 0,
   warehouseId: '',
@@ -1386,8 +1682,58 @@ type ShipmentOrderGroup = {
 
 const locationCount = computed(() => warehouses.value.reduce((sum, item) => sum + item.locations.length, 0));
 const pendingNoticeCount = computed(() => warehouseNotices.value.filter((notice) => notice.status === 'PENDING').length);
-const currentLocations = computed(() => warehouses.value.find((item) => item.id === receiptForm.warehouseId)?.locations || []);
-const currentStockNoticeLocations = computed(() => warehouses.value.find((item) => item.id === stockNoticeForm.warehouseId)?.locations || []);
+const warehouseNoticeCounts = computed(() => {
+  const pending = warehouseNotices.value.filter((notice) => notice.status === 'PENDING').length;
+  const acknowledged = warehouseNotices.value.filter((notice) => notice.status === 'ACKNOWLEDGED').length;
+  return { ALL: warehouseNotices.value.length, PENDING: pending, ACKNOWLEDGED: acknowledged };
+});
+const filteredWarehouseNotices = computed(() =>
+  warehouseNoticeStatusFilter.value === 'ALL'
+    ? warehouseNotices.value
+    : warehouseNotices.value.filter((notice) => notice.status === warehouseNoticeStatusFilter.value)
+);
+const enabledWarehouses = computed(() => warehouses.value.filter((item) => item.status === 'ENABLED'));
+const warehouseDialogTitle = computed(() => (warehouseEditId.value ? '编辑仓库' : '新增仓库'));
+const locationDialogTitle = computed(() => (locationEditId.value ? '编辑库位' : '新增库位'));
+const locationWarehouseOptions = computed(() => (locationEditId.value ? warehouses.value : enabledWarehouses.value));
+const currentLocations = computed(() => {
+  const warehouse = warehouses.value.find((item) => item.id === receiptForm.warehouseId);
+  if (!warehouse || warehouse.status !== 'ENABLED') {
+    return [];
+  }
+  return warehouse.locations.filter((item) => item.status === 'ENABLED');
+});
+const currentStockNoticeLocations = computed(() => {
+  const warehouse = warehouses.value.find((item) => item.id === stockNoticeForm.warehouseId);
+  if (!warehouse || warehouse.status !== 'ENABLED') {
+    return [];
+  }
+  return warehouse.locations.filter((item) => item.status === 'ENABLED');
+});
+const warehouseOperatorOptionRows = computed(() => {
+  const merged = new Map<string, ProductionOperator>();
+  warehouseOperatorOptions.value.forEach((operator) => merged.set(operator.code, operator));
+  [
+    receiptForm.warehouseConfirmedByCode,
+    shipmentForm.warehouseConfirmedByCode,
+    batchShipmentForm.warehouseConfirmedByCode,
+    stockNoticeForm.acknowledgedByCode
+  ]
+    .filter(Boolean)
+    .forEach((code) => {
+      const cached = warehouseOperatorCache[code];
+      if (cached) {
+        merged.set(code, cached);
+      }
+  });
+  return Array.from(merged.values()).filter(isWarehouseOperator);
+});
+const warehouseOperatorSelectOptions = computed(() =>
+  warehouseOperatorOptionRows.value.map((operator) => ({
+    label: warehouseOperatorOptionLabel(operator),
+    value: operator.code
+  }))
+);
 const activeStockNoticeIsWithdraw = computed(() => Boolean(activeWarehouseNotice.value && requiresWithdrawStockReceipt(activeWarehouseNotice.value)));
 const showCustomerChangeHandlingFields = computed(() => Boolean(activeWarehouseNotice.value && requiresCustomerChangeHandling(activeWarehouseNotice.value)));
 const stockNoticeNeedsWarehouse = computed(
@@ -1396,6 +1742,28 @@ const stockNoticeNeedsWarehouse = computed(
 const showStockMergeConfirm = computed(
   () => showCustomerChangeHandlingFields.value && stockNoticeForm.handlingMode === 'STOCK'
 );
+const stockNoticeHandlingQuantityMax = computed(() => {
+  const notice = activeWarehouseNotice.value;
+  if (!notice) {
+    return 0;
+  }
+  if (requiresWithdrawStockReceipt(notice)) {
+    return roundQuantityValue(Number(notice.afterQuantity ?? 0));
+  }
+  if (requiresCustomerChangeHandling(notice)) {
+    return customerChangeHandlingQuantityLimit(notice);
+  }
+  return 0;
+});
+const stockNoticeQuantityText = computed(() => {
+  const notice = activeWarehouseNotice.value;
+  if (!notice) {
+    return '-';
+  }
+  const quantity = stockNoticeDisplayQuantity(notice);
+  const prefix = requiresCustomerChangeHandling(notice) ? '需处理' : '数量';
+  return `${prefix} ${formatQuantity(quantity, notice.unit || '件')}`;
+});
 const stockNoticeDialogTitle = computed(() => (activeStockNoticeIsWithdraw.value ? '撤回零件转库存确认' : '客户变更零件处理'));
 const stockNoticeAlertTitle = computed(() =>
   activeStockNoticeIsWithdraw.value
@@ -1420,7 +1788,7 @@ const activeShipmentOverQuantity = computed(() => {
   if (!activeShipment.value) {
     return 0;
   }
-  return Math.max(Number(shipmentForm.shipmentQuantity || 0) - Number(activeShipment.value.remainingQuantity || 0), 0);
+  return Math.max(Number(shipmentForm.shipmentQuantity ?? 0) - Number(activeShipment.value.remainingQuantity ?? 0), 0);
 });
 const activeShipmentQuantityAdjustmentText = computed(() =>
   activeShipment.value
@@ -1439,7 +1807,7 @@ const batchShipmentTotalText = computed(() => formatShipmentTotal(batchShipmentR
 const batchShipmentCurrentText = computed(() => formatShipmentTotal(batchShipmentRows.value, 'currentShipmentQuantity'));
 const batchShipmentOverText = computed(() => formatBatchShipmentOverText(batchShipmentRows.value));
 const batchShipmentHasStockOverRows = computed(() =>
-  batchShipmentRows.value.some((row) => row.isStockOverShipment && Number(row.currentShipmentQuantity || 0) > 0)
+  batchShipmentRows.value.some((row) => row.isStockOverShipment && Number(row.currentShipmentQuantity ?? 0) > 0)
 );
 const batchShipmentRequiresSalesConfirmation = computed(
   () => Boolean(batchShipmentOverText.value) || batchShipmentHasStockOverRows.value
@@ -1499,17 +1867,107 @@ const shipmentOrderGroups = computed(() => {
   }
   return [...groupMap.values()].sort((a, b) => a.orderNo.localeCompare(b.orderNo, 'zh-Hans-CN'));
 });
-const warehouseRows = computed(() =>
-  warehouses.value.flatMap((warehouse) =>
-    warehouse.locations.map((location) => ({
+const warehouseRows = computed<WarehouseLocationRow[]>(() =>
+  warehouses.value.flatMap((warehouse) => {
+    if (!warehouse.locations.length) {
+      return [
+        {
+          warehouseId: warehouse.id,
+          warehouseCode: warehouse.warehouseCode,
+          warehouseName: warehouse.warehouseName,
+          warehouseStatus: warehouse.status,
+          locationId: '',
+          locationCode: '-',
+          locationName: '未建库位',
+          locationStatus: warehouse.status,
+          status: warehouse.status
+        }
+      ];
+    }
+    return warehouse.locations.map((location) => ({
+      warehouseId: warehouse.id,
       warehouseCode: warehouse.warehouseCode,
       warehouseName: warehouse.warehouseName,
+      warehouseStatus: warehouse.status,
+      locationId: location.id,
       locationCode: location.locationCode,
       locationName: location.locationName,
+      locationStatus: location.status,
       status: location.status
-    }))
-  )
+    }));
+  })
 );
+
+function normalizeWarehouseOperatorKeyword(value?: string) {
+  return String(value || '').trim().toLowerCase().replace(/[\s\-_./\\]+/g, '');
+}
+
+function isWarehouseOperator(operator: ProductionOperator) {
+  const role = operator.role || '';
+  const tokens = [
+    role,
+    operator.name,
+    operator.accountId,
+    operator.code,
+    operator.pinyin,
+    operator.pinyinInitials,
+    ...(operator.keywords || [])
+  ]
+    .filter(Boolean)
+    .map((value) => normalizeWarehouseOperatorKeyword(String(value)));
+  return tokens.some((token) => token.includes('仓库') || token.includes('仓管') || token.includes('库管') || token.includes('cangguan'));
+}
+
+function cacheWarehouseOperators(operators: ProductionOperator[]) {
+  operators.forEach((operator) => {
+    warehouseOperatorCache[operator.code] = operator;
+  });
+}
+
+async function searchWarehouseOperators(keyword = '') {
+  const requestId = ++warehouseOperatorRequestSeq;
+  warehouseOperatorLoading.value = true;
+  try {
+    const operators = await erpApi.productionOperators(keyword.trim());
+    if (requestId !== warehouseOperatorRequestSeq) {
+      return;
+    }
+    const warehouseOperators = operators.filter(isWarehouseOperator);
+    cacheWarehouseOperators(warehouseOperators);
+    warehouseOperatorOptions.value = warehouseOperators;
+  } catch {
+    if (requestId === warehouseOperatorRequestSeq) {
+      warehouseOperatorOptions.value = [];
+    }
+  } finally {
+    if (requestId === warehouseOperatorRequestSeq) {
+      warehouseOperatorLoading.value = false;
+    }
+  }
+}
+
+function handleWarehouseOperatorSelectVisible(visible: boolean) {
+  if (visible) {
+    void searchWarehouseOperators('');
+  }
+}
+
+function warehouseOperatorOptionLabel(operator: ProductionOperator) {
+  return `${operator.name} / ${operator.accountId || operator.code} / ${operator.role}`;
+}
+
+function warehouseOperatorSnapshot(operator: ProductionOperator) {
+  return `${operator.name}（${operator.accountId || operator.code} / ${operator.role}）`;
+}
+
+function requireWarehouseOperator(code: string, actionName: string) {
+  const operator = warehouseOperatorCache[code];
+  if (!operator || !isWarehouseOperator(operator)) {
+    ElMessage.warning(`请选择${actionName}仓库确认人`);
+    return undefined;
+  }
+  return operator;
+}
 
 function receiptCardKey(receipt: WarehouseReceipt) {
   return `receipt:${receipt.id}`;
@@ -1648,7 +2106,15 @@ function applyRouteOrderFilter() {
 async function loadWarehouseNotices() {
   noticeLoading.value = true;
   try {
-    warehouseNotices.value = await erpApi.warehouseNotices();
+    warehouseNotices.value = await erpApi.warehouseNotices(undefined, {
+      customerId: warehouseNoticeFilters.customerId,
+      orderNo: warehouseNoticeFilters.orderNo,
+      partCode: warehouseNoticeFilters.partCode,
+      keyword: warehouseNoticeFilters.keyword,
+      noticeType: warehouseNoticeFilters.noticeType === 'ALL' ? undefined : warehouseNoticeFilters.noticeType,
+      dateFrom: warehouseNoticeDateRange.value[0],
+      dateTo: warehouseNoticeDateRange.value[1]
+    });
   } catch (error) {
     warehouseNotices.value = [];
     ElMessage.error(error instanceof Error ? error.message : '仓库通知加载失败，请确认后端服务');
@@ -1658,8 +2124,23 @@ async function loadWarehouseNotices() {
 }
 
 async function openWarehouseNotices() {
+  warehouseNoticeFilters.customerId = filters.customerId;
+  warehouseNoticeFilters.orderNo = filters.orderNo || '';
+  warehouseNoticeDateRange.value = [...dateRange.value];
   noticeVisible.value = true;
   await loadWarehouseNotices();
+  warehouseNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+}
+
+async function resetWarehouseNoticeFilters() {
+  warehouseNoticeFilters.customerId = undefined;
+  warehouseNoticeFilters.orderNo = '';
+  warehouseNoticeFilters.partCode = '';
+  warehouseNoticeFilters.keyword = '';
+  warehouseNoticeFilters.noticeType = 'ALL';
+  warehouseNoticeDateRange.value = [];
+  await loadWarehouseNotices();
+  warehouseNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
 }
 
 function warehouseNoticeTitle(notice: ProductionNotice) {
@@ -1683,23 +2164,25 @@ function acknowledgeWarehouseNotice(notice: ProductionNotice) {
   activeWarehouseNotice.value = notice;
   if (requiresWithdrawStockReceipt(notice) || requiresCustomerChangeHandling(notice)) {
     const handlingPlan = notice.handlingPlan;
-    stockNoticeForm.acknowledgedBy = '';
+    stockNoticeForm.acknowledgedByCode = '';
     stockNoticeConfirmTime.value = formatDateTime(new Date());
     stockNoticeForm.handlingMode = requiresWithdrawStockReceipt(notice)
       ? 'STOCK'
       : handlingPlan?.handlingMode || 'NONE';
-    stockNoticeForm.handlingQuantity = handlingPlan?.handlingQuantity || 0;
-    stockNoticeForm.warehouseId = warehouses.value[0]?.id || '';
+    stockNoticeForm.handlingQuantity = handlingPlan?.handlingQuantity ?? 0;
+    stockNoticeForm.warehouseId = enabledWarehouses.value[0]?.id || '';
     stockNoticeForm.mergeConfirmed = false;
     stockNoticeForm.remark = handlingPlan?.remark || '';
     resetStockNoticeLocation();
+    void searchWarehouseOperators('');
     stockNoticeVisible.value = true;
     return;
   }
+  void searchWarehouseOperators('');
   acknowledgeVisible.value = true;
 }
 
-async function saveWarehouseNoticeAcknowledge(acknowledgedBy: string) {
+async function saveWarehouseNoticeAcknowledge(operatorCode: string) {
   if (guardDesktopWarehouseMutation('确认仓库通知')) {
     return;
   }
@@ -1707,9 +2190,16 @@ async function saveWarehouseNoticeAcknowledge(acknowledgedBy: string) {
   if (!notice) {
     return;
   }
+  const warehouseOperator = requireWarehouseOperator(operatorCode, '通知');
+  if (!warehouseOperator) {
+    return;
+  }
   acknowledgeSaving.value = true;
   try {
-    await erpApi.acknowledgeWarehouseNotice(notice.id, acknowledgedBy);
+    await erpApi.acknowledgeWarehouseNotice(notice.id, {
+      acknowledgedByCode: warehouseOperator.code,
+      acknowledgedBy: warehouseOperatorSnapshot(warehouseOperator)
+    });
     ElMessage.success('仓库通知已确认');
     acknowledgeVisible.value = false;
     await loadWarehouseNotices();
@@ -1721,11 +2211,32 @@ async function saveWarehouseNoticeAcknowledge(acknowledgedBy: string) {
 }
 
 function requiresWithdrawStockReceipt(notice: ProductionNotice) {
-  return notice.noticeType === 'TASK_WITHDRAWN' && Number(notice.afterQuantity || 0) > 0;
+  return notice.noticeType === 'TASK_WITHDRAWN' && Number(notice.afterQuantity ?? 0) > 0;
 }
 
 function requiresCustomerChangeHandling(notice: ProductionNotice) {
   return notice.noticeType === 'ORDER_CANCELLED' || notice.noticeType === 'QUANTITY_DECREASE';
+}
+
+function roundQuantityValue(value: number) {
+  return Math.round((value + Number.EPSILON) * 1000) / 1000;
+}
+
+function customerChangeHandlingQuantityLimit(notice: ProductionNotice) {
+  const beforeQuantity = Number(notice.beforeQuantity ?? 0);
+  const afterQuantity = Number(notice.afterQuantity ?? 0);
+  const deltaQuantity = Math.abs(Number(notice.deltaQuantity ?? 0));
+  const plannedHandlingQuantity = Number(notice.handlingPlan?.handlingQuantity ?? 0);
+  const reducedQuantity = beforeQuantity > afterQuantity ? beforeQuantity - afterQuantity : 0;
+  return roundQuantityValue(Math.max(deltaQuantity, reducedQuantity, plannedHandlingQuantity, 0));
+}
+
+function stockNoticeDisplayQuantity(notice: ProductionNotice) {
+  // 仓库通知展示客户变更时必须使用待处理数量，不能把变更后的订单数量当成待处理实物数量。
+  if (requiresCustomerChangeHandling(notice) || requiresWithdrawStockReceipt(notice)) {
+    return stockNoticeHandlingQuantityMax.value;
+  }
+  return Number(notice.afterQuantity ?? 0);
 }
 
 function handlingPlanText(notice: ProductionNotice) {
@@ -1733,7 +2244,7 @@ function handlingPlanText(notice: ProductionNotice) {
   if (!plan) {
     return '';
   }
-  const quantityText = formatQuantity(plan.handlingQuantity || 0, notice.unit || '件');
+  const quantityText = formatQuantity(plan.handlingQuantity ?? 0, notice.unit || '件');
   const remarkText = plan.remark ? `，说明：${plan.remark}` : '';
   if (plan.handlingMode === 'STOCK') {
     return `建议转备货库存 ${quantityText}${remarkText}`;
@@ -1756,6 +2267,24 @@ function handleSavingDialogBeforeClose(done: () => void) {
   done();
 }
 
+function closeWarehouseStatusDialog() {
+  if (saving.value) {
+    ElMessage.warning('仓库状态正在保存，请等待保存完成');
+    return;
+  }
+  warehouseStatusVisible.value = false;
+  activeWarehouseStatusTarget.value = undefined;
+}
+
+function handleWarehouseStatusDialogBeforeClose(done: () => void) {
+  if (saving.value) {
+    ElMessage.warning('仓库状态正在保存，请等待保存完成');
+    return;
+  }
+  activeWarehouseStatusTarget.value = undefined;
+  done();
+}
+
 function handleStockNoticeBeforeClose(done: () => void) {
   if (stockNoticeSaving.value) {
     ElMessage.warning('仓库通知正在处理，请等待保存完成');
@@ -1773,8 +2302,14 @@ function handleStockNoticeModeChange() {
     return;
   }
   if (stockNoticeForm.handlingMode === 'STOCK' && !stockNoticeForm.warehouseId) {
-    stockNoticeForm.warehouseId = warehouses.value[0]?.id || '';
+    stockNoticeForm.warehouseId = enabledWarehouses.value[0]?.id || '';
     resetStockNoticeLocation();
+  }
+  if (showCustomerChangeHandlingFields.value && stockNoticeHandlingQuantityMax.value > 0) {
+    const nextQuantity = Number(stockNoticeForm.handlingQuantity ?? 0);
+    if (nextQuantity <= 0 || nextQuantity > stockNoticeHandlingQuantityMax.value) {
+      stockNoticeForm.handlingQuantity = stockNoticeHandlingQuantityMax.value;
+    }
   }
 }
 
@@ -1789,12 +2324,25 @@ async function saveWithdrawStockNotice() {
   if (!notice) {
     return;
   }
-  if (!stockNoticeForm.acknowledgedBy.trim()) {
-    ElMessage.warning('请填写仓库确认人员');
+  const warehouseOperator = requireWarehouseOperator(stockNoticeForm.acknowledgedByCode, '通知');
+  if (!warehouseOperator) {
     return;
   }
   if (showCustomerChangeHandlingFields.value && stockNoticeForm.handlingMode !== 'NONE' && stockNoticeForm.handlingQuantity <= 0) {
     ElMessage.warning('请填写处理数量');
+    return;
+  }
+  if (
+    showCustomerChangeHandlingFields.value &&
+    stockNoticeForm.handlingMode !== 'NONE' &&
+    stockNoticeHandlingQuantityMax.value > 0 &&
+    stockNoticeForm.handlingQuantity > stockNoticeHandlingQuantityMax.value + 0.0001
+  ) {
+    ElMessage.warning(`处理数量不能超过本次客户变更数量 ${formatQuantity(stockNoticeHandlingQuantityMax.value, notice.unit || '件')}`);
+    return;
+  }
+  if (showCustomerChangeHandlingFields.value && stockNoticeForm.handlingMode === 'NONE' && stockNoticeHandlingQuantityMax.value > 0 && !stockNoticeForm.remark.trim()) {
+    ElMessage.warning('确认无实物处理时请填写备注说明');
     return;
   }
   if (stockNoticeNeedsWarehouse.value && !stockNoticeForm.warehouseId) {
@@ -1813,7 +2361,8 @@ async function saveWithdrawStockNotice() {
   stockNoticeSaving.value = true;
   try {
     await erpApi.acknowledgeWarehouseNotice(notice.id, {
-      acknowledgedBy: stockNoticeForm.acknowledgedBy.trim(),
+      acknowledgedByCode: warehouseOperator.code,
+      acknowledgedBy: warehouseOperatorSnapshot(warehouseOperator),
       handlingMode: showCustomerChangeHandlingFields.value ? stockNoticeForm.handlingMode : undefined,
       handlingQuantity: showCustomerChangeHandlingFields.value ? stockNoticeForm.handlingQuantity : undefined,
       warehouseId: stockNoticeNeedsWarehouse.value ? stockNoticeForm.warehouseId : undefined,
@@ -1837,22 +2386,24 @@ function openConfirm(row: WarehouseReceipt) {
     return;
   }
   activeReceipt.value = row;
-  receiptForm.warehouseId = warehouses.value[0]?.id || '';
+  receiptForm.warehouseId = enabledWarehouses.value[0]?.id || '';
+  receiptForm.warehouseConfirmedByCode = '';
   receiptForm.remark = '';
   resetLocation();
+  void searchWarehouseOperators('');
   confirmVisible.value = true;
 }
 
 function defaultShipmentQuantity(row: WarehouseShipment) {
-  const suggestedQuantity = Number(row.suggestedShipmentQuantity || 0);
+  const suggestedQuantity = Number(row.suggestedShipmentQuantity ?? 0);
   if (suggestedQuantity > 0) {
     return suggestedQuantity;
   }
   if (row.remainingQuantity === undefined || row.remainingQuantity === null) {
-    return Number(row.quantity || 0);
+    return Number(row.quantity ?? 0);
   }
-  const remainingQuantity = Number(row.remainingQuantity || 0);
-  return remainingQuantity > 0 ? Math.min(Number(row.quantity || 0), remainingQuantity) : 0;
+  const remainingQuantity = Number(row.remainingQuantity ?? 0);
+  return remainingQuantity > 0 ? Math.min(Number(row.quantity ?? 0), remainingQuantity) : 0;
 }
 
 function prepareBatchShipmentRows(rows: WarehouseShipment[]): EditableWarehouseShipment[] {
@@ -1875,7 +2426,7 @@ function toStockOverShipmentRow(source: InventorySourceBatchDetail, targetLine: 
     deliveryDate: targetLine.deliveryDate,
     partCode: source.partCode,
     partName: source.partName,
-    quantity: Number(source.quantity || 0),
+    quantity: Number(source.quantity ?? 0),
     customerOrderQuantity: targetLine.customerOrderQuantity,
     shippedQuantity: targetLine.shippedQuantity,
     remainingQuantity: targetLine.remainingQuantity,
@@ -1933,10 +2484,10 @@ async function appendStockOverShipment(row: EditableWarehouseShipment) {
     // 备货超发只允许把最新查询到的可用备货批次追加到当前发货明细，避免慢请求把旧订单库存插入当前发货单。
     const existingIds = new Set(batchShipmentRows.value.map((item) => item.id));
     const source = detail.sources
-      .filter((item) => item.inventorySourceType === 'STOCK' && Number(item.quantity || 0) > 0 && !existingIds.has(item.id))
+      .filter((item) => item.inventorySourceType === 'STOCK' && Number(item.quantity ?? 0) > 0 && !existingIds.has(item.id))
       .sort(
         (a, b) =>
-          Number(a.quantity || 0) - Number(b.quantity || 0) ||
+          Number(a.quantity ?? 0) - Number(b.quantity ?? 0) ||
           String(a.batchNo || '').localeCompare(String(b.batchNo || ''), 'zh-Hans-CN')
       )[0];
     if (!source) {
@@ -1971,10 +2522,11 @@ function openShipmentConfirm(row: WarehouseShipment) {
   }
   activeShipment.value = row;
   shipmentForm.shipmentQuantity = defaultShipmentQuantity(row);
-  shipmentForm.warehouseConfirmedBy = '';
+  shipmentForm.warehouseConfirmedByCode = '';
   shipmentForm.salesConfirmedBy = '';
   shipmentForm.overShipmentReason = '';
   shipmentForm.remark = '';
+  void searchWarehouseOperators('');
   shipmentVisible.value = true;
 }
 
@@ -2053,9 +2605,10 @@ function openOrderShipmentConfirm(row: WarehouseShipment) {
     .sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`))
   );
   batchShipmentForm.remark = '';
-  batchShipmentForm.warehouseConfirmedBy = '';
+  batchShipmentForm.warehouseConfirmedByCode = '';
   batchShipmentForm.salesConfirmedBy = '';
   batchShipmentForm.overShipmentReason = '';
+  void searchWarehouseOperators('');
   batchShipmentIsOrderMode.value = true;
   batchShipmentVisible.value = true;
 }
@@ -2087,9 +2640,10 @@ function openBatchShipmentConfirm(rows: WarehouseShipment[]) {
     [...rows].sort((a, b) => `${a.partCode}-${a.batchNo}`.localeCompare(`${b.partCode}-${b.batchNo}`))
   );
   batchShipmentForm.remark = '';
-  batchShipmentForm.warehouseConfirmedBy = '';
+  batchShipmentForm.warehouseConfirmedByCode = '';
   batchShipmentForm.salesConfirmedBy = '';
   batchShipmentForm.overShipmentReason = '';
+  void searchWarehouseOperators('');
   batchShipmentIsOrderMode.value = false;
   batchShipmentVisible.value = true;
 }
@@ -2126,13 +2680,14 @@ function resetReceiptDialog() {
   activeReceipt.value = undefined;
   receiptForm.warehouseId = '';
   receiptForm.locationId = '';
+  receiptForm.warehouseConfirmedByCode = '';
   receiptForm.remark = '';
 }
 
 function resetShipmentDialog() {
   activeShipment.value = undefined;
   shipmentForm.shipmentQuantity = 0;
-  shipmentForm.warehouseConfirmedBy = '';
+  shipmentForm.warehouseConfirmedByCode = '';
   shipmentForm.salesConfirmedBy = '';
   shipmentForm.overShipmentReason = '';
   shipmentForm.remark = '';
@@ -2142,7 +2697,7 @@ function resetBatchShipmentDialog() {
   if (!batchShipmentVisible.value) {
     batchShipmentIsOrderMode.value = false;
     batchShipmentRows.value = [];
-    batchShipmentForm.warehouseConfirmedBy = '';
+    batchShipmentForm.warehouseConfirmedByCode = '';
     batchShipmentForm.salesConfirmedBy = '';
     batchShipmentForm.overShipmentReason = '';
     batchShipmentForm.remark = '';
@@ -2218,18 +2773,16 @@ function transactionSourceOrderNo(row: WarehouseTransaction) {
   return row.sourceOrderNo || row.orderNo || '';
 }
 
-function formatDateTime(value?: Date | string) {
-  if (!value) {
-    return '-';
-  }
-  return new Date(value).toLocaleString('zh-CN', { hour12: false });
+function showMobileScanReserved() {
+  ElMessage.info('扫码入口已预留，第一阶段暂不启用');
 }
 
 function guardDesktopWarehouseMutation(actionLabel: string) {
-  if (!isMobileLayout.value) {
+  const desktopOnlyActions = ['新增仓库', '编辑仓库', '删除仓库', '停用仓库', '启用仓库', '新增库位', '编辑库位', '删除库位', '停用库位', '启用库位'];
+  if (!isMobileLayout.value || !desktopOnlyActions.includes(actionLabel)) {
     return false;
   }
-  ElMessage.warning(`手机端仅查看仓库、库存和通知，${actionLabel}请在电脑端操作`);
+  ElMessage.warning(`手机端可处理入库、发货和仓库通知，${actionLabel}请在电脑端操作`);
   return true;
 }
 
@@ -2237,8 +2790,19 @@ function openWarehouseDialog() {
   if (guardDesktopWarehouseMutation('新增仓库')) {
     return;
   }
+  warehouseEditId.value = '';
   warehouseForm.warehouseCode = '';
   warehouseForm.warehouseName = '';
+  warehouseVisible.value = true;
+}
+
+function openEditWarehouseDialog(row: WarehouseLocationRow) {
+  if (guardDesktopWarehouseMutation('编辑仓库')) {
+    return;
+  }
+  warehouseEditId.value = row.warehouseId;
+  warehouseForm.warehouseCode = row.warehouseCode;
+  warehouseForm.warehouseName = row.warehouseName;
   warehouseVisible.value = true;
 }
 
@@ -2246,63 +2810,242 @@ function openLocationDialog() {
   if (guardDesktopWarehouseMutation('新增库位')) {
     return;
   }
-  locationForm.warehouseId = warehouses.value[0]?.id || '';
+  if (!enabledWarehouses.value.length) {
+    ElMessage.warning('请先新增或启用仓库');
+    return;
+  }
+  locationEditId.value = '';
+  locationForm.warehouseId = enabledWarehouses.value[0]?.id || '';
   locationForm.locationCode = '';
   locationForm.locationName = '';
   locationVisible.value = true;
 }
 
+function openEditLocationDialog(row: WarehouseLocationRow) {
+  if (guardDesktopWarehouseMutation('编辑库位')) {
+    return;
+  }
+  if (!row.locationId) {
+    ElMessage.warning('该仓库还没有库位可编辑');
+    return;
+  }
+  locationEditId.value = row.locationId;
+  locationForm.warehouseId = row.warehouseId;
+  locationForm.locationCode = row.locationCode;
+  locationForm.locationName = row.locationName;
+  locationVisible.value = true;
+}
+
 async function saveWarehouse() {
-  if (guardDesktopWarehouseMutation('新增仓库')) {
+  const isEdit = Boolean(warehouseEditId.value);
+  if (guardDesktopWarehouseMutation(isEdit ? '编辑仓库' : '新增仓库')) {
     return;
   }
   if (saving.value) {
     return;
   }
-  if (!warehouseForm.warehouseName.trim()) {
+  const warehouseCode = warehouseForm.warehouseCode.trim();
+  const warehouseName = warehouseForm.warehouseName.trim();
+  if (isEdit && !warehouseCode) {
+    ElMessage.warning('请填写仓库编码');
+    return;
+  }
+  if (!warehouseName) {
     ElMessage.warning('请填写仓库名称');
     return;
   }
 
   saving.value = true;
   try {
-    await erpApi.createWarehouse({
-      warehouseCode: warehouseForm.warehouseCode || undefined,
-      warehouseName: warehouseForm.warehouseName
-    });
-    ElMessage.success('仓库已新增');
+    if (isEdit) {
+      await erpApi.updateWarehouse(warehouseEditId.value, {
+        warehouseCode,
+        warehouseName
+      });
+      ElMessage.success('仓库已保存');
+    } else {
+      await erpApi.createWarehouse({
+        warehouseCode: warehouseCode || undefined,
+        warehouseName
+      });
+      ElMessage.success('仓库已新增');
+    }
     warehouseVisible.value = false;
+    warehouseEditId.value = '';
     await queryWarehouseWork();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '仓库新增失败');
+    ElMessage.error(error instanceof Error ? error.message : isEdit ? '仓库保存失败' : '仓库新增失败');
   } finally {
     saving.value = false;
   }
 }
 
 async function saveLocation() {
-  if (guardDesktopWarehouseMutation('新增库位')) {
+  const isEdit = Boolean(locationEditId.value);
+  if (guardDesktopWarehouseMutation(isEdit ? '编辑库位' : '新增库位')) {
     return;
   }
   if (saving.value) {
     return;
   }
-  if (!locationForm.warehouseId || !locationForm.locationCode.trim()) {
+  const locationCode = locationForm.locationCode.trim();
+  const locationName = locationForm.locationName.trim();
+  if (!locationForm.warehouseId || !locationCode) {
     ElMessage.warning('请选择仓库并填写库位编码');
     return;
   }
 
   saving.value = true;
   try {
-    await erpApi.createWarehouseLocation(locationForm.warehouseId, {
-      locationCode: locationForm.locationCode,
-      locationName: locationForm.locationName || undefined
-    });
-    ElMessage.success('库位已新增');
+    if (isEdit) {
+      await erpApi.updateWarehouseLocation(locationForm.warehouseId, locationEditId.value, {
+        locationCode,
+        locationName: locationName || undefined
+      });
+      ElMessage.success('库位已保存');
+    } else {
+      await erpApi.createWarehouseLocation(locationForm.warehouseId, {
+        locationCode,
+        locationName: locationName || undefined
+      });
+      ElMessage.success('库位已新增');
+    }
     locationVisible.value = false;
+    locationEditId.value = '';
     await queryWarehouseWork();
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '库位新增失败');
+    ElMessage.error(error instanceof Error ? error.message : isEdit ? '库位保存失败' : '库位新增失败');
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function toggleWarehouseStatus(row: WarehouseLocationRow) {
+  const nextStatus: CommonStatus = row.warehouseStatus === 'ENABLED' ? 'DISABLED' : 'ENABLED';
+  const actionLabel = nextStatus === 'ENABLED' ? '启用仓库' : '停用仓库';
+  if (guardDesktopWarehouseMutation(actionLabel) || saving.value) {
+    return;
+  }
+  activeWarehouseStatusTarget.value = {
+    type: 'warehouse',
+    warehouseId: row.warehouseId,
+    nextStatus,
+    title: `仓库 ${row.warehouseName} / ${row.warehouseCode}`,
+    actionLabel,
+    warning:
+      nextStatus === 'ENABLED'
+        ? '启用后该仓库可重新作为后续入库、转库存和发货调整的候选；已随仓库停用的库位不会自动恢复，需要逐个启用。历史库存、流水和订单来源继续保留。'
+        : '停用仓库会同步停用该仓库下仍启用的库位，避免后续入库或转库存误选；历史库存、流水和订单来源仍会显示原仓库和库位名称。'
+  };
+  warehouseStatusVisible.value = true;
+}
+
+async function confirmWarehouseStatusTarget() {
+  const target = activeWarehouseStatusTarget.value;
+  if (!target || saving.value) {
+    return;
+  }
+  if (guardDesktopWarehouseMutation(target.actionLabel)) {
+    return;
+  }
+  saving.value = true;
+  try {
+    if (target.type === 'warehouse') {
+      // 仓库停用只影响后续选择，历史库存批次和库存流水继续保留。
+      await erpApi.updateWarehouse(target.warehouseId, { status: target.nextStatus });
+      ElMessage.success(target.nextStatus === 'ENABLED' ? '仓库已启用' : '仓库已停用');
+    } else if (target.locationId) {
+      // 库位停用只影响后续入库选择，不修改历史来源记录。
+      await erpApi.updateWarehouseLocation(target.warehouseId, target.locationId, { status: target.nextStatus });
+      ElMessage.success(target.nextStatus === 'ENABLED' ? '库位已启用' : '库位已停用');
+    }
+    warehouseStatusVisible.value = false;
+    activeWarehouseStatusTarget.value = undefined;
+    await queryWarehouseWork();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '仓库/库位状态保存失败');
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function toggleLocationStatus(row: WarehouseLocationRow) {
+  if (!row.locationId) {
+    return;
+  }
+  const nextStatus: CommonStatus = row.locationStatus === 'ENABLED' ? 'DISABLED' : 'ENABLED';
+  const actionLabel = nextStatus === 'ENABLED' ? '启用库位' : '停用库位';
+  if (guardDesktopWarehouseMutation(actionLabel) || saving.value) {
+    return;
+  }
+  activeWarehouseStatusTarget.value = {
+    type: 'location',
+    warehouseId: row.warehouseId,
+    locationId: row.locationId,
+    nextStatus,
+    title: `库位 ${row.locationName} / ${row.locationCode}`,
+    actionLabel,
+    warning:
+      nextStatus === 'ENABLED'
+        ? '启用后该库位可重新作为后续入库和转库存候选。历史库存、流水和订单来源继续保留。'
+        : '停用后不得作为新入库或转库存候选；已有库存溯源仍会展示该库位，并允许按业务规则盘点或发货处理。'
+  };
+  warehouseStatusVisible.value = true;
+}
+
+function requestDeleteWarehouse(row: WarehouseLocationRow) {
+  if (guardDesktopWarehouseMutation('删除仓库')) {
+    return;
+  }
+  activeWarehouseDeleteTarget.value = {
+    type: 'warehouse',
+    warehouseId: row.warehouseId,
+    title: `仓库 ${row.warehouseName} / ${row.warehouseCode}`,
+    warning: '只有没有库存批次、库存流水和库位历史的空仓库才会被删除；已有历史记录请改用停用。'
+  };
+  warehouseDeleteVisible.value = true;
+}
+
+function requestDeleteLocation(row: WarehouseLocationRow) {
+  if (guardDesktopWarehouseMutation('删除库位')) {
+    return;
+  }
+  if (!row.locationId) {
+    ElMessage.warning('该仓库还没有库位可删除');
+    return;
+  }
+  activeWarehouseDeleteTarget.value = {
+    type: 'location',
+    warehouseId: row.warehouseId,
+    locationId: row.locationId,
+    title: `库位 ${row.locationName} / ${row.locationCode}`,
+    warning: '只有没有库存批次或库存流水的空库位才会被删除；已有历史记录请改用停用。'
+  };
+  warehouseDeleteVisible.value = true;
+}
+
+async function confirmDeleteWarehouseTarget() {
+  const target = activeWarehouseDeleteTarget.value;
+  if (!target || saving.value) {
+    return;
+  }
+  if (guardDesktopWarehouseMutation(target.type === 'warehouse' ? '删除仓库' : '删除库位')) {
+    return;
+  }
+  saving.value = true;
+  try {
+    if (target.type === 'warehouse') {
+      await erpApi.deleteWarehouse(target.warehouseId);
+      ElMessage.success('仓库已删除');
+    } else if (target.locationId) {
+      await erpApi.deleteWarehouseLocation(target.warehouseId, target.locationId);
+      ElMessage.success('库位已删除');
+    }
+    warehouseDeleteVisible.value = false;
+    activeWarehouseDeleteTarget.value = undefined;
+    await queryWarehouseWork();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '删除失败');
   } finally {
     saving.value = false;
   }
@@ -2326,14 +3069,19 @@ async function confirmReceipt() {
     ElMessage.warning('请选择库位');
     return;
   }
+  const warehouseOperator = requireWarehouseOperator(receiptForm.warehouseConfirmedByCode, '入库');
+  if (!warehouseOperator) {
+    return;
+  }
   saving.value = true;
   try {
-    await erpApi.confirmReceipt(
-      activeReceipt.value.id,
-      receiptForm.warehouseId,
-      receiptForm.locationId,
-      receiptForm.remark || undefined
-    );
+    await erpApi.confirmReceipt(activeReceipt.value.id, {
+      warehouseId: receiptForm.warehouseId,
+      locationId: receiptForm.locationId,
+      warehouseConfirmedByCode: warehouseOperator.code,
+      warehouseConfirmedBy: warehouseOperatorSnapshot(warehouseOperator),
+      remark: receiptForm.remark || undefined
+    });
     ElMessage.success('入库已确认');
     confirmVisible.value = false;
     await queryWarehouseWork();
@@ -2371,8 +3119,8 @@ async function confirmShipment() {
     ElMessage.warning('本次发货数量不能大于当前库存数量');
     return;
   }
-  if (!shipmentForm.warehouseConfirmedBy.trim()) {
-    ElMessage.warning('请填写仓库确认人');
+  const warehouseOperator = requireWarehouseOperator(shipmentForm.warehouseConfirmedByCode, '发货');
+  if (!warehouseOperator) {
     return;
   }
   if (activeShipmentOverQuantity.value > 0 && !shipmentForm.salesConfirmedBy.trim()) {
@@ -2387,7 +3135,8 @@ async function confirmShipment() {
   try {
     await erpApi.confirmShipment(activeShipment.value.id, {
       shipmentQuantity: shipmentForm.shipmentQuantity,
-      warehouseConfirmedBy: shipmentForm.warehouseConfirmedBy.trim(),
+      warehouseConfirmedByCode: warehouseOperator.code,
+      warehouseConfirmedBy: warehouseOperatorSnapshot(warehouseOperator),
       salesConfirmedBy: shipmentForm.salesConfirmedBy.trim() || undefined,
       overShipmentReason: shipmentForm.overShipmentReason.trim() || undefined,
       remark: shipmentForm.remark || undefined
@@ -2421,12 +3170,12 @@ async function confirmBatchShipment() {
     ElMessage.warning('该订单仍有待补单短缺，请先处理补单、客户减量或无需补单说明');
     return;
   }
-  if (!batchShipmentForm.warehouseConfirmedBy.trim()) {
-    ElMessage.warning('请填写仓库确认人');
+  const warehouseOperator = requireWarehouseOperator(batchShipmentForm.warehouseConfirmedByCode, '发货');
+  if (!warehouseOperator) {
     return;
   }
   const invalidQuantityRow = batchShipmentRows.value.find(
-    (row) => Number(row.currentShipmentQuantity || 0) < 0 || Number(row.currentShipmentQuantity || 0) > Number(row.quantity || 0)
+    (row) => Number(row.currentShipmentQuantity ?? 0) < 0 || Number(row.currentShipmentQuantity ?? 0) > Number(row.quantity ?? 0)
   );
   if (invalidQuantityRow) {
     ElMessage.warning(`${invalidQuantityRow.batchNo} 本次发货数量不能大于当前库存数量`);
@@ -2436,7 +3185,7 @@ async function confirmBatchShipment() {
     .map((row) => ({
       batchId: row.id,
       orderLineId: row.isStockOverShipment ? row.targetOrderLineId || row.orderLineId : row.orderLineId,
-      shipmentQuantity: Number(row.currentShipmentQuantity || 0)
+      shipmentQuantity: Number(row.currentShipmentQuantity ?? 0)
     }))
     .filter((item) => item.shipmentQuantity > 0);
   if (batchShipments.length === 0) {
@@ -2455,7 +3204,8 @@ async function confirmBatchShipment() {
   try {
     const payload = {
       batchShipments,
-      warehouseConfirmedBy: batchShipmentForm.warehouseConfirmedBy.trim(),
+      warehouseConfirmedByCode: warehouseOperator.code,
+      warehouseConfirmedBy: warehouseOperatorSnapshot(warehouseOperator),
       salesConfirmedBy: batchShipmentForm.salesConfirmedBy.trim() || undefined,
       overShipmentReason: batchShipmentForm.overShipmentReason.trim() || undefined,
       remark: batchShipmentForm.remark || undefined
@@ -2478,7 +3228,7 @@ async function confirmBatchShipment() {
     batchShipmentVisible.value = false;
     batchShipmentIsOrderMode.value = false;
     batchShipmentRows.value = [];
-    batchShipmentForm.warehouseConfirmedBy = '';
+    batchShipmentForm.warehouseConfirmedByCode = '';
     batchShipmentForm.salesConfirmedBy = '';
     batchShipmentForm.overShipmentReason = '';
     batchShipmentForm.remark = '';
@@ -2495,7 +3245,7 @@ async function confirmBatchShipment() {
 function formatShipmentTotal(rows: EditableWarehouseShipment[], field: keyof EditableWarehouseShipment = 'quantity') {
   const quantityByUnit = new Map<string, number>();
   rows.forEach((row) => {
-    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) || 0) + Number(row[field] || 0));
+    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) ?? 0) + Number(row[field] ?? 0));
   });
   return Array.from(quantityByUnit.entries())
     .map(([unit, quantity]) => formatQuantity(quantity, unit))
@@ -2511,7 +3261,7 @@ function formatShipmentLineTotal(rows: EditableWarehouseShipment[], field: keyof
       return;
     }
     seenLineKeys.add(lineKey);
-    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) || 0) + Number(row[field] || 0));
+    quantityByUnit.set(row.unit, (quantityByUnit.get(row.unit) ?? 0) + Number(row[field] ?? 0));
   });
   return Array.from(quantityByUnit.entries())
     .map(([unit, quantity]) => formatQuantity(quantity, unit))
@@ -2522,7 +3272,7 @@ function formatBatchShipmentOverText(rows: EditableWarehouseShipment[]) {
   const lineMap = new Map<string, { current: number; remaining: number; unit: string }>();
   rows.forEach((row) => {
     const lineKey = row.orderLineId || `${row.partCode}-${row.partName}-${row.unit}`;
-    const current = Number(row.currentShipmentQuantity || 0);
+    const current = Number(row.currentShipmentQuantity ?? 0);
     const existing = lineMap.get(lineKey);
     if (existing) {
       existing.current += current;
@@ -2530,7 +3280,7 @@ function formatBatchShipmentOverText(rows: EditableWarehouseShipment[]) {
     }
     lineMap.set(lineKey, {
       current,
-      remaining: Number(row.remainingQuantity || 0),
+      remaining: Number(row.remainingQuantity ?? 0),
       unit: row.unit
     });
   });
@@ -2539,7 +3289,7 @@ function formatBatchShipmentOverText(rows: EditableWarehouseShipment[]) {
   lineMap.forEach((item) => {
     const overQuantity = Math.max(item.current - item.remaining, 0);
     if (overQuantity > 0) {
-      overByUnit.set(item.unit, (overByUnit.get(item.unit) || 0) + overQuantity);
+      overByUnit.set(item.unit, (overByUnit.get(item.unit) ?? 0) + overQuantity);
     }
   });
   return Array.from(overByUnit.entries())
@@ -2548,9 +3298,9 @@ function formatBatchShipmentOverText(rows: EditableWarehouseShipment[]) {
 }
 
 function shipmentQuantityAdjustmentText(row: EditableWarehouseShipment) {
-  const currentQuantity = Number(row.currentShipmentQuantity || 0);
-  const suggestedQuantity = Number(row.suggestedShipmentQuantity || 0);
-  const remainingQuantity = Number(row.remainingQuantity || 0);
+  const currentQuantity = Number(row.currentShipmentQuantity ?? 0);
+  const suggestedQuantity = Number(row.suggestedShipmentQuantity ?? 0);
+  const remainingQuantity = Number(row.remainingQuantity ?? 0);
   const unit = row.unit || '件';
 
   if (row.isStockOverShipment && currentQuantity > 0) {
@@ -2574,13 +3324,13 @@ function orderShortageActionText(order: OrderSummary) {
   if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
     const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
       ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
-      : formatQuantity(order.pendingProductionReplenishmentQuantity || 0, order.pendingProductionReplenishmentUnit || order.unit);
-    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount || 0} 个 / ${quantityText}`;
+      : formatQuantity(order.pendingProductionReplenishmentQuantity ?? 0, order.pendingProductionReplenishmentUnit || order.unit);
+    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount ?? 0} 个 / ${quantityText}`;
   }
   const quantityText = order.unresolvedShortageQuantityByUnit?.length
     ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
-    : formatQuantity(order.unresolvedShortageQuantity || 0, order.unresolvedShortageUnit || order.unit);
-  return `需补单 ${order.unresolvedShortageLineCount || 0} 个 / ${quantityText}`;
+    : formatQuantity(order.unresolvedShortageQuantity ?? 0, order.unresolvedShortageUnit || order.unit);
+  return `需补单 ${order.unresolvedShortageLineCount ?? 0} 个 / ${quantityText}`;
 }
 
 function orderNeedsShortageAttention(order: OrderSummary) {
@@ -2657,6 +3407,27 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.notice-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.notice-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  align-items: center;
+}
+
+.notice-filter-grid :deep(.el-input),
+.notice-filter-grid :deep(.el-select),
+.notice-filter-grid :deep(.date-range-filter) {
+  width: 100%;
+}
+
 .notice-item {
   display: flex;
   align-items: flex-start;
@@ -2711,6 +3482,12 @@ onMounted(async () => {
 .notice-summary-card span {
   color: #64748b;
   font-size: 13px;
+}
+
+.notice-quantity-limit {
+  margin-left: 8px;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .notice-plan-card {
@@ -2855,6 +3632,24 @@ onMounted(async () => {
   min-height: 28px;
   color: #64748b;
   font-size: 12px;
+}
+
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+}
+
+.delete-confirm-body {
+  display: grid;
+  gap: 12px;
+}
+
+.delete-confirm-body p {
+  margin: 0;
+  color: #334155;
+  line-height: 22px;
 }
 
 @media (max-width: 900px) {

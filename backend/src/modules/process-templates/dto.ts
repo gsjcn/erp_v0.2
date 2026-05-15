@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
+import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { CommonStatus } from '@prisma/client';
 
 export class ProcessTemplateQueryDto {
@@ -15,19 +15,16 @@ export class ProcessTemplateQueryDto {
 export class ProcessTemplateStepDto {
   @IsString()
   @IsNotEmpty()
-  @MaxLength(30)
   processName!: string;
 
   @IsOptional()
   @IsString()
-  @MaxLength(120)
   processRemark?: string;
 }
 
 export class CreateProcessTemplateDto {
   @IsString()
   @IsNotEmpty()
-  @MaxLength(60)
   templateName!: string;
 
   @IsArray()
@@ -37,14 +34,12 @@ export class CreateProcessTemplateDto {
 
   @IsOptional()
   @IsString()
-  @MaxLength(300)
   remark?: string;
 }
 
 export class UpdateProcessTemplateDto {
   @IsOptional()
   @IsString()
-  @MaxLength(60)
   templateName?: string;
 
   @IsOptional()
@@ -55,6 +50,5 @@ export class UpdateProcessTemplateDto {
 
   @IsOptional()
   @IsString()
-  @MaxLength(300)
   remark?: string;
 }

@@ -202,7 +202,7 @@ export class StatisticsService {
       if (transaction.orderNo) {
         orderReceiptQuantityByTaskNo.set(
           transaction.productionTaskNo,
-          (orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) || 0) + quantity
+          (orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity
         );
         continue;
       }
@@ -214,7 +214,7 @@ export class StatisticsService {
         transaction.unit
       );
       row.stockQuantity += quantity;
-      stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) || 0) + quantity);
+      stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity);
     }
 
     const completedProductionQuantityByOrderUnit = new Map<string, Map<string, number>>();
@@ -227,8 +227,8 @@ export class StatisticsService {
       const row = getRow(orderPeriod.periodKey, orderPeriod.periodLabel, task.partCode, task.partName, task.unit);
       const completedQuantity = this.toEffectiveTaskCompletedQuantity(
         task,
-        stockQuantityByTaskNo.get(task.productionTaskNo) || 0,
-        orderReceiptQuantityByTaskNo.get(task.productionTaskNo) || 0
+        stockQuantityByTaskNo.get(task.productionTaskNo) ?? 0,
+        orderReceiptQuantityByTaskNo.get(task.productionTaskNo) ?? 0
       );
       row.completedProductionQuantity += completedQuantity;
       this.addOrderUnitQuantity(completedProductionQuantityByOrderUnit, task.orderNo, task.unit, completedQuantity);
@@ -307,12 +307,12 @@ export class StatisticsService {
   private addOrderUnitQuantity(target: Map<string, Map<string, number>>, orderNo: string, unit: string, quantity: number) {
     const unitMap = target.get(orderNo) || new Map<string, number>();
     const normalizedUnit = unit || '件';
-    unitMap.set(normalizedUnit, (unitMap.get(normalizedUnit) || 0) + quantity);
+    unitMap.set(normalizedUnit, (unitMap.get(normalizedUnit) ?? 0) + quantity);
     target.set(orderNo, unitMap);
   }
 
   private addLineQuantity(target: Map<string, number>, orderLineId: string, quantity: number) {
-    target.set(orderLineId, (target.get(orderLineId) || 0) + quantity);
+    target.set(orderLineId, (target.get(orderLineId) ?? 0) + quantity);
   }
 
   private mergeLineQuantityMaps(...sources: Array<Map<string, number>>) {
@@ -388,18 +388,25 @@ export class StatisticsService {
     }
     if (
       this.allUnitsReached(quantityByUnit, 'totalProductionPlanQuantity', completedProductionQuantityByUnit) &&
-      quantityByUnit.every((row) => Number(row.totalProductionPlanQuantity || 0) >= Number(row.totalQuantity || 0))
+      quantityByUnit.every((row) => Number(row.totalProductionPlanQuantity ?? 0) >= Number(row.totalQuantity ?? 0))
     ) {
       // 兼容纯重新生产的历史订单：没有库存分配流水时，生产完成数量达到生产计划即可视为已完成未发货。
       return 'ORDER_COMPLETED_UNSHIPPED';
     }
     if (
       orderStatus === OrderStatus.IN_PRODUCTION ||
-      tasks.some((task) => task.status === ProductionStatus.IN_PROGRESS || task.status === ProductionStatus.COMPLETED)
+      tasks.some((task) =>
+        new Set<ProductionStatus>([
+          ProductionStatus.IN_PROGRESS,
+          ProductionStatus.WAITING_CONFIRMATION,
+          ProductionStatus.COMPLETED,
+          ProductionStatus.STORED
+        ]).has(task.status)
+      )
     ) {
       return 'ORDER_IN_PRODUCTION';
     }
-    if (tasks.length > 0 || orderStatus === OrderStatus.SUBMITTED) {
+    if (tasks.length > 0 || orderStatus === OrderStatus.PENDING_PRODUCTION) {
       return 'WAITING_PRODUCTION';
     }
     return orderStatus;
@@ -411,8 +418,8 @@ export class StatisticsService {
   ) {
     return (
       orderBatches.length > 0 &&
-      quantityByUnit.some((row) => Number(row.totalQuantity || 0) > 0) &&
-      quantityByUnit.every((row) => Number(row.totalProductionPlanQuantity || 0) <= 0)
+      quantityByUnit.some((row) => Number(row.totalQuantity ?? 0) > 0) &&
+      quantityByUnit.every((row) => Number(row.totalProductionPlanQuantity ?? 0) <= 0)
     );
   }
 
@@ -421,11 +428,11 @@ export class StatisticsService {
     field: 'totalQuantity' | 'totalProductionPlanQuantity',
     actualQuantityByUnit: Map<string, number>
   ) {
-    const targets = quantityByUnit.filter((row) => Number(row[field] || 0) > 0);
+    const targets = quantityByUnit.filter((row) => Number(row[field] ?? 0) > 0);
     if (targets.length === 0) {
       return false;
     }
-    return targets.every((row) => (actualQuantityByUnit.get(row.unit || '件') || 0) + 0.0001 >= Number(row[field] || 0));
+    return targets.every((row) => (actualQuantityByUnit.get(row.unit || '件') ?? 0) + 0.0001 >= Number(row[field] ?? 0));
   }
 
   private totalQuantityFromUnitMap(quantityByUnit: Map<string, number>) {
@@ -433,7 +440,7 @@ export class StatisticsService {
   }
 
   private hasLineQuantity(lines: Array<{ id: string }>, quantityByLineId: Map<string, number>) {
-    return lines.some((line) => (quantityByLineId.get(line.id) || 0) > 0);
+    return lines.some((line) => (quantityByLineId.get(line.id) ?? 0) > 0);
   }
 
   private allLinesReached(lines: Array<{ id: string; quantity: unknown }>, quantityByLineId: Map<string, number>) {
@@ -443,12 +450,12 @@ export class StatisticsService {
     }
     return targets.every((line) => {
       const targetQuantity = decimalToNumber(line.quantity as Prisma.Decimal | number | string | null | undefined);
-      return (quantityByLineId.get(line.id) || 0) + 0.0001 >= targetQuantity;
+      return (quantityByLineId.get(line.id) ?? 0) + 0.0001 >= targetQuantity;
     });
   }
 
   private totalQuantityFromLineMap(lines: Array<{ id: string }>, quantityByLineId: Map<string, number>) {
-    return lines.reduce((sum, line) => sum + (quantityByLineId.get(line.id) || 0), 0);
+    return lines.reduce((sum, line) => sum + (quantityByLineId.get(line.id) ?? 0), 0);
   }
 
   private toOrderQuantityByUnit(lines: any[]) {
@@ -492,7 +499,7 @@ export class StatisticsService {
       return completedQuantity;
     }
     // 历史任务若已入库但 completedQuantity 仍为 0，优先使用订单入库 IN 流水兜底。
-    const orderInventoryQuantity = orderReceiptQuantity || (task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0);
+    const orderInventoryQuantity = orderReceiptQuantity > 0 ? orderReceiptQuantity : task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0;
     return orderInventoryQuantity + stockQuantity;
   }
 }

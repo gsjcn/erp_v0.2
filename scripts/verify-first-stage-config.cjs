@@ -97,6 +97,23 @@ function verifyDockerIgnore() {
   }
 }
 
+function verifyAgentsFileSafetyRules() {
+  const agentsSource = readRequiredFile('AGENTS.md');
+  const requiredSnippets = [
+    '文件安全限制',
+    '项目根目录为 `G:\\codex\\百胜企业系统\\erp_v0.2`',
+    '不得删除、移动、重命名、覆盖项目根目录以外的任何文件',
+    '不得对项目根目录以外执行 `Remove-Item`、`del`、`rm`、`rmdir`、`Move-Item`、`git clean` 等破坏性命令',
+    '任何递归删除或移动前，必须先解析绝对路径，并确认目标路径仍在项目根目录内',
+    '涉及数据库目录、上传目录、导出目录、备份目录、`.env`、`node_modules` 的删除，必须先征求用户确认'
+  ];
+
+  // 文件安全规则是协作底线，自检中固定校验，避免后续文档整理时误删。
+  for (const snippet of requiredSnippets) {
+    assertIncludes(agentsSource, snippet, 'AGENTS.md file safety rules');
+  }
+}
+
 function verifyDockerCompose() {
   const compose = readRequiredFile('docker-compose.yml');
   const postgres = serviceBlock(compose, 'postgres');
@@ -158,8 +175,11 @@ function verifyBackendEnvBootstrapAndPrismaScripts() {
     '"backend:db:migrate": "npm --workspace backend run db:migrate"',
     '"backend:db:deploy": "npm --workspace backend run db:deploy"',
     '"backend:db:seed": "npm --workspace backend run db:seed"',
+    '"verify:prisma-client-enums": "node scripts/verify-prisma-client-enums.cjs"',
+    '"verify:first-stage:api": "node scripts/verify-first-stage-api.cjs"',
     '"verify:first-stage:strict"',
-    'npm run backend:db:generate && npm run backend:verify:first-stage'
+    'npm run backend:db:generate && npm run verify:prisma-client-enums && npm run backend:verify:first-stage',
+    'npm run verify:first-stage:api && npm run frontend:build'
   ];
   for (const snippet of rootScriptSnippets) {
     assertIncludes(rootPackageJson, snippet, 'root package scripts');
@@ -208,6 +228,7 @@ function verifyDatabaseSafetyMigrations() {
 
 verifyEnvExample();
 verifyDockerIgnore();
+verifyAgentsFileSafetyRules();
 verifyDockerCompose();
 verifyBackendHealthcheck();
 verifyFrontendDevServer();

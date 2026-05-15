@@ -168,16 +168,16 @@
             <div class="stock-summary-line">
               <span>来源</span>
               <strong :class="{ 'is-empty': !row.sourceAvailableQuantity }">
-                {{ formatQuantity(row.sourceAvailableQuantity || 0, row.sourceUnit) }}
+                {{ formatQuantity(row.sourceAvailableQuantity ?? 0, row.sourceUnit) }}
               </strong>
-              <em>{{ row.sourceAvailableBatchCount || 0 }} 批</em>
+              <em>{{ row.sourceAvailableBatchCount ?? 0 }} 批</em>
             </div>
             <div class="stock-summary-line target">
               <span>目标</span>
               <strong :class="{ 'is-empty': !row.targetAvailableQuantity }">
-                {{ formatQuantity(row.targetAvailableQuantity || 0, row.targetUnit) }}
+                {{ formatQuantity(row.targetAvailableQuantity ?? 0, row.targetUnit) }}
               </strong>
-              <em>{{ row.targetAvailableBatchCount || 0 }} 批</em>
+              <em>{{ row.targetAvailableBatchCount ?? 0 }} 批</em>
             </div>
             <el-tag class="inventory-decision-tag" :type="transformInventoryDecision(row).type" effect="plain" size="small">
               {{ transformInventoryDecision(row).label }}
@@ -285,8 +285,8 @@
         </div>
         <p>{{ row.sourcePartCode }} -> {{ row.targetPartCode }}</p>
         <p>
-          来源库存 {{ formatQuantity(row.sourceAvailableQuantity || 0, row.sourceUnit) }} / {{ row.sourceAvailableBatchCount || 0 }} 批；
-          目标库存 {{ formatQuantity(row.targetAvailableQuantity || 0, row.targetUnit) }} / {{ row.targetAvailableBatchCount || 0 }} 批
+          来源库存 {{ formatQuantity(row.sourceAvailableQuantity ?? 0, row.sourceUnit) }} / {{ row.sourceAvailableBatchCount ?? 0 }} 批；
+          目标库存 {{ formatQuantity(row.targetAvailableQuantity ?? 0, row.targetUnit) }} / {{ row.targetAvailableBatchCount ?? 0 }} 批
         </p>
         <el-tag :type="transformInventoryDecision(row).type" effect="plain" size="small">
           {{ transformInventoryDecision(row).label }}
@@ -432,7 +432,7 @@
           <el-input v-model="form.remark" type="textarea" :rows="2" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="form.status" style="width: 160px">
+          <el-select v-model="form.status" :disabled="Boolean(form.id)" style="width: 160px">
             <el-option label="启用" value="ENABLED" />
             <el-option label="停用" value="DISABLED" />
           </el-select>
@@ -518,7 +518,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Rank } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
-import { erpApi, type SaveMaterialTransformRulePayload } from '../api/erp';
+import { erpApi, type SaveMaterialTransformRulePayload, type UpdateMaterialTransformRulePayload } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import InventorySourceDetailsDialog from '../components/InventorySourceDetailsDialog.vue';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
@@ -664,10 +664,10 @@ const transformRulesFixedText = computed(() => {
       transformInventoryDecisionReason(row),
       row.sourcePartCode,
       row.sourcePartName,
-      `${formatQuantity(row.sourceAvailableQuantity || 0, row.sourceUnit)} / ${row.sourceAvailableBatchCount || 0} 批`,
+      `${formatQuantity(row.sourceAvailableQuantity ?? 0, row.sourceUnit)} / ${row.sourceAvailableBatchCount ?? 0} 批`,
       row.targetPartCode,
       row.targetPartName,
-      `${formatQuantity(row.targetAvailableQuantity || 0, row.targetUnit)} / ${row.targetAvailableBatchCount || 0} 批`,
+      `${formatQuantity(row.targetAvailableQuantity ?? 0, row.targetUnit)} / ${row.targetAvailableBatchCount ?? 0} 批`,
       row.scopeLabel,
       row.multiplier,
       row.lossRate ?? '-',
@@ -699,10 +699,10 @@ const transformRulesFixedText = computed(() => {
 });
 
 function transformInventoryDecisionValue(row: MaterialTransformRule): TransformInventoryDecisionValue {
-  if ((row.targetAvailableQuantity || 0) > 0) {
+  if ((row.targetAvailableQuantity ?? 0) > 0) {
     return 'TARGET_STOCK';
   }
-  if ((row.sourceAvailableQuantity || 0) > 0) {
+  if ((row.sourceAvailableQuantity ?? 0) > 0) {
     return 'SOURCE_REWORK';
   }
   return 'NO_STOCK';
@@ -720,8 +720,8 @@ function transformInventoryDecision(row: MaterialTransformRule): { label: string
 }
 
 function transformInventoryDecisionReason(row: MaterialTransformRule) {
-  const sourceQuantity = row.sourceAvailableQuantity || 0;
-  const targetQuantity = row.targetAvailableQuantity || 0;
+  const sourceQuantity = row.sourceAvailableQuantity ?? 0;
+  const targetQuantity = row.targetAvailableQuantity ?? 0;
   if (targetQuantity > 0) {
     return `目标零件有 ${formatQuantity(targetQuantity, row.targetUnit)} 可用库存，提交生产时先打开目标库存批次核对。`;
   }
@@ -990,7 +990,7 @@ function openEditDialog(row: MaterialTransformRule) {
   form.projectModel = row.projectModel || '';
   form.conversionDescription = row.conversionDescription || '';
   form.defaultProcessRouteSteps = splitDefaultProcessRoute(row.defaultProcessRoute || '');
-  form.multiplier = row.multiplier || 1;
+  form.multiplier = row.multiplier ?? 1;
   form.lossRate = row.lossRate ?? undefined;
   form.remark = row.remark || '';
   form.status = row.status;
@@ -1209,7 +1209,7 @@ function buildPayload(): SaveMaterialTransformRulePayload | undefined {
     multiplier: form.multiplier,
     lossRate: form.lossRate,
     remark: form.remark.trim() || undefined,
-    status: form.status
+    ...(form.id ? {} : { status: form.status })
   };
 }
 
@@ -1227,7 +1227,19 @@ async function saveRule() {
   saving.value = true;
   try {
     if (form.id) {
-      await erpApi.updateMaterialTransformRule(form.id, payload);
+      const updatePayload: UpdateMaterialTransformRulePayload = {
+        sourceMaterialId: payload.sourceMaterialId,
+        targetMaterialId: payload.targetMaterialId,
+        customerId: payload.customerId,
+        projectModel: payload.projectModel,
+        conversionDescription: payload.conversionDescription,
+        defaultProcessRoute: payload.defaultProcessRoute,
+        multiplier: payload.multiplier,
+        lossRate: payload.lossRate,
+        remark: payload.remark
+      };
+      // 来源加工关系状态必须走 restoreMaterialTransformRule / disableMaterialTransformRule，普通编辑不携带 status。
+      await erpApi.updateMaterialTransformRule(form.id, updatePayload);
     } else {
       await erpApi.createMaterialTransformRule(payload);
     }
@@ -1274,19 +1286,8 @@ async function confirmRuleStatusChange() {
       await erpApi.disableMaterialTransformRule(row.id);
       ElMessage.success('来源加工关系已停用');
     } else {
-      // 启用后只恢复建议展示；是否使用库存仍必须在库存来源核对中人工确认。
-      await erpApi.updateMaterialTransformRule(row.id, {
-        sourceMaterialId: row.sourceMaterialId,
-        targetMaterialId: row.targetMaterialId,
-        customerId: row.customerId || undefined,
-        projectModel: row.projectModel || undefined,
-        conversionDescription: row.conversionDescription || undefined,
-        defaultProcessRoute: splitDefaultProcessRoute(row.defaultProcessRoute || '').join('、') || undefined,
-        multiplier: row.multiplier,
-        lossRate: row.lossRate ?? undefined,
-        remark: row.remark || undefined,
-        status: 'ENABLED'
-      });
+      // 恢复启用只恢复建议展示，不重写原来的客户范围、机型范围、倍率、损耗和工艺建议。
+      await erpApi.restoreMaterialTransformRule(row.id);
       ElMessage.success('来源加工关系已启用');
     }
     ruleStatusDialogVisible.value = false;

@@ -392,6 +392,7 @@
           :default-delivery-date="orderForm.deliveryDate"
           :customer-id="orderForm.customerId"
           :inventory-summary="inventorySummary"
+          :read-only="isMobileLayout"
           @remove="removeLine"
           @quantity-change="syncPlanQuantity"
         />
@@ -788,7 +789,7 @@
       :before-close="handleOrderSavingDialogClose"
     >
       <el-alert
-        title="正常订单和补单订单都可以取消。未开始生产的订单会删除未开工任务并释放库存；已开始生产的订单会同步通知生产和仓库处理已生产零件。"
+        title="正常订单和补单订单都可以取消。未开始生产任务会标记为已取消并保留历史，同时释放库存；已开始生产的订单会同步通知生产和仓库处理已生产零件。"
         type="warning"
         :closable="false"
         class="mb-16"
@@ -839,7 +840,7 @@
                 class="cancel-handling-quantity"
                 :disabled="row.handlingMode === 'NONE'"
               />
-              <el-input v-model="row.remark" maxlength="120" show-word-limit placeholder="处理说明，可修改" />
+              <el-input v-model="row.remark" placeholder="处理说明，可修改" />
             </article>
           </div>
           <el-alert v-else title="该订单未发现已开始生产的零件；请选择“未生产取消”或刷新订单后重试。" type="warning" :closable="false" />
@@ -1392,7 +1393,7 @@ let orderConfirmResolver: ((confirmed: boolean) => void) | null = null;
 
 const orderStatusOptions: Array<{ label: string; value: OrderStatus }> = [
   { label: '待提交生产', value: 'DRAFT' },
-  { label: '待确认生产', value: 'SUBMITTED' },
+  { label: '待确认生产', value: 'PENDING_PRODUCTION' },
   { label: '生产中', value: 'IN_PRODUCTION' },
   { label: '已完成', value: 'COMPLETED' },
   { label: '已取消', value: 'CANCELLED' }
@@ -1821,12 +1822,12 @@ function orderFormProcessText(line: CreateOrderLinePayload) {
 }
 
 function formatOrderFormStructureCore(line: CreateOrderLinePayload) {
-  return `${displayOrderFormPartCode(line)} | ${line.partName || '未填写零件名称'} | 订单 ${formatQuantity(line.quantity || 0, line.unit || '件')}`;
+  return `${displayOrderFormPartCode(line)} | ${line.partName || '未填写零件名称'} | 订单 ${formatQuantity(line.quantity ?? 0, line.unit || '件')}`;
 }
 
 function formatOrderFormStructureMeta(line: CreateOrderLinePayload) {
   const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
-  return `计划 ${formatQuantity(line.productionPlanQuantity || 0, line.unit || '件')} | 图纸 ${drawingText} | 工艺 ${orderFormProcessText(line)}`;
+  return `计划 ${formatQuantity(line.productionPlanQuantity ?? 0, line.unit || '件')} | 图纸 ${drawingText} | 工艺 ${orderFormProcessText(line)}`;
 }
 
 function formatOrderFormStructureTextLine(line: CreateOrderLinePayload, prefix: string, type: StructureGroupType) {
@@ -1841,8 +1842,8 @@ function formatOrderFormStructureTextLine(line: CreateOrderLinePayload, prefix: 
     `项目 ${line.projectModel || '-'}`,
     `厚度 ${formatStructureLineThickness(line)}`,
     `规格 ${line.partSpecification || '-'}`,
-    `订单 ${formatQuantity(line.quantity || 0, line.unit || '件')}`,
-    `计划 ${formatQuantity(line.productionPlanQuantity || 0, line.unit || '件')}`,
+    `订单 ${formatQuantity(line.quantity ?? 0, line.unit || '件')}`,
+    `计划 ${formatQuantity(line.productionPlanQuantity ?? 0, line.unit || '件')}`,
     `交期 ${line.deliveryDate || orderForm.deliveryDate || '-'}`,
     `图纸 ${drawingText}`,
     `工艺 ${orderFormProcessText(line)}`
@@ -1941,7 +1942,8 @@ function formatImportStructureCore(line: ImportStructureRow) {
 function formatImportStructureMeta(line: ImportStructureRow) {
   const drawingText = [line.drawingNo, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
   const processText = line.processRoute || '-';
-  const quantityText = line.orderQuantity || line.unitUsage ? `订单 ${line.orderQuantity ?? '-'} / 单套 ${line.unitUsage ?? '-'}` : '数量 -';
+  const quantityText =
+    line.orderQuantity != null || line.unitUsage != null ? `订单 ${line.orderQuantity ?? '-'} / 单套 ${line.unitUsage ?? '-'}` : '数量 -';
   return `${quantityText} | 图纸 ${drawingText} | 工艺 ${processText}`;
 }
 
@@ -2087,16 +2089,16 @@ function formatModelBomStructureMeta(line: ModelBom['lines'][number]) {
     line.drawingSource === 'BOM_LINE' ? 'BOM指定' : line.drawingSource === 'MATERIAL_DEFAULT' ? '零件默认' : line.drawingSource === 'MATERIAL_LATEST' ? '零件最新' : '-';
   const processText = line.defaultProcessRoute || '-';
   const specificationText = line.partSpecification || '-';
-  const thicknessText = line.lineType === 'COMPONENT' ? '不适用（父级组件由子零件维护）' : Number(line.partThickness || 0) > 0 ? line.partThickness : '待核对';
+  const thicknessText = line.lineType === 'COMPONENT' ? '不适用（父级组件由子零件维护）' : Number(line.partThickness ?? 0) > 0 ? line.partThickness : '待核对';
   return `图纸 ${drawingText}（${drawingSourceText}） | 工艺 ${processText} | 厚度 ${thicknessText} | 规格 ${specificationText}`;
 }
 
 function isModelBomLineMissingThickness(line: ModelBom['lines'][number]) {
-  return line.lineType !== 'COMPONENT' && Number(line.partThickness || 0) <= 0;
+  return line.lineType !== 'COMPONENT' && Number(line.partThickness ?? 0) <= 0;
 }
 
 function orderLineNeedsThicknessReview(line: CreateOrderLinePayload) {
-  return line.lineType !== 'COMPONENT' && Number(line.partThickness || 0) <= 0;
+  return line.lineType !== 'COMPONENT' && Number(line.partThickness ?? 0) <= 0;
 }
 
 function isBlankOrderLine(line: CreateOrderLinePayload) {
@@ -2195,7 +2197,8 @@ function modelBomImportProjectModel(bom: ModelBom) {
 }
 
 function scaleModelBomQuantity(value: number, multiplier: number) {
-  const baseQuantity = Number.isFinite(value) && value > 0 ? value : 1;
+  // BOM 默认数量为 0 时保留为草稿待人工修正，不能静默放大为 1。
+  const baseQuantity = Number.isFinite(value) ? Math.max(value, 0) : 1;
   const safeMultiplier = Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
   return Math.round(baseQuantity * safeMultiplier * 1000) / 1000;
 }
@@ -2208,7 +2211,7 @@ function createLineFromModelBomLine(
   targetProjectModel = modelBomImportProjectModel(bom),
   quantityMultiplier = 1
 ): CreateOrderLinePayload {
-  const quantity = scaleModelBomQuantity(Number(bomLine.defaultQuantity || 1), quantityMultiplier);
+  const quantity = scaleModelBomQuantity(Number(bomLine.defaultQuantity ?? 1), quantityMultiplier);
   const line = newLine(index);
   line.lineType = bomLine.lineType === 'COMPONENT' ? 'COMPONENT' : 'PART';
   line.partCategory = bomLine.partCategory || '';
@@ -2221,7 +2224,7 @@ function createLineFromModelBomLine(
   line.partName = bomLine.partName;
   // 全部机型 BOM 按当前搜索机型带入订单，避免订单行缺少项目型号影响后续筛选和追溯。
   line.projectModel = targetProjectModel;
-  const materialThickness = Number(bomLine.partThickness || 0);
+  const materialThickness = Number(bomLine.partThickness ?? 0);
   // 父级组件由子零件拼接，不维护自身厚度；子零件和单独零件缺厚度时必须人工补齐。
   line.partThickness = bomLine.lineType === 'COMPONENT' ? 0 : materialThickness > 0 ? materialThickness : 0;
   line.partSpecification = bomLine.partSpecification || '';
@@ -2231,7 +2234,7 @@ function createLineFromModelBomLine(
   line.drawingStatus = bomLine.drawingStatus || '';
   line.drawingFileName = bomLine.drawingFileName || '';
   line.drawingFileUrl = bomLine.drawingFileUrl || '';
-  line.quantity = quantity > 0 ? quantity : 1;
+  line.quantity = quantity;
   line.productionPlanQuantity = line.quantity;
   line.productionPlanSuggestedQuantity = line.quantity;
   line.unit = bomLine.unit || line.unit;
@@ -2545,13 +2548,13 @@ function orderShortageActionText(order: OrderSummary) {
   if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
     const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
       ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
-      : formatQuantity(order.pendingProductionReplenishmentQuantity || 0, order.pendingProductionReplenishmentUnit || order.unit);
-    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount || 0} 个 / ${quantityText}`;
+      : formatQuantity(order.pendingProductionReplenishmentQuantity ?? 0, order.pendingProductionReplenishmentUnit || order.unit);
+    return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount ?? 0} 个 / ${quantityText}`;
   }
   const quantityText = order.unresolvedShortageQuantityByUnit?.length
     ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
-    : formatQuantity(order.unresolvedShortageQuantity || 0, order.unresolvedShortageUnit || order.unit);
-  return `需补单 ${order.unresolvedShortageLineCount || 0} 个 / ${quantityText}`;
+    : formatQuantity(order.unresolvedShortageQuantity ?? 0, order.unresolvedShortageUnit || order.unit);
+  return `需补单 ${order.unresolvedShortageLineCount ?? 0} 个 / ${quantityText}`;
 }
 
 function orderNeedsShortageAttention(order: OrderSummary) {
@@ -4058,7 +4061,8 @@ async function deleteDraftOrder() {
 }
 
 function taskHasProductionProgress(task: OrderLineProductionTask) {
-  return task.status !== 'PENDING' || task.completedQuantity > 0;
+  // 已取消任务只保留历史，不参与订单取消时的已生产处理计划。
+  return task.status !== 'CANCELLED' && (task.status !== 'PENDING' || task.completedQuantity > 0);
 }
 
 function buildCancelHandlingPlanRows(order: OrderDetail) {

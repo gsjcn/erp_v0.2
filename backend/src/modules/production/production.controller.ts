@@ -47,6 +47,11 @@ export class ProductionController {
     return this.productionService.notices(query);
   }
 
+  @Get('notices/admin')
+  adminNotices(@Query() query: ProductionNoticeQueryDto) {
+    return this.productionService.adminNotices(query);
+  }
+
   @Post('notices/:id/acknowledge')
   acknowledgeNotice(@Param('id') id: string, @Body() dto: AcknowledgeProductionNoticeDto) {
     return this.productionService.acknowledgeNotice(id, dto);

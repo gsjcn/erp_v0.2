@@ -2,6 +2,9 @@ import { CommonStatus, InventoryStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsDateString, IsEnum, IsIn, IsNumber, IsObject, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
 
+export const stockAlertFilterValues = ['ALL', 'ENABLED', 'TRIGGERED', 'DISABLED'] as const;
+export type StockAlertFilter = (typeof stockAlertFilterValues)[number];
+
 export class InventoryQueryDto {
   @IsOptional()
   @IsString()
@@ -22,6 +25,10 @@ export class InventoryQueryDto {
   @IsOptional()
   @IsEnum(InventoryStatus)
   status?: InventoryStatus;
+
+  @IsOptional()
+  @IsIn(stockAlertFilterValues)
+  stockAlert?: StockAlertFilter;
 
   @IsOptional()
   @IsString()
@@ -70,6 +77,10 @@ export class MaterialQueryDto {
   @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
+
+  @IsOptional()
+  @IsIn(stockAlertFilterValues)
+  stockAlert?: StockAlertFilter;
 
   @IsOptional()
   @Type(() => Number)
@@ -128,6 +139,16 @@ export class CreateMaterialDto {
   partSpecification?: string;
 
   @IsOptional()
+  @IsBoolean()
+  stockAlertEnabled?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  stockAlertQuantity?: number;
+
+  @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
 }
@@ -148,6 +169,16 @@ export class UpdateMaterialDto {
   @IsOptional()
   @IsString()
   partSpecification?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  stockAlertEnabled?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  stockAlertQuantity?: number;
 
   @IsOptional()
   @IsEnum(CommonStatus)
@@ -461,9 +492,8 @@ export class ConfirmModelBomDiffReviewDto {
   @IsObject()
   fieldsJson?: Record<string, unknown>;
 
-  @IsOptional()
   @IsString()
-  reviewedBy?: string;
+  reviewedBy!: string;
 
   @IsOptional()
   @IsString()
@@ -607,6 +637,10 @@ export class AdjustInventoryBatchDto {
   @IsNumber()
   @Min(0)
   afterQuantity!: number;
+
+  @IsOptional()
+  @IsIn(['SCRAPPED'])
+  targetStatus?: 'SCRAPPED';
 
   @IsString()
   countedBy!: string;

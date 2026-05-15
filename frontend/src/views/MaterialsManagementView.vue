@@ -42,6 +42,10 @@
         <div class="stat-label">无历史下单</div>
         <div class="stat-value">{{ dashboard.summary.withoutRecentOrderCount }}</div>
       </button>
+      <button class="stat-card stat-action" :class="{ active: filters.stockAlert === 'TRIGGERED' }" type="button" @click="openTriggeredStockAlerts">
+        <div class="stat-label">低库存报警</div>
+        <div class="stat-value">{{ triggeredStockAlertText }}</div>
+      </button>
     </div>
 
     <div class="summary-filter-grid">
@@ -74,6 +78,17 @@
         :class="{ active: filters.bomStructureType === item.value }"
         type="button"
         @click="applyBomStructureFilter(item.value)"
+      >
+        <span>{{ item.label }}</span>
+        <strong>{{ item.count }}</strong>
+      </button>
+      <button
+        v-for="item in stockAlertSummaryItems"
+        :key="item.value"
+        class="summary-filter-chip"
+        :class="{ active: filters.stockAlert === item.value }"
+        type="button"
+        @click="applyStockAlertFilter(item.value)"
       >
         <span>{{ item.label }}</span>
         <strong>{{ item.count }}</strong>
@@ -202,6 +217,14 @@
         <el-select v-model="filters.recentOrderPresence" clearable placeholder="全部" style="width: 140px" @change="resetAndLoad">
           <el-option label="有历史下单" value="WITH_RECENT_ORDER" />
           <el-option label="无历史下单" value="WITHOUT_RECENT_ORDER" />
+        </el-select>
+      </div>
+      <div class="filter-field">
+        <label>库存报警</label>
+        <el-select v-model="filters.stockAlert" clearable placeholder="全部报警" style="width: 150px" @change="resetAndLoad">
+          <el-option label="已启用" value="ENABLED" />
+          <el-option label="低库存" value="TRIGGERED" />
+          <el-option label="未启用" value="DISABLED" />
         </el-select>
       </div>
       <div class="filter-field">
@@ -359,7 +382,7 @@
         </el-button>
         <span v-else class="mobile-readonly-note">手机端只查看常用机型</span>
       </div>
-      <span class="project-quick-hint">误操作创建的无效 BOM 可永久删除；正常暂不用的 BOM 建议停用。查看/编辑会进入机型零件包页维护表头、明细和拖拽顺序。</span>
+      <span class="project-quick-hint">误操作创建且没有明细、适用客户或差异记录的无效空 BOM 可永久删除；正常暂不用的 BOM 建议停用。查看/编辑会进入机型零件包页维护表头、明细和拖拽顺序。</span>
     </div>
 
     <div v-if="contextBomPanelVisible" v-loading="contextBomLoading" class="context-bom-panel">
@@ -607,7 +630,7 @@
           </template>
         </el-table-column>
         <el-table-column label="默认数量" width="120">
-          <template #default="{ row }">{{ row.defaultQuantity ? formatQuantity(row.defaultQuantity, row.defaultQuantityUnit || row.unit) : '-' }}</template>
+          <template #default="{ row }">{{ row.defaultQuantity != null ? formatQuantity(row.defaultQuantity, row.defaultQuantityUnit || row.unit) : '-' }}</template>
         </el-table-column>
         <el-table-column label="默认工艺" min-width="180">
           <template #default="{ row }">{{ row.defaultProcessRoute || '-' }}</template>
@@ -622,6 +645,9 @@
           <template #default="{ row }">
             <div>可用 {{ formatQuantity(row.availableQuantity, row.unit) }}</div>
             <div class="cell-subtext">订单 {{ formatQuantity(row.orderInventoryQuantity, row.unit) }} / 备货 {{ formatQuantity(row.stockInventoryQuantity, row.unit) }}</div>
+            <el-tag size="small" :type="stockAlertTagType(row)" effect="plain">
+              {{ stockAlertText(row) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="BOM" min-width="280">
@@ -717,6 +743,10 @@
             <label>最近下单</label>
             <span>{{ row.lastOrderDate || '-' }}</span>
           </div>
+          <div class="mobile-field">
+            <label>库存报警</label>
+            <span>{{ stockAlertText(row) }}</span>
+          </div>
         </div>
         <div class="mobile-card-actions">
           <el-button size="small" type="primary" plain @click="openSourceDetails(row)">库存来源</el-button>
@@ -755,7 +785,7 @@
           <el-input v-model="form.partSpecification" placeholder="可留空" />
         </el-form-item>
         <el-form-item label="状态">
-          <el-select v-model="form.status" style="width: 160px">
+          <el-select v-model="form.status" :disabled="Boolean(editingMaterialId)" style="width: 160px">
             <el-option label="启用" value="ENABLED" />
             <el-option label="停用" value="DISABLED" />
           </el-select>
@@ -767,7 +797,7 @@
         :closable="false"
         show-icon
         title="保存范围"
-        description="这里只维护零件搜索记忆，方便后续下单搜索和 0 库存查看；不会修改历史订单、库存批次、库存数量、BOM 明细或生产记录。"
+        description="这里只维护零件搜索记忆，方便后续下单搜索和 0 库存查看；编辑已有零件时状态请使用列表里的启用/停用动作，不会修改历史订单、库存批次、库存数量、BOM 明细或生产记录。"
       />
       <template #footer>
         <el-button :disabled="saving" @click="closeMaterialDialog">取消</el-button>
@@ -840,11 +870,12 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Rank } from '@element-plus/icons-vue';
-import { erpApi } from '../api/erp';
+import { erpApi, type StockAlertFilter } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
 import InventorySourceDetailsDialog from '../components/InventorySourceDetailsDialog.vue';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
+import { formatQuantity } from '../utils/format';
 import type {
   CommonStatus,
   Customer,
@@ -865,7 +896,6 @@ const loading = ref(false);
 const saving = ref(false);
 const dialogVisible = ref(false);
 const editingMaterialId = ref('');
-const commonProjectStorageKey = 'baisheng.erp.materials.commonProjectModels.v1';
 const defaultCommonProjectModels = ['B3', 'B5'];
 const commonProjectCandidate = ref('');
 const commonProjectModels = ref<string[]>([]);
@@ -875,7 +905,7 @@ const commonProjectDragInsertAfter = ref(false);
 const commonProjectDragSaving = ref(false);
 const commonProjectSaving = ref(false);
 const commonProjectLoading = ref(false);
-const commonProjectSyncSource = ref<'SERVER' | 'CACHE' | 'DEFAULT'>('DEFAULT');
+const commonProjectSyncSource = ref<'SERVER' | 'DEFAULT' | 'ERROR'>('DEFAULT');
 const projectOptions = ref<string[]>([]);
 const drawingDateRange = ref<string[]>([]);
 const lastOrderDateRange = ref<string[]>([]);
@@ -913,6 +943,7 @@ type ActiveFilterKey =
   | 'bomStructureType'
   | 'bomPresence'
   | 'recentOrderPresence'
+  | 'stockAlert'
   | 'drawingDate'
   | 'lastOrderDate'
   | 'sort'
@@ -936,7 +967,8 @@ const dashboard = reactive<MaterialDashboardResponse>({
     withoutRecentOrderCount: 0,
     relationCounts: {},
     drawingSourceCounts: {},
-    bomStructureCounts: {}
+    bomStructureCounts: {},
+    stockAlertCounts: {}
   }
 });
 
@@ -952,6 +984,7 @@ const filters = reactive<{
   bomStructureType: '' | 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE';
   bomPresence: '' | 'WITH_BOM' | 'WITHOUT_BOM';
   recentOrderPresence: '' | 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER';
+  stockAlert: '' | StockAlertFilter;
   sortBy: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE' | 'UPDATED_AT';
   sortOrder: 'ASC' | 'DESC';
   status: '' | CommonStatus;
@@ -967,6 +1000,7 @@ const filters = reactive<{
   bomStructureType: '',
   bomPresence: '',
   recentOrderPresence: '',
+  stockAlert: '',
   sortBy: 'LAST_ORDER_DATE',
   sortOrder: 'DESC',
   status: 'ENABLED'
@@ -1008,8 +1042,8 @@ const commonProjectSyncText = computed(() => {
   if (commonProjectSyncSource.value === 'SERVER') {
     return `数据库已保存 / ${countText}`;
   }
-  if (commonProjectSyncSource.value === 'CACHE') {
-    return `本机缓存 / ${countText}`;
+  if (commonProjectSyncSource.value === 'ERROR') {
+    return `读取失败，显示默认值 / ${countText}`;
   }
   return `默认 B3/B5 / ${countText}`;
 });
@@ -1019,6 +1053,9 @@ const commonProjectSyncTagType = computed(() => {
   }
   if (commonProjectSyncSource.value === 'SERVER') {
     return 'success';
+  }
+  if (commonProjectSyncSource.value === 'ERROR') {
+    return 'danger';
   }
   return 'info';
 });
@@ -1074,6 +1111,12 @@ const bomStructureSummaryItems = computed(() => [
   { label: '单独零件', value: 'STANDALONE_PART' as const, count: dashboard.summary.bomStructureCounts.STANDALONE_PART || 0 },
   { label: '未进 BOM', value: 'NONE' as const, count: dashboard.summary.bomStructureCounts.NONE || 0 }
 ]);
+const stockAlertSummaryItems = computed(() => [
+  { label: '已启用报警', value: 'ENABLED' as const, count: dashboard.summary.stockAlertCounts.ENABLED || 0 },
+  { label: '低库存', value: 'TRIGGERED' as const, count: dashboard.summary.stockAlertCounts.TRIGGERED || 0 },
+  { label: '未启用报警', value: 'DISABLED' as const, count: dashboard.summary.stockAlertCounts.DISABLED || 0 }
+]);
+const triggeredStockAlertText = computed(() => `${dashboard.summary.stockAlertCounts.TRIGGERED || 0} 条`);
 const dashboardFixedText = computed(() => buildDashboardText());
 const contextBomFixedText = computed(() => buildContextBomText());
 const managementConfirmMessageLines = computed(() =>
@@ -1117,6 +1160,9 @@ const activeFilterItems = computed<Array<{ key: ActiveFilterKey; label: string }
   if (filters.recentOrderPresence) {
     items.push({ key: 'recentOrderPresence', label: `下单记录：${recentOrderPresenceFilterLabel(filters.recentOrderPresence)}` });
   }
+  if (filters.stockAlert) {
+    items.push({ key: 'stockAlert', label: `库存报警：${stockAlertFilterLabel(filters.stockAlert)}` });
+  }
   if (drawingDateRange.value.length) {
     items.push({ key: 'drawingDate', label: `图纸日期：${formatRangeText(drawingDateRange.value)}` });
   }
@@ -1144,6 +1190,7 @@ watch(
     route.query.projectModel,
     route.query.keyword,
     route.query.status,
+    route.query.stockAlert,
     route.query.excludeGlobalAllProject
   ],
   async () => {
@@ -1170,11 +1217,22 @@ function routeStatusFilter(value: string): CommonStatus | '' | undefined {
   return undefined;
 }
 
+function routeStockAlertFilter(value: string): StockAlertFilter | '' | undefined {
+  if (value === 'ENABLED' || value === 'TRIGGERED' || value === 'DISABLED') {
+    return value;
+  }
+  if (value === 'ALL') {
+    return '';
+  }
+  return undefined;
+}
+
 function applyRouteQueryFilters() {
   const customerId = routeQueryText(route.query.customerId);
   const projectModel = routeQueryText(route.query.projectModel);
   const keyword = routeQueryText(route.query.keyword);
   const status = routeStatusFilter(routeQueryText(route.query.status));
+  const stockAlert = routeStockAlertFilter(routeQueryText(route.query.stockAlert));
 
   filters.customerId = customerId;
   filters.projectModel = projectModel;
@@ -1183,6 +1241,9 @@ function applyRouteQueryFilters() {
   }
   if (status !== undefined) {
     filters.status = status;
+  }
+  if (stockAlert !== undefined) {
+    filters.stockAlert = stockAlert;
   }
   if (!customerId) {
     selectedCustomerName.value = '';
@@ -1220,13 +1281,6 @@ function uniqueProjectModels(values: string[]) {
   return result;
 }
 
-function commonProjectStorage() {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  return window.localStorage;
-}
-
 // 常用机型只是快捷入口设置，不修改 BOM 适用范围或零件业务数据。
 async function loadCommonProjectModels() {
   commonProjectLoading.value = true;
@@ -1234,40 +1288,14 @@ async function loadCommonProjectModels() {
     const savedProjectModels = await erpApi.materialCommonProjectModels();
     commonProjectModels.value = uniqueProjectModels(savedProjectModels);
     commonProjectSyncSource.value = 'SERVER';
-    saveCommonProjectModelsToCache();
     return commonProjectSyncSource.value;
   } catch {
-    ElMessage.warning('常用机型设置读取失败，已使用本机缓存或默认 B3/B5');
+    commonProjectModels.value = [...defaultCommonProjectModels];
+    commonProjectSyncSource.value = 'ERROR';
+    ElMessage.warning('常用机型设置读取失败，已显示默认 B3/B5；请确认后端服务后刷新');
+    return commonProjectSyncSource.value;
   } finally {
     commonProjectLoading.value = false;
-  }
-
-  const storage = commonProjectStorage();
-  const rawValue = storage?.getItem(commonProjectStorageKey);
-  if (!rawValue) {
-    commonProjectModels.value = [...defaultCommonProjectModels];
-    commonProjectSyncSource.value = 'DEFAULT';
-    return commonProjectSyncSource.value;
-  }
-
-  try {
-    const parsedValue: unknown = JSON.parse(rawValue);
-    commonProjectModels.value = Array.isArray(parsedValue)
-      ? uniqueProjectModels(parsedValue.filter((item): item is string => typeof item === 'string'))
-      : [...defaultCommonProjectModels];
-    commonProjectSyncSource.value = Array.isArray(parsedValue) ? 'CACHE' : 'DEFAULT';
-  } catch {
-    commonProjectModels.value = [...defaultCommonProjectModels];
-    commonProjectSyncSource.value = 'DEFAULT';
-  }
-  return commonProjectSyncSource.value;
-}
-
-function saveCommonProjectModelsToCache() {
-  try {
-    commonProjectStorage()?.setItem(commonProjectStorageKey, JSON.stringify(commonProjectModels.value));
-  } catch {
-    // 本机缓存失败不影响后端保存，页面刷新后仍以数据库设置为准。
   }
 }
 
@@ -1282,16 +1310,14 @@ async function saveCommonProjectModels() {
   }
   commonProjectSaving.value = true;
   commonProjectModels.value = uniqueProjectModels(commonProjectModels.value);
-  saveCommonProjectModelsToCache();
   try {
     const savedProjectModels = await erpApi.saveMaterialCommonProjectModels(commonProjectModels.value);
     commonProjectModels.value = uniqueProjectModels(savedProjectModels);
     commonProjectSyncSource.value = 'SERVER';
-    saveCommonProjectModelsToCache();
     return true;
   } catch {
-    commonProjectSyncSource.value = 'CACHE';
-    ElMessage.warning('常用机型设置保存到后端失败，已临时保存到本机浏览器');
+    commonProjectSyncSource.value = 'ERROR';
+    ElMessage.error('常用机型设置保存失败，未写入数据库，请确认后端服务后重试');
     return false;
   } finally {
     commonProjectSaving.value = false;
@@ -1305,8 +1331,8 @@ async function refreshCommonProjects() {
   const source = await loadCommonProjectModels();
   if (source === 'SERVER') {
     ElMessage.success('常用机型已从数据库刷新');
-  } else if (source === 'CACHE') {
-    ElMessage.info('已读取本机缓存常用机型');
+  } else if (source === 'ERROR') {
+    ElMessage.warning('常用机型读取失败，当前仅显示默认 B3/B5');
   } else {
     ElMessage.info('已使用默认常用机型 B3/B5');
   }
@@ -1325,10 +1351,13 @@ async function addCommonProject(projectModel: string) {
     ElMessage.info(`${normalized} 已是常用机型`);
     return;
   }
+  const previousProjectModels = [...commonProjectModels.value];
   commonProjectModels.value = uniqueProjectModels([...commonProjectModels.value, normalized]);
   if (await saveCommonProjectModels()) {
     ElMessage.success(`已加入常用机型：${normalized}`);
+    return;
   }
+  commonProjectModels.value = previousProjectModels;
 }
 
 function addCommonProjectFromSelect(projectModel: string) {
@@ -1348,20 +1377,26 @@ async function removeCommonProject(projectModel: string) {
     return;
   }
   const key = projectModelKey(projectModel);
+  const previousProjectModels = [...commonProjectModels.value];
   commonProjectModels.value = commonProjectModels.value.filter((item) => projectModelKey(item) !== key);
   if (await saveCommonProjectModels()) {
     ElMessage.success(`已移除常用机型：${normalizeProjectModel(projectModel)}`);
+    return;
   }
+  commonProjectModels.value = previousProjectModels;
 }
 
 async function resetCommonProjectsToDefault() {
   if (commonProjectBusy.value) {
     return;
   }
+  const previousProjectModels = [...commonProjectModels.value];
   commonProjectModels.value = [...defaultCommonProjectModels];
   if (await saveCommonProjectModels()) {
     ElMessage.success('已恢复默认常用机型 B3/B5');
+    return;
   }
+  commonProjectModels.value = previousProjectModels;
 }
 
 function startCommonProjectDrag(event: DragEvent, projectModel: string) {
@@ -1404,10 +1439,13 @@ async function dropCommonProject(event: DragEvent, projectModel: string) {
     return;
   }
   commonProjectDragSaving.value = true;
+  const previousProjectModels = [...commonProjectModels.value];
   commonProjectModels.value = orderedProjects;
   try {
     if (await saveCommonProjectModels()) {
       ElMessage.success('常用机型顺序已保存');
+    } else {
+      commonProjectModels.value = previousProjectModels;
     }
   } finally {
     commonProjectDragSaving.value = false;
@@ -1468,6 +1506,7 @@ async function loadDashboard() {
       bomStructureType: filters.bomStructureType || undefined,
       bomPresence: filters.bomPresence || undefined,
       recentOrderPresence: filters.recentOrderPresence || undefined,
+      stockAlert: filters.stockAlert || undefined,
       drawingDateFrom: drawingDateRange.value[0],
       drawingDateTo: drawingDateRange.value[1],
       lastOrderDateFrom: lastOrderDateRange.value[0],
@@ -1604,6 +1643,12 @@ function applyBomStructureFilter(value: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE
   resetAndLoad();
 }
 
+function applyStockAlertFilter(value: StockAlertFilter) {
+  filters.stockAlert = filters.stockAlert === value ? '' : value;
+  // 库存报警快捷筛选只切换列表视图，不自动补单、下单、提交生产或扣库存。
+  resetAndLoad();
+}
+
 async function clearActiveFilter(key: ActiveFilterKey) {
   if (key === 'keyword') {
     filters.keyword = '';
@@ -1630,6 +1675,8 @@ async function clearActiveFilter(key: ActiveFilterKey) {
     filters.bomPresence = '';
   } else if (key === 'recentOrderPresence') {
     filters.recentOrderPresence = '';
+  } else if (key === 'stockAlert') {
+    filters.stockAlert = '';
   } else if (key === 'drawingDate') {
     drawingDateRange.value = [];
   } else if (key === 'lastOrderDate') {
@@ -1656,6 +1703,7 @@ async function resetFilters() {
   filters.bomStructureType = '';
   filters.bomPresence = '';
   filters.recentOrderPresence = '';
+  filters.stockAlert = '';
   filters.sortBy = 'LAST_ORDER_DATE';
   filters.sortOrder = 'DESC';
   filters.status = 'ENABLED';
@@ -1743,7 +1791,7 @@ async function disableProjectBom(projectModel: string) {
       message: `确定停用 ${bom.bomName} 吗？`,
       details: [
         '停用只影响后续推荐，不会删除历史订单引用或 BOM 明细。',
-        '误建无效 BOM 请使用删除。',
+        '误建且没有明细、适用客户或差异记录的无效空 BOM 才允许删除。',
         bom.isCommon ? '该 BOM 当前为常用，停用后会同时取消常用排序。' : ''
       ].filter(Boolean),
       confirmButtonText: '停用',
@@ -1752,7 +1800,7 @@ async function disableProjectBom(projectModel: string) {
     if (!confirmed) {
       return;
     }
-    // BOM 停用用于保留历史订单和 BOM 行引用；误建无效 BOM 才走物理删除。
+    // BOM 停用用于保留历史订单和 BOM 行引用；误建无效空 BOM 才走物理删除。
     await erpApi.disableModelBom(bom.id);
     ElMessage.success(`${targetProjectModel} BOM 已停用`);
     await Promise.all([loadDashboard(), loadContextBoms()]);
@@ -1828,10 +1876,10 @@ async function deleteProjectBom(projectModel: string) {
     if (!(await confirmDeleteBom(bom))) {
       return;
     }
-    // 永久删除只用于误操作创建的无效 BOM；后端会阻断仍被客户副本引用的来源 BOM。
+    // 永久删除只用于误操作创建的无效空 BOM；后端会阻断仍有明细、适用客户、差异记录或客户副本引用的 BOM。
     const result = await erpApi.deleteModelBom(bom.id);
     ElMessage.success(
-      `已删除无效 BOM：${result.bomName}，清理 ${result.lineCount} 行明细、${result.customerScopeCount} 个适用客户、${result.diffReviewCount} 条差异核对记录`
+      `已删除无效空 BOM：${result.bomName}，确认明细 ${result.lineCount} 行、适用客户 ${result.customerScopeCount} 个、差异核对 ${result.diffReviewCount} 条`
     );
     await Promise.all([loadDashboard(), loadContextBoms()]);
   } catch (error) {
@@ -1894,6 +1942,14 @@ function openDesktopMaintenancePage(path: string, actionLabel: string) {
     return;
   }
   router.push(path);
+}
+
+function openTriggeredStockAlerts() {
+  filters.status = 'ENABLED';
+  filters.stockAlert = filters.stockAlert === 'TRIGGERED' ? '' : 'TRIGGERED';
+  pagination.page = 1;
+  // 控制面板低库存入口只切换筛选视图；库存报警不自动下单、补单、提交生产或扣库存。
+  void loadDashboard();
 }
 
 function warnMaterialSavingClose() {
@@ -1999,14 +2055,13 @@ async function saveMaterial() {
       partCode,
       partName,
       unit,
-      partSpecification: form.partSpecification.trim() || undefined,
-      status: form.status
+      partSpecification: form.partSpecification.trim() || undefined
     };
     if (editingMaterialId.value) {
       await erpApi.updateInventoryMaterial(editingMaterialId.value, payload);
       ElMessage.success('零件搜索记忆已保存');
     } else {
-      await erpApi.createInventoryMaterial(payload);
+      await erpApi.createInventoryMaterial({ ...payload, status: form.status });
       ElMessage.success('零件搜索记忆已新增');
     }
     dialogVisible.value = false;
@@ -2039,7 +2094,18 @@ async function enableMaterial(row: MaterialDashboardRow) {
   if (guardDesktopOperation('启用零件')) {
     return;
   }
-  await erpApi.updateInventoryMaterial(row.id, { status: 'ENABLED' });
+  const confirmed = await openManagementConfirmDialog({
+    title: '启用零件搜索记忆',
+    message: `确定启用零件 ${row.partCode} / ${row.partName} 吗？`,
+    details: ['系统只会恢复 Material 后续可选状态；适用范围、BOM 行、默认图纸和来源加工关系仍需单独人工恢复。'],
+    confirmButtonText: '启用',
+    confirmButtonType: 'success'
+  });
+  if (!confirmed) {
+    return;
+  }
+  // 恢复零件搜索记忆只恢复 Material 后续可选状态；适用范围、BOM 行和来源加工关系需单独人工恢复。
+  await erpApi.restoreInventoryMaterial(row.id);
   ElMessage.success('零件搜索记忆已启用');
   await Promise.all([loadDashboard(), loadContextBoms()]);
 }
@@ -2363,7 +2429,7 @@ async function disableContextBom(bom: ModelBom) {
       message: `确定停用 ${bom.bomName} 吗？`,
       details: [
         '停用只影响后续推荐，不会删除历史订单引用或 BOM 明细。',
-        '误建无效 BOM 请使用删除。',
+        '误建且没有明细、适用客户或差异记录的无效空 BOM 才允许删除。',
         bom.isCommon ? '该 BOM 当前为常用，停用后会同时取消常用排序。' : ''
       ].filter(Boolean),
       confirmButtonText: '停用',
@@ -2372,7 +2438,7 @@ async function disableContextBom(bom: ModelBom) {
     if (!confirmed) {
       return;
     }
-    // BOM 停用用于保留历史订单和 BOM 行引用；误建无效 BOM 才走物理删除。
+    // BOM 停用用于保留历史订单和 BOM 行引用；误建无效空 BOM 才走物理删除。
     await erpApi.disableModelBom(bom.id);
     ElMessage.success('零件包已停用');
     await Promise.all([loadDashboard(), loadContextBoms()]);
@@ -2570,10 +2636,10 @@ async function deleteContextBom(bom: ModelBom) {
     if (!(await confirmDeleteBom(bom))) {
       return;
     }
-    // 永久删除只用于误操作创建的无效 BOM；后端会阻断仍被客户副本引用的来源 BOM。
+    // 永久删除只用于误操作创建的无效空 BOM；后端会阻断仍有明细、适用客户、差异记录或客户副本引用的 BOM。
     const result = await erpApi.deleteModelBom(bom.id);
     ElMessage.success(
-      `已删除无效 BOM：${result.bomName}，清理 ${result.lineCount} 行明细、${result.customerScopeCount} 个适用客户、${result.diffReviewCount} 条差异核对记录`
+      `已删除无效空 BOM：${result.bomName}，确认明细 ${result.lineCount} 行、适用客户 ${result.customerScopeCount} 个、差异核对 ${result.diffReviewCount} 条`
     );
     await Promise.all([loadDashboard(), loadContextBoms()]);
   } catch (error) {
@@ -2590,9 +2656,9 @@ async function confirmDeleteBom(bom: ModelBom) {
     title: '删除无效 BOM',
     message: `确定永久删除 ${bom.bomName} 吗？`,
     details: [
-      '该操作会删除 BOM 表头、包内明细和差异核对记录。',
-      '仅用于误操作创建的无效 BOM。',
-      '不会删除订单、生产或库存数据。'
+      '仅允许删除已停用、无包内明细、无适用客户、无差异核对记录且没有客户副本引用的无效空 BOM。',
+      '有明细、客户范围、差异核对记录或客户副本引用时，后端会阻断物理删除，请改为停用。',
+      '不会删除订单、生产、库存、BOM 行历史或客户 BOM 副本。'
     ],
     confirmButtonText: '永久删除',
     confirmButtonType: 'danger'
@@ -2667,7 +2733,7 @@ function buildDashboardText() {
   }
   const header = [
     `零件管理固定格式清单`,
-    `筛选：客户 ${selectedCustomerFilterLabel()}；机型 ${filters.projectModel || '全部'}；关键字 ${filters.keyword || '无'}；当前关系 ${materialRelationFilterLabel(filters.relationType)}；图纸来源 ${drawingSourceFilterLabel(filters.drawingSource)}；BOM 结构 ${bomStructureFilterLabel(filters.bomStructureType)}；BOM 状态 ${bomPresenceFilterLabel(filters.bomPresence)}；下单记录 ${recentOrderPresenceFilterLabel(filters.recentOrderPresence)}；排序 ${dashboardSortByLabel(filters.sortBy)} / ${dashboardSortOrderLabel(filters.sortOrder)}；状态 ${filters.status || '全部'}`,
+    `筛选：客户 ${selectedCustomerFilterLabel()}；机型 ${filters.projectModel || '全部'}；关键字 ${filters.keyword || '无'}；当前关系 ${materialRelationFilterLabel(filters.relationType)}；图纸来源 ${drawingSourceFilterLabel(filters.drawingSource)}；BOM 结构 ${bomStructureFilterLabel(filters.bomStructureType)}；BOM 状态 ${bomPresenceFilterLabel(filters.bomPresence)}；下单记录 ${recentOrderPresenceFilterLabel(filters.recentOrderPresence)}；库存报警 ${stockAlertFilterLabel(filters.stockAlert)}；排序 ${dashboardSortByLabel(filters.sortBy)} / ${dashboardSortOrderLabel(filters.sortOrder)}；状态 ${filters.status || '全部'}`,
     `页码：第 ${pagination.page} 页；本页 ${dashboard.items.length} 条；总计 ${dashboard.totalCount} 条`
   ].join('\n');
   const body = dashboard.items.map((row, index) => formatDashboardRowText(row, index + 1)).join('\n');
@@ -2686,8 +2752,8 @@ function formatDashboardRowText(row: MaterialDashboardRow, index: number) {
     `${index}. ${row.partCode} | ${row.partName}`,
     `类型：${row.partType || row.scopeLabel || '-'}；当前关系：${row.currentRelationLabel || '-'}；说明：${row.currentRelationDescription || '-'}；范围：${row.scopeLabel || '-'}；客户：${joinPreview(row.customerNames, '全部客户')}；机型：${joinPreview(materialProjectScopeValues(row), '全部机型')}`,
     `图纸：${row.drawingNo || '-'} / ${row.drawingVersion || '-'} / ${row.drawingDate || '-'} / ${row.drawingStatus || '-'}；来源：${row.drawingSourceLabel || '-'}`,
-    `厚度规格：${row.partThickness ?? '-'} / ${row.partSpecification || '-'}；默认数量：${row.defaultQuantity ? formatQuantity(row.defaultQuantity, row.defaultQuantityUnit || row.unit) : '-'}；默认工艺：${row.defaultProcessRoute || '-'}`,
-    `最近下单：${row.lastOrderDate || '-'} / ${row.lastOrderNo || '-'} / ${row.lastCustomerName || '-'}；库存：可用 ${formatQuantity(row.availableQuantity, row.unit)}，订单 ${formatQuantity(row.orderInventoryQuantity, row.unit)}，备货 ${formatQuantity(row.stockInventoryQuantity, row.unit)}；BOM：${joinPreview(row.bomNames, '-')}；结构：${dashboardBomStructureSummary(row)}`,
+    `厚度规格：${row.partThickness ?? '-'} / ${row.partSpecification || '-'}；默认数量：${row.defaultQuantity != null ? formatQuantity(row.defaultQuantity, row.defaultQuantityUnit || row.unit) : '-'}；默认工艺：${row.defaultProcessRoute || '-'}`,
+    `最近下单：${row.lastOrderDate || '-'} / ${row.lastOrderNo || '-'} / ${row.lastCustomerName || '-'}；库存：可用 ${formatQuantity(row.availableQuantity, row.unit)}，订单 ${formatQuantity(row.orderInventoryQuantity, row.unit)}，备货 ${formatQuantity(row.stockInventoryQuantity, row.unit)}；库存报警：${stockAlertText(row)}；BOM：${joinPreview(row.bomNames, '-')}；结构：${dashboardBomStructureSummary(row)}`,
     ...dashboardBomStructureTextLines(row)
   ].join('\n');
 }
@@ -3034,6 +3100,18 @@ function recentOrderPresenceFilterLabel(value: typeof filters.recentOrderPresenc
   );
 }
 
+function stockAlertFilterLabel(value: typeof filters.stockAlert) {
+  return (
+    {
+      ENABLED: '已启用',
+      TRIGGERED: '低库存',
+      DISABLED: '未启用',
+      ALL: '全部',
+      '': '全部'
+    }[value] || '全部'
+  );
+}
+
 function dashboardSortByLabel(value: typeof filters.sortBy) {
   return (
     {
@@ -3076,13 +3154,22 @@ function joinPreview(values: string[], emptyText = '-') {
   return filtered.length > 3 ? `${preview} 等 ${filtered.length} 项` : preview;
 }
 
-function formatQuantity(value: number | undefined | null, unit?: string | null) {
-  return `${formatNumber(value || 0)} ${unit || ''}`.trim();
+function stockAlertText(row: MaterialDashboardRow) {
+  if (!row.stockAlertEnabled) {
+    return '未启用库存报警';
+  }
+  const alertQuantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? 0 : Number(row.stockAlertQuantity);
+  const thresholdText = formatQuantity(alertQuantity, row.unit);
+  return row.stockAlertTriggered ? `低库存：小于等于 ${thresholdText}` : `报警线：${thresholdText}`;
 }
 
-function formatNumber(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/\.?0+$/, '');
+function stockAlertTagType(row: MaterialDashboardRow) {
+  if (!row.stockAlertEnabled) {
+    return 'info';
+  }
+  return row.stockAlertTriggered ? 'danger' : 'success';
 }
+
 </script>
 
 <style scoped>

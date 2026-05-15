@@ -19,7 +19,7 @@ export function matchedStockSummary(line: StockCheckLine, inventorySummary: Inve
 }
 
 export function availableStockQuantity(line: StockCheckLine, inventorySummary: InventorySummaryRow[]) {
-  return matchedStockSummary(line, inventorySummary)?.stockInventoryQuantity || 0;
+  return matchedStockSummary(line, inventorySummary)?.stockInventoryQuantity ?? 0;
 }
 
 export function validateStockModeLines(lines: StockCheckLine[], inventorySummary: InventorySummaryRow[]) {
@@ -60,7 +60,7 @@ export function validateStockModeLines(lines: StockCheckLine[], inventorySummary
       if (selectedQuantity > 0) {
         row.availableQuantity += selectedQuantity;
       } else if (!row.summaryAvailabilityCounted) {
-        row.availableQuantity += summary?.stockInventoryQuantity || 0;
+        row.availableQuantity += summary?.stockInventoryQuantity ?? 0;
         row.summaryAvailabilityCounted = true;
       }
     }
@@ -79,5 +79,5 @@ export function validateStockModeLines(lines: StockCheckLine[], inventorySummary
 }
 
 function selectedStockSourceQuantity(line: StockCheckLine) {
-  return (line.selectedStockSources || []).reduce((sum, source) => sum + Number(source.quantity || 0), 0);
+  return (line.selectedStockSources || []).reduce((sum, source) => sum + Number(source.quantity ?? 0), 0);
 }

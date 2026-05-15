@@ -19,7 +19,7 @@ enum CustomerRegionType {
 
 enum OrderStatus {
   DRAFT
-  SUBMITTED
+  PENDING_PRODUCTION
   IN_PRODUCTION
   COMPLETED
   CANCELLED
@@ -34,7 +34,10 @@ enum OrderLineFulfillmentMode {
 enum ProductionStatus {
   PENDING
   IN_PROGRESS
+  WAITING_CONFIRMATION
   COMPLETED
+  STORED
+  CANCELLED
 }
 
 enum ProductionNoticeType {
@@ -57,7 +60,9 @@ enum ProductionNoticeTarget {
 
 enum InventoryStatus {
   AVAILABLE
+  RESERVED
   USED
+  SCRAPPED
 }
 
 enum InventoryTransactionType {
@@ -72,29 +77,29 @@ enum InventoryReservationStatus {
 }
 
 model Customer {
-  id           String          @id @default(uuid())
-  customerCode String          @unique
-  customerName String
-  contactName  String?
-  contactPhone String?
-  address      String?
-  regionType   CustomerRegionType @default(CHINA)
-  country      String             @default("中国")
-  province     String?
-  state        String?
-  district     String?
-  city         String?
-  detailAddress String?
-  remark       String?
-  status       CommonStatus    @default(ENABLED)
-  contacts     CustomerContact[]
-  orders       CustomerOrder[]
+  id                      String                  @id @default(uuid())
+  customerCode            String                  @unique
+  customerName            String
+  contactName             String?
+  contactPhone            String?
+  address                 String?
+  regionType              CustomerRegionType      @default(CHINA)
+  country                 String                  @default("中国")
+  province                String?
+  state                   String?
+  district                String?
+  city                    String?
+  detailAddress           String?
+  remark                  String?
+  status                  CommonStatus            @default(ENABLED)
+  contacts                CustomerContact[]
+  orders                  CustomerOrder[]
   materialApplicabilities MaterialApplicability[]
-  modelBoms    ModelBom[]
-  modelBomCustomerScopes ModelBomCustomerScope[]
-  materialTransformRules MaterialTransformRule[]
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  modelBoms               ModelBom[]
+  modelBomCustomerScopes  ModelBomCustomerScope[]
+  materialTransformRules  MaterialTransformRule[]
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
 
   @@index([customerName])
   @@index([status])
@@ -109,31 +114,36 @@ model CustomerContact {
   title        String?
   remark       String?
   isPrimary    Boolean  @default(false)
+  status       CommonStatus @default(ENABLED)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   @@index([customerId])
+  @@index([customerId, status])
   @@index([contactName])
 }
 
 /// 物料基础清单，只保存零件编码、名称和默认单位；库存数量仍然从 InventoryBatch 实时计算。
 model Material {
-  id                String       @id @default(uuid())
-  partCode          String       @unique
-  partName          String
-  unit              String       @default("件")
-  partSpecification String?
-  status            CommonStatus @default(ENABLED)
-  applicabilities   MaterialApplicability[]
-  drawingRevisions  MaterialDrawingRevision[]
-  modelBomLines     ModelBomLine[]
-  sourceTransformRules MaterialTransformRule[] @relation("MaterialTransformSource")
-  targetTransformRules MaterialTransformRule[] @relation("MaterialTransformTarget")
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
+  id                   String                    @id @default(uuid())
+  partCode             String                    @unique
+  partName             String
+  unit                 String                    @default("件")
+  partSpecification    String?
+  stockAlertEnabled    Boolean                   @default(false)
+  stockAlertQuantity   Decimal?                  @db.Decimal(18, 3)
+  status               CommonStatus              @default(ENABLED)
+  applicabilities      MaterialApplicability[]
+  drawingRevisions     MaterialDrawingRevision[]
+  modelBomLines        ModelBomLine[]
+  sourceTransformRules MaterialTransformRule[]   @relation("MaterialTransformSource")
+  targetTransformRules MaterialTransformRule[]   @relation("MaterialTransformTarget")
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
 
   @@index([partName])
   @@index([status])
+  @@index([stockAlertEnabled])
 }
 
 /// 零件管理常用机型快捷入口。只保存显示顺序，不改变 BOM、零件适用范围、订单或库存。
@@ -152,23 +162,23 @@ model MaterialCommonProjectModel {
 
 /// 零件图纸版本。历史图纸不覆盖旧订单，订单行只保存下单时的图纸快照。
 model MaterialDrawingRevision {
-  id                String       @id @default(uuid())
-  materialId        String
-  material          Material     @relation(fields: [materialId], references: [id], onDelete: Cascade)
-  drawingNo         String
-  drawingVersion    String
-  drawingDate       DateTime?
-  drawingStatus     String?
-  drawingFileName   String?
-  drawingFileUrl    String?
-  isDefault         Boolean      @default(false)
-  defaultChangedBy  String?
-  defaultChangedAt  DateTime?
-  remark            String?
-  status            CommonStatus @default(ENABLED)
-  modelBomLines     ModelBomLine[]
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
+  id               String         @id @default(uuid())
+  materialId       String
+  material         Material       @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  drawingNo        String
+  drawingVersion   String
+  drawingDate      DateTime?
+  drawingStatus    String?
+  drawingFileName  String?
+  drawingFileUrl   String?
+  isDefault        Boolean        @default(false)
+  defaultChangedBy String?
+  defaultChangedAt DateTime?
+  remark           String?
+  status           CommonStatus   @default(ENABLED)
+  modelBomLines    ModelBomLine[]
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   @@unique([materialId, drawingNo, drawingVersion])
   @@index([materialId, isDefault])
@@ -179,27 +189,27 @@ model MaterialDrawingRevision {
 
 /// 机型零件包。用于维护 B3、B5 等标准清单；只做下单推荐基础，不自动创建订单或生产任务。
 model ModelBom {
-  id                   String       @id @default(uuid())
-  bomName              String
-  customerId           String?
-  customer             Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  customerNameSnapshot String?
-  projectModel         String
-  customerScopeMode    String       @default("ALL")
-  customerScopeKey     String       @default("ALL")
-  projectModelScopeKey String
-  sourceBomId          String?
+  id                    String                  @id @default(uuid())
+  bomName               String
+  customerId            String?
+  customer              Customer?               @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerNameSnapshot  String?
+  projectModel          String
+  customerScopeMode     String                  @default("ALL")
+  customerScopeKey      String                  @default("ALL")
+  projectModelScopeKey  String
+  sourceBomId           String?
   sourceBomNameSnapshot String?
-  isCommon             Boolean      @default(false)
-  commonSortOrder      Int?
-  remark               String?
-  status               CommonStatus @default(ENABLED)
-  customerScopes       ModelBomCustomerScope[]
-  lines                ModelBomLine[]
-  diffReviewsAsTarget  ModelBomDiffReview[] @relation("ModelBomDiffReviewTarget")
-  diffReviewsAsSource  ModelBomDiffReview[] @relation("ModelBomDiffReviewSource")
-  createdAt            DateTime     @default(now())
-  updatedAt            DateTime     @updatedAt
+  isCommon              Boolean                 @default(false)
+  commonSortOrder       Int?
+  remark                String?
+  status                CommonStatus            @default(ENABLED)
+  customerScopes        ModelBomCustomerScope[]
+  lines                 ModelBomLine[]
+  diffReviewsAsTarget   ModelBomDiffReview[]    @relation("ModelBomDiffReviewTarget")
+  diffReviewsAsSource   ModelBomDiffReview[]    @relation("ModelBomDiffReviewSource")
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
 
   @@unique([bomName, customerScopeKey, projectModelScopeKey])
   @@unique([customerScopeKey, projectModelScopeKey])
@@ -227,31 +237,31 @@ model ModelBomCustomerScope {
 }
 
 model ModelBomLine {
-  id                    String       @id @default(uuid())
-  bomId                 String
-  bom                   ModelBom     @relation(fields: [bomId], references: [id], onDelete: Cascade)
-  materialId            String
-  material              Material     @relation(fields: [materialId], references: [id], onDelete: Restrict)
-  partCodeSnapshot      String
-  partNameSnapshot      String
-  unitSnapshot          String
+  id                        String                   @id @default(uuid())
+  bomId                     String
+  bom                       ModelBom                 @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  materialId                String
+  material                  Material                 @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  partCodeSnapshot          String
+  partNameSnapshot          String
+  unitSnapshot              String
   partSpecificationSnapshot String?
-  partThicknessSnapshot Decimal?     @db.Decimal(18, 3)
-  lineType              String       @default("PART")
-  partCategory          String?
-  componentNo           String?
-  parentComponentNo     String?
-  defaultDrawingRevisionId String?
-  defaultDrawingRevision MaterialDrawingRevision? @relation(fields: [defaultDrawingRevisionId], references: [id], onDelete: SetNull)
-  diffReviewsAsSourceLine ModelBomDiffReview[] @relation("ModelBomDiffReviewSourceLine")
-  diffReviewsAsTargetLine ModelBomDiffReview[] @relation("ModelBomDiffReviewTargetLine")
-  defaultProcessRoute   String?
-  defaultQuantity       Decimal      @default(1) @db.Decimal(18, 3)
-  remark                String?
-  sortOrder             Int          @default(0)
-  status                CommonStatus @default(ENABLED)
-  createdAt             DateTime     @default(now())
-  updatedAt             DateTime     @updatedAt
+  partThicknessSnapshot     Decimal?                 @db.Decimal(18, 3)
+  lineType                  String                   @default("PART")
+  partCategory              String?
+  componentNo               String?
+  parentComponentNo         String?
+  defaultDrawingRevisionId  String?
+  defaultDrawingRevision    MaterialDrawingRevision? @relation(fields: [defaultDrawingRevisionId], references: [id], onDelete: SetNull)
+  diffReviewsAsSourceLine   ModelBomDiffReview[]     @relation("ModelBomDiffReviewSourceLine")
+  diffReviewsAsTargetLine   ModelBomDiffReview[]     @relation("ModelBomDiffReviewTargetLine")
+  defaultProcessRoute       String?
+  defaultQuantity           Decimal                  @default(1) @db.Decimal(18, 3)
+  remark                    String?
+  sortOrder                 Int                      @default(0)
+  status                    CommonStatus             @default(ENABLED)
+  createdAt                 DateTime                 @default(now())
+  updatedAt                 DateTime                 @updatedAt
 
   @@index([bomId, materialId])
   @@index([bomId, lineType, sortOrder])
@@ -264,12 +274,12 @@ model ModelBomLine {
 
 /// 客户 BOM 与来源 BOM 的人工差异核对记录；只记录人工确认，不自动覆盖 BOM 明细。
 model ModelBomDiffReview {
-  id              String       @id @default(uuid())
+  id              String        @id @default(uuid())
   targetBomId     String
-  targetBom       ModelBom     @relation("ModelBomDiffReviewTarget", fields: [targetBomId], references: [id], onDelete: Cascade)
+  targetBom       ModelBom      @relation("ModelBomDiffReviewTarget", fields: [targetBomId], references: [id], onDelete: Cascade)
   sourceBomId     String
-  sourceBom       ModelBom     @relation("ModelBomDiffReviewSource", fields: [sourceBomId], references: [id], onDelete: Cascade)
-  reviewKey       String       @unique
+  sourceBom       ModelBom      @relation("ModelBomDiffReviewSource", fields: [sourceBomId], references: [id], onDelete: Cascade)
+  reviewKey       String        @unique
   issueKind       String
   sourceLineId    String?
   sourceLine      ModelBomLine? @relation("ModelBomDiffReviewSourceLine", fields: [sourceLineId], references: [id], onDelete: SetNull)
@@ -281,10 +291,10 @@ model ModelBomDiffReview {
   fieldsJson      Json?
   reviewedBy      String?
   reviewRemark    String?
-  status          CommonStatus @default(ENABLED)
-  reviewedAt      DateTime     @default(now())
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  status          CommonStatus  @default(ENABLED)
+  reviewedAt      DateTime      @default(now())
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
   @@index([targetBomId, sourceBomId])
   @@index([targetBomId, status])
@@ -362,23 +372,23 @@ model OrderNoReservation {
 
 /// 客户订单总表，只保存订单汇总信息；订单零件必须进入 OrderLine。
 model CustomerOrder {
-  id               String           @id @default(uuid())
-  orderNo          String           @unique
-  customerId       String
-  customer         Customer         @relation(fields: [customerId], references: [id])
-  customerCode     String
-  customerName     String
-  customerSnapshot Json
-  orderDate        DateTime
-  deliveryDate     DateTime?
-  status           OrderStatus      @default(DRAFT)
-  remark           String?
-  lines            OrderLine[]
-  productionTasks  ProductionTask[]
-  inventoryBatches InventoryBatch[]
+  id                    String                 @id @default(uuid())
+  orderNo               String                 @unique
+  customerId            String
+  customer              Customer               @relation(fields: [customerId], references: [id])
+  customerCode          String
+  customerName          String
+  customerSnapshot      Json
+  orderDate             DateTime
+  deliveryDate          DateTime?
+  status                OrderStatus            @default(DRAFT)
+  remark                String?
+  lines                 OrderLine[]
+  productionTasks       ProductionTask[]
+  inventoryBatches      InventoryBatch[]
   inventoryReservations InventoryReservation[]
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
   @@index([customerId])
   @@index([orderDate])
@@ -387,15 +397,15 @@ model CustomerOrder {
 
 /// Excel 订单导入会话。一个会话可以连续上传多个文件，最终只创建 DRAFT 订单。
 model OrderImportSession {
-  id          String            @id @default(uuid())
-  status      String            @default("DRAFT")
-  createdBy   String?
-  committedAt DateTime?
+  id                String            @id @default(uuid())
+  status            String            @default("DRAFT")
+  createdBy         String?
+  committedAt       DateTime?
   committedOrderNos Json?
-  files       OrderImportFile[]
-  rows        OrderImportRow[]
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
+  files             OrderImportFile[]
+  rows              OrderImportRow[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   @@index([status])
   @@index([createdAt])
@@ -471,8 +481,8 @@ model OrderImportRow {
 
 /// Excel 零件基础库导入会话。只写入零件主数据，不创建订单、库存或生产任务。
 model MaterialImportSession {
-  id                     String               @id @default(uuid())
-  status                 String               @default("DRAFT")
+  id                     String                           @id @default(uuid())
+  status                 String                           @default("DRAFT")
   createdBy              String?
   committedAt            DateTime?
   committedMaterialCodes Json?
@@ -480,8 +490,8 @@ model MaterialImportSession {
   rows                   MaterialImportRow[]
   applicabilityRows      MaterialApplicabilityImportRow[]
   transformRows          MaterialTransformImportRow[]
-  createdAt              DateTime             @default(now())
-  updatedAt              DateTime             @updatedAt
+  createdAt              DateTime                         @default(now())
+  updatedAt              DateTime                         @updatedAt
 
   @@index([status])
   @@index([createdAt])
@@ -489,20 +499,20 @@ model MaterialImportSession {
 
 /// 零件基础库导入文件记录。一个会话允许连续上传多个 .xlsx 文件。
 model MaterialImportFile {
-  id                String                @id @default(uuid())
+  id                String                           @id @default(uuid())
   sessionId         String
-  session           MaterialImportSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session           MaterialImportSession            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   fileName          String
   storedFileName    String?
   fileHash          String
   sheetName         String
-  rowCount          Int                   @default(0)
-  materialRowCount  Int                   @default(0)
-  scopeRowCount     Int                   @default(0)
-  transformRowCount Int                   @default(0)
-  acceptedRowCount  Int                   @default(0)
-  duplicateRowCount Int                   @default(0)
-  createdAt         DateTime              @default(now())
+  rowCount          Int                              @default(0)
+  materialRowCount  Int                              @default(0)
+  scopeRowCount     Int                              @default(0)
+  transformRowCount Int                              @default(0)
+  acceptedRowCount  Int                              @default(0)
+  duplicateRowCount Int                              @default(0)
+  createdAt         DateTime                         @default(now())
   rows              MaterialImportRow[]
   applicabilityRows MaterialApplicabilityImportRow[]
   transformRows     MaterialTransformImportRow[]
@@ -514,29 +524,31 @@ model MaterialImportFile {
 
 /// 零件基础库导入原始行快照。提交前后端重新校验，不信任 Excel 公式。
 model MaterialImportRow {
-  id                String                @id @default(uuid())
-  sessionId         String
-  session           MaterialImportSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  fileId            String
-  file              MaterialImportFile    @relation(fields: [fileId], references: [id], onDelete: Cascade)
-  sourceRowNo       Int
-  rowHash           String
-  partCode          String
-  partName          String
-  unit              String
-  partSpecification String?
-  drawingNo         String?
-  drawingVersion    String?
-  drawingDate       DateTime?
-  drawingStatus     String?
-  partThickness     Decimal?              @db.Decimal(18, 3)
-  projectModel      String?
-  remark            String?
-  raw               Json
-  issues            Json?
-  errorCount        Int                   @default(0)
-  warningCount      Int                   @default(0)
-  createdAt         DateTime              @default(now())
+  id                 String                @id @default(uuid())
+  sessionId          String
+  session            MaterialImportSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  fileId             String
+  file               MaterialImportFile    @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  sourceRowNo        Int
+  rowHash            String
+  partCode           String
+  partName           String
+  unit               String
+  partSpecification  String?
+  drawingNo          String?
+  drawingVersion     String?
+  drawingDate        DateTime?
+  drawingStatus      String?
+  partThickness      Decimal?              @db.Decimal(18, 3)
+  projectModel       String?
+  stockAlertEnabled  Boolean?
+  stockAlertQuantity Decimal?              @db.Decimal(18, 3)
+  remark             String?
+  raw                Json
+  issues             Json?
+  errorCount         Int                   @default(0)
+  warningCount       Int                   @default(0)
+  createdAt          DateTime              @default(now())
 
   @@unique([sessionId, rowHash])
   @@index([sessionId])
@@ -636,52 +648,52 @@ model MaterialTransformRule {
 }
 
 model OrderLine {
-  id              String                 @id @default(uuid())
-  orderId         String
-  order           CustomerOrder          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  lineNo          Int
-  partCode        String
-  partName        String
-  drawingNo       String?
-  drawingVersion  String?
-  drawingFileName String?
-  drawingFileUrl  String?
-  partThickness   Decimal                @default(1) @db.Decimal(18, 3)
-  partSpecification String?
-  quantity        Decimal                @db.Decimal(18, 3)
-  productionPlanQuantity Decimal          @db.Decimal(18, 3)
-  productionPlanSuggestedQuantity Decimal? @db.Decimal(18, 3)
-  productionPlanOverrideByCode String?
-  productionPlanOverrideByName String?
-  productionPlanOverrideByRole String?
-  productionPlanOverrideAt DateTime?
-  productionPlanOverrideReason String?
-  fulfillmentMode OrderLineFulfillmentMode @default(PRODUCTION)
-  unit            String
-  deliveryDate    DateTime?
-  remark          String?
-  processSnapshot Json?
-  stockSourceSelections Json?
-  lineType        String                 @default("PART")
-  partCategory    String?
-  componentNo     String?
-  parentComponentNo String?
-  importSequence  String?
-  sourceImportSessionId String?
-  sourceImportFileId String?
-  sourceImportFile OrderImportFile? @relation("OrderLineSourceImportFile", fields: [sourceImportFileId], references: [id], onDelete: SetNull)
-  sourceImportFileName String?
-  sourceImportRowNo Int?
-  projectModel    String?
-  drawingDate     DateTime?
-  drawingStatus   String?
-  processSteps    OrderLineProcessStep[]
-  productionTasks ProductionTask[]
-  inventoryBatches InventoryBatch[]
-  inventoryReservations InventoryReservation[]
-  inventoryTransactions InventoryTransaction[]
-  createdAt       DateTime               @default(now())
-  updatedAt       DateTime               @updatedAt
+  id                              String                   @id @default(uuid())
+  orderId                         String
+  order                           CustomerOrder            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  lineNo                          Int
+  partCode                        String
+  partName                        String
+  drawingNo                       String?
+  drawingVersion                  String?
+  drawingFileName                 String?
+  drawingFileUrl                  String?
+  partThickness                   Decimal                  @default(1) @db.Decimal(18, 3)
+  partSpecification               String?
+  quantity                        Decimal                  @db.Decimal(18, 3)
+  productionPlanQuantity          Decimal                  @db.Decimal(18, 3)
+  productionPlanSuggestedQuantity Decimal?                 @db.Decimal(18, 3)
+  productionPlanOverrideByCode    String?
+  productionPlanOverrideByName    String?
+  productionPlanOverrideByRole    String?
+  productionPlanOverrideAt        DateTime?
+  productionPlanOverrideReason    String?
+  fulfillmentMode                 OrderLineFulfillmentMode @default(PRODUCTION)
+  unit                            String
+  deliveryDate                    DateTime?
+  remark                          String?
+  processSnapshot                 Json?
+  stockSourceSelections           Json?
+  lineType                        String                   @default("PART")
+  partCategory                    String?
+  componentNo                     String?
+  parentComponentNo               String?
+  importSequence                  String?
+  sourceImportSessionId           String?
+  sourceImportFileId              String?
+  sourceImportFile                OrderImportFile?         @relation("OrderLineSourceImportFile", fields: [sourceImportFileId], references: [id], onDelete: SetNull)
+  sourceImportFileName            String?
+  sourceImportRowNo               Int?
+  projectModel                    String?
+  drawingDate                     DateTime?
+  drawingStatus                   String?
+  processSteps                    OrderLineProcessStep[]
+  productionTasks                 ProductionTask[]
+  inventoryBatches                InventoryBatch[]
+  inventoryReservations           InventoryReservation[]
+  inventoryTransactions           InventoryTransaction[]
+  createdAt                       DateTime                 @default(now())
+  updatedAt                       DateTime                 @updatedAt
 
   @@unique([orderId, lineNo])
   @@index([partCode])
@@ -695,47 +707,47 @@ model OrderLine {
 
 /// 每个订单零件独立保存生产步骤，避免把流程压成一个长字符串。
 model OrderLineProcessStep {
-  id          String    @id @default(uuid())
-  orderLineId String
-  orderLine   OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
-  stepNo      Int
-  processName String
+  id            String    @id @default(uuid())
+  orderLineId   String
+  orderLine     OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  stepNo        Int
+  processName   String
   processRemark String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@unique([orderLineId, stepNo])
   @@index([processName])
 }
 
-/// 生产任务由订单零件生成，生产状态只保留第一阶段需要的三种状态。
+/// 生产任务由订单零件生成，状态按 PENDING -> IN_PROGRESS -> WAITING_CONFIRMATION -> COMPLETED -> STORED 流转。
 model ProductionTask {
-  id               String           @id @default(uuid())
-  productionTaskNo String           @unique
-  orderId          String
-  order            CustomerOrder    @relation(fields: [orderId], references: [id])
-  orderLineId      String
-  orderLine        OrderLine        @relation(fields: [orderLineId], references: [id])
-  orderNo          String
-  customerName     String
-  partCode         String
-  partName         String
-  plannedQuantity  Decimal          @db.Decimal(18, 3)
-  completedQuantity Decimal         @default(0) @db.Decimal(18, 3)
-  unit             String
-  status           ProductionStatus @default(PENDING)
-  processSnapshot  Json
-  isReplenishment  Boolean          @default(false)
-  sourceProductionTaskNo String?
-  replenishmentSourceType String?
+  id                           String                        @id @default(uuid())
+  productionTaskNo             String                        @unique
+  orderId                      String
+  order                        CustomerOrder                 @relation(fields: [orderId], references: [id])
+  orderLineId                  String
+  orderLine                    OrderLine                     @relation(fields: [orderLineId], references: [id])
+  orderNo                      String
+  customerName                 String
+  partCode                     String
+  partName                     String
+  plannedQuantity              Decimal                       @db.Decimal(18, 3)
+  completedQuantity            Decimal                       @default(0) @db.Decimal(18, 3)
+  unit                         String
+  status                       ProductionStatus              @default(PENDING)
+  processSnapshot              Json
+  isReplenishment              Boolean                       @default(false)
+  sourceProductionTaskNo       String?
+  replenishmentSourceType      String?
   replenishmentSourceRequestNo String?
-  startedAt        DateTime?
-  completedAt      DateTime?
-  remark           String?
-  inventoryBatch   InventoryBatch?
-  processCompletions ProductionProcessCompletion[]
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
+  startedAt                    DateTime?
+  completedAt                  DateTime?
+  remark                       String?
+  inventoryBatch               InventoryBatch?
+  processCompletions           ProductionProcessCompletion[]
+  createdAt                    DateTime                      @default(now())
+  updatedAt                    DateTime                      @updatedAt
 
   @@index([orderId])
   @@index([orderNo])
@@ -768,35 +780,35 @@ model ProductionOperator {
 
 /// 每道工序的完成表单；同一个生产任务的同一道工序只保留当前有效记录。
 model ProductionProcessCompletion {
-  id                String                         @id @default(uuid())
-  productionTaskId  String
-  productionTask    ProductionTask                 @relation(fields: [productionTaskId], references: [id], onDelete: Cascade)
-  stepNo            Int
-  processName       String
-  processRemark     String?
-  isCompleted       Boolean                        @default(false)
-  completedQuantity Decimal                        @default(0) @db.Decimal(18, 3)
-  scrapQuantity     Decimal                        @default(0) @db.Decimal(18, 3)
-  shortageQuantity  Decimal                        @default(0) @db.Decimal(18, 3)
-  shortageMode      String?
-  replenishmentTaskNo String?
-  managerName       String?
-  shortageReason    String?
-  shortageResolutionMode String?
-  shortageResolutionBy String?
+  id                       String                           @id @default(uuid())
+  productionTaskId         String
+  productionTask           ProductionTask                   @relation(fields: [productionTaskId], references: [id], onDelete: Cascade)
+  stepNo                   Int
+  processName              String
+  processRemark            String?
+  isCompleted              Boolean                          @default(false)
+  completedQuantity        Decimal                          @default(0) @db.Decimal(18, 3)
+  scrapQuantity            Decimal                          @default(0) @db.Decimal(18, 3)
+  shortageQuantity         Decimal                          @default(0) @db.Decimal(18, 3)
+  shortageMode             String?
+  replenishmentTaskNo      String?
+  managerName              String?
+  shortageReason           String?
+  shortageResolutionMode   String?
+  shortageResolutionBy     String?
   shortageResolutionReason String?
-  shortageResolvedAt DateTime?
-  unit              String
-  operatorCode      String?
-  operatorName      String?
-  operatorRole      String?
-  completedAt       DateTime?
-  quantityOverrideReason String?
-  remark            String?
-  replenishmentRequests ProductionReplenishmentRequest[]
-  logs              ProductionProcessCompletionLog[]
-  createdAt         DateTime                       @default(now())
-  updatedAt         DateTime                       @updatedAt
+  shortageResolvedAt       DateTime?
+  unit                     String
+  operatorCode             String?
+  operatorName             String?
+  operatorRole             String?
+  completedAt              DateTime?
+  quantityOverrideReason   String?
+  remark                   String?
+  replenishmentRequests    ProductionReplenishmentRequest[]
+  logs                     ProductionProcessCompletionLog[]
+  createdAt                DateTime                         @default(now())
+  updatedAt                DateTime                         @updatedAt
 
   @@unique([productionTaskId, stepNo])
   @@index([processName])
@@ -807,17 +819,17 @@ model ProductionProcessCompletion {
 
 /// 工序完成表单修改日志，只追加，不覆盖。
 model ProductionProcessCompletionLog {
-  id                String                      @id @default(uuid())
-  completionId      String
-  completion        ProductionProcessCompletion @relation(fields: [completionId], references: [id], onDelete: Cascade)
-  productionTaskId  String
-  processName       String
-  action            String
-  operatorCode      String?
-  operatorName      String?
-  beforeSnapshot    Json?
-  afterSnapshot     Json
-  createdAt         DateTime                    @default(now())
+  id               String                      @id @default(uuid())
+  completionId     String
+  completion       ProductionProcessCompletion @relation(fields: [completionId], references: [id], onDelete: Cascade)
+  productionTaskId String
+  processName      String
+  action           String
+  operatorCode     String?
+  operatorName     String?
+  beforeSnapshot   Json?
+  afterSnapshot    Json
+  createdAt        DateTime                    @default(now())
 
   @@index([completionId])
   @@index([productionTaskId])
@@ -826,32 +838,32 @@ model ProductionProcessCompletionLog {
 
 /// 生产过程中因报废、缺件发起的补单申请；和订单页面由销售/计划发起的数量增加补单分开记录。
 model ProductionReplenishmentRequest {
-  id                    String                       @id @default(uuid())
-  requestNo             String                       @unique
-  sourceType            String                       @default("PRODUCTION_SCRAP")
-  status                String                       @default("PENDING")
-  orderId               String?
-  orderNo               String
-  orderLineId           String?
-  productionTaskId      String?
-  productionTaskNo      String?
-  processCompletionId   String?                      @unique
-  processCompletion     ProductionProcessCompletion? @relation(fields: [processCompletionId], references: [id], onDelete: SetNull)
-  partCode              String
-  partName              String
-  requestQuantity       Decimal                      @db.Decimal(18, 3)
-  scrapQuantity         Decimal                      @default(0) @db.Decimal(18, 3)
-  unit                  String
-  reason                String
-  requestedByCode       String?
-  requestedByName       String?
-  supervisorName        String?
-  supervisorRemark      String?
-  approvedAt            DateTime?
-  reviewedAt            DateTime?
-  replenishmentTaskNo   String?
-  createdAt             DateTime                     @default(now())
-  updatedAt             DateTime                     @updatedAt
+  id                  String                       @id @default(uuid())
+  requestNo           String                       @unique
+  sourceType          String                       @default("PRODUCTION_SCRAP")
+  status              String                       @default("PENDING")
+  orderId             String?
+  orderNo             String
+  orderLineId         String?
+  productionTaskId    String?
+  productionTaskNo    String?
+  processCompletionId String?                      @unique
+  processCompletion   ProductionProcessCompletion? @relation(fields: [processCompletionId], references: [id], onDelete: SetNull)
+  partCode            String
+  partName            String
+  requestQuantity     Decimal                      @db.Decimal(18, 3)
+  scrapQuantity       Decimal                      @default(0) @db.Decimal(18, 3)
+  unit                String
+  reason              String
+  requestedByCode     String?
+  requestedByName     String?
+  supervisorName      String?
+  supervisorRemark    String?
+  approvedAt          DateTime?
+  reviewedAt          DateTime?
+  replenishmentTaskNo String?
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
 
   @@index([status])
   @@index([sourceType])
@@ -862,29 +874,29 @@ model ProductionReplenishmentRequest {
 }
 
 model ProductionNotice {
-  id                 String                 @id @default(uuid())
-  noticeNo           String                 @unique
-  noticeType         ProductionNoticeType
-  status             ProductionNoticeStatus @default(PENDING)
-  target             ProductionNoticeTarget @default(PRODUCTION)
-  orderId            String?
-  orderNo            String
-  orderLineId        String?
-  productionTaskId   String?
-  productionTaskNo   String?
-  partCode           String?
-  partName           String?
-  beforeQuantity     Decimal?               @db.Decimal(18, 3)
-  afterQuantity      Decimal?               @db.Decimal(18, 3)
-  deltaQuantity      Decimal?               @db.Decimal(18, 3)
-  unit               String?
-  reason             String
-  managerName        String?
-  handlingPlan       Json?
-  acknowledgedBy     String?
-  acknowledgedAt     DateTime?
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
+  id               String                 @id @default(uuid())
+  noticeNo         String                 @unique
+  noticeType       ProductionNoticeType
+  status           ProductionNoticeStatus @default(PENDING)
+  target           ProductionNoticeTarget @default(PRODUCTION)
+  orderId          String?
+  orderNo          String
+  orderLineId      String?
+  productionTaskId String?
+  productionTaskNo String?
+  partCode         String?
+  partName         String?
+  beforeQuantity   Decimal?               @db.Decimal(18, 3)
+  afterQuantity    Decimal?               @db.Decimal(18, 3)
+  deltaQuantity    Decimal?               @db.Decimal(18, 3)
+  unit             String?
+  reason           String
+  managerName      String?
+  handlingPlan     Json?
+  acknowledgedBy   String?
+  acknowledgedAt   DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
 
   @@index([status])
   @@index([target])
@@ -896,23 +908,23 @@ model ProductionNotice {
 }
 
 model ProductionScrapRecord {
-  id                 String   @id @default(uuid())
-  scrapNo            String   @unique
-  orderId            String?
-  orderNo            String
-  orderLineId        String?
-  productionTaskId   String?
-  productionTaskNo   String?
-  partCode           String
-  partName           String
-  quantity           Decimal  @db.Decimal(18, 3)
-  unit               String
-  reason             String
-  sourceRecordType   String
-  sourceRecordId     String
-  recordDate         DateTime @default(now())
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id               String   @id @default(uuid())
+  scrapNo          String   @unique
+  orderId          String?
+  orderNo          String
+  orderLineId      String?
+  productionTaskId String?
+  productionTaskNo String?
+  partCode         String
+  partName         String
+  quantity         Decimal  @db.Decimal(18, 3)
+  unit             String
+  reason           String
+  sourceRecordType String
+  sourceRecordId   String
+  recordDate       DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   @@unique([sourceRecordType, sourceRecordId])
   @@index([orderNo])
@@ -949,34 +961,34 @@ model WarehouseLocation {
 }
 
 model InventoryBatch {
-  id                     String                 @id @default(uuid())
-  batchNo                String                 @unique
-  partCode               String
-  partName               String
-  sourceOrderId          String?
-  sourceOrder            CustomerOrder?         @relation(fields: [sourceOrderId], references: [id])
-  sourceOrderLineId      String?
-  sourceOrderLine        OrderLine?             @relation(fields: [sourceOrderLineId], references: [id])
-  sourceOrderNo          String?
-  sourceCustomerName     String?
-  productionTaskId       String?                @unique
-  productionTask         ProductionTask?        @relation(fields: [productionTaskId], references: [id])
-  sourceProductionTaskNo String?
-  sourceKind             String                 @default("NORMAL_ORDER")
-  replenishmentSourceType String?
+  id                           String                 @id @default(uuid())
+  batchNo                      String                 @unique
+  partCode                     String
+  partName                     String
+  sourceOrderId                String?
+  sourceOrder                  CustomerOrder?         @relation(fields: [sourceOrderId], references: [id])
+  sourceOrderLineId            String?
+  sourceOrderLine              OrderLine?             @relation(fields: [sourceOrderLineId], references: [id])
+  sourceOrderNo                String?
+  sourceCustomerName           String?
+  productionTaskId             String?                @unique
+  productionTask               ProductionTask?        @relation(fields: [productionTaskId], references: [id])
+  sourceProductionTaskNo       String?
+  sourceKind                   String                 @default("NORMAL_ORDER")
+  replenishmentSourceType      String?
   replenishmentSourceRequestNo String?
-  quantity               Decimal                @db.Decimal(18, 3)
-  unit                   String
-  warehouseId            String
-  warehouse              Warehouse              @relation(fields: [warehouseId], references: [id])
-  locationId             String?
-  location               WarehouseLocation?     @relation(fields: [locationId], references: [id])
-  status                 InventoryStatus        @default(AVAILABLE)
-  transactions           InventoryTransaction[]
-  adjustments            InventoryAdjustment[]
-  reservations           InventoryReservation[]
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
+  quantity                     Decimal                @db.Decimal(18, 3)
+  unit                         String
+  warehouseId                  String
+  warehouse                    Warehouse              @relation(fields: [warehouseId], references: [id])
+  locationId                   String?
+  location                     WarehouseLocation?     @relation(fields: [locationId], references: [id])
+  status                       InventoryStatus        @default(AVAILABLE)
+  transactions                 InventoryTransaction[]
+  adjustments                  InventoryAdjustment[]
+  reservations                 InventoryReservation[]
+  createdAt                    DateTime               @default(now())
+  updatedAt                    DateTime               @updatedAt
 
   @@index([partCode])
   @@index([sourceOrderNo])
@@ -1019,29 +1031,29 @@ model InventoryReservation {
 
 /// 库存流水只追加记录，用于保留入库 / 出库数量变化。
 model InventoryTransaction {
-  id                     String                   @id @default(uuid())
-  transactionNo          String                   @unique
-  transactionType        InventoryTransactionType
-  batchId                String?
-  batch                  InventoryBatch?          @relation(fields: [batchId], references: [id])
-  orderLineId            String?
-  orderLine              OrderLine?               @relation(fields: [orderLineId], references: [id], onDelete: SetNull)
-  partCode               String
-  partName               String
-  orderNo                String?
-  productionTaskNo       String?
-  quantity               Decimal                  @db.Decimal(18, 3)
-  unit                   String
-  warehouseId            String
-  warehouse              Warehouse                @relation(fields: [warehouseId], references: [id])
-  locationId             String?
-  location               WarehouseLocation?       @relation(fields: [locationId], references: [id])
-  transactionTime        DateTime                 @default(now())
-  remark                 String?
-  sourceRecordType       String?
-  sourceRecordId         String?
-  createdAt              DateTime                 @default(now())
-  updatedAt              DateTime                 @updatedAt
+  id               String                   @id @default(uuid())
+  transactionNo    String                   @unique
+  transactionType  InventoryTransactionType
+  batchId          String
+  batch            InventoryBatch           @relation(fields: [batchId], references: [id])
+  orderLineId      String?
+  orderLine        OrderLine?               @relation(fields: [orderLineId], references: [id], onDelete: SetNull)
+  partCode         String
+  partName         String
+  orderNo          String?
+  productionTaskNo String?
+  quantity         Decimal                  @db.Decimal(18, 3)
+  unit             String
+  warehouseId      String
+  warehouse        Warehouse                @relation(fields: [warehouseId], references: [id])
+  locationId       String?
+  location         WarehouseLocation?       @relation(fields: [locationId], references: [id])
+  transactionTime  DateTime                 @default(now())
+  remark           String?
+  sourceRecordType String?
+  sourceRecordId   String?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
 
   @@index([transactionType])
   @@index([partCode])

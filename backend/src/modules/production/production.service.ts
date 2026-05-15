@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { OrderStatus, Prisma, ProductionNoticeStatus, ProductionNoticeTarget, ProductionStatus } from '@prisma/client';
-import { businessDateKey } from '../../common/business-date';
+import { randomUUID } from 'node:crypto';
+import { businessDateKey, businessDateTimeKey } from '../../common/business-date';
 import { decimalToNumber, processSnapshotToDetails, type ProcessStepSnapshot } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -63,6 +64,15 @@ const fallbackProductionOperators: ProductionOperatorRow[] = [
     pinyin: 'chenzhuren',
     pinyinInitials: 'czr',
     keywords: ['chen', 'zhuren', 'czr', '车间主任', '主任', '车间', '主管']
+  },
+  {
+    code: 'WH-001',
+    accountId: 'WH-001',
+    name: '周仓管',
+    role: '仓库管理员',
+    pinyin: 'zhoucangguan',
+    pinyinInitials: 'zcg',
+    keywords: ['zhou', 'cangguan', 'zcg', '仓库', '仓管', '库管', '入库', '发货']
   },
   {
     code: 'TECH-001',
@@ -173,12 +183,20 @@ export class ProductionService {
 
   async notices(query: ProductionNoticeQueryDto = {}) {
     const target = query.target || ProductionNoticeTarget.PRODUCTION;
+    const where = await this.buildProductionNoticeWhere(query, target);
     const notices = await this.prisma.productionNotice.findMany({
-      where: {
-        target,
-        ...(query.status ? { status: query.status } : {})
-      },
-      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }]
+      where,
+      orderBy: { createdAt: 'desc' }
+    });
+    return this.toNoticesWithCustomerNames(notices);
+  }
+
+  async adminNotices(query: ProductionNoticeQueryDto = {}) {
+    // 管理员全部通知只做只读历史查询，按 target 过滤展示归类，不参与确认或状态流转。
+    const where = await this.buildProductionNoticeWhere(query, query.target);
+    const notices = await this.prisma.productionNotice.findMany({
+      where,
+      orderBy: { createdAt: 'desc' }
     });
     return this.toNoticesWithCustomerNames(notices);
   }
@@ -188,18 +206,34 @@ export class ProductionService {
     if (!acknowledgedBy) {
       throw new BadRequestException('确认人员不能为空');
     }
-    const notice = await this.prisma.productionNotice.findUnique({ where: { id } });
-    if (!notice) {
-      throw new NotFoundException('生产通知不存在');
-    }
-    const saved = await this.prisma.productionNotice.update({
-      where: { id },
+    // 通知确认只允许把生产端 PENDING 改为 ACKNOWLEDGED；历史通知不能重复改写确认人。
+    const updated = await this.prisma.productionNotice.updateMany({
+      where: {
+        id,
+        target: ProductionNoticeTarget.PRODUCTION,
+        status: ProductionNoticeStatus.PENDING
+      },
       data: {
         status: ProductionNoticeStatus.ACKNOWLEDGED,
         acknowledgedBy,
         acknowledgedAt: new Date()
       }
     });
+    if (updated.count !== 1) {
+      const notice = await this.prisma.productionNotice.findFirst({
+        where: { id, target: ProductionNoticeTarget.PRODUCTION },
+        select: { id: true, status: true }
+      });
+      if (!notice) {
+        throw new NotFoundException('生产通知不存在');
+      }
+      throw new BadRequestException('生产通知已确认，不能重复确认');
+    }
+
+    const saved = await this.prisma.productionNotice.findUnique({ where: { id } });
+    if (!saved) {
+      throw new NotFoundException('生产通知不存在');
+    }
     const [noticeWithCustomer] = await this.toNoticesWithCustomerNames([saved]);
     return noticeWithCustomer;
   }
@@ -376,7 +410,11 @@ export class ProductionService {
     return tokens.some((token) => token.includes(keyword));
   }
 
-  private async resolveOperatorSnapshot(operatorCodes?: string[], fallbackOperatorCode?: string): Promise<ResolvedOperatorSnapshot> {
+  private async resolveOperatorSnapshot(
+    operatorCodes?: string[],
+    fallbackOperatorCode?: string,
+    options: { required?: boolean } = {}
+  ): Promise<ResolvedOperatorSnapshot> {
     const normalizedCodes = [
       ...(operatorCodes || []),
       ...(fallbackOperatorCode ? [fallbackOperatorCode] : [])
@@ -385,7 +423,10 @@ export class ProductionService {
       .filter(Boolean);
     const uniqueCodes = Array.from(new Set(normalizedCodes));
     if (uniqueCodes.length === 0) {
-      // 工序完成表允许暂不填写操作人员，但如果填写就必须来自后端账户清单。
+      if (options.required) {
+        throw new BadRequestException('请选择工序操作人员');
+      }
+      // 回退未完成时允许不填写操作人员；一旦确认完成，后端必须校验操作人员账号。
       return { code: null, name: null, role: null };
     }
 
@@ -435,12 +476,12 @@ export class ProductionService {
     processName: string
   ): Promise<ResolvedOperatorSnapshot> {
     const assignment = dto.operatorsByProcess?.find((item) => item.processName.trim() === processName);
-    return this.resolveOperatorSnapshot(assignment?.operatorCodes ?? dto.operatorCodes, dto.operatorCode);
+    return this.resolveOperatorSnapshot(assignment?.operatorCodes ?? dto.operatorCodes, dto.operatorCode, { required: true });
   }
 
   private buildTaskWhere(query: ProductionTaskQueryDto) {
     const where: Prisma.ProductionTaskWhereInput = {
-      // 已取消订单只保留已开工且未入库的任务，供管理撤回；未开工或已入库的取消任务不再干扰生产首页。
+      // 已取消订单只保留已开工且未入库的任务，供管理撤回；已取消任务默认不再干扰生产首页。
       NOT: [
         {
           status: ProductionStatus.PENDING,
@@ -455,6 +496,8 @@ export class ProductionService {
 
     if (query.status) {
       where.status = query.status;
+    } else {
+      where.status = { not: ProductionStatus.CANCELLED };
     }
 
     if (query.orderNo) {
@@ -558,20 +601,20 @@ export class ProductionService {
         };
       const customerOrderLineKey = task.orderLineId || `${task.partCode}__${task.partName}__${task.unit}`;
       if (!current.customerOrderLineKeys.has(customerOrderLineKey)) {
-        quantityRow.customerOrderQuantity += Number(task.customerOrderQuantity || 0);
+        quantityRow.customerOrderQuantity += Number(task.customerOrderQuantity ?? 0);
         current.customerOrderLineKeys.add(customerOrderLineKey);
       }
-      quantityRow.plannedQuantity += Number(task.plannedQuantity || 0);
-      quantityRow.completedQuantity += Number(task.completedQuantity || 0);
+      quantityRow.plannedQuantity += Number(task.plannedQuantity ?? 0);
+      quantityRow.completedQuantity += Number(task.completedQuantity ?? 0);
       current.quantityByUnit.set(task.unit, quantityRow);
-      current.totalPlannedQuantity += Number(task.plannedQuantity || 0);
-      current.totalCompletedQuantity += Number(task.completedQuantity || 0);
-      if (Number(task.unresolvedShortageQuantity || 0) > 0) {
+      current.totalPlannedQuantity += Number(task.plannedQuantity ?? 0);
+      current.totalCompletedQuantity += Number(task.completedQuantity ?? 0);
+      if (Number(task.unresolvedShortageQuantity ?? 0) > 0) {
         current.unresolvedShortageLineKeys.add(task.orderLineId || task.id);
         const shortageUnit = task.unresolvedShortageUnit || task.unit || '件';
         current.unresolvedShortageQuantityByUnit.set(
           shortageUnit,
-          (current.unresolvedShortageQuantityByUnit.get(shortageUnit) || 0) + Number(task.unresolvedShortageQuantity || 0)
+          (current.unresolvedShortageQuantityByUnit.get(shortageUnit) ?? 0) + Number(task.unresolvedShortageQuantity ?? 0)
         );
         current.shortageActionTasks.push({
           id: task.id,
@@ -583,13 +626,13 @@ export class ProductionService {
           unit: shortageUnit
         });
       }
-      if (Number(task.pendingProductionReplenishmentQuantity || 0) > 0) {
+      if (Number(task.pendingProductionReplenishmentQuantity ?? 0) > 0) {
         current.pendingProductionReplenishmentLineKeys.add(task.orderLineId || task.id);
         const shortageUnit = task.pendingProductionReplenishmentUnit || task.unit || '件';
         current.pendingProductionReplenishmentQuantityByUnit.set(
           shortageUnit,
-          (current.pendingProductionReplenishmentQuantityByUnit.get(shortageUnit) || 0) +
-            Number(task.pendingProductionReplenishmentQuantity || 0)
+          (current.pendingProductionReplenishmentQuantityByUnit.get(shortageUnit) ?? 0) +
+            Number(task.pendingProductionReplenishmentQuantity ?? 0)
         );
       }
 
@@ -626,7 +669,7 @@ export class ProductionService {
         current.receivedCount += 1;
       }
       const progressLabel = this.orderSummaryProgressLabel(task, status);
-      current.progressBuckets.set(progressLabel, (current.progressBuckets.get(progressLabel) || 0) + 1);
+      current.progressBuckets.set(progressLabel, (current.progressBuckets.get(progressLabel) ?? 0) + 1);
 
       summaries.set(key, current);
     }
@@ -805,22 +848,22 @@ export class ProductionService {
       if (transaction.orderNo) {
         orderReceiptQuantityByTaskNo.set(
           transaction.productionTaskNo,
-          (orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) || 0) + quantity
+          (orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity
         );
         continue;
       }
 
       const row = getRow(transaction.partCode, transaction.partName, transaction.unit);
       row.stockQuantity += quantity;
-      stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) || 0) + quantity);
+      stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity);
     }
 
     for (const task of productionTasks) {
       const row = getRow(task.partCode, task.partName, task.unit);
       row.completedProductionQuantity += this.toEffectiveTaskCompletedQuantity(
         task,
-        stockQuantityByTaskNo.get(task.productionTaskNo) || 0,
-        orderReceiptQuantityByTaskNo.get(task.productionTaskNo) || 0
+        stockQuantityByTaskNo.get(task.productionTaskNo) ?? 0,
+        orderReceiptQuantityByTaskNo.get(task.productionTaskNo) ?? 0
       );
     }
 
@@ -850,6 +893,7 @@ export class ProductionService {
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能重新开始生产');
         }
+        this.assertTaskNotStored(task, '生产任务已入库，不能重新开始生产');
         if (task.status === ProductionStatus.COMPLETED) {
           throw new BadRequestException('已完成任务不能重新开始生产');
         }
@@ -910,6 +954,7 @@ export class ProductionService {
           if (task.inventoryBatch) {
             throw new BadRequestException(`生产任务已入库，不能重新开始生产：${task.productionTaskNo}`);
           }
+          this.assertTaskNotStored(task, `生产任务已入库，不能重新开始生产：${task.productionTaskNo}`);
           if (task.status !== ProductionStatus.PENDING) {
             throw new BadRequestException(`只能批量开始待确认生产任务：${task.productionTaskNo}`);
           }
@@ -977,29 +1022,48 @@ export class ProductionService {
         if (task.order.status === OrderStatus.COMPLETED) {
           throw new BadRequestException('已完成发货订单不能撤回生产任务');
         }
+        if (task.status === ProductionStatus.CANCELLED) {
+          // 已取消任务只保留历史，不能通过管理撤回重新改回待生产。
+          throw new BadRequestException('生产任务已取消，不能管理撤回');
+        }
+        this.assertTaskNotStored(task, '生产任务已入库，不能撤回');
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能撤回');
+        }
+        const maxHandlingQuantity = this.withdrawHandlingQuantityLimit(task);
+        if (handlingMode !== 'NONE' && maxHandlingQuantity <= 0) {
+          throw new BadRequestException('当前生产任务没有已记录产出数量，不能转库存或报废');
+        }
+        if (handlingMode !== 'NONE' && handlingQuantity > maxHandlingQuantity + 0.0001) {
+          // 管理撤回只能处理已经记录的生产产出，不能凭撤回操作生成超量库存或报废记录。
+          throw new BadRequestException(`撤回处理数量不能超过已记录产出数量 ${this.formatQuantity(maxHandlingQuantity, task.unit)}`);
         }
         const childTasks = await tx.productionTask.findMany({
           where: { sourceProductionTaskNo: task.productionTaskNo },
           include: { inventoryBatch: true, processCompletions: true }
         });
         const lockedChild = childTasks.find(
-          (child) => child.status !== ProductionStatus.PENDING || child.inventoryBatch || child.processCompletions.length > 0
+          (child) =>
+            (child.status !== ProductionStatus.PENDING && child.status !== ProductionStatus.CANCELLED) ||
+            child.inventoryBatch ||
+            child.processCompletions.length > 0
         );
         if (lockedChild) {
           throw new BadRequestException('已有补单任务开始生产，不能自动撤回');
         }
+        const activeReplenishmentRequest = (task.processCompletions || [])
+          .flatMap((completion: any) => completion.replenishmentRequests || [])
+          .find((request: any) => request.status !== 'REJECTED');
+        if (activeReplenishmentRequest) {
+          throw new BadRequestException(
+            `已有生产报废补单申请 ${activeReplenishmentRequest.requestNo}，请先完成审批或驳回后再撤回生产任务`
+          );
+        }
+        const withdrawProcessSummary = this.formatWithdrawProcessSummary(task.processCompletions || []);
 
-        await tx.productionTask.deleteMany({
-          where: { sourceProductionTaskNo: task.productionTaskNo, status: ProductionStatus.PENDING }
-        });
-        await tx.productionScrapRecord.deleteMany({
-          where: { productionTaskId: task.id }
-        });
-        await tx.productionProcessCompletion.deleteMany({
-          where: { productionTaskId: task.id }
-        });
+        await this.cancelPendingReplenishmentTasksForWithdraw(tx, task, managerName, reason);
+        await this.archiveWithdrawProcessScrapRecords(tx, task, managerName, handledAt);
+        await this.resetWithdrawProcessCompletions(tx, task, managerName);
         await tx.productionTask.update({
           where: { id },
           data: {
@@ -1007,7 +1071,16 @@ export class ProductionService {
             completedQuantity: 0,
             startedAt: null,
             completedAt: null,
-            remark: this.formatWithdrawRemark(reason, handlingMode, handlingQuantity, task.unit, handledAt, managerName, remark)
+            remark: this.formatWithdrawRemark(
+              reason,
+              handlingMode,
+              handlingQuantity,
+              task.unit,
+              handledAt,
+              managerName,
+              remark,
+              withdrawProcessSummary
+            )
           }
         });
         await this.markOrderInProduction(tx, task.orderId);
@@ -1026,7 +1099,7 @@ export class ProductionService {
               unit: task.unit,
               reason: `管理撤回报废：${reason}${remark ? `；说明：${remark}` : ''}`,
               sourceRecordType: 'ProductionTaskWithdraw',
-              sourceRecordId: `${task.id}:${handledAt.getTime()}`,
+              sourceRecordId: `${task.id}:withdraw:${businessDateTimeKey(handledAt)}-${randomUUID().slice(0, 8).toUpperCase()}`,
               recordDate: handledAt
             }
           });
@@ -1044,9 +1117,11 @@ export class ProductionService {
             productionTaskNo: task.productionTaskNo,
             partCode: task.partCode,
             partName: task.partName,
+            beforeQuantity: 0,
             afterQuantity: handlingQuantity,
+            deltaQuantity: handlingQuantity,
             unit: task.unit,
-            reason: this.formatWithdrawNoticeReason(reason, handlingMode, handlingQuantity, task.unit, handledAt, remark),
+            reason: this.formatWithdrawNoticeReason(reason, handlingMode, handlingQuantity, task.unit, handledAt, remark, withdrawProcessSummary),
             managerName,
             acknowledgedBy: managerName,
             acknowledgedAt: new Date()
@@ -1066,7 +1141,9 @@ export class ProductionService {
               productionTaskNo: task.productionTaskNo,
               partCode: task.partCode,
               partName: task.partName,
+              beforeQuantity: 0,
               afterQuantity: handlingQuantity,
+              deltaQuantity: handlingQuantity,
               unit: task.unit,
               reason: `管理撤回后需要仓库确认转库存：${this.formatWithdrawNoticeReason(
                 reason,
@@ -1074,7 +1151,8 @@ export class ProductionService {
                 handlingQuantity,
                 task.unit,
                 handledAt,
-                remark
+                remark,
+                withdrawProcessSummary
               )}`,
               managerName
             }
@@ -1085,6 +1163,14 @@ export class ProductionService {
     );
 
     return this.toTask((await this.findTaskOrThrow(id))!);
+  }
+
+  private withdrawHandlingQuantityLimit(task: any) {
+    const processQuantity = Math.max(
+      0,
+      ...(task.processCompletions || []).map((item: any) => decimalToNumber(item.completedQuantity))
+    );
+    return this.roundQuantity(Math.max(decimalToNumber(task.completedQuantity), processQuantity, 0));
   }
 
   async complete(id: string, dto: CompleteProductionDto) {
@@ -1106,11 +1192,20 @@ export class ProductionService {
         if (task.order.status === OrderStatus.COMPLETED) {
           throw new BadRequestException('已完成发货订单不能修改生产完成记录');
         }
+        if (task.status === ProductionStatus.CANCELLED) {
+          // 已取消任务只保留历史，不能再写入最终完成数量。
+          throw new BadRequestException('生产任务已取消，不能确认生产完成');
+        }
+        this.assertTaskNotStored(task, '生产任务已入库，不能修改生产完成记录');
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能修改生产完成记录');
         }
         const isFinalCorrection = task.status === ProductionStatus.COMPLETED;
-        if (task.status !== ProductionStatus.IN_PROGRESS && !isFinalCorrection) {
+        if (
+          task.status !== ProductionStatus.IN_PROGRESS &&
+          task.status !== ProductionStatus.WAITING_CONFIRMATION &&
+          !isFinalCorrection
+        ) {
           throw new BadRequestException('生产任务必须先开始，才能确认完成');
         }
 
@@ -1220,9 +1315,7 @@ export class ProductionService {
         // 订单不能在生产完成时直接完成，必须经过仓库入库和发货后才允许进入 COMPLETED。
         await this.markOrderInProduction(tx, task.orderId);
 
-        if (steps.length > 0) {
-          await this.markAllProcessStepsCompleted(tx, task, completedQuantity, dto.remark);
-        }
+        // 最终生产确认只更新最后一道工序记录，不能用系统操作员覆盖已人工确认的前序工序。
 
         return saved;
       },
@@ -1236,7 +1329,7 @@ export class ProductionService {
     if (dto.isCompleted && !dto.completedQuantity) {
       throw new BadRequestException('完成数量不能为空');
     }
-    const operators = await this.resolveOperatorSnapshot(dto.operatorCodes, dto.operatorCode);
+    const operators = await this.resolveOperatorSnapshot(dto.operatorCodes, dto.operatorCode, { required: dto.isCompleted });
 
     const completedQuantity = dto.isCompleted ? Number(dto.completedQuantity) : 0;
     if (dto.isCompleted && completedQuantity <= 0) {
@@ -1253,6 +1346,11 @@ export class ProductionService {
         if (task.order.status === OrderStatus.COMPLETED) {
           throw new BadRequestException('已完成发货订单不能修改工序完成记录');
         }
+        if (task.status === ProductionStatus.CANCELLED) {
+          // 已取消任务只保留历史，不能再改写工序完成表。
+          throw new BadRequestException('生产任务已取消，不能修改工序完成记录');
+        }
+        this.assertTaskNotStored(task, '生产任务已入库，不能修改工序完成记录');
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能修改工序完成记录');
         }
@@ -1285,7 +1383,23 @@ export class ProductionService {
 
         const existing = completionMap.get(stepNo);
         const beforeSnapshot = existing ? this.toProcessCompletionSnapshot(existing) : null;
-        const shortageHandling = existing ? this.shortageHandlingFromCompletion(existing) : this.emptyShortageHandling();
+        const isFinalStep = stepNo === steps.length;
+        const existingShortageHandling = existing ? this.shortageHandlingFromCompletion(existing) : this.emptyShortageHandling();
+        const shouldResolveShortageHandling =
+          dto.isCompleted && isFinalStep && (this.hasSubmittedShortageHandling(dto) || existingShortageHandling.shortageQuantity > 0);
+        const shortageHandling = shouldResolveShortageHandling
+          ? this.resolveShortageHandling(dto, completedQuantity, decimalToNumber(task.plannedQuantity), existing?.replenishmentTaskNo)
+          : existingShortageHandling;
+        if (shouldResolveShortageHandling) {
+          // 最后一道工序可先登记缺货处理；未提交缺货字段时仍由最终确认兜底校验。
+          shortageHandling.replenishmentTaskNo = await this.applyReplenishmentHandling(
+            tx,
+            task,
+            stepDetails,
+            shortageHandling,
+            existing?.replenishmentTaskNo
+          );
+        }
         const quantityGuard = dto.isCompleted
           ? this.resolveProcessQuantityGuard(
               task,
@@ -1354,6 +1468,11 @@ export class ProductionService {
           }
         });
 
+        if (shouldResolveShortageHandling) {
+          await this.upsertProductionScrapRecord(tx, task, saved, shortageHandling.scrapQuantity);
+          await this.syncProductionReplenishmentRequest(tx, task, saved, shortageHandling, operators);
+        }
+
         // 工序确认只负责标记工艺进度；整单生产完成必须在所有工序确认后单独点击“确认完成”。
         await this.syncTaskStatusFromProcessSteps(
           tx,
@@ -1396,6 +1515,11 @@ export class ProductionService {
         if (task.order.status === OrderStatus.COMPLETED) {
           throw new BadRequestException('已完成发货订单不能修改工序完成记录');
         }
+        if (task.status === ProductionStatus.CANCELLED) {
+          // 已取消任务只保留历史，不能再批量改写工序完成表。
+          throw new BadRequestException('生产任务已取消，不能修改工序完成记录');
+        }
+        this.assertTaskNotStored(task, '生产任务已入库，不能修改工序完成记录');
         if (task.inventoryBatch) {
           throw new BadRequestException('生产任务已入库，不能修改工序完成记录');
         }
@@ -1439,7 +1563,23 @@ export class ProductionService {
           const operators = operatorsBySubmittedProcess.get(processName.trim()) || { code: null, name: null, role: null };
           const existing = completionMap.get(stepNo);
           const beforeSnapshot = existing ? this.toProcessCompletionSnapshot(existing) : null;
-          const shortageHandling = existing ? this.shortageHandlingFromCompletion(existing) : this.emptyShortageHandling();
+          const isFinalStep = stepNo === steps.length;
+          const existingShortageHandling = existing ? this.shortageHandlingFromCompletion(existing) : this.emptyShortageHandling();
+          const shouldResolveShortageHandling =
+            isFinalStep && (this.hasSubmittedShortageHandling(dto) || existingShortageHandling.shortageQuantity > 0);
+          const shortageHandling = shouldResolveShortageHandling
+            ? this.resolveShortageHandling(dto, completedQuantity, decimalToNumber(task.plannedQuantity), existing?.replenishmentTaskNo)
+            : existingShortageHandling;
+          if (shouldResolveShortageHandling) {
+            // 批量确认连续工序时，只允许最后一道工序登记缺货处理。
+            shortageHandling.replenishmentTaskNo = await this.applyReplenishmentHandling(
+              tx,
+              task,
+              stepDetails,
+              shortageHandling,
+              existing?.replenishmentTaskNo
+            );
+          }
           const quantityGuard = this.resolveProcessQuantityGuard(
             task,
             stepDetails,
@@ -1506,6 +1646,11 @@ export class ProductionService {
               afterSnapshot: this.toProcessCompletionSnapshot(saved)
             }
           });
+
+          if (shouldResolveShortageHandling) {
+            await this.upsertProductionScrapRecord(tx, task, saved, shortageHandling.scrapQuantity);
+            await this.syncProductionReplenishmentRequest(tx, task, saved, shortageHandling, operators);
+          }
         }
 
         await this.syncTaskStatusFromProcessSteps(
@@ -1567,6 +1712,11 @@ export class ProductionService {
       if (task.order.status === OrderStatus.COMPLETED) {
         throw new BadRequestException('已完成发货订单不能确认生产报废补单');
       }
+      if (task.status === ProductionStatus.CANCELLED) {
+        // 已取消任务只保留历史，不能再确认生成新的生产报废补单。
+        throw new BadRequestException('生产任务已取消，不能确认生产报废补单');
+      }
+      this.assertTaskNotStored(task, '生产任务已入库，不能确认生产报废补单');
       if (task.inventoryBatch) {
         throw new BadRequestException('生产任务已入库，不能确认生产报废补单');
       }
@@ -1695,6 +1845,11 @@ export class ProductionService {
       if (task.order.status === OrderStatus.COMPLETED) {
         throw new BadRequestException('已完成发货订单不能驳回生产报废补单');
       }
+      if (task.status === ProductionStatus.CANCELLED) {
+        // 已取消任务只保留历史，不能再驳回并改写短缺处理记录。
+        throw new BadRequestException('生产任务已取消，不能驳回生产报废补单');
+      }
+      this.assertTaskNotStored(task, '生产任务已入库，不能驳回生产报废补单');
       if (task.inventoryBatch) {
         throw new BadRequestException('生产任务已入库，不能驳回生产报废补单');
       }
@@ -1803,6 +1958,13 @@ export class ProductionService {
     return task;
   }
 
+  private assertTaskNotStored(task: { status: ProductionStatus }, message: string) {
+    if (task.status === ProductionStatus.STORED) {
+      // 已入库状态本身就是写保护，避免异常缺失 inventoryBatch 时继续改写生产记录。
+      throw new BadRequestException(message);
+    }
+  }
+
   private resolveProcessQuantityGuard(
     task: any,
     stepDetails: ProcessStepSnapshot[],
@@ -1869,6 +2031,16 @@ export class ProductionService {
     };
   }
 
+  private hasSubmittedShortageHandling(dto: ProcessShortageDto) {
+    return (
+      dto.scrapQuantity !== undefined ||
+      dto.shortageMode !== undefined ||
+      dto.createReplenishment !== undefined ||
+      dto.managerName !== undefined ||
+      dto.shortageReason !== undefined
+    );
+  }
+
   private resolveShortageHandling(
     dto: ProcessShortageDto,
     completedQuantity: number,
@@ -1908,6 +2080,10 @@ export class ProductionService {
 
     if (shortageMode === 'REPLENISHMENT' && !existingReplenishmentTaskNo) {
       throw new BadRequestException('生产报废补单必须先由生产人员申请，并由车间主管确认');
+    }
+
+    if (shortageMode === 'REPLENISHMENT_REQUEST' && scrapQuantity <= 0) {
+      throw new BadRequestException('生产报废补单申请必须填写大于 0 的报废数量');
     }
 
     if (existingReplenishmentTaskNo && shortageMode !== 'REPLENISHMENT') {
@@ -1983,25 +2159,28 @@ export class ProductionService {
         where: { productionTaskNo: existingReplenishmentTaskNo }
       });
       if (existing) {
-        if (existing.status !== ProductionStatus.PENDING) {
+        if (existing.status === ProductionStatus.CANCELLED) {
+          existingReplenishmentTaskNo = null;
+        } else if (existing.status !== ProductionStatus.PENDING) {
           throw new BadRequestException('已有补单任务已开始生产，不能修改');
+        } else {
+          await tx.productionTask.update({
+            where: { productionTaskNo: existingReplenishmentTaskNo },
+            data: {
+              plannedQuantity,
+              unit: task.unit,
+              processSnapshot: this.processStepsToJson(steps),
+              ...(sourceInfo
+                ? {
+                    replenishmentSourceType: sourceInfo.sourceType,
+                    replenishmentSourceRequestNo: sourceInfo.sourceRequestNo || null
+                  }
+                : {}),
+              remark: replenishmentRemark
+            }
+          });
+          return existingReplenishmentTaskNo;
         }
-        await tx.productionTask.update({
-          where: { productionTaskNo: existingReplenishmentTaskNo },
-          data: {
-            plannedQuantity,
-            unit: task.unit,
-            processSnapshot: this.processStepsToJson(steps),
-            ...(sourceInfo
-              ? {
-                  replenishmentSourceType: sourceInfo.sourceType,
-                  replenishmentSourceRequestNo: sourceInfo.sourceRequestNo || null
-                }
-              : {}),
-            remark: replenishmentRemark
-          }
-        });
-        return existingReplenishmentTaskNo;
       }
     }
 
@@ -2041,7 +2220,7 @@ export class ProductionService {
         isReplenishment: true,
         sourceProductionTaskNo,
         ...(sourceInfo?.sourceType ? { replenishmentSourceType: sourceInfo.sourceType } : {}),
-        status: { not: ProductionStatus.PENDING }
+        status: { notIn: [ProductionStatus.PENDING, ProductionStatus.CANCELLED] }
       },
       orderBy: { productionTaskNo: 'desc' }
     });
@@ -2087,7 +2266,13 @@ export class ProductionService {
     if (existing.status !== ProductionStatus.PENDING || existing.inventoryBatch || existing.processCompletions.length > 0) {
       throw new BadRequestException('已有补单任务存在生产记录，不能自动删除');
     }
-    await tx.productionTask.delete({ where: { productionTaskNo: replenishmentTaskNo } });
+    await tx.productionTask.update({
+      where: { productionTaskNo: replenishmentTaskNo },
+      data: {
+        status: ProductionStatus.CANCELLED,
+        remark: this.appendTaskRemark(existing.remark, '自动取消未开始补单任务：工序短缺处理已变更')
+      }
+    });
   }
 
   private async generateNextReplenishmentTaskNo(tx: Prisma.TransactionClient, sourceProductionTaskNo: string) {
@@ -2122,9 +2307,20 @@ export class ProductionService {
     const sourceRecordType = 'ProductionProcessCompletion';
     const sourceRecordId = completion.id;
     if (scrapQuantity <= 0) {
-      await tx.productionScrapRecord.deleteMany({
+      const existingRecords = await tx.productionScrapRecord.findMany({
         where: { sourceRecordType, sourceRecordId }
       });
+      for (const record of existingRecords) {
+        // 工序报废数量改回 0 时归档旧报废记录，避免物理删除生产报废历史。
+        await tx.productionScrapRecord.update({
+          where: { id: record.id },
+          data: {
+            sourceRecordType: 'ProductionProcessCompletionScrapCancelled',
+            sourceRecordId: `${sourceRecordId}:scrap-cancel:${businessDateTimeKey()}-${randomUUID().slice(0, 8).toUpperCase()}:${record.id}`,
+            reason: this.appendTaskRemark(record.reason, '工序报废数量已改为 0，原报废记录归档保留')
+          }
+        });
+      }
       return;
     }
 
@@ -2173,19 +2369,43 @@ export class ProductionService {
       where: { processCompletionId: completion.id }
     });
 
-    if (shortageHandling.shortageMode !== 'REPLENISHMENT_REQUEST' || shortageHandling.shortageQuantity <= 0) {
-      if (existingRequest?.status === 'PENDING') {
-        await tx.productionReplenishmentRequest.delete({ where: { id: existingRequest.id } });
-      }
-      return;
-    }
-
     if (existingRequest?.status === 'APPROVED') {
       throw new BadRequestException('已确认的生产报废补单申请不能修改');
     }
 
+    if (shortageHandling.shortageMode !== 'REPLENISHMENT_REQUEST' || shortageHandling.shortageQuantity <= 0) {
+      if (existingRequest?.status === 'PENDING') {
+        const cancelReason =
+          shortageHandling.shortageQuantity <= 0
+            ? '操作员取消生产报废补单申请：短缺数量已清零'
+            : `操作员取消生产报废补单申请：处理方式改为 ${shortageHandling.shortageMode || '未选择短缺处理'}`;
+        await this.rejectPendingProductionReplenishmentRequest(tx, existingRequest, requestedBy, cancelReason);
+      }
+      return;
+    }
+
     // 操作员在工序完成表中发现报废并选择“生产报废补单申请”时，只创建待确认申请，不直接生成生产任务。
     await this.createProductionReplenishmentRequest(tx, task, completion, requestedBy, existingRequest?.requestNo);
+  }
+
+  private async rejectPendingProductionReplenishmentRequest(
+    tx: Prisma.TransactionClient,
+    request: { id: string },
+    reviewedBy: ResolvedOperatorSnapshot,
+    supervisorRemark: string
+  ) {
+    // 操作员修改短缺处理方式时保留原生产报废补单申请，避免删除审核历史。
+    await tx.productionReplenishmentRequest.update({
+      where: { id: request.id },
+      data: {
+        status: 'REJECTED',
+        supervisorName: reviewedBy.name || reviewedBy.code || '工序操作员',
+        supervisorRemark,
+        approvedAt: null,
+        reviewedAt: new Date(),
+        replenishmentTaskNo: null
+      }
+    });
   }
 
   private async createProductionReplenishmentRequest(
@@ -2295,8 +2515,109 @@ export class ProductionService {
     return [existing, appendLine].filter(Boolean).join('；');
   }
 
+  private async archiveWithdrawProcessScrapRecords(
+    tx: Prisma.TransactionClient,
+    task: any,
+    managerName: string,
+    handledAt: Date
+  ) {
+    const processScrapRecords = await tx.productionScrapRecord.findMany({
+      where: {
+        productionTaskId: task.id,
+        sourceRecordType: 'ProductionProcessCompletion'
+      }
+    });
+    for (const record of processScrapRecords) {
+      await tx.productionScrapRecord.update({
+        where: { id: record.id },
+        data: {
+          sourceRecordType: 'ProductionProcessCompletionWithdrawSnapshot',
+          sourceRecordId: `${record.sourceRecordId}:withdraw:${businessDateTimeKey(handledAt)}-${randomUUID().slice(0, 8).toUpperCase()}:${record.id}`,
+          reason: this.appendTaskRemark(record.reason, `管理撤回保留工序报废快照：${managerName}`)
+        }
+      });
+    }
+  }
+
+  private async cancelPendingReplenishmentTasksForWithdraw(
+    tx: Prisma.TransactionClient,
+    task: any,
+    managerName: string,
+    reason: string
+  ) {
+    const pendingChildTasks = await tx.productionTask.findMany({
+      where: {
+        sourceProductionTaskNo: task.productionTaskNo,
+        status: ProductionStatus.PENDING
+      },
+      select: {
+        id: true,
+        remark: true
+      }
+    });
+    for (const childTask of pendingChildTasks) {
+      // 管理撤回只取消未开始补单任务，保留任务号占用和取消原因，避免历史补单号被复用。
+      await tx.productionTask.update({
+        where: { id: childTask.id },
+        data: {
+          status: ProductionStatus.CANCELLED,
+          remark: this.appendTaskRemark(childTask.remark, `管理撤回取消未开始补单：${reason}（管理人员：${managerName}）`)
+        }
+      });
+    }
+  }
+
+  private async resetWithdrawProcessCompletions(tx: Prisma.TransactionClient, task: any, managerName: string) {
+    const completions = [...(task.processCompletions || [])].sort((left, right) => Number(left.stepNo ?? 0) - Number(right.stepNo ?? 0));
+    for (const completion of completions) {
+      const beforeSnapshot = this.toProcessCompletionSnapshot(completion);
+      // 撤回保留工序完成表和日志，只重置可再次生产会读取的数量和完成状态。
+      const saved = await tx.productionProcessCompletion.update({
+        where: { id: completion.id },
+        data: {
+          isCompleted: false,
+          completedQuantity: 0,
+          scrapQuantity: 0,
+          shortageQuantity: 0,
+          shortageMode: null,
+          replenishmentTaskNo: null,
+          managerName: null,
+          shortageReason: null,
+          shortageResolutionMode: null,
+          shortageResolutionBy: null,
+          shortageResolutionReason: null,
+          shortageResolvedAt: null,
+          operatorCode: null,
+          operatorName: null,
+          operatorRole: null,
+          completedAt: null,
+          quantityOverrideReason: null,
+          remark: null
+        },
+        include: { replenishmentRequests: true, logs: true }
+      });
+      await tx.productionProcessCompletionLog.create({
+        data: {
+          completionId: saved.id,
+          productionTaskId: task.id,
+          processName: saved.processName,
+          action: 'TASK_WITHDRAWN',
+          operatorName: managerName,
+          beforeSnapshot,
+          afterSnapshot: this.toProcessCompletionSnapshot(saved)
+        }
+      });
+    }
+  }
+
   private formatSupervisorActionRemark(action: string, supervisor: ProductionOperatorRow) {
     return `${action}：${supervisor.name}（${supervisor.accountId || supervisor.code} / ${supervisor.role}）`;
+  }
+
+  private businessDateTimeText(value: Date) {
+    const stamp = businessDateTimeKey(value);
+    // 生产撤回备注和通知按公司业务时区展示，避免 NAS / Docker 默认 UTC 或服务器本地时区造成时间偏差。
+    return stamp.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6');
   }
 
   private formatWithdrawRemark(
@@ -2306,7 +2627,8 @@ export class ProductionService {
     unit: string,
     handledAt: Date,
     managerName: string,
-    remark?: string
+    remark?: string,
+    processSummary?: string
   ) {
     const handlingText = this.withdrawHandlingText(handlingMode);
     const quantityText = handlingMode === 'NONE' ? '无实物处理' : `${this.roundQuantity(handlingQuantity)} ${unit}`;
@@ -2314,9 +2636,10 @@ export class ProductionService {
       `管理撤回：${reason}`,
       `处理方式：${handlingText}`,
       `处理数量：${quantityText}`,
-      `处理日期：${handledAt.toISOString()}`,
+      `处理日期：${this.businessDateTimeText(handledAt)}`,
       `管理人员：${managerName}`,
-      remark ? `说明：${remark}` : ''
+      remark ? `说明：${remark}` : '',
+      processSummary ? `撤回前工序：${processSummary}` : ''
     ]
       .filter(Boolean)
       .join('；');
@@ -2328,7 +2651,8 @@ export class ProductionService {
     handlingQuantity: number,
     unit: string,
     handledAt: Date,
-    remark?: string
+    remark?: string,
+    processSummary?: string
   ) {
     const handlingText = this.withdrawHandlingText(handlingMode);
     const quantityText = handlingMode === 'NONE' ? '无实物处理' : `${this.roundQuantity(handlingQuantity)} ${unit}`;
@@ -2336,11 +2660,41 @@ export class ProductionService {
       `撤回原因：${reason}`,
       `处理方式：${handlingText}`,
       `处理数量：${quantityText}`,
-      `处理日期：${handledAt.toLocaleString('zh-CN', { hour12: false })}`,
-      remark ? `说明：${remark}` : ''
+      `处理日期：${this.businessDateTimeText(handledAt)}`,
+      remark ? `说明：${remark}` : '',
+      processSummary ? `撤回前工序：${processSummary}` : ''
     ]
       .filter(Boolean)
       .join('；');
+  }
+
+  private formatWithdrawProcessSummary(completions: any[] = []) {
+    const rows = completions
+      .filter(
+        (completion) =>
+          completion?.isCompleted ||
+          decimalToNumber(completion?.completedQuantity) > 0 ||
+          decimalToNumber(completion?.scrapQuantity) > 0 ||
+          Boolean(completion?.operatorName)
+      )
+      .sort((left, right) => Number(left.stepNo ?? 0) - Number(right.stepNo ?? 0));
+    if (rows.length === 0) {
+      return '';
+    }
+    const preview: string[] = [];
+    for (const completion of rows) {
+      if (preview.length >= 5) {
+        break;
+      }
+      const completedQuantity = this.roundQuantity(decimalToNumber(completion.completedQuantity));
+      const scrapQuantity = this.roundQuantity(decimalToNumber(completion.scrapQuantity));
+      const quantityText = `${completedQuantity} ${completion.unit || ''}`.trim();
+      const scrapText = scrapQuantity > 0 ? `，报废 ${scrapQuantity} ${completion.unit || ''}`.trim() : '';
+      const operatorText = completion.operatorName ? `，操作员 ${completion.operatorName}` : '';
+      preview.push(`${completion.stepNo}.${completion.processName}${completion.isCompleted ? '已完成' : '未完成'} ${quantityText}${scrapText}${operatorText}`);
+    }
+    const remaining = rows.length > preview.length ? `，另 ${rows.length - preview.length} 道工序` : '';
+    return `${preview.join('；')}${remaining}`;
   }
 
   private withdrawHandlingText(handlingMode: string) {
@@ -2357,6 +2711,10 @@ export class ProductionService {
     return Math.round((value + Number.EPSILON) * 1000) / 1000;
   }
 
+  private formatQuantity(value: number, unit?: string | null) {
+    return `${this.roundQuantity(value)} ${unit || '件'}`;
+  }
+
   private pickEarliestDate(current?: Date | string | null, candidate?: Date | string | null) {
     if (!current) {
       return candidate;
@@ -2368,8 +2726,14 @@ export class ProductionService {
   }
 
   private productionDisplayStatus(task: any): ProductionOrderSummaryStatus {
-    if (task.inventoryBatchNo) {
+    if (task.status === ProductionStatus.CANCELLED) {
+      return ProductionStatus.CANCELLED;
+    }
+    if (task.inventoryBatchNo || task.status === ProductionStatus.STORED) {
       return 'RECEIVED';
+    }
+    if (task.status === ProductionStatus.WAITING_CONFIRMATION) {
+      return 'READY_TO_COMPLETE';
     }
     const processSteps = Array.isArray(task.processSteps) ? task.processSteps : [];
     const allProcessesCompleted =
@@ -2389,10 +2753,15 @@ export class ProductionService {
   }
 
   private toEffectiveTaskProductionStatus(task: any) {
-    if (task.inventoryBatch || task.status === ProductionStatus.COMPLETED) {
+    if (task.status === ProductionStatus.CANCELLED) {
+      return ProductionStatus.CANCELLED;
+    }
+    if (task.inventoryBatch || task.status === ProductionStatus.STORED || task.status === ProductionStatus.COMPLETED) {
       return ProductionStatus.COMPLETED;
     }
-    return task.status === ProductionStatus.IN_PROGRESS ? ProductionStatus.IN_PROGRESS : ProductionStatus.PENDING;
+    return task.status === ProductionStatus.IN_PROGRESS || task.status === ProductionStatus.WAITING_CONFIRMATION
+      ? ProductionStatus.IN_PROGRESS
+      : ProductionStatus.PENDING;
   }
 
   private orderSummaryProgressLabel(task: any, status: ProductionOrderSummaryStatus) {
@@ -2426,14 +2795,23 @@ export class ProductionService {
     if (status === 'IN_PROGRESS') {
       return '生产中';
     }
+    if (status === 'WAITING_CONFIRMATION') {
+      return '待确认完成';
+    }
     if (status === 'COMPLETED') {
       return '已完成';
+    }
+    if (status === 'STORED') {
+      return '已入库';
     }
     if (status === 'RECEIVED') {
       return '已入库';
     }
     if (status === 'READY_TO_COMPLETE') {
       return '待确认完成';
+    }
+    if (status === 'CANCELLED') {
+      return '已取消';
     }
     return '待确认生产';
   }
@@ -2460,7 +2838,7 @@ export class ProductionService {
       return completedQuantity;
     }
     // 生产统计不能只依赖旧 completedQuantity；已入库历史任务用订单入库批次和转库存批次数量兜底。
-    const orderInventoryQuantity = orderReceiptQuantity || (task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0);
+    const orderInventoryQuantity = orderReceiptQuantity > 0 ? orderReceiptQuantity : task.inventoryBatch ? decimalToNumber(task.inventoryBatch.quantity) : 0;
     return orderInventoryQuantity + stockQuantity;
   }
 
@@ -2477,7 +2855,7 @@ export class ProductionService {
       if (quantity <= 0) {
         continue;
       }
-      quantityByLine.set(key, this.roundQuantity((quantityByLine.get(key) || 0) + quantity));
+      quantityByLine.set(key, this.roundQuantity((quantityByLine.get(key) ?? 0) + quantity));
     }
     return quantityByLine;
   }
@@ -2491,7 +2869,7 @@ export class ProductionService {
       return shortageQuantity;
     }
     const key = task.orderLineId || task.productionTaskNo;
-    const coveringQuantity = completedReplenishmentQuantityByLine.get(key) || 0;
+    const coveringQuantity = completedReplenishmentQuantityByLine.get(key) ?? 0;
     if (coveringQuantity <= 0) {
       return shortageQuantity;
     }
@@ -2499,77 +2877,6 @@ export class ProductionService {
     const usedQuantity = Math.min(shortageQuantity, coveringQuantity);
     completedReplenishmentQuantityByLine.set(key, this.roundQuantity(coveringQuantity - usedQuantity));
     return this.roundQuantity(shortageQuantity - usedQuantity);
-  }
-
-  private async markAllProcessStepsCompleted(
-    tx: Prisma.TransactionClient,
-    task: any,
-    completedQuantity: number,
-    remark?: string
-  ) {
-    const stepDetails = processSnapshotToDetails(task.processSnapshot);
-    for (const [index, processStep] of stepDetails.entries()) {
-      const processName = processStep.processName;
-      const stepNo = index + 1;
-      const existing = await tx.productionProcessCompletion.findUnique({
-        where: { productionTaskId_stepNo: { productionTaskId: task.id, stepNo } }
-      });
-      const beforeSnapshot = existing ? this.toProcessCompletionSnapshot(existing) : null;
-      const saved = await tx.productionProcessCompletion.upsert({
-        where: { productionTaskId_stepNo: { productionTaskId: task.id, stepNo } },
-        update: {
-          processName,
-          processRemark: processStep.processRemark || null,
-          isCompleted: true,
-          completedQuantity,
-          scrapQuantity: 0,
-          shortageQuantity: 0,
-          shortageMode: null,
-          replenishmentTaskNo: null,
-          managerName: null,
-          shortageReason: null,
-          unit: task.unit,
-          operatorCode: 'SYSTEM',
-          operatorName: '系统完成',
-          operatorRole: '整单完成',
-          completedAt: new Date(),
-          remark: remark?.trim() || existing?.remark || null
-        },
-        create: {
-          productionTaskId: task.id,
-          stepNo,
-          processName,
-          processRemark: processStep.processRemark || null,
-          isCompleted: true,
-          completedQuantity,
-          scrapQuantity: 0,
-          shortageQuantity: 0,
-          shortageMode: null,
-          replenishmentTaskNo: null,
-          managerName: null,
-          shortageReason: null,
-          unit: task.unit,
-          operatorCode: 'SYSTEM',
-          operatorName: '系统完成',
-          operatorRole: '整单完成',
-          completedAt: new Date(),
-          remark: remark?.trim() || null
-        }
-      });
-
-      await tx.productionProcessCompletionLog.create({
-        data: {
-          completionId: saved.id,
-          productionTaskId: task.id,
-          processName,
-          action: existing ? 'TASK_COMPLETE_UPDATE' : 'TASK_COMPLETE_CREATE',
-          operatorCode: 'SYSTEM',
-          operatorName: '系统完成',
-          beforeSnapshot: beforeSnapshot ?? Prisma.JsonNull,
-          afterSnapshot: this.toProcessCompletionSnapshot(saved)
-        }
-      });
-    }
   }
 
   private async upsertProcesslessFinalCompletion(
@@ -2651,12 +2958,28 @@ export class ProductionService {
     currentCompletedAt?: Date | null,
     currentCompletedQuantity = 0
   ) {
-    const isAlreadyCompleted = currentStatus === ProductionStatus.COMPLETED;
+    const isAlreadyCompleted = currentStatus === ProductionStatus.COMPLETED || currentStatus === ProductionStatus.STORED;
+    const completedRows =
+      _steps.length > 0
+        ? await tx.productionProcessCompletion.findMany({
+            where: { productionTaskId, isCompleted: true },
+            select: { stepNo: true }
+          })
+        : [];
+    const completedStepNos = new Set(completedRows.map((row) => row.stepNo));
+    const allProcessesCompleted =
+      _steps.length > 0 && _steps.every((_, index) => completedStepNos.has(index + 1));
+    const nextStatus: ProductionStatus = isAlreadyCompleted && currentStatus
+      ? currentStatus
+      : allProcessesCompleted
+        ? ProductionStatus.WAITING_CONFIRMATION
+        : ProductionStatus.IN_PROGRESS;
 
     await tx.productionTask.update({
       where: { id: productionTaskId },
       data: {
-        status: isAlreadyCompleted ? ProductionStatus.COMPLETED : ProductionStatus.IN_PROGRESS,
+        // 工序全完成只进入待最终确认，最终完成数量仍必须由生产确认动作单独写入。
+        status: nextStatus,
         // 工序完成表可能多次修改，startedAt 必须保留首次开始生产时间，不能被后续修改日志刷新。
         startedAt: startedAt || new Date(),
         completedAt: isAlreadyCompleted ? currentCompletedAt || new Date() : null,
@@ -2705,6 +3028,102 @@ export class ProductionService {
       completedAt: completion.completedAt ? new Date(completion.completedAt).toISOString() : null,
       quantityOverrideReason: completion.quantityOverrideReason,
       remark: completion.remark
+    };
+  }
+
+  private async buildProductionNoticeWhere(query: ProductionNoticeQueryDto, target?: ProductionNoticeTarget) {
+    const where: Prisma.ProductionNoticeWhereInput = target ? { target } : {};
+    const and: Prisma.ProductionNoticeWhereInput[] = [];
+
+    if (query.status) {
+      where.status = query.status;
+    }
+    if (query.noticeType) {
+      where.noticeType = query.noticeType;
+    }
+    if (query.orderNo?.trim()) {
+      where.orderNo = { contains: query.orderNo.trim(), mode: 'insensitive' };
+    }
+    if (query.productionTaskNo?.trim()) {
+      where.productionTaskNo = { contains: query.productionTaskNo.trim(), mode: 'insensitive' };
+    }
+    if (query.partCode?.trim()) {
+      where.partCode = { contains: query.partCode.trim(), mode: 'insensitive' };
+    }
+    if (query.dateFrom || query.dateTo) {
+      where.createdAt = {};
+      if (query.dateFrom) {
+        where.createdAt.gte = this.startOfDay(query.dateFrom);
+      }
+      if (query.dateTo) {
+        where.createdAt.lte = this.endOfDay(query.dateTo);
+      }
+    }
+
+    const customerScope = await this.productionNoticeCustomerScope(query.customerId, query.customerKeyword);
+    if (customerScope) {
+      and.push(customerScope);
+    }
+
+    const keyword = query.keyword?.trim();
+    if (keyword) {
+      // 通知历史筛选必须覆盖订单、客户、零件、通知原因和任务号，避免只按当前 PENDING 列表人工翻找。
+      const keywordCustomerScope = await this.productionNoticeCustomerScope(undefined, keyword);
+      and.push({
+        OR: [
+          { noticeNo: { contains: keyword, mode: 'insensitive' } },
+          { orderNo: { contains: keyword, mode: 'insensitive' } },
+          { productionTaskNo: { contains: keyword, mode: 'insensitive' } },
+          { partCode: { contains: keyword, mode: 'insensitive' } },
+          { partName: { contains: keyword, mode: 'insensitive' } },
+          { reason: { contains: keyword, mode: 'insensitive' } },
+          ...(keywordCustomerScope?.OR || [])
+        ]
+      });
+    }
+
+    if (and.length > 0) {
+      where.AND = and;
+    }
+
+    return where;
+  }
+
+  private async productionNoticeCustomerScope(customerId?: string, customerKeyword?: string): Promise<Prisma.ProductionNoticeWhereInput | null> {
+    const normalizedCustomerId = customerId?.trim();
+    const keyword = customerKeyword?.trim();
+    if (!normalizedCustomerId && !keyword) {
+      return null;
+    }
+
+    const orderWhere: Prisma.CustomerOrderWhereInput = {};
+    if (normalizedCustomerId) {
+      orderWhere.customerId = normalizedCustomerId;
+    }
+    if (keyword) {
+      orderWhere.OR = [
+        { customerName: { contains: keyword, mode: 'insensitive' } },
+        { customerCode: { contains: keyword, mode: 'insensitive' } },
+        { orderNo: { contains: keyword, mode: 'insensitive' } }
+      ];
+    }
+
+    const orders = await this.prisma.customerOrder.findMany({
+      where: orderWhere,
+      select: { id: true, orderNo: true }
+    });
+    const orderIds = [...new Set(orders.map((order) => order.id).filter(Boolean))];
+    const orderNos = [...new Set(orders.map((order) => order.orderNo).filter(Boolean))];
+
+    if (orderIds.length === 0 && orderNos.length === 0) {
+      return { id: '__NO_PRODUCTION_NOTICE_CUSTOMER_MATCH__' };
+    }
+
+    return {
+      OR: [
+        ...(orderIds.length > 0 ? [{ orderId: { in: orderIds } }] : []),
+        ...(orderNos.length > 0 ? [{ orderNo: { in: orderNos } }] : [])
+      ]
     };
   }
 
@@ -2836,7 +3255,8 @@ export class ProductionService {
     const steps = stepDetails.map((step) => step.processName);
     const completionMap = new Map((task.processCompletions || []).map((item: any) => [item.stepNo, item]));
     const effectiveCompletedQuantity = this.toEffectiveTaskCompletedQuantity(task);
-    const isImplicitlyCompleted = Boolean(task.inventoryBatch) || task.status === ProductionStatus.COMPLETED;
+    const isImplicitlyCompleted =
+      Boolean(task.inventoryBatch) || task.status === ProductionStatus.COMPLETED || task.status === ProductionStatus.STORED;
     const finalCompletion = (task.processCompletions || []).reduce((current: any, item: any) => {
       if (!current || item.stepNo > current.stepNo) {
         return item;

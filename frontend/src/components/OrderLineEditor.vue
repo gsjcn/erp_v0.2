@@ -16,8 +16,8 @@
         <el-button
           class="line-drag-handle"
           text
-          :draggable="lines.length > 1"
-          :disabled="lines.length <= 1"
+          :draggable="!readOnly && lines.length > 1"
+          :disabled="readOnly || lines.length <= 1"
           title="拖动调整顺序"
           @dragstart.stop="startLineDrag($event, $index)"
           @dragenter.prevent="handleLineDragOver($event, $index)"
@@ -41,7 +41,7 @@
     </el-table-column>
     <el-table-column label="行类型" width="104">
       <template #default="{ row }">
-        <el-select v-model="row.lineType" placeholder="行类型" @change="handleLineTypeChange(row)">
+        <el-select v-model="row.lineType" placeholder="行类型" :disabled="readOnly" @change="handleLineTypeChange(row)">
           <el-option label="零件" value="PART" />
           <el-option label="组件" value="COMPONENT" />
         </el-select>
@@ -49,7 +49,7 @@
     </el-table-column>
     <el-table-column label="零件类型" width="120">
       <template #default="{ row }">
-        <el-select v-model="row.partCategory" clearable filterable placeholder="类型">
+        <el-select v-model="row.partCategory" clearable filterable placeholder="类型" :disabled="readOnly">
           <el-option label="通用件" value="通用件" />
           <el-option label="定制件" value="定制件" />
           <el-option label="数控件" value="数控件" />
@@ -62,7 +62,7 @@
         <el-input
           v-model="row.componentNo"
           placeholder="组件行填 C001"
-          :disabled="row.lineType !== 'COMPONENT'"
+          :disabled="readOnly || row.lineType !== 'COMPONENT'"
           @focus="captureComponentNoBeforeEdit(row)"
           @blur="normalizeComponentFields(row)"
         />
@@ -75,7 +75,7 @@
           clearable
           filterable
           placeholder="选择组件"
-          :disabled="row.lineType === 'COMPONENT'"
+          :disabled="readOnly || row.lineType === 'COMPONENT'"
           @change="normalizeComponentFields(row)"
         >
           <el-option v-for="option in componentOptions" :key="option.value" :label="option.label" :value="option.value" />
@@ -92,6 +92,7 @@
           :debounce="250"
           :trigger-on-focus="true"
           clearable
+          :disabled="readOnly"
           popper-class="material-suggestion-popper"
           @input="handlePartCodeInput(row)"
           @blur="() => fillExactMaterialFromInput(row, 'partCode')"
@@ -114,6 +115,7 @@
             :debounce="250"
             :trigger-on-focus="true"
             clearable
+            :disabled="readOnly"
             popper-class="material-suggestion-popper"
             @input="handlePartNameInput(row)"
             @blur="() => fillExactMaterialFromInput(row, 'partName')"
@@ -131,7 +133,7 @@
     </el-table-column>
     <el-table-column label="库存/生产方式" width="170">
       <template #default="{ row }">
-        <el-select v-model="row.fulfillmentMode" placeholder="选择方式" @change="handleFulfillmentModeChange(row)">
+        <el-select v-model="row.fulfillmentMode" placeholder="选择方式" :disabled="readOnly" @change="handleFulfillmentModeChange(row)">
           <el-option label="重新生产" value="PRODUCTION" />
           <el-option label="使用库存" value="STOCK" />
           <el-option label="库存再加工" value="REWORK" />
@@ -174,6 +176,7 @@
           :min="0.001"
           :precision="3"
           :controls="false"
+          :disabled="readOnly"
           style="width: 96px"
           @change="handleStockComparableChange(row)"
         />
@@ -186,6 +189,7 @@
           filterable
           allow-create
           placeholder="例如 120mm x 204mm x 10mm"
+          :disabled="readOnly"
           @change="handleStockComparableChange(row)"
         >
           <el-option v-for="item in specificationOptions" :key="item" :label="item" :value="item" />
@@ -193,16 +197,16 @@
       </template>
     </el-table-column>
     <el-table-column label="图号" width="130">
-      <template #default="{ row }"><el-input v-model="row.drawingNo" @input="handleStockComparableChange(row)" /></template>
+      <template #default="{ row }"><el-input v-model="row.drawingNo" :disabled="readOnly" @input="handleStockComparableChange(row)" /></template>
     </el-table-column>
     <el-table-column label="版本" width="90">
-      <template #default="{ row }"><el-input v-model="row.drawingVersion" placeholder="A" @input="handleStockComparableChange(row)" /></template>
+      <template #default="{ row }"><el-input v-model="row.drawingVersion" placeholder="A" :disabled="readOnly" @input="handleStockComparableChange(row)" /></template>
     </el-table-column>
     <el-table-column label="图纸" width="170">
       <template #default="{ row }">
         <div class="drawing-upload-cell">
-          <el-upload :show-file-list="false" :http-request="createUploadRequest(row)" accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf">
-            <el-button size="small">上传图纸</el-button>
+          <el-upload :show-file-list="false" :http-request="createUploadRequest(row)" accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf" :disabled="readOnly">
+            <el-button size="small" :disabled="readOnly">上传图纸</el-button>
           </el-upload>
           <DrawingPreviewLink :file-name="row.drawingFileName" :file-url="row.drawingFileUrl" :title="`${row.partName || row.partCode || '零件'} 图纸预览`" />
         </div>
@@ -215,6 +219,7 @@
           type="date"
           value-format="YYYY-MM-DD"
           placeholder="默认订单交期"
+          :disabled="readOnly"
           style="width: 132px"
         />
       </template>
@@ -225,6 +230,7 @@
           v-model="row.quantity"
           :min="1"
           :controls="false"
+          :disabled="readOnly"
           style="width: 110px"
           @change="emitQuantityChange(row)"
         />
@@ -236,6 +242,7 @@
           v-model="row.productionPlanQuantity"
           :min="productionPlanMin(row)"
           :controls="false"
+          :disabled="readOnly"
           style="width: 110px"
           @change="handlePlanQuantityChange(row)"
         />
@@ -247,24 +254,25 @@
     <el-table-column label="计划偏差说明" width="260">
       <template #default="{ row }">
         <div v-if="stockProductionPlanDiffers(row)" class="plan-override-cell">
-          <el-input v-model="row.productionPlanOverrideByCode" size="small" placeholder="操作人员账号" />
+          <el-input v-model="row.productionPlanOverrideByCode" size="small" placeholder="操作人员账号" :disabled="readOnly" />
           <el-input
             v-model="row.productionPlanOverrideReason"
             size="small"
             type="textarea"
             :rows="2"
             placeholder="备货、替代品、客户确认少做或需多做备件"
+            :disabled="readOnly"
           />
         </div>
         <span v-else class="muted">-</span>
       </template>
     </el-table-column>
     <el-table-column label="单位" width="100">
-      <template #default="{ row }"><el-input v-model="row.unit" @input="handleUnitInput(row)" /></template>
+      <template #default="{ row }"><el-input v-model="row.unit" :disabled="readOnly" @input="handleUnitInput(row)" /></template>
     </el-table-column>
     <el-table-column label="操作" width="96" fixed="right" align="center">
       <template #default="{ $index }">
-        <el-button class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove($index)">
+        <el-button v-if="!readOnly" class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove($index)">
           {{ removeButtonText }}
         </el-button>
       </template>
@@ -298,7 +306,7 @@
           <el-button link type="primary" @click.stop="toggleMobileLineCard(index)">
             {{ isMobileLineExpanded(index) ? '收起' : '详情' }}
           </el-button>
-          <el-button class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove(index)">
+          <el-button v-if="!readOnly" class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove(index)">
             {{ removeButtonText }}
           </el-button>
         </div>
@@ -308,7 +316,7 @@
         <span>{{ orderLineStructureHint(line) }}</span>
         <span>{{ line.partCode || '未填编码' }}</span>
         <span>{{ fulfillmentModeText(line) }}</span>
-        <span>订单 {{ formatQuantity(line.quantity || 0, line.unit || '件') }}</span>
+        <span>订单 {{ formatQuantity(line.quantity ?? 0, line.unit || '件') }}</span>
         <span>计划 {{ formatQuantity(line.productionPlanQuantity ?? suggestedProductionPlanQuantity(line), line.unit || '件') }}</span>
         <span>交期 {{ line.deliveryDate || defaultDeliveryDate || '-' }}</span>
         <span v-if="selectedStockSourceQuantity(line) > 0">库存 {{ formatQuantity(selectedStockSourceQuantity(line), line.unit || '件') }}</span>
@@ -321,14 +329,14 @@
       <div v-show="isMobileLineExpanded(index)" class="order-line-mobile-fields">
         <label>
           <span>行类型</span>
-          <el-select v-model="line.lineType" placeholder="行类型" @change="handleLineTypeChange(line)">
+          <el-select v-model="line.lineType" placeholder="行类型" :disabled="readOnly" @change="handleLineTypeChange(line)">
             <el-option label="零件" value="PART" />
             <el-option label="组件" value="COMPONENT" />
           </el-select>
         </label>
         <label>
           <span>零件类型</span>
-          <el-select v-model="line.partCategory" clearable filterable placeholder="类型">
+          <el-select v-model="line.partCategory" clearable filterable placeholder="类型" :disabled="readOnly">
             <el-option label="通用件" value="通用件" />
             <el-option label="定制件" value="定制件" />
             <el-option label="数控件" value="数控件" />
@@ -340,7 +348,7 @@
           <el-input
             v-model="line.componentNo"
             placeholder="组件行填 C001"
-            :disabled="line.lineType !== 'COMPONENT'"
+            :disabled="readOnly || line.lineType !== 'COMPONENT'"
             @focus="captureComponentNoBeforeEdit(line)"
             @blur="normalizeComponentFields(line)"
           />
@@ -352,7 +360,7 @@
             clearable
             filterable
             placeholder="选择组件"
-            :disabled="line.lineType === 'COMPONENT'"
+            :disabled="readOnly || line.lineType === 'COMPONENT'"
             @change="normalizeComponentFields(line)"
           >
             <el-option v-for="option in componentOptions" :key="option.value" :label="option.label" :value="option.value" />
@@ -368,6 +376,7 @@
             :debounce="250"
             :trigger-on-focus="true"
             clearable
+            :disabled="readOnly"
             popper-class="material-suggestion-popper"
             @input="handlePartCodeInput(line)"
             @blur="() => fillExactMaterialFromInput(line, 'partCode')"
@@ -389,6 +398,7 @@
               :debounce="250"
               :trigger-on-focus="true"
               clearable
+              :disabled="readOnly"
               popper-class="material-suggestion-popper"
               @input="handlePartNameInput(line)"
               @blur="() => fillExactMaterialFromInput(line, 'partName')"
@@ -405,7 +415,7 @@
         </label>
         <label>
           <span>库存/生产方式</span>
-          <el-select v-model="line.fulfillmentMode" placeholder="选择方式" @change="handleFulfillmentModeChange(line)">
+          <el-select v-model="line.fulfillmentMode" placeholder="选择方式" :disabled="readOnly" @change="handleFulfillmentModeChange(line)">
             <el-option label="重新生产" value="PRODUCTION" />
             <el-option label="使用库存" value="STOCK" />
             <el-option label="库存再加工" value="REWORK" />
@@ -439,11 +449,11 @@
         </label>
         <label>
           <span>图号</span>
-          <el-input v-model="line.drawingNo" @input="handleStockComparableChange(line)" />
+          <el-input v-model="line.drawingNo" :disabled="readOnly" @input="handleStockComparableChange(line)" />
         </label>
         <label>
           <span>图纸版本</span>
-          <el-input v-model="line.drawingVersion" placeholder="A" @input="handleStockComparableChange(line)" />
+          <el-input v-model="line.drawingVersion" placeholder="A" :disabled="readOnly" @input="handleStockComparableChange(line)" />
         </label>
         <label>
           <span>零件厚度(mm)</span>
@@ -454,6 +464,7 @@
             :min="0.001"
             :precision="3"
             :controls="false"
+            :disabled="readOnly"
             @change="handleStockComparableChange(line)"
           />
         </label>
@@ -464,6 +475,7 @@
             filterable
             allow-create
             placeholder="例如 120mm x 204mm x 10mm"
+            :disabled="readOnly"
             @change="handleStockComparableChange(line)"
           >
             <el-option v-for="item in specificationOptions" :key="item" :label="item" :value="item" />
@@ -472,8 +484,8 @@
         <label>
           <span>图纸上传</span>
           <div class="drawing-upload-cell">
-            <el-upload :show-file-list="false" :http-request="createUploadRequest(line)" accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf">
-              <el-button>上传图纸</el-button>
+            <el-upload :show-file-list="false" :http-request="createUploadRequest(line)" accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf" :disabled="readOnly">
+              <el-button :disabled="readOnly">上传图纸</el-button>
             </el-upload>
             <DrawingPreviewLink :file-name="line.drawingFileName" :file-url="line.drawingFileUrl" :title="`${line.partName || line.partCode || '零件'} 图纸预览`" />
           </div>
@@ -485,11 +497,12 @@
             type="date"
             value-format="YYYY-MM-DD"
             placeholder="默认订单交期"
+            :disabled="readOnly"
           />
         </label>
         <label>
           <span>客户订单数量</span>
-          <el-input-number v-model="line.quantity" :min="1" :controls="false" @change="emitQuantityChange(line)" />
+          <el-input-number v-model="line.quantity" :min="1" :controls="false" :disabled="readOnly" @change="emitQuantityChange(line)" />
         </label>
         <label>
           <span>生产计划数量</span>
@@ -497,6 +510,7 @@
             v-model="line.productionPlanQuantity"
             :min="productionPlanMin(line)"
             :controls="false"
+            :disabled="readOnly"
             @change="handlePlanQuantityChange(line)"
           />
           <small v-if="stockProductionPlanHint(line)" class="stock-plan-hint">
@@ -505,17 +519,18 @@
         </label>
         <label v-if="stockProductionPlanDiffers(line)">
           <span>计划偏差说明</span>
-          <el-input v-model="line.productionPlanOverrideByCode" placeholder="操作人员账号" />
+          <el-input v-model="line.productionPlanOverrideByCode" placeholder="操作人员账号" :disabled="readOnly" />
           <el-input
             v-model="line.productionPlanOverrideReason"
             type="textarea"
             :rows="2"
             placeholder="备货、替代品、客户确认少做或需多做备件"
+            :disabled="readOnly"
           />
         </label>
         <label>
           <span>单位</span>
-          <el-input v-model="line.unit" @input="handleUnitInput(line)" />
+          <el-input v-model="line.unit" :disabled="readOnly" @input="handleUnitInput(line)" />
         </label>
       </div>
     </article>
@@ -531,7 +546,7 @@
     :exclude-order-no="excludeOrderNo"
     :exclude-order-id="excludeOrderId"
     :customer-id="customerId"
-    review-mode
+    :review-mode="!readOnly"
     :reviewed="Boolean(currentSourceLine && isStockSourceReviewed(currentSourceLine))"
     @source-search="loadStockDetailsForPart"
     @selection-change="handleStockSourceSelectionChange"
@@ -587,6 +602,7 @@ const props = withDefaults(
     excludeOrderNo?: string;
     excludeOrderId?: string;
     inventorySummary?: InventorySummaryRow[];
+    readOnly?: boolean;
   }>(),
   {
     componentSourceLines: () => [],
@@ -595,7 +611,8 @@ const props = withDefaults(
     customerId: '',
     excludeOrderNo: '',
     excludeOrderId: '',
-    inventorySummary: () => []
+    inventorySummary: () => [],
+    readOnly: false
   }
 );
 
@@ -603,6 +620,7 @@ const lines = computed(() => props.lines);
 const defaultDeliveryDate = computed(() => props.defaultDeliveryDate);
 const excludeOrderNo = computed(() => props.excludeOrderNo);
 const excludeOrderId = computed(() => props.excludeOrderId);
+const readOnly = computed(() => props.readOnly);
 const removeButtonText = computed(() => (props.lines.length > props.minLines ? '删除' : '清空'));
 const sourceDetailsVisible = ref(false);
 const sourceDetailsLoading = ref(false);
@@ -721,6 +739,15 @@ function collapseAllMobileLineCards() {
   expandedMobileLineIndexes.value = [];
 }
 
+function guardReadOnlyOrderLineMutation(actionText: string) {
+  if (!props.readOnly) {
+    return false;
+  }
+  // 手机端订单明细只读，防止绕过外层页面入口后误改订单、图纸或库存来源。
+  ElMessage.warning(`订单明细只读，${actionText}请在电脑端操作`);
+  return true;
+}
+
 function isDragAfterRowMiddle(event: DragEvent) {
   const target = event.currentTarget as HTMLElement | null;
   if (!target) {
@@ -731,7 +758,7 @@ function isDragAfterRowMiddle(event: DragEvent) {
 }
 
 function startLineDrag(event: DragEvent, index: number) {
-  if (props.lines.length <= 1) {
+  if (props.readOnly || props.lines.length <= 1) {
     return;
   }
   draggedLineIndex.value = index;
@@ -744,7 +771,7 @@ function startLineDrag(event: DragEvent, index: number) {
 }
 
 function handleLineDragOver(event: DragEvent, index: number) {
-  if (draggedLineIndex.value === null) {
+  if (props.readOnly || draggedLineIndex.value === null) {
     return;
   }
   dragOverLineIndex.value = index;
@@ -856,7 +883,7 @@ function orderLineStatusText(line: CreateOrderLinePayload) {
 }
 
 function formatOrderLineFixedTextLine(line: CreateOrderLinePayload, prefix: string) {
-  const orderQuantity = formatQuantity(line.quantity || 0, line.unit || '件');
+  const orderQuantity = formatQuantity(line.quantity ?? 0, line.unit || '件');
   const planQuantity = formatQuantity(line.productionPlanQuantity ?? suggestedProductionPlanQuantity(line), line.unit || '件');
   const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
   const thicknessText = orderLineRequiresThickness(line) ? (line.partThickness ? `${line.partThickness}mm` : '厚度需核对') : '厚度不适用（父级组件由子零件维护）';
@@ -1037,7 +1064,8 @@ function buildDraggedLineOrder(targetIndex: number, insertAfter: boolean): Creat
 }
 
 function dropLineDrag(index: number) {
-  if (draggedLineIndex.value === null) {
+  if (props.readOnly || draggedLineIndex.value === null) {
+    endLineDrag();
     return;
   }
   const ordered = buildDraggedLineOrder(index, dragOverLineInsertAfter.value);
@@ -1178,6 +1206,9 @@ function clearChildParentComponentNo(componentNo: string) {
 }
 
 function handleLineTypeChange(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('切换行类型')) {
+    return;
+  }
   const previousComponentNo = normalizeComponentNo(line.componentNo);
   normalizeComponentFields(line);
   if (line.lineType === 'COMPONENT') {
@@ -1247,10 +1278,16 @@ function fulfillmentModeText(line: CreateOrderLinePayload) {
 }
 
 function emitRemove(index: number) {
+  if (guardReadOnlyOrderLineMutation('删除订单零件')) {
+    return;
+  }
   emit('remove', index);
 }
 
 function emitQuantityChange(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改订单数量')) {
+    return;
+  }
   invalidateStockSourceReview(line);
   // 客户订单数量变化时由父页面统一同步生产计划数量，避免创建和编辑逻辑分叉。
   emit('quantityChange', line);
@@ -1261,6 +1298,9 @@ function productionPlanMin(line: CreateOrderLinePayload) {
 }
 
 function handleFulfillmentModeChange(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改库存/生产方式')) {
+    return;
+  }
   if (line.fulfillmentMode === 'STOCK') {
     syncStockProductionPlanQuantity(line);
     invalidateStockSourceReview(line);
@@ -1281,12 +1321,12 @@ function handleFulfillmentModeChange(line: CreateOrderLinePayload) {
 function ensureProductionPlanQuantity(line: CreateOrderLinePayload) {
   // 切换生产方式时只补默认值；少做或多做由“计划偏差说明”记录操作人员和原因。
   if (line.productionPlanQuantity === undefined || line.productionPlanQuantity === null) {
-    line.productionPlanQuantity = line.quantity || 1;
+    line.productionPlanQuantity = line.quantity ?? 1;
   }
 }
 
 function stockShortageProductionQuantity(line: CreateOrderLinePayload) {
-  const customerQuantity = Number(line.quantity || 0);
+  const customerQuantity = Number(line.quantity ?? 0);
   const selectedQuantity = selectedStockSourceQuantity(line);
   return Math.max(Math.round((customerQuantity - selectedQuantity + Number.EPSILON) * 1000) / 1000, 0);
 }
@@ -1302,7 +1342,7 @@ function syncStockProductionPlanQuantity(
     line.productionPlanSuggestedQuantity = nextSuggestedQuantity;
     const planWasFollowingSuggestion = Math.abs(currentPlanQuantity - previousSuggestedQuantity) <= 0.0001;
     const stockCoversCustomerQuantity =
-      nextSuggestedQuantity <= 0 && selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity || 0);
+      nextSuggestedQuantity <= 0 && selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity ?? 0);
     const hasExplicitProductionPlanOverride = hasProductionPlanOverride(line);
     // 库存完全覆盖时默认不生产；如果操作人员已填写多做/少做说明，不覆盖人工计划。
     if (options.forceWhenStockCovers && stockCoversCustomerQuantity && !hasExplicitProductionPlanOverride) {
@@ -1329,8 +1369,8 @@ function syncInitialStockCoveredPlanQuantity(line: CreateOrderLinePayload) {
   stockCoverAutoSyncedLines.add(line);
   if (
     line.fulfillmentMode === 'STOCK' &&
-    selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity || 0) &&
-    Number(line.productionPlanQuantity || 0) > 0
+    selectedStockSourceQuantity(line) + 0.0001 >= Number(line.quantity ?? 0) &&
+    Number(line.productionPlanQuantity ?? 0) > 0
   ) {
     syncStockProductionPlanQuantity(line, suggestedProductionPlanQuantity(line), { forceWhenStockCovers: true });
   }
@@ -1450,7 +1490,7 @@ function stockStatusHint(line: CreateOrderLinePayload) {
     if (selectedQuantity > 0) {
       const shortageQuantity = stockShortageProductionQuantity(line);
       return shortageQuantity > 0
-        ? `此零件，客户要求 ${formatQuantity(line.quantity || 0, line.unit || '件')}，库存已有 ${formatQuantity(selectedQuantity, line.unit || '件')}，按需生产 ${formatQuantity(shortageQuantity, line.unit || '件')}`
+        ? `此零件，客户要求 ${formatQuantity(line.quantity ?? 0, line.unit || '件')}，库存已有 ${formatQuantity(selectedQuantity, line.unit || '件')}，按需生产 ${formatQuantity(shortageQuantity, line.unit || '件')}`
         : `此零件库存已覆盖客户数量，确认生产后进入待发货`;
     }
     if (isStockSourceReviewed(line)) {
@@ -1488,9 +1528,9 @@ function stockProductionPlanHint(line: CreateOrderLinePayload) {
     return '选择库存来源后自动计算';
   }
   if (suggestedQuantity <= 0) {
-    return `客户要求 ${formatQuantity(line.quantity || 0, line.unit || '件')}，库存已覆盖，不生成生产任务`;
+    return `客户要求 ${formatQuantity(line.quantity ?? 0, line.unit || '件')}，库存已覆盖，不生成生产任务`;
   }
-  return `客户要求 ${formatQuantity(line.quantity || 0, line.unit || '件')}，库存已有 ${formatQuantity(selectedQuantity, line.unit || '件')}，按需生产 ${formatQuantity(suggestedQuantity, line.unit || '件')}`;
+  return `客户要求 ${formatQuantity(line.quantity ?? 0, line.unit || '件')}，库存已有 ${formatQuantity(selectedQuantity, line.unit || '件')}，按需生产 ${formatQuantity(suggestedQuantity, line.unit || '件')}`;
 }
 
 function stockSourceReviewHint(line: CreateOrderLinePayload) {
@@ -1609,6 +1649,9 @@ async function loadStockDetailsForPart(partCode: string) {
 }
 
 function handleStockSourceSelectionChange(sources: StockSourceSelectionPayload[]) {
+  if (guardReadOnlyOrderLineMutation('调整库存来源')) {
+    return;
+  }
   if (!currentSourceLine.value) {
     return;
   }
@@ -1616,12 +1659,15 @@ function handleStockSourceSelectionChange(sources: StockSourceSelectionPayload[]
   currentSourceLine.value.selectedStockSources = sources;
   currentSourceLine.value.stockSourceReviewed = false;
   currentSourceLine.value.stockSourceReviewSignature = '';
-  currentSourceLine.value.stockSourceAvailableQuantity = sources.reduce((sum, source) => sum + Number(source.quantity || 0), 0);
+  currentSourceLine.value.stockSourceAvailableQuantity = sources.reduce((sum, source) => sum + Number(source.quantity ?? 0), 0);
   currentSourceLine.value.stockSourceMatchedQuantity = currentSourceLine.value.stockSourceAvailableQuantity;
   syncStockProductionPlanQuantity(currentSourceLine.value, previousSuggestedQuantity, { forceWhenStockCovers: true });
 }
 
 function handleStockSourceReviewed() {
+  if (guardReadOnlyOrderLineMutation('确认库存来源')) {
+    return;
+  }
   if (!currentSourceLine.value) {
     return;
   }
@@ -1642,6 +1688,9 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
   const normalizedKeyword = keyword.trim();
   const requestId = ++materialSuggestionRequestSeq.value;
   callback([]);
+  if (props.readOnly) {
+    return;
+  }
   if (!normalizedKeyword && !props.customerId?.trim()) {
     return;
   }
@@ -1691,6 +1740,9 @@ function loadMaterialSuggestions(keyword: string) {
 }
 
 async function fillExactMaterialFromInput(line: CreateOrderLinePayload, field: MaterialSuggestionInputField) {
+  if (props.readOnly) {
+    return;
+  }
   const keyword = String(line[field] || '').trim();
   if (!keyword) {
     return;
@@ -1741,6 +1793,9 @@ async function fillExactMaterialFromInput(line: CreateOrderLinePayload, field: M
 }
 
 function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryMaterialSuggestion) {
+  if (guardReadOnlyOrderLineMutation('选择物料建议')) {
+    return;
+  }
   if (item.hasIdentityConflict) {
     ElMessage.warning(`零件编码 ${item.partCode} 存在多套历史资料，已按当前候选套用，请核对${materialIdentityConflictFieldsText(item)}`);
   }
@@ -1799,6 +1854,9 @@ function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryM
 }
 
 function handlePartCodeInput(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改零件编码')) {
+    return;
+  }
   clearAutoMaterialFieldsWhenMaterialIdentityChanges(line);
   clearMaterialIdentityWarningWhenMaterialIdentityChanges(line);
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
@@ -1807,6 +1865,9 @@ function handlePartCodeInput(line: CreateOrderLinePayload) {
 }
 
 function handlePartNameInput(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改零件名称')) {
+    return;
+  }
   clearAutoMaterialFieldsWhenMaterialIdentityChanges(line);
   clearMaterialIdentityWarningWhenMaterialIdentityChanges(line);
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
@@ -1815,12 +1876,18 @@ function handlePartNameInput(line: CreateOrderLinePayload) {
 }
 
 function handleStockComparableChange(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改图纸或规格资料')) {
+    return;
+  }
   if (line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK' || line.selectedStockSources?.length) {
     invalidateStockSourceReview(line, false, true);
   }
 }
 
 function handlePlanQuantityChange(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改生产计划数量')) {
+    return;
+  }
   if (line.fulfillmentMode === 'STOCK') {
     if (!stockProductionPlanDiffers(line)) {
       clearProductionPlanOverride(line);
@@ -1833,6 +1900,9 @@ function handlePlanQuantityChange(line: CreateOrderLinePayload) {
 }
 
 function handleUnitInput(line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('修改单位')) {
+    return;
+  }
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
     invalidateStockSourceReview(line, true);
   }
@@ -1872,7 +1942,7 @@ function clearAutoMaterialFieldsWhenMaterialIdentityChanges(line: CreateOrderLin
   }
   if (
     snapshot.autoFields.partThickness !== undefined &&
-    Math.abs(Number(line.partThickness || 0) - Number(snapshot.autoFields.partThickness || 0)) <= 0.0001
+    Math.abs(Number(line.partThickness ?? 0) - Number(snapshot.autoFields.partThickness ?? 0)) <= 0.0001
   ) {
     line.partThickness = 0;
   }
@@ -1885,6 +1955,9 @@ function createUploadRequest(line: CreateOrderLinePayload) {
 }
 
 async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLinePayload) {
+  if (guardReadOnlyOrderLineMutation('上传图纸')) {
+    return;
+  }
   try {
     const file = options.file as File;
     const canUpload = await confirmUploadDrawingFileName(file, props.lines, line, props.excludeOrderNo);

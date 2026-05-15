@@ -1,4 +1,4 @@
-import { InventoryTransactionType, ProductionNoticeStatus } from '@prisma/client';
+import { CommonStatus, InventoryTransactionType, ProductionNoticeStatus, ProductionNoticeType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayNotEmpty,
@@ -24,6 +24,20 @@ export class CreateWarehouseDto {
   warehouseName!: string;
 }
 
+export class UpdateWarehouseDto {
+  @IsOptional()
+  @IsString()
+  warehouseCode?: string;
+
+  @IsOptional()
+  @IsString()
+  warehouseName?: string;
+
+  @IsOptional()
+  @IsEnum(CommonStatus)
+  status?: CommonStatus;
+}
+
 export class CreateWarehouseLocationDto {
   @IsString()
   locationCode!: string;
@@ -31,6 +45,20 @@ export class CreateWarehouseLocationDto {
   @IsOptional()
   @IsString()
   locationName?: string;
+}
+
+export class UpdateWarehouseLocationDto {
+  @IsOptional()
+  @IsString()
+  locationCode?: string;
+
+  @IsOptional()
+  @IsString()
+  locationName?: string;
+
+  @IsOptional()
+  @IsEnum(CommonStatus)
+  status?: CommonStatus;
 }
 
 export class ConfirmReceiptDto {
@@ -41,6 +69,14 @@ export class ConfirmReceiptDto {
   @IsString()
   @IsNotEmpty()
   locationId!: string;
+
+  @IsOptional()
+  @IsString()
+  warehouseConfirmedByCode?: string;
+
+  @IsOptional()
+  @IsString()
+  warehouseConfirmedBy?: string;
 
   @IsOptional()
   @IsString()
@@ -63,6 +99,10 @@ export class ConfirmShipmentItemDto {
 }
 
 export class ConfirmShipmentDto {
+  @IsOptional()
+  @IsString()
+  warehouseConfirmedByCode?: string;
+
   @IsOptional()
   @IsString()
   warehouseConfirmedBy?: string;
@@ -143,9 +183,49 @@ export class WarehouseNoticeQueryDto {
   @IsOptional()
   @IsEnum(ProductionNoticeStatus)
   status?: ProductionNoticeStatus;
+
+  @IsOptional()
+  @IsEnum(ProductionNoticeType)
+  noticeType?: ProductionNoticeType;
+
+  @IsOptional()
+  @IsString()
+  keyword?: string;
+
+  @IsOptional()
+  @IsString()
+  customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  customerKeyword?: string;
+
+  @IsOptional()
+  @IsString()
+  orderNo?: string;
+
+  @IsOptional()
+  @IsString()
+  productionTaskNo?: string;
+
+  @IsOptional()
+  @IsString()
+  partCode?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
 }
 
 export class AcknowledgeWarehouseNoticeDto {
+  @IsOptional()
+  @IsString()
+  acknowledgedByCode?: string;
+
   @IsString()
   acknowledgedBy!: string;
 
