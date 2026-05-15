@@ -482,7 +482,7 @@ async function seedCustomers() {
       country: '中国',
       province: '江苏省',
       city: '常州市',
-      detailAddress: '',
+      detailAddress: null,
       contacts: [{ contactName: '张经理', contactPhone: '138****6201', title: '经理' }],
       remark: '第一阶段示例客户',
       status: 'ENABLED' as const
@@ -494,7 +494,7 @@ async function seedCustomers() {
       country: '中国',
       province: '江苏省',
       city: '无锡市',
-      detailAddress: '',
+      detailAddress: null,
       contacts: [{ contactName: '李工', contactPhone: '139****1024', title: '工程' }],
       remark: '设备配套订单',
       status: 'ENABLED' as const
@@ -506,7 +506,7 @@ async function seedCustomers() {
       country: '中国',
       province: '江苏省',
       city: '苏州市',
-      detailAddress: '',
+      detailAddress: null,
       contacts: [{ contactName: '王主管', contactPhone: '137****8890', title: '主管' }],
       remark: '当前停用',
       status: 'DISABLED' as const
@@ -518,7 +518,7 @@ async function seedCustomers() {
       country: '中国',
       province: '江苏省',
       city: '江阴市',
-      detailAddress: '',
+      detailAddress: null,
       contacts: [{ contactName: '百胜制冷', contactPhone: '136****0520', title: '业务' }],
       remark: '百胜全部机型通用零件包所属客户',
       status: 'ENABLED' as const
