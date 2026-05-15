@@ -27,6 +27,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/backend/package.json ./backend/package.json
 COPY --from=build /app/backend/dist ./backend/dist
 COPY --from=build /app/database/prisma ./database/prisma
+COPY outputs/component-order-template ./outputs/component-order-template
 
 WORKDIR /app/backend
 

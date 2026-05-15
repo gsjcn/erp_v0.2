@@ -463,10 +463,14 @@ async function verifyBundledWorkbookUploadPreviews() {
   const workbookFiles = readdirSync(workbookDir)
     .filter((fileName) => fileName.endsWith('.xlsx'))
     .sort();
+  assert(workbookFiles.includes('组件零件清单ERP上传模板.xlsx'), '缺少网页下载同源的空白 ERP 上传模板');
   assert(workbookFiles.some((fileName) => fileName.includes('最终版')), '缺少最终版组件零件清单台账模板');
   assert(workbookFiles.includes('erpordertest.xlsx'), '缺少 erpordertest.xlsx 汇总上传测试文件');
 
   for (const fileName of workbookFiles) {
+    if (fileName === '组件零件清单ERP上传模板.xlsx') {
+      continue;
+    }
     const previewSession = await requestJson('/orders/import-sessions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -534,6 +538,12 @@ async function assertTemplateWorkbook(template) {
     `模板应返回 xlsx content-type，实际 ${template.contentType}`
   );
   assert(template.buffer.slice(0, 2).toString('utf8') === 'PK', '模板必须是 xlsx zip 文件');
+  const bundledTemplatePath = join(resolve('outputs/component-order-template'), '组件零件清单ERP上传模板.xlsx');
+  assert(existsSync(bundledTemplatePath), '必须保留 outputs/component-order-template/组件零件清单ERP上传模板.xlsx 作为网页下载模板来源');
+  assert(
+    template.buffer.equals(readFileSync(bundledTemplatePath)),
+    '网页下载的 ERP 上传模板必须和 outputs/component-order-template/组件零件清单ERP上传模板.xlsx 完全一致'
+  );
   const workbook = await loadWorkbookFromBuffer(template.buffer, '订单导入模板');
   for (const sheetName of ['ERP上传净表', '字段说明', '示例数据', '选项']) {
     assert(workbook.getWorksheet(sheetName), `订单导入模板必须包含 ${sheetName} 工作表`);

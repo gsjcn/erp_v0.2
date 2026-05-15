@@ -9425,6 +9425,9 @@ function verifyOrderExcelImportWorkflow() {
   const migrationSqlSource = readMigrationSqlSource();
 
   const serviceSnippets = [
+    'readOrderImportTemplateWorkbookFile',
+    '组件零件清单ERP上传模板.xlsx',
+    "['outputs', 'component-order-template', this.orderImportTemplateFileName]",
     "workbook.getWorksheet('ERP上传净表')",
     'Excel 文件必须包含名为 ERP上传净表 的工作表',
     'ERP上传净表必须连续填写',
@@ -9975,6 +9978,7 @@ function verifyOrderExcelImportWorkflow() {
     'committed import session rejected upload',
     'outputs/component-order-template',
     'readFileSync(join(workbookDir, fileName))',
+    'template.buffer.equals(readFileSync(bundledTemplatePath))',
     "upload.files?.[0]?.sheetName",
     "upload.files?.[0]?.fileName === fileName",
     "sourceFileName === fileName",

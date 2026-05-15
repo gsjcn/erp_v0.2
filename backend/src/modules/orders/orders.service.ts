@@ -224,11 +224,39 @@ type OrderProductionFilterStatus = (typeof orderProductionFilterStatuses)[number
 @Injectable()
 export class OrdersService {
   private readonly importCommitCreatedOrdersPreviewLimit = 50;
+  private readonly orderImportTemplateFileName = '组件零件清单ERP上传模板.xlsx';
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly processDefinitionsService: ProcessDefinitionsService
   ) {}
+
+  private async readOrderImportTemplateWorkbookFile(): Promise<Uint8Array | null> {
+    const relativePath = ['outputs', 'component-order-template', this.orderImportTemplateFileName];
+    const candidates = [
+      resolve(process.cwd(), ...relativePath),
+      resolve(process.cwd(), '..', ...relativePath),
+      resolve(__dirname, '..', '..', '..', '..', ...relativePath)
+    ];
+    const checked = new Set<string>();
+    for (const filePath of candidates) {
+      if (checked.has(filePath)) {
+        continue;
+      }
+      checked.add(filePath);
+      try {
+        // 网页订单导入模板以 outputs/component-order-template 为准，避免下载模板和发给客户的模板分叉。
+        return await readFile(filePath);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          continue;
+        }
+        throw error;
+      }
+    }
+    return null;
+  }
 
   async findAll(query: OrderQueryDto) {
     const where: Prisma.CustomerOrderWhereInput = {};
@@ -899,6 +927,11 @@ export class OrdersService {
   }
 
   async buildOrderImportTemplate(): Promise<Uint8Array> {
+    const workbookFile = await this.readOrderImportTemplateWorkbookFile();
+    if (workbookFile) {
+      return workbookFile;
+    }
+
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'Baisheng ERP';
     workbook.created = new Date();
