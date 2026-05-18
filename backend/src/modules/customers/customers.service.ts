@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CommonStatus, CustomerRegionType, Prisma } from '@prisma/client';
+import * as ExcelJS from 'exceljs';
 import { PrismaService } from '../../prisma/prisma.service';
 import { normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin-search';
 import {
@@ -14,12 +15,15 @@ import {
 
 @Injectable()
 export class CustomersService {
+  private readonly testFixtureCustomerPrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
+
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll(query: CustomerQueryDto) {
     const where: Prisma.CustomerWhereInput = {};
     const keyword = normalizeSearchKeyword(query.keyword);
     const withPage = query.withPage === 'true';
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const limit = Math.min(Math.max(query.limit || 50, 1), 200);
     const offset = Math.max(query.offset || 0, 0);
 
@@ -33,11 +37,12 @@ export class CustomersService {
       orderBy: [{ status: 'asc' }, { customerCode: 'asc' }]
     });
 
+    const visibleCustomers = includeTestFixtures ? customers : customers.filter((customer) => !this.isTestFixtureCustomer(customer));
     const matchedCustomers = keyword
-      ? customers
+      ? visibleCustomers
           .filter((customer) => this.customerMatchesKeyword(customer, keyword))
           .sort((left, right) => this.compareCustomerSearchResults(left, right, keyword))
-      : customers;
+      : visibleCustomers;
 
     if (!withPage) {
       return matchedCustomers;
@@ -53,6 +58,114 @@ export class CustomersService {
       offset,
       hasMore: offset + items.length < totalCount
     };
+  }
+
+  async buildCustomersExport(query: CustomerQueryDto = {}): Promise<Uint8Array> {
+    const exportQuery = { ...query, withPage: undefined, limit: undefined, offset: undefined };
+    const customers = (await this.findAll(exportQuery)) as Awaited<ReturnType<CustomersService['findAll']>> extends Array<infer Row>
+      ? Row[]
+      : any[];
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const headers = [
+      '序号',
+      '客户ID',
+      '客户名称',
+      '状态',
+      '地区范围',
+      '国家',
+      '省份',
+      '州',
+      '地区',
+      '城市',
+      '详细地址',
+      '地址快照',
+      '主要联系人',
+      '主要联系人电话',
+      '联系人明细',
+      '备注',
+      '创建时间',
+      '更新时间'
+    ];
+    const worksheet = workbook.addWorksheet('客户资料', {
+      pageSetup: {
+        paperSize: 9,
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.2, footer: 0.2 }
+      },
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+    const columnCount = headers.length;
+    const titleRow = worksheet.addRow(['客户资料导出']);
+    worksheet.mergeCells(titleRow.number, 1, titleRow.number, columnCount);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    const scopeRow = worksheet.addRow([this.customerExportScopeText(query, customers.length)]);
+    worksheet.mergeCells(scopeRow.number, 1, scopeRow.number, columnCount);
+    scopeRow.font = { color: { argb: 'FF475569' } };
+    scopeRow.alignment = { vertical: 'middle', wrapText: true };
+
+    const generatedRow = worksheet.addRow([`制表时间：${this.customerExportDateTimeText(new Date())}`]);
+    worksheet.mergeCells(generatedRow.number, 1, generatedRow.number, columnCount);
+    generatedRow.font = { color: { argb: 'FF475569' } };
+
+    const headerRow = worksheet.addRow(headers);
+    headerRow.font = { bold: true, color: { argb: 'FF0F172A' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      cell.border = this.customerExportThinBorder();
+    });
+
+    customers.forEach((customer: any, index) => {
+      const primaryContact = this.customerExportPrimaryContact(customer);
+      const row = worksheet.addRow([
+        index + 1,
+        customer.customerCode,
+        customer.customerName,
+        this.customerExportStatusLabel(customer.status),
+        this.customerExportRegionTypeLabel(customer.regionType),
+        customer.country || '',
+        customer.province || '',
+        customer.state || '',
+        customer.district || '',
+        customer.city || '',
+        customer.detailAddress || '',
+        customer.address || this.buildAddress(customer),
+        primaryContact?.contactName || customer.contactName || '',
+        primaryContact?.contactPhone || customer.contactPhone || '',
+        this.customerExportContactsText(customer.contacts || []),
+        customer.remark || '',
+        this.customerExportDateTimeText(customer.createdAt),
+        this.customerExportDateTimeText(customer.updatedAt)
+      ]);
+      row.alignment = { vertical: 'top', wrapText: true };
+      row.eachCell((cell) => {
+        cell.border = this.customerExportThinBorder();
+      });
+    });
+
+    [8, 14, 28, 10, 12, 14, 14, 14, 14, 14, 28, 36, 16, 18, 46, 34, 20, 20].forEach((width, index) => {
+      worksheet.getColumn(index + 1).width = width;
+    });
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: columnCount }
+    };
+
+    // 客户导出只读取客户、多联系人和地区快照，不触发查重、启停用、订单、BOM、生产或库存写入。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async findOne(id: string) {
@@ -487,5 +600,85 @@ export class CustomersService {
       (JSON.stringify(error.meta || {}).includes('customerCode') ||
         JSON.stringify(error.meta || {}).includes('Customer_customerCode_lower_key'))
     );
+  }
+
+  private customerExportScopeText(query: CustomerQueryDto, count: number) {
+    const keyword = query.keyword?.trim();
+    return [
+      query.status ? `状态：${this.customerExportStatusLabel(query.status)}` : '状态：全部',
+      keyword ? `关键字：${keyword}` : '关键字：全部',
+      `记录数：${count}`
+    ].join('；');
+  }
+
+  private customerExportStatusLabel(status?: CommonStatus | null) {
+    if (status === CommonStatus.ENABLED) {
+      return '启用';
+    }
+    if (status === CommonStatus.DISABLED) {
+      return '停用';
+    }
+    return '';
+  }
+
+  private customerExportRegionTypeLabel(regionType?: CustomerRegionType | null) {
+    if (regionType === CustomerRegionType.OVERSEAS) {
+      return '国外';
+    }
+    return '中国';
+  }
+
+  private isTestFixtureCustomer(customer: Pick<Prisma.CustomerGetPayload<{}>, 'customerCode' | 'customerName' | 'status'>) {
+    const customerCode = String(customer.customerCode || '');
+    const customerName = String(customer.customerName || '');
+    return this.testFixtureCustomerPrefixes.some((prefix) => customerCode.startsWith(prefix) || customerName.startsWith(prefix));
+  }
+
+  private customerExportPrimaryContact(customer: { contacts?: any[]; contactName?: string | null }) {
+    return (
+      customer.contacts?.find((contact) => contact.isPrimary && contact.contactName?.trim()) ||
+      customer.contacts?.find((contact) => contact.contactName?.trim()) ||
+      (customer.contactName ? { contactName: customer.contactName, contactPhone: null } : undefined)
+    );
+  }
+
+  private customerExportContactsText(contacts: Array<{ contactName?: string; contactPhone?: string | null; title?: string | null; remark?: string | null; isPrimary?: boolean | null }>) {
+    return contacts
+      .filter((contact) => contact.contactName?.trim())
+      .map((contact) =>
+        [
+          contact.isPrimary ? '主要' : '联系人',
+          contact.contactName,
+          contact.contactPhone,
+          contact.title,
+          contact.remark
+        ]
+          .filter(Boolean)
+          .join(' / ')
+      )
+      .join('\n');
+  }
+
+  private customerExportDateTimeText(value?: Date | string | null) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '';
+    }
+    const pad = (item: number) => String(item).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+      date.getMinutes()
+    )}`;
+  }
+
+  private customerExportThinBorder(): Partial<ExcelJS.Borders> {
+    return {
+      top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      right: { style: 'thin', color: { argb: 'FFE2E8F0' } }
+    };
   }
 }

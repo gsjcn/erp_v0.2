@@ -123,13 +123,14 @@ model CustomerContact {
   @@index([contactName])
 }
 
-/// 物料基础清单，只保存零件编码、名称和默认单位；库存数量仍然从 InventoryBatch 实时计算。
+/// 物料基础清单，只保存零件身份、默认单位和默认工艺建议；库存数量仍然从 InventoryBatch 实时计算。
 model Material {
   id                   String                    @id @default(uuid())
   partCode             String                    @unique
   partName             String
   unit                 String                    @default("件")
   partSpecification    String?
+  defaultProcessRoute  String?
   stockAlertEnabled    Boolean                   @default(false)
   stockAlertQuantity   Decimal?                  @db.Decimal(18, 3)
   status               CommonStatus              @default(ENABLED)
@@ -206,13 +207,14 @@ model ModelBom {
   status                CommonStatus            @default(ENABLED)
   customerScopes        ModelBomCustomerScope[]
   lines                 ModelBomLine[]
+  revisions             ModelBomRevision[]
+  scopeApprovalRequests ModelBomScopeApprovalRequest[]
   diffReviewsAsTarget   ModelBomDiffReview[]    @relation("ModelBomDiffReviewTarget")
   diffReviewsAsSource   ModelBomDiffReview[]    @relation("ModelBomDiffReviewSource")
   createdAt             DateTime                @default(now())
   updatedAt             DateTime                @updatedAt
 
   @@unique([bomName, customerScopeKey, projectModelScopeKey])
-  @@unique([customerScopeKey, projectModelScopeKey])
   @@index([customerId])
   @@index([sourceBomId])
   @@index([projectModelScopeKey])
@@ -302,6 +304,57 @@ model ModelBomDiffReview {
   @@index([sourceLineId])
   @@index([targetLineId])
   @@index([reviewedAt])
+}
+
+/// BOM 适用范围扩大审批申请；只控制“让更多客户/机型看到 BOM”的特殊动作，不保存订单、生产或库存数据。
+model ModelBomScopeApprovalRequest {
+  id                       String   @id @default(uuid())
+  requestNo                String   @unique
+  bomId                    String
+  bom                      ModelBom @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  requestType              String   @default("EXPAND_SCOPE")
+  status                   String   @default("PENDING")
+  requestedBomName         String
+  requestedCustomerScopeMode String
+  requestedCustomerId      String?
+  requestedCustomerNameSnapshot String?
+  requestedCustomerIds     Json?
+  requestedProjectModel    String
+  requestedScopeKey        String
+  requestedProjectModelScopeKey String
+  currentScopeJson         Json
+  requestedScopeJson       Json
+  reason                   String
+  requestedBy              String
+  approvedBy               String?
+  approvedAt               DateTime?
+  rejectedBy               String?
+  rejectedAt               DateTime?
+  reviewRemark             String?
+  usedAt                   DateTime?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([bomId, status])
+  @@index([status, createdAt])
+  @@index([bomId, status, requestedCustomerScopeMode, requestedScopeKey, requestedProjectModelScopeKey], map: "ModelBomScopeApprovalRequest_scope_query_idx")
+  @@index([requestType])
+}
+
+model ModelBomRevision {
+  id           String   @id @default(uuid())
+  bomId        String
+  bom          ModelBom @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  revisionNo   Int
+  action       String
+  changedBy    String?
+  changeRemark String?
+  snapshotJson Json
+  createdAt    DateTime @default(now())
+
+  @@unique([bomId, revisionNo])
+  @@index([bomId, createdAt])
+  @@index([action])
 }
 
 /// 零件适用范围。customerScopeKey / projectModelScopeKey 用于避免 PostgreSQL NULL 唯一约束失效。
@@ -453,6 +506,7 @@ model OrderImportRow {
   parentComponentNo String?
   partCode          String
   drawingNo         String?
+  drawingVersion    String?
   partName          String
   partSpecification String?
   partThickness     Decimal            @default(1) @db.Decimal(18, 3)
@@ -541,6 +595,7 @@ model MaterialImportRow {
   drawingStatus      String?
   partThickness      Decimal?              @db.Decimal(18, 3)
   projectModel       String?
+  defaultProcessRoute String?
   stockAlertEnabled  Boolean?
   stockAlertQuantity Decimal?              @db.Decimal(18, 3)
   remark             String?

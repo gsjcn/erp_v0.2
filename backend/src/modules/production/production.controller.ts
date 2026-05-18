@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Post, Query, StreamableFile } from '@nestjs/common';
 import {
   AcknowledgeProductionNoticeDto,
   ApproveProductionReplenishmentRequestDto,
@@ -7,6 +7,7 @@ import {
   CompleteProcessStepsDto,
   CompleteProductionDto,
   ProductionAnnualSummaryQueryDto,
+  ProductionExportQueryDto,
   ProductionNoticeQueryDto,
   ProductionOperatorQueryDto,
   ProductionReplenishmentRequestQueryDto,
@@ -24,17 +25,24 @@ export class ProductionController {
 
   @Get()
   findTasks(@Query() query: ProductionTaskQueryDto) {
-    return this.productionService.findTasks(query);
+    return this.productionService.findTasks({ ...query, withPage: 'true' });
   }
 
   @Get('order-summary')
   orderSummary(@Query() query: ProductionTaskQueryDto) {
-    return this.productionService.orderSummary(query);
+    return this.productionService.orderSummary({ ...query, withPage: 'true' });
   }
 
   @Get('annual-summary')
   annualSummary(@Query() query: ProductionAnnualSummaryQueryDto) {
     return this.productionService.annualSummary(query);
+  }
+
+  @Get('export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="production-export.xlsx"')
+  async exportProduction(@Query() query: ProductionExportQueryDto) {
+    return new StreamableFile(await this.productionService.buildProductionExport(query));
   }
 
   @Get('operators')
@@ -44,12 +52,26 @@ export class ProductionController {
 
   @Get('notices')
   notices(@Query() query: ProductionNoticeQueryDto) {
-    return this.productionService.notices(query);
+    return this.productionService.notices({ ...query, withPage: 'true' });
+  }
+
+  @Get('notices/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="production-notices-export.xlsx"')
+  async exportNotices(@Query() query: ProductionNoticeQueryDto) {
+    return new StreamableFile(await this.productionService.buildProductionNoticesExport(query));
   }
 
   @Get('notices/admin')
   adminNotices(@Query() query: ProductionNoticeQueryDto) {
-    return this.productionService.adminNotices(query);
+    return this.productionService.adminNotices({ ...query, withPage: 'true' });
+  }
+
+  @Get('notices/admin/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="admin-notices-export.xlsx"')
+  async exportAdminNotices(@Query() query: ProductionNoticeQueryDto) {
+    return new StreamableFile(await this.productionService.buildProductionNoticesExport(query, { admin: true }));
   }
 
   @Post('notices/:id/acknowledge')
@@ -69,12 +91,26 @@ export class ProductionController {
 
   @Get('replenishment-requests')
   replenishmentRequests(@Query() query: ProductionReplenishmentRequestQueryDto) {
-    return this.productionService.replenishmentRequests(query);
+    return this.productionService.replenishmentRequests({ ...query, withPage: 'true' });
+  }
+
+  @Get('replenishment-requests/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="production-replenishment-requests-export.xlsx"')
+  async exportReplenishmentRequests(@Query() query: ProductionReplenishmentRequestQueryDto) {
+    return new StreamableFile(await this.productionService.buildProductionReplenishmentRequestsExport(query));
   }
 
   @Get('scrap-records')
   scrapRecords(@Query() query: ProductionScrapQueryDto) {
-    return this.productionService.scrapRecords(query);
+    return this.productionService.scrapRecords({ ...query, withPage: 'true' });
+  }
+
+  @Get('scrap-records/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="production-scrap-records-export.xlsx"')
+  async exportScrapRecords(@Query() query: ProductionScrapQueryDto) {
+    return new StreamableFile(await this.productionService.buildProductionScrapRecordsExport(query));
   }
 
   @Post('batch-start')

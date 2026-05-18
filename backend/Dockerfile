@@ -37,4 +37,4 @@ WORKDIR /app/backend
 
 EXPOSE 3000
 
-CMD ["node", "dist/main.js"]
+CMD ["sh", "-c", "node scripts/prisma-with-root-env.cjs migrate deploy --schema ../database/prisma/schema.prisma && node dist/main.js"]

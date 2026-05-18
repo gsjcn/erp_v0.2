@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, Param, Patch, Post, Query, StreamableFile } from '@nestjs/common';
 import { CreateProcessTemplateDto, ProcessTemplateQueryDto, UpdateProcessTemplateDto } from './dto';
 import { ProcessTemplatesService } from './process-templates.service';
 
@@ -8,7 +8,14 @@ export class ProcessTemplatesController {
 
   @Get()
   findAll(@Query() query: ProcessTemplateQueryDto) {
-    return this.processTemplatesService.findAll(query);
+    return this.processTemplatesService.findAll({ ...query, withPage: 'true' });
+  }
+
+  @Get('export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="process-templates-export.xlsx"')
+  async exportTemplates(@Query() query: ProcessTemplateQueryDto) {
+    return new StreamableFile(await this.processTemplatesService.buildProcessTemplatesExport(query));
   }
 
   @Post()

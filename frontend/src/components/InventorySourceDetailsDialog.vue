@@ -37,7 +37,46 @@
         <el-button @click="searchInventoryKeyword">查询库存</el-button>
         <el-button v-if="expected?.partCode" @click="searchExpectedPart">返回订单零件</el-button>
       </div>
-      <div v-if="sourceSearchManualPickRequired && lastInventorySuggestions.length" class="source-search-results">
+      <div v-if="sourceSearchManualPickRequired && lastInventorySuggestions.length" class="inventory-source-table-height-toolbar source-search-result-height-toolbar">
+        <div class="inventory-source-table-height-actions" aria-label="替代物料搜索结果高度">
+          <span class="inventory-source-table-height-label">替代物料搜索结果高度</span>
+          <el-tooltip content="降低搜索结果高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="inventorySourceDialogTableHeights.searchResults <= inventorySourceDialogTableHeightLimits.min"
+              aria-label="降低替代物料搜索结果高度"
+              @click="adjustInventorySourceDialogTableHeight('searchResults', -inventorySourceDialogTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高搜索结果高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="inventorySourceDialogTableHeights.searchResults >= inventorySourceDialogTableHeightLimits.max"
+              aria-label="提高替代物料搜索结果高度"
+              @click="adjustInventorySourceDialogTableHeight('searchResults', inventorySourceDialogTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="inventorySourceDialogTableHeights.searchResults === inventorySourceDialogTableDefaultHeights.searchResults"
+              aria-label="恢复替代物料搜索结果默认高度"
+              @click="resetInventorySourceDialogTableHeight('searchResults')"
+            />
+          </el-tooltip>
+        </div>
+      </div>
+      <div
+        v-if="sourceSearchManualPickRequired && lastInventorySuggestions.length"
+        class="source-search-results"
+        :style="{ maxHeight: `${inventorySourceDialogTableHeights.searchResults}px` }"
+      >
         <strong>{{ sourceSearchResultHint }}</strong>
         <button
           v-for="item in lastInventorySuggestions"
@@ -64,9 +103,13 @@
         <article v-for="rule in transformRuleSuggestions" :key="rule.id" class="transform-suggestion-item">
           <div>
             <strong>{{ rule.sourcePartCode }} / {{ rule.sourcePartName }}</strong>
-            <span>{{ rule.scopeLabel }} / 倍率 {{ rule.multiplier }} / 损耗 {{ rule.lossRate ?? '-' }}</span>
-            <small v-if="rule.defaultProcessRoute">建议工艺：{{ rule.defaultProcessRoute }}</small>
-            <small v-if="rule.conversionDescription">{{ rule.conversionDescription }}</small>
+            <el-tooltip :content="transformRuleScopeTitle(rule)" placement="top">
+              <span class="transform-suggestion-meta">{{ transformRuleScopePreview(rule) }}</span>
+            </el-tooltip>
+            <small v-if="rule.defaultProcessRoute" :title="rule.defaultProcessRoute">建议工艺：{{ formatProcessRoutePreview(rule.defaultProcessRoute) }}</small>
+            <el-tooltip v-if="rule.conversionDescription" :content="transformRuleDescriptionTitle(rule)" placement="top">
+              <small class="transform-suggestion-description">{{ transformRuleDescriptionPreview(rule) }}</small>
+            </el-tooltip>
           </div>
           <div class="transform-suggestion-action">
             <el-button size="small" type="primary" plain @click="searchTransformSource(rule)">
@@ -107,8 +150,7 @@
       <div v-if="expected && hasExpectedInfo" class="expected-card">
         <div class="expected-title">本次订单图纸要求</div>
         <div class="expected-grid">
-          <span>图号：{{ expected.drawingNo || '未填写' }}</span>
-          <span>版本：{{ expected.drawingVersion || '未填写' }}</span>
+          <span>图纸：{{ drawingTitle(expected) }}</span>
           <span>规格：{{ expected.partSpecification || '未填写' }}</span>
           <span>厚度：{{ expectedThicknessText }}</span>
         <span>本次需要：{{ expected.requiredQuantity != null ? formatQuantity(expected.requiredQuantity, expected.unit || '件') : '未填写' }}</span>
@@ -121,15 +163,8 @@
           title="本次订单图纸"
         />
         <el-alert
-          v-if="expectedMissingInfoReasons.length"
-          :title="`本次订单资料不完整：${expectedMissingInfoReasons.join('、')}。仍可使用库存，但必须填写人工确认说明。`"
-          type="warning"
-          :closable="false"
-          class="expected-warning"
-        />
-        <el-alert
-          v-else-if="expectedFileMissing"
-          title="本次订单未上传图纸文件，系统只能按图号、版本、规格和厚度进行初步核对。建议补上传图纸后再使用库存。"
+          v-if="expectedOrderInfoReasons.length"
+          :title="`本次订单资料不完整：${formatDialogReasonPreview(expectedOrderInfoReasons, '字段')}。仍可使用库存，但必须填写人工确认说明。`"
           type="warning"
           :closable="false"
           class="expected-warning"
@@ -241,7 +276,12 @@
               <small v-if="source.manualConfirmedBy" class="selected-source-manual-note">
                 人工确认：{{ source.manualConfirmedBy }}
                 <template v-if="source.manualConfirmedAt"> / {{ formatDateTime(source.manualConfirmedAt) }}</template>
-                <template v-if="source.manualConfirmRemark"> / {{ source.manualConfirmRemark }}</template>
+                <template v-if="source.manualConfirmRemark">
+                  /
+                  <span class="selected-source-manual-remark" :title="manualConfirmationRemarkTitle(source)">
+                    {{ manualConfirmationRemarkPreview(source) }}
+                  </span>
+                </template>
               </small>
             </div>
             <div class="selected-source-quantity-editor">
@@ -258,7 +298,7 @@
             </div>
             <el-tag v-if="selectedSourceQueuePlaceholder(source)" type="info" effect="plain">队列占位</el-tag>
             <el-tag v-else-if="sourceNeedsManualConfirmation(source)" type="warning" effect="plain">
-              {{ manualConfirmationReason(source) }}
+              <span :title="manualConfirmationReasonTitle(source)">{{ manualConfirmationReasonPreview(source) }}</span>
             </el-tag>
             <el-tag v-else type="success" effect="plain">已匹配</el-tag>
             <div class="selected-source-sort-actions">
@@ -282,7 +322,9 @@
               <el-tag type="warning" effect="plain">
                 {{ item.source.batchNo || item.source.batchId }}
               </el-tag>
-              <span>{{ manualConfirmationReason(item.source) }}</span>
+              <span class="manual-confirm-reason" :title="manualConfirmationReasonTitle(item.source)">
+                {{ manualConfirmationReasonPreview(item.source, 42) }}
+              </span>
             </div>
             <div class="manual-confirm-form">
               <label>
@@ -307,12 +349,47 @@
         </div>
       </div>
 
+      <div v-if="detail" class="inventory-source-table-height-toolbar">
+        <div class="inventory-source-table-height-actions" aria-label="库存来源批次表格高度">
+          <span class="inventory-source-table-height-label">库存来源批次表格高度</span>
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="inventorySourceDialogTableHeights.sources <= inventorySourceDialogTableHeightLimits.min"
+              aria-label="降低库存来源批次表格高度"
+              @click="adjustInventorySourceDialogTableHeight('sources', -inventorySourceDialogTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="inventorySourceDialogTableHeights.sources >= inventorySourceDialogTableHeightLimits.max"
+              aria-label="提高库存来源批次表格高度"
+              @click="adjustInventorySourceDialogTableHeight('sources', inventorySourceDialogTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="inventorySourceDialogTableHeights.sources === inventorySourceDialogTableDefaultHeights.sources"
+              aria-label="恢复库存来源批次表格默认高度"
+              @click="resetInventorySourceDialogTableHeight('sources')"
+            />
+          </el-tooltip>
+        </div>
+      </div>
       <el-table
         v-if="detail"
         class="desktop-table"
         :data="sourceRows"
         :row-class-name="sourceRowClassName"
-        max-height="520"
+        :max-height="inventorySourceDialogTableHeights.sources"
         border
       >
         <el-table-column v-if="reviewMode" label="本次使用" width="180" fixed="left">
@@ -340,6 +417,8 @@
               <el-tag v-if="isFocusedSource(row)" type="primary" size="small" effect="plain">当前批次</el-tag>
             </div>
             <div class="cell-subtext">{{ sourceTypeText(row.inventorySourceType) }} / {{ sourceKindText(row.sourceKind) }}</div>
+            <div v-if="row.partCategory" class="cell-subtext">类型 {{ row.partCategory }}</div>
+            <div v-if="row.projectModel" class="cell-subtext">项目 {{ row.projectModel }}</div>
             <div v-if="sourceComponentText(row)" class="cell-subtext">{{ sourceComponentText(row) }}</div>
           </template>
         </el-table-column>
@@ -429,7 +508,7 @@
               {{ compatibilityResult(row).label }}
             </el-tag>
             <div v-if="compatibilityResult(row).reason" class="cell-subtext warning-text">
-              {{ compatibilityResult(row).reason }}
+              <span :title="compatibilityReasonTitle(row)">{{ compatibilityReasonPreview(row) }}</span>
             </div>
           </template>
         </el-table-column>
@@ -460,7 +539,9 @@
               <small v-if="draftReservedQuantity(row)" class="warning-text">
                 本订单其他零件已选 {{ formatQuantity(draftReservedQuantity(row), row.unit) }}
               </small>
+              <small v-if="row.partCategory">类型 {{ row.partCategory }}</small>
               <small v-if="sourceComponentText(row)">{{ sourceComponentText(row) }}</small>
+              <small v-if="row.projectModel">项目 {{ row.projectModel }}</small>
               <small v-if="row.reservedQuantity" class="warning-text">{{ reservationSummary(row) }}</small>
             </div>
             <div class="mobile-card-header-actions source-mobile-header-actions">
@@ -542,7 +623,7 @@
             </div>
             <div v-if="expected && hasExpectedInfo && compatibilityResult(row).reason" class="mobile-field">
               <label>适用说明</label>
-              <span class="warning-text">{{ compatibilityResult(row).reason }}</span>
+              <span class="warning-text" :title="compatibilityReasonTitle(row)">{{ compatibilityReasonPreview(row, 38) }}</span>
             </div>
           </div>
 
@@ -555,6 +636,22 @@
             />
           </div>
         </article>
+      </div>
+
+      <div v-if="sourcePaginationVisible" class="source-pagination-row">
+        <span>
+          第 {{ sourcePaginationCurrentPage }} 页，已显示 {{ sourceRows.length }} /
+          {{ sourcePaginationTotal }} 批库存来源
+        </span>
+        <el-pagination
+          background
+          layout="prev, pager, next"
+          :current-page="sourcePaginationCurrentPage"
+          :page-size="sourcePaginationPageSize"
+          :total="sourcePaginationTotal"
+          :disabled="loading"
+          @current-change="handleSourcePageChange"
+        />
       </div>
 
       <el-empty v-if="detail && adjustedSourceRows.length === 0" :description="sourceEmptyDescription" />
@@ -613,7 +710,42 @@
             <StatusTag :value="orderDisplayStatus(orderPreview)" compact />
           </div>
         </div>
-        <el-table :data="orderPreview.lines" border max-height="360">
+        <div class="inventory-source-table-height-toolbar order-preview-table-height-toolbar">
+          <div class="inventory-source-table-height-actions" aria-label="订单信息预览表格高度">
+            <span class="inventory-source-table-height-label">订单信息预览表格高度</span>
+            <el-tooltip content="降低表格高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="Minus"
+                :disabled="inventorySourceDialogTableHeights.orderPreview <= inventorySourceDialogTableHeightLimits.min"
+                aria-label="降低订单信息预览表格高度"
+                @click="adjustInventorySourceDialogTableHeight('orderPreview', -inventorySourceDialogTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="提高表格高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="Plus"
+                :disabled="inventorySourceDialogTableHeights.orderPreview >= inventorySourceDialogTableHeightLimits.max"
+                aria-label="提高订单信息预览表格高度"
+                @click="adjustInventorySourceDialogTableHeight('orderPreview', inventorySourceDialogTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="恢复默认高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="inventorySourceDialogTableHeights.orderPreview === inventorySourceDialogTableDefaultHeights.orderPreview"
+                aria-label="恢复订单信息预览表格默认高度"
+                @click="resetInventorySourceDialogTableHeight('orderPreview')"
+              />
+            </el-tooltip>
+          </div>
+        </div>
+        <el-table :data="orderPreview.lines" border :max-height="inventorySourceDialogTableHeights.orderPreview">
           <el-table-column prop="partCode" label="零件编码" min-width="130" />
           <el-table-column prop="partName" label="零件名称" min-width="150" />
           <el-table-column label="客户订单" width="120">
@@ -624,7 +756,7 @@
           </el-table-column>
           <el-table-column label="图纸" min-width="170">
             <template #default="{ row }">
-              <div>{{ row.drawingNo || '未填写' }} / {{ row.drawingVersion || '-' }}</div>
+              <div>{{ drawingTitle(row) }}</div>
               <DrawingPreviewLink :file-name="row.drawingFileName" :file-url="row.drawingFileUrl" link-text="打开图纸" />
             </template>
           </el-table-column>
@@ -642,10 +774,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { Rank } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
 import DrawingPreviewLink from './DrawingPreviewLink.vue';
 import MaterialSuggestionOption from './MaterialSuggestionOption.vue';
 import StatusTag from './StatusTag.vue';
@@ -686,6 +818,7 @@ const emit = defineEmits<{
   confirmReviewed: [];
   sourceSearch: [partCode: string];
   selectionChange: [sources: StockSourceSelectionPayload[]];
+  sourcePageChange: [offset: number];
 }>();
 
 type CompatibilityStatus = NonNullable<StockSourceSelectionPayload['compatibilityStatus']>;
@@ -693,6 +826,14 @@ type ManualConfirmForm = {
   confirmedBy: string;
   confirmedAt: Date;
   remark: string;
+  reasonKey: string;
+};
+
+const selectedSourceCompatibilityRank: Record<CompatibilityStatus, number> = {
+  MATCHED: 0,
+  NEEDS_CONFIRMATION: 1,
+  INCOMPLETE: 2,
+  UNKNOWN: 3
 };
 
 const sourceGuardAlertTitle = computed(() =>
@@ -717,6 +858,23 @@ type SourceRow = InventorySourceBatchDetail & {
 type SelectedSourceRow = StockSourceSelectionPayload & {
   currentAvailableQuantity?: number;
 };
+type InventorySourceDialogTableKey = 'sources' | 'searchResults' | 'orderPreview';
+
+const inventorySourceDialogTableHeightLimits = {
+  min: 280,
+  max: 760,
+  step: 80
+};
+const inventorySourceDialogTableDefaultHeights: Record<InventorySourceDialogTableKey, number> = {
+  sources: 520,
+  searchResults: 280,
+  orderPreview: 360
+};
+const inventorySourceDialogTableHeightStorageKey = 'baisheng.erp.inventorySourceDialogTableHeights.v1';
+// 库存来源弹窗表格和搜索结果高度只保存为本机 UI 偏好，不写入库存批次、预占、订单、生产或库存流水业务数据。
+const inventorySourceDialogTableHeights = reactive<Record<InventorySourceDialogTableKey, number>>({
+  ...inventorySourceDialogTableDefaultHeights
+});
 
 const expected = computed(() => props.expected || null);
 const sourceSearchKeyword = ref('');
@@ -765,6 +923,56 @@ const sourceSearchResultHint = computed(() => {
   }
   return lastInventorySuggestions.value.length > 1 ? '匹配到多个零件，请选择具体零件' : '匹配到相似零件，请选择确认';
 });
+
+function splitDefaultProcessRoute(value: string) {
+  return value
+    .split(/(?:->|→|[、,，;；\n\r]+)/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const steps = splitDefaultProcessRoute(String(value || ''));
+  if (steps.length === 0) {
+    return emptyText;
+  }
+  const preview = steps.filter((_, index) => index < 3).join('、');
+  return steps.length > 3 ? `${preview} 等 ${steps.length} 个工序` : preview;
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function transformRuleScopePreview(rule: MaterialTransformRule) {
+  return `${formatLongTextPreview(rule.scopeLabel, 24, '未设置范围')} / 倍率 ${rule.multiplier} / 损耗 ${rule.lossRate ?? '-'}`;
+}
+
+function transformRuleScopeTitle(rule: MaterialTransformRule) {
+  const description = String(rule.conversionDescription || '').trim();
+  return [
+    `适用范围：${formatLongTextPreview(rule.scopeLabel, 24, '未设置范围')}`,
+    `倍率：${rule.multiplier}`,
+    `损耗：${rule.lossRate ?? '-'}`,
+    description ? `说明：${description}` : '',
+    '来源加工关系只提供库存来源建议；完整范围请进入来源加工关系详情核对，不会自动扣库存或自动选中批次'
+  ]
+    .filter(Boolean)
+    .join('。');
+}
+
+function transformRuleDescriptionPreview(rule: MaterialTransformRule) {
+  return `转换说明：${formatLongTextPreview(rule.conversionDescription, 36, '-')}`;
+}
+
+function transformRuleDescriptionTitle(rule: MaterialTransformRule) {
+  return String(rule.conversionDescription || '').trim() || '-';
+}
+
 const draftReservedQuantityByBatchId = computed(() => {
   const rows = new Map<string, number>();
   for (const source of props.draftReservedSources || []) {
@@ -813,6 +1021,20 @@ const sourceRows = computed(() => {
     )
     .map((item) => item.row);
 });
+const sourcePaginationTotal = computed(() => Number(props.detail?.totalSourceCount ?? 0));
+const sourcePaginationPageSize = computed(() => Math.max(Number(props.detail?.sourceLimit ?? props.detail?.sources.length ?? 20), 1));
+const sourcePaginationOffset = computed(() => Math.max(Number(props.detail?.sourceOffset ?? 0), 0));
+const sourcePaginationCurrentPage = computed(() => Math.floor(sourcePaginationOffset.value / sourcePaginationPageSize.value) + 1);
+const sourcePaginationVisible = computed(() =>
+  Boolean(!props.reviewMode && props.detail && props.detail.totalSourceCount !== undefined && sourcePaginationTotal.value > sourcePaginationPageSize.value)
+);
+const mobileSourceBatchStateKey = computed(() =>
+  (props.detail?.sources || []).map((row) => sourceBatchCardKey(row)).join('|')
+);
+
+function handleSourcePageChange(page: number) {
+  emit('sourcePageChange', Math.max(page - 1, 0) * sourcePaginationPageSize.value);
+}
 
 function sourceBatchCardKey(row: Pick<InventorySourceBatchDetail, 'id' | 'batchNo'>) {
   return row.id || row.batchNo || '';
@@ -847,7 +1069,12 @@ const selectedSourceRows = computed<SelectedSourceRow[]>(() => {
     const compatibility = compatibilityResult(row);
     const nextCompatibilityStatus = selectionCompatibilityStatus(row);
     const nextCompatibilityReason = selectionCompatibilityReason(compatibility);
-    const savedManualReason = source.manualConfirmedBy && source.compatibilityReason ? source.compatibilityReason : '';
+    const manualConfirmationSource = selectedSourceManualConfirmationSource(
+      source,
+      undefined,
+      nextCompatibilityStatus,
+      nextCompatibilityReason
+    );
     return {
       ...source,
       batchNo: row.batchNo || source.batchNo,
@@ -859,12 +1086,11 @@ const selectedSourceRows = computed<SelectedSourceRow[]>(() => {
       replenishmentSourceType: row.replenishmentSourceType || source.replenishmentSourceType,
       replenishmentSourceRequestNo: row.replenishmentSourceRequestNo || source.replenishmentSourceRequestNo,
       replenishmentSourceLabel: row.replenishmentSourceLabel || source.replenishmentSourceLabel,
-      compatibilityStatus: savedManualReason
-        ? source.compatibilityStatus && source.compatibilityStatus !== 'MATCHED'
-          ? source.compatibilityStatus
-          : 'NEEDS_CONFIRMATION'
-        : nextCompatibilityStatus,
-      compatibilityReason: savedManualReason || nextCompatibilityReason
+      compatibilityStatus: nextCompatibilityStatus,
+      compatibilityReason: nextCompatibilityReason,
+      manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim(),
+      manualConfirmedAt: manualConfirmationSource?.manualConfirmedAt?.trim(),
+      manualConfirmRemark: manualConfirmationSource?.manualConfirmRemark?.trim()
     };
   });
 });
@@ -936,6 +1162,8 @@ const expectedMissingInfoReasons = computed(() => {
   return [
     !normalizeValue(row.drawingNo) ? '缺图号' : '',
     !normalizeValue(row.drawingVersion) ? '缺图纸版本' : '',
+    !normalizeValue(row.drawingDate) ? '缺图纸日期' : '',
+    !normalizeValue(row.drawingStatus) ? '缺图纸状态' : '',
     !normalizeValue(row.partSpecification) ? '缺成品规格' : '',
     expectedRequiresThickness.value && Number(row.partThickness ?? 0) <= 0 ? '缺零件厚度' : ''
   ].filter(Boolean);
@@ -947,8 +1175,17 @@ const expectedThicknessText = computed(() => {
   }
   return expected.value?.partThickness ? `${expected.value.partThickness} mm` : '未填写';
 });
-const expectedFileMissing = computed(() => Boolean(expected.value && !expected.value.drawingFileUrl));
-const orderDrawingInfoComplete = computed(() => expectedMissingInfoReasons.value.length === 0);
+const expectedFileMissingReasons = computed(() => {
+  const row = expected.value;
+  if (!row) {
+    return [];
+  }
+  return [
+    !normalizeValue(row.drawingFileName) ? '缺图纸文件名' : '',
+    !normalizeValue(row.drawingFileUrl) ? '缺图纸文件' : ''
+  ].filter(Boolean);
+});
+const expectedOrderInfoReasons = computed(() => [...expectedMissingInfoReasons.value, ...expectedFileMissingReasons.value]);
 const stockReviewQuantityOk = computed(() => {
   if (!hasReviewableSource.value) {
     return false;
@@ -1216,7 +1453,16 @@ function warnInventorySuggestionNeedsManualPick(item: InventoryMaterialSuggestio
 }
 
 function materialIdentityConflictFieldsText(item: InventoryMaterialSuggestion) {
-  return item.identityConflictFields?.length ? item.identityConflictFields.join('、') : '图号、规格、厚度和项目型号';
+  return item.identityConflictFields?.length ? formatDialogReasonPreview(item.identityConflictFields, '字段') : '图号、规格、厚度和项目型号';
+}
+
+function formatDialogReasonPreview(values: Array<string | null | undefined>, unitLabel: string, emptyText = '-') {
+  const filtered = values.map((value) => String(value || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  return filtered.length > 3 ? `${preview} 等 ${filtered.length} 个${unitLabel}` : preview;
 }
 
 function keepInventorySuggestionManualPick(item: InventoryMaterialSuggestion) {
@@ -1396,6 +1642,9 @@ function selectedSourceCapacity(source: StockSourceSelectionPayload) {
 
 function createSelectionFromRow(row: InventorySourceBatchDetail, quantity: number, previous?: StockSourceSelectionPayload) {
   const compatibility = compatibilityResult(row);
+  const compatibilityStatus = selectionCompatibilityStatus(row);
+  const compatibilityReason = selectionCompatibilityReason(compatibility);
+  const manualConfirmationSource = selectedSourceManualConfirmationSource(previous, undefined, compatibilityStatus, compatibilityReason);
   return {
     batchId: row.id,
     batchNo: row.batchNo,
@@ -1407,11 +1656,11 @@ function createSelectionFromRow(row: InventorySourceBatchDetail, quantity: numbe
     replenishmentSourceType: row.replenishmentSourceType,
     replenishmentSourceRequestNo: row.replenishmentSourceRequestNo,
     replenishmentSourceLabel: row.replenishmentSourceLabel,
-    compatibilityStatus: selectionCompatibilityStatus(row),
-    compatibilityReason: selectionCompatibilityReason(compatibility),
-    manualConfirmedBy: previous?.manualConfirmedBy,
-    manualConfirmedAt: previous?.manualConfirmedAt,
-    manualConfirmRemark: previous?.manualConfirmRemark
+    compatibilityStatus,
+    compatibilityReason,
+    manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim(),
+    manualConfirmedAt: manualConfirmationSource?.manualConfirmedAt?.trim(),
+    manualConfirmRemark: manualConfirmationSource?.manualConfirmRemark?.trim()
   } satisfies StockSourceSelectionPayload;
 }
 
@@ -1846,6 +2095,57 @@ function mergeCurrentDetailSelection(currentRows: StockSourceSelectionPayload[])
   return normalizeSelectedSources([...selectedSourcesOutsideCurrentDetail(), ...currentRows]);
 }
 
+function compatibilityReasonText(reason?: string) {
+  return reason?.trim() || undefined;
+}
+
+function stricterSelectedSourceCompatibilityStatus(
+  incoming?: CompatibilityStatus,
+  current?: CompatibilityStatus,
+  hasIncoming = false,
+  hasCurrent = false
+) {
+  if (!hasIncoming) {
+    return current;
+  }
+  if (!hasCurrent) {
+    return incoming;
+  }
+  if (!incoming || !current) {
+    return undefined;
+  }
+  return selectedSourceCompatibilityRank[incoming] > selectedSourceCompatibilityRank[current] ? incoming : current;
+}
+
+function mergeSelectedSourceCompatibilityReason(
+  incoming?: string,
+  current?: string,
+  hasIncoming = false,
+  hasCurrent = false
+) {
+  const reasons = [hasCurrent ? current : undefined, hasIncoming ? incoming : undefined]
+    .map((reason) => compatibilityReasonText(reason))
+    .filter(Boolean);
+  return [...new Set(reasons)].join('；') || undefined;
+}
+
+function selectedSourceManualConfirmationSource(
+  incoming: StockSourceSelectionPayload | undefined,
+  current: StockSourceSelectionPayload | undefined,
+  mergedStatus?: CompatibilityStatus,
+  mergedReason?: string
+) {
+  const normalizedMergedReason = compatibilityReasonText(mergedReason);
+  const incomingMatchesMerged =
+    incoming?.compatibilityStatus === mergedStatus && compatibilityReasonText(incoming?.compatibilityReason) === normalizedMergedReason;
+  if (incomingMatchesMerged) {
+    return incoming;
+  }
+  const currentMatchesMerged =
+    current?.compatibilityStatus === mergedStatus && compatibilityReasonText(current?.compatibilityReason) === normalizedMergedReason;
+  return currentMatchesMerged ? current : undefined;
+}
+
 function normalizeSelectedSources(sources: StockSourceSelectionPayload[]) {
   const rows = new Map<string, StockSourceSelectionPayload>();
   for (const source of sources || []) {
@@ -1859,22 +2159,43 @@ function normalizeSelectedSources(sources: StockSourceSelectionPayload[]) {
       source.availableQuantity === undefined && current?.availableQuantity === undefined
         ? undefined
         : Math.max(Number(source.availableQuantity ?? 0), Number(current?.availableQuantity ?? 0));
+    const currentQuantity = Number(current?.quantity ?? 0);
+    const sourceNeedsReviewMerge = quantity > 0;
+    const currentNeedsReviewMerge = currentQuantity > 0;
+    const compatibilityStatus = stricterSelectedSourceCompatibilityStatus(
+      normalizeCompatibilityStatus(source.compatibilityStatus),
+      normalizeCompatibilityStatus(current?.compatibilityStatus),
+      sourceNeedsReviewMerge,
+      currentNeedsReviewMerge
+    );
+    const compatibilityReason = mergeSelectedSourceCompatibilityReason(
+      source.compatibilityReason,
+      current?.compatibilityReason,
+      sourceNeedsReviewMerge,
+      currentNeedsReviewMerge
+    );
+    const manualConfirmationSource = selectedSourceManualConfirmationSource(
+      sourceNeedsReviewMerge ? source : undefined,
+      currentNeedsReviewMerge ? current : undefined,
+      compatibilityStatus,
+      compatibilityReason
+    );
     rows.set(batchId, {
       batchId,
       batchNo: source.batchNo?.trim() || current?.batchNo,
       partCode: source.partCode?.trim() || current?.partCode,
       partName: source.partName?.trim() || current?.partName,
-      quantity: (current?.quantity ?? 0) + quantity,
+      quantity: currentQuantity + quantity,
       availableQuantity,
       unit: source.unit?.trim() || current?.unit,
       replenishmentSourceType: source.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
       replenishmentSourceRequestNo: source.replenishmentSourceRequestNo?.trim() || current?.replenishmentSourceRequestNo,
       replenishmentSourceLabel: source.replenishmentSourceLabel?.trim() || current?.replenishmentSourceLabel,
-      compatibilityStatus: normalizeCompatibilityStatus(source.compatibilityStatus || current?.compatibilityStatus),
-      compatibilityReason: source.compatibilityReason?.trim() || current?.compatibilityReason,
-      manualConfirmedBy: source.manualConfirmedBy?.trim() || current?.manualConfirmedBy,
-      manualConfirmedAt: source.manualConfirmedAt?.trim() || current?.manualConfirmedAt,
-      manualConfirmRemark: source.manualConfirmRemark?.trim() || current?.manualConfirmRemark
+      compatibilityStatus,
+      compatibilityReason,
+      manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim(),
+      manualConfirmedAt: manualConfirmationSource?.manualConfirmedAt?.trim(),
+      manualConfirmRemark: manualConfirmationSource?.manualConfirmRemark?.trim()
     });
   }
   return [...rows.values()];
@@ -1989,10 +2310,8 @@ function selectedSourceReplenishmentText(source: StockSourceSelectionPayload) {
   return source.replenishmentSourceRequestNo ? `${label}：${source.replenishmentSourceRequestNo}` : label;
 }
 
-function drawingTitle(row: InventorySourceBatchDetail) {
-  const drawingNo = row.drawingNo || '未记录图号';
-  const version = row.drawingVersion ? ` / ${row.drawingVersion}` : '';
-  return `${drawingNo}${version}`;
+function drawingTitle(row: Pick<InventorySourceBatchDetail | InventorySourceExpected, 'drawingNo' | 'drawingVersion' | 'drawingDate' | 'drawingStatus'>) {
+  return [row.drawingNo || '未记录图号', row.drawingVersion, row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ');
 }
 
 function normalizeValue(value?: string | number | null) {
@@ -2017,44 +2336,62 @@ function sameNumber(left?: number | null, right?: number | null) {
   return Math.abs(leftNumber - rightNumber) < 0.0001;
 }
 
+function sourceStructureKind(row: { lineType?: string | null; parentComponentNo?: string | null }) {
+  if (String(row.lineType || 'PART').trim().toUpperCase() === 'COMPONENT') {
+    return 'COMPONENT';
+  }
+  return String(row.parentComponentNo || '').trim() ? 'CHILD_PART' : 'STANDALONE_PART';
+}
+
 function compatibilityResult(row: InventorySourceBatchDetail) {
   const target = expected.value;
   if (!target) {
     return { type: 'info' as const, label: '未提供对照', reason: '' };
   }
 
-  if (expectedMissingInfoReasons.value.length > 0) {
-    return { type: 'warning' as const, label: '资料不完整', reason: `本次订单${expectedMissingInfoReasons.value.join('、')}` };
-  }
-
-  if (expectedFileMissing.value) {
-    return { type: 'warning' as const, label: '资料不完整', reason: '本次订单未上传图纸文件' };
+  if (expectedOrderInfoReasons.value.length > 0) {
+    return { type: 'warning' as const, label: '资料不完整', reason: `本次订单资料不完整：${formatDialogReasonPreview(expectedOrderInfoReasons.value, '字段')}` };
   }
 
   const targetRequiresThickness = target.lineType !== 'COMPONENT';
   const missingReasons = [
     target.drawingNo && !row.drawingNo ? '库存缺图号' : '',
     target.drawingVersion && !row.drawingVersion ? '库存缺版本' : '',
+    target.drawingDate && !row.drawingDate ? '库存缺图纸日期' : '',
+    target.drawingStatus && !row.drawingStatus ? '库存缺图纸状态' : '',
+    target.drawingFileName && !row.drawingFileName ? '库存缺图纸文件名' : '',
     target.drawingFileUrl && !row.drawingFileUrl ? '库存缺图纸文件' : '',
     target.partSpecification && !row.partSpecification ? '库存缺规格' : '',
+    target.partCategory && !row.partCategory ? '库存缺零件类型' : '',
+    target.projectModel && !row.projectModel ? '库存缺项目型号' : '',
     targetRequiresThickness && target.partThickness && !row.partThickness ? '库存缺厚度' : ''
   ].filter(Boolean);
   if (missingReasons.length > 0) {
-    return { type: 'warning' as const, label: '资料不完整', reason: missingReasons.join('、') };
+    return { type: 'warning' as const, label: '资料不完整', reason: formatDialogReasonPreview(missingReasons, '字段') };
   }
 
   const mismatchReasons = [
+    sameText(row.lineType || 'PART', target.lineType || 'PART') ? '' : '行类型不同',
+    sourceStructureKind(row) === sourceStructureKind(target) ? '' : '组件结构不同',
+    sameText(row.partCategory, target.partCategory) ? '' : '零件类型不同',
     sameText(row.partCode, target.partCode) ? '' : '零件编码不同',
+    sameText(row.partName, target.partName) ? '' : '零件名称不同',
+    sameText(row.unit, target.unit) ? '' : '单位不同',
+    sameText(row.projectModel, target.projectModel) ? '' : '项目型号不同',
     sameText(row.drawingNo, target.drawingNo) ? '' : '图号不同',
     sameText(row.drawingVersion, target.drawingVersion) ? '' : '版本不同',
+    sameText(row.drawingDate, target.drawingDate) ? '' : '图纸日期不同',
+    sameText(row.drawingStatus, target.drawingStatus) ? '' : '图纸状态不同',
+    sameText(row.drawingFileName, target.drawingFileName) ? '' : '图纸文件名不同',
+    sameText(row.drawingFileUrl, target.drawingFileUrl) ? '' : '图纸文件不同',
     sameText(row.partSpecification, target.partSpecification) ? '' : '规格不同',
     targetRequiresThickness && !sameNumber(row.partThickness, target.partThickness) ? '厚度不同' : ''
   ].filter(Boolean);
 
   if (mismatchReasons.length > 0) {
-    return { type: 'danger' as const, label: '需要确认', reason: mismatchReasons.join('、') };
+    return { type: 'danger' as const, label: '需要确认', reason: formatDialogReasonPreview(mismatchReasons, '字段') };
   }
-  if (!row.drawingNo || !row.drawingVersion || !row.drawingFileUrl) {
+  if (!row.drawingNo || !row.drawingVersion || !row.drawingDate || !row.drawingStatus || !row.drawingFileName || !row.drawingFileUrl) {
     return { type: 'warning' as const, label: '资料不完整', reason: '库存图纸信息不完整' };
   }
   return { type: 'success' as const, label: '图纸匹配', reason: '' };
@@ -2125,7 +2462,36 @@ function sourceUsageOrderIssue(source: StockSourceSelectionPayload) {
 }
 
 function manualConfirmationReason(source: StockSourceSelectionPayload) {
-  return sourceUsageOrderIssue(source) || source.compatibilityReason || '需要人工确认';
+  return (
+    sourceUsageOrderIssue(source) ||
+    source.compatibilityReason ||
+    (expectedOrderInfoReasons.value.length ? `本次订单资料不完整：${formatDialogReasonPreview(expectedOrderInfoReasons.value, '字段')}` : '') ||
+    '需要人工确认'
+  );
+}
+
+function manualConfirmationReasonPreview(source: StockSourceSelectionPayload, maxLength = 22) {
+  return formatLongTextPreview(manualConfirmationReason(source), maxLength, '需要人工确认');
+}
+
+function manualConfirmationReasonTitle(source: StockSourceSelectionPayload) {
+  return manualConfirmationReason(source).trim() || '需要人工确认';
+}
+
+function manualConfirmationRemarkPreview(source: Pick<StockSourceSelectionPayload, 'manualConfirmRemark'>, maxLength = 24) {
+  return formatLongTextPreview(source.manualConfirmRemark, maxLength, '-');
+}
+
+function manualConfirmationRemarkTitle(source: Pick<StockSourceSelectionPayload, 'manualConfirmRemark'>) {
+  return String(source.manualConfirmRemark || '').trim() || '-';
+}
+
+function compatibilityReasonPreview(row: SourceRow, maxLength = 30) {
+  return formatLongTextPreview(compatibilityResult(row).reason, maxLength, '');
+}
+
+function compatibilityReasonTitle(row: SourceRow) {
+  return compatibilityResult(row).reason || '-';
 }
 
 function sourceNeedsManualConfirmation(source: StockSourceSelectionPayload) {
@@ -2136,7 +2502,10 @@ function sourceNeedsManualConfirmation(source: StockSourceSelectionPayload) {
     Boolean(sourceUsageOrderIssue(source)) ||
     source.compatibilityStatus !== 'MATCHED' ||
     !sameText(source.partCode, expected.value?.partCode) ||
-    Boolean(expected.value?.fulfillmentMode === 'STOCK' && (!orderDrawingInfoComplete.value || expectedFileMissing.value))
+    Boolean(
+      (expected.value?.fulfillmentMode === 'STOCK' || expected.value?.fulfillmentMode === 'REWORK') &&
+        expectedOrderInfoReasons.value.length > 0
+    )
   );
 }
 
@@ -2160,16 +2529,26 @@ function toManualConfirmDate(value?: string) {
   return Number.isNaN(date.getTime()) ? new Date() : date;
 }
 
+function manualConfirmationReasonKey(source: StockSourceSelectionPayload) {
+  return manualConfirmationReason(source).trim();
+}
+
 function createManualConfirmForm(source: StockSourceSelectionPayload): ManualConfirmForm {
+  const reasonKey = manualConfirmationReasonKey(source);
+  const preserveSavedManualConfirmation =
+    Boolean(source.manualConfirmedBy?.trim() && source.manualConfirmedAt?.trim() && source.manualConfirmRemark?.trim()) &&
+    source.compatibilityReason?.trim() === reasonKey;
   return {
-    confirmedBy: source.manualConfirmedBy || '',
-    confirmedAt: toManualConfirmDate(source.manualConfirmedAt),
-    remark: source.manualConfirmRemark || ''
+    confirmedBy: preserveSavedManualConfirmation ? source.manualConfirmedBy || '' : '',
+    confirmedAt: preserveSavedManualConfirmation ? toManualConfirmDate(source.manualConfirmedAt) : new Date(),
+    remark: preserveSavedManualConfirmation ? source.manualConfirmRemark || '' : '',
+    reasonKey
   };
 }
 
 function ensureManualConfirmForm(source: StockSourceSelectionPayload) {
-  if (!manualConfirmForms.value[source.batchId]) {
+  const current = manualConfirmForms.value[source.batchId];
+  if (!current || current.reasonKey !== manualConfirmationReasonKey(source)) {
     manualConfirmForms.value[source.batchId] = createManualConfirmForm(source);
   }
   return manualConfirmForms.value[source.batchId];
@@ -2179,7 +2558,8 @@ function syncManualConfirmForms() {
   const nextForms: Record<string, ManualConfirmForm> = {};
   for (const source of selectedIssueSources.value) {
     const current = manualConfirmForms.value[source.batchId];
-    nextForms[source.batchId] = current || createManualConfirmForm(source);
+    nextForms[source.batchId] =
+      current && current.reasonKey === manualConfirmationReasonKey(source) ? current : createManualConfirmForm(source);
   }
   manualConfirmForms.value = nextForms;
 }
@@ -2236,6 +2616,7 @@ function confirmReviewed() {
     const form = ensureManualConfirmForm(source);
     form.confirmedAt = confirmedAt;
     const reason = manualConfirmationReason(source);
+    form.reasonKey = reason.trim();
     return {
       ...source,
       compatibilityStatus:
@@ -2253,12 +2634,66 @@ function confirmReviewed() {
   emit('confirmReviewed');
 }
 
+function clampInventorySourceDialogTableHeight(value: number) {
+  return Math.min(inventorySourceDialogTableHeightLimits.max, Math.max(inventorySourceDialogTableHeightLimits.min, value));
+}
+
+function adjustInventorySourceDialogTableHeight(key: InventorySourceDialogTableKey, delta: number) {
+  inventorySourceDialogTableHeights[key] = clampInventorySourceDialogTableHeight(inventorySourceDialogTableHeights[key] + delta);
+}
+
+function resetInventorySourceDialogTableHeight(key: InventorySourceDialogTableKey) {
+  inventorySourceDialogTableHeights[key] = inventorySourceDialogTableDefaultHeights[key];
+}
+
+function restoreInventorySourceDialogTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(inventorySourceDialogTableHeightStorageKey);
+    const savedHeights = rawValue ? JSON.parse(rawValue) as Partial<Record<InventorySourceDialogTableKey, number>> : {};
+    for (const key of Object.keys(inventorySourceDialogTableDefaultHeights) as InventorySourceDialogTableKey[]) {
+      const savedHeight = Number(savedHeights[key]);
+      if (Number.isFinite(savedHeight)) {
+        inventorySourceDialogTableHeights[key] = clampInventorySourceDialogTableHeight(savedHeight);
+      }
+    }
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响库存来源核对、替代物料搜索或订单库存预览。
+    inventorySourceDialogTableHeights.sources = inventorySourceDialogTableDefaultHeights.sources;
+    inventorySourceDialogTableHeights.searchResults = inventorySourceDialogTableDefaultHeights.searchResults;
+    inventorySourceDialogTableHeights.orderPreview = inventorySourceDialogTableDefaultHeights.orderPreview;
+  }
+}
+
+function saveInventorySourceDialogTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      inventorySourceDialogTableHeightStorageKey,
+      JSON.stringify({
+        sources: inventorySourceDialogTableHeights.sources,
+        searchResults: inventorySourceDialogTableHeights.searchResults,
+        orderPreview: inventorySourceDialogTableHeights.orderPreview
+      })
+    );
+  } catch {
+    // 本机 UI 偏好写入失败不阻断库存来源核对、替代物料搜索或订单库存预览。
+  }
+}
+
+restoreInventorySourceDialogTableHeights();
+
 watch(
   () => props.modelValue,
   (visible) => {
     if (!visible) {
       activeSearchFocusBatchNo.value = '';
       sourceSearchSelectedLabel.value = '';
+      expandedMobileSourceBatchKeys.value = [];
       resetTransformRuleSuggestions();
       return;
     }
@@ -2273,7 +2708,15 @@ watch(
   () => {
     activeSearchFocusBatchNo.value = '';
     sourceSearchSelectedLabel.value = '';
+    expandedMobileSourceBatchKeys.value = [];
     void loadTransformRuleSuggestions();
+  }
+);
+
+watch(
+  mobileSourceBatchStateKey,
+  () => {
+    expandedMobileSourceBatchKeys.value = [];
   }
 );
 
@@ -2283,6 +2726,15 @@ watch(
     syncManualConfirmForms();
   },
   { deep: true, immediate: true, flush: 'sync' }
+);
+
+watch(
+  () => [
+    inventorySourceDialogTableHeights.sources,
+    inventorySourceDialogTableHeights.searchResults,
+    inventorySourceDialogTableHeights.orderPreview
+  ],
+  () => saveInventorySourceDialogTableHeights()
 );
 </script>
 
@@ -2324,7 +2776,6 @@ watch(
   grid-column: 1 / -1;
   display: grid;
   gap: 8px;
-  max-height: 220px;
   overflow: auto;
   padding-top: 4px;
 }
@@ -2332,6 +2783,34 @@ watch(
 .source-search-results > strong {
   color: #1e3a8a;
   font-size: 13px;
+}
+
+.inventory-source-table-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 8px 0;
+}
+
+.inventory-source-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inventory-source-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.order-preview-table-height-toolbar {
+  margin-top: 0;
+}
+
+.source-search-result-height-toolbar {
+  grid-column: 1 / -1;
+  margin: 0;
 }
 
 .transform-suggestion-panel {
@@ -2363,6 +2842,15 @@ watch(
   color: #475569;
   font-size: 12px;
   line-height: 18px;
+}
+
+.transform-suggestion-meta,
+.transform-suggestion-description {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .transform-suggestion-count {
@@ -2426,6 +2914,17 @@ watch(
 
 .source-detail-body {
   min-height: 180px;
+}
+
+.source-pagination-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .source-summary {
@@ -2782,6 +3281,10 @@ watch(
   color: #b45309;
 }
 
+.selected-source-item .selected-source-manual-remark {
+  color: inherit;
+}
+
 .selected-source-item .selected-source-replenishment-note {
   color: #2563eb;
 }
@@ -2850,6 +3353,10 @@ watch(
   color: #9a3412;
   font-size: 13px;
   line-height: 20px;
+}
+
+.manual-confirm-item-head .manual-confirm-reason {
+  max-width: 100%;
 }
 
 .manual-confirm-form {

@@ -8,6 +8,10 @@ export class OrderQueryDto {
   customerId?: string;
 
   @IsOptional()
+  @IsString()
+  orderNo?: string;
+
+  @IsOptional()
   @IsDateString()
   dateFrom?: string;
 
@@ -26,6 +30,10 @@ export class OrderQueryDto {
   @IsOptional()
   @IsString()
   productionStatuses?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class NextOrderNoQueryDto {

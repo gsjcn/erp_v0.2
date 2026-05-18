@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  CommonStatus,
   InventoryReservationStatus,
   InventoryTransactionType,
   OrderStatus,
@@ -8,6 +9,7 @@ import {
   ProductionNoticeTarget,
   ProductionStatus
 } from '@prisma/client';
+import * as ExcelJS from 'exceljs';
 import { businessDateKey } from '../../common/business-date';
 import { decimalToNumber } from '../../common/serializers';
 import { runSerializableTransaction } from '../../common/transactions';
@@ -21,12 +23,14 @@ import {
   CreateWarehouseLocationDto,
   UpdateWarehouseDto,
   UpdateWarehouseLocationDto,
+  WarehouseConfigQueryDto,
   WarehouseNoticeQueryDto,
   WarehouseWorkQueryDto,
   WarehouseTransactionQueryDto
 } from './dto';
 
 type WarehousePrismaClient = PrismaService | Prisma.TransactionClient;
+type WarehouseTransactionExportCellValue = string | number | Date | null | undefined;
 type NormalizedShipmentItem = {
   batchId: string;
   shipmentQuantity: number;
@@ -52,6 +56,18 @@ type WarehouseOperatorRow = {
   keywords?: string[] | null;
 };
 
+const WAREHOUSE_TEST_FIXTURE_PREFIXES = [
+  'COD-',
+  'VERIFY-',
+  'VERIFY_',
+  'TEST-',
+  'MI-API-',
+  'MAT-STABLE',
+  'UPLOAD-FILENAME',
+  'CUST-SEARCH-',
+  'TEST-CUSTOMER'
+];
+
 const fallbackWarehouseOperators: WarehouseOperatorRow[] = [
   {
     accountId: 'WH-001',
@@ -67,22 +83,273 @@ const fallbackWarehouseOperators: WarehouseOperatorRow[] = [
 export class WarehousesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findWarehouses() {
+  async findWarehouses(query: WarehouseConfigQueryDto = {}) {
+    const statusFilter = query.status && query.status !== 'ALL' ? query.status : undefined;
+    const locationStatusFilter =
+      query.locationStatus === 'ALL' ? undefined : query.locationStatus || undefined;
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const warehouses = await this.prisma.warehouse.findMany({
-      include: { locations: { orderBy: { locationCode: 'asc' } } },
+      where: this.warehouseConfigWhere(statusFilter, includeTestFixtures),
+      include: {
+        locations: {
+          where: this.warehouseLocationConfigWhere(locationStatusFilter, includeTestFixtures),
+          orderBy: { locationCode: 'asc' }
+        }
+      },
       orderBy: { warehouseCode: 'asc' }
     });
 
     return warehouses;
   }
 
+  async buildWarehouseConfigExport(query: WarehouseConfigQueryDto = {}): Promise<Uint8Array> {
+    const statusFilter = query.status && query.status !== 'ALL' ? query.status : undefined;
+    const locationStatusFilter =
+      query.locationStatus === 'ALL' ? undefined : query.locationStatus || statusFilter;
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const warehouses = await this.prisma.warehouse.findMany({
+      where: this.warehouseConfigWhere(statusFilter, includeTestFixtures),
+      include: {
+        _count: { select: { inventoryBatches: true, inventoryTransactions: true } },
+        locations: {
+          where: this.warehouseLocationConfigWhere(locationStatusFilter, includeTestFixtures),
+          include: {
+            _count: { select: { inventoryBatches: true, inventoryTransactions: true } }
+          },
+          orderBy: { locationCode: 'asc' }
+        }
+      },
+      orderBy: { warehouseCode: 'asc' }
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const scopeText = this.warehouseConfigExportScopeText(query);
+
+    this.addWarehouseExportSheet(workbook, {
+      sheetName: '仓库配置',
+      title: '仓库配置导出',
+      scopeText,
+      headers: [
+        '序号',
+        '仓库编码',
+        '仓库名称',
+        '仓库状态',
+        '库位数量',
+        '启用库位',
+        '停用库位',
+        '库存批次',
+        '库存流水',
+        '创建时间',
+        '更新时间'
+      ],
+      rows:
+        warehouses.length > 0
+          ? warehouses.map((warehouse, index) => {
+              const enabledLocationCount = warehouse.locations.filter((location) => location.status === 'ENABLED').length;
+              const disabledLocationCount = warehouse.locations.filter((location) => location.status === 'DISABLED').length;
+              return [
+                index + 1,
+                warehouse.warehouseCode,
+                warehouse.warehouseName,
+                this.warehouseConfigStatusLabel(warehouse.status),
+                warehouse.locations.length,
+                enabledLocationCount,
+                disabledLocationCount,
+                warehouse._count.inventoryBatches,
+                warehouse._count.inventoryTransactions,
+                this.warehouseExportDateTimeText(warehouse.createdAt),
+                this.warehouseExportDateTimeText(warehouse.updatedAt)
+              ];
+            })
+          : [['当前筛选范围没有仓库配置']]
+    });
+
+    const locationRows: WarehouseTransactionExportCellValue[][] = [];
+    for (const warehouse of warehouses) {
+      for (const location of warehouse.locations) {
+        locationRows.push([
+          locationRows.length + 1,
+          warehouse.warehouseCode,
+          warehouse.warehouseName,
+          this.warehouseConfigStatusLabel(warehouse.status),
+          location.locationCode,
+          location.locationName,
+          this.warehouseConfigStatusLabel(location.status),
+          location._count.inventoryBatches,
+          location._count.inventoryTransactions,
+          this.warehouseExportDateTimeText(location.createdAt),
+          this.warehouseExportDateTimeText(location.updatedAt)
+        ]);
+      }
+    }
+    if (locationRows.length === 0) {
+      locationRows.push(['当前筛选范围没有库位配置']);
+    }
+
+    this.addWarehouseExportSheet(workbook, {
+      sheetName: '库位配置',
+      title: '库位配置导出',
+      scopeText,
+      headers: [
+        '序号',
+        '仓库编码',
+        '仓库名称',
+        '仓库状态',
+        '库位编码',
+        '库位名称',
+        '库位状态',
+        '库存批次',
+        '库存流水',
+        '创建时间',
+        '更新时间'
+      ],
+      rows: locationRows
+    });
+
+    // 仓库配置导出只读取仓库和库位基础资料，不新增库存批次、不写库存流水，也不改变启停用状态。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  private warehouseFixtureTextFilters(fields: Array<'warehouseCode' | 'warehouseName' | 'locationCode' | 'locationName'>) {
+    return WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) =>
+      fields.map((field) => ({
+        [field]: { startsWith: prefix, mode: 'insensitive' as const }
+      }))
+    );
+  }
+
+  private warehouseConfigWhere(status?: CommonStatus, includeTestFixtures = false): Prisma.WarehouseWhereInput {
+    const where: Prisma.WarehouseWhereInput = {};
+    if (status) {
+      where.status = status;
+    }
+    if (!includeTestFixtures) {
+      where.NOT = { OR: this.warehouseFixtureTextFilters(['warehouseCode', 'warehouseName']) };
+    }
+    return where;
+  }
+
+  private warehouseLocationConfigWhere(status?: CommonStatus, includeTestFixtures = false): Prisma.WarehouseLocationWhereInput {
+    const where: Prisma.WarehouseLocationWhereInput = {};
+    if (status) {
+      where.status = status;
+    }
+    if (!includeTestFixtures) {
+      where.NOT = { OR: this.warehouseFixtureTextFilters(['locationCode', 'locationName']) };
+    }
+    return where;
+  }
+
+  private warehouseNoticeFixtureWhere(): Prisma.ProductionNoticeWhereInput {
+    return {
+      OR: WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        { noticeNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
+        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
+        { managerName: { startsWith: prefix, mode: 'insensitive' as const } }
+      ])
+    };
+  }
+
   async warehouseNotices(query: WarehouseNoticeQueryDto = {}) {
     const where = await this.buildWarehouseNoticeWhere(query);
-    const notices = await this.prisma.productionNotice.findMany({
-      where,
-      orderBy: { createdAt: 'desc' }
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, notices] = await Promise.all([
+      this.prisma.productionNotice.count({ where }),
+      this.prisma.productionNotice.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        ...(withPage ? { skip: offset, take: limit } : {})
+      })
+    ]);
+    const items = await this.toNoticesWithCustomerNames(notices);
+    if (!withPage) {
+      return items;
+    }
+    // 仓库通知历史必须显式分页，避免现场入口随着历史消息增长一次性拉取全量通知。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async buildWarehouseNoticesExport(query: WarehouseNoticeQueryDto = {}): Promise<Uint8Array> {
+    const notices = (await this.warehouseNotices({ ...query, withPage: undefined, limit: undefined, offset: undefined })) as any[];
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const scopeText = await this.warehouseNoticeExportScopeText(query);
+
+    this.addWarehouseExportSheet(workbook, {
+      sheetName: '仓库通知',
+      title: '仓库通知历史导出',
+      scopeText,
+      headers: [
+        '序号',
+        '通知号',
+        '状态',
+        '通知类型',
+        '订单号',
+        '客户',
+        '生产任务',
+        '零件编码',
+        '零件名称',
+        '变更前数量',
+        '变更后数量',
+        '变更数量',
+        '单位',
+        '处理建议',
+        '原因',
+        '管理员',
+        '确认人',
+        '确认时间',
+        '通知时间'
+      ],
+      rows: notices.map((notice, index) => [
+        index + 1,
+        notice.noticeNo,
+        this.warehouseNoticeStatusLabel(notice.status),
+        this.warehouseNoticeTypeLabel(notice.noticeType),
+        notice.orderNo || '',
+        notice.customerName || '',
+        notice.productionTaskNo || '',
+        notice.partCode || '',
+        notice.partName || '',
+        notice.beforeQuantity ?? '',
+        notice.afterQuantity ?? '',
+        notice.deltaQuantity ?? '',
+        notice.unit || '',
+        this.warehouseNoticeHandlingPlanText(notice.handlingPlan, notice.unit),
+        notice.reason || '',
+        notice.managerName || '',
+        notice.acknowledgedBy || '',
+        this.warehouseExportDateTimeText(notice.acknowledgedAt),
+        this.warehouseExportDateTimeText(notice.createdAt)
+      ])
     });
-    return this.toNoticesWithCustomerNames(notices);
+
+    // 仓库通知导出只读取历史消息，不修改 PENDING/ACKNOWLEDGED 状态，也不触发库存处理。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async acknowledgeWarehouseNotice(id: string, dto: AcknowledgeWarehouseNoticeDto) {
@@ -883,6 +1150,160 @@ export class WarehousesService {
     return batches.map((batch) => this.toShipment(batch, shippedQuantityByLine, remainingSuggestionQuantityByLine));
   }
 
+  async buildWarehouseWorkExport(query: WarehouseWorkQueryDto): Promise<Uint8Array> {
+    const [receipts, shipments] = await Promise.all([this.pendingReceipts(query), this.pendingShipments(query)]);
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const scopeText = await this.warehouseWorkExportScopeText(query);
+
+    this.addWarehouseExportSheet(workbook, {
+      sheetName: '待入库',
+      title: '仓库待入库导出',
+      scopeText,
+      headers: [
+        '序号',
+        '完成任务号',
+        '订单号',
+        '客户',
+        '订单日期',
+        '交期',
+        '零件编码',
+        '零件名称',
+        '行类型',
+        '零件类型',
+        '组件编号',
+        '所属组件',
+        '图号',
+        '图纸版本',
+        '图纸日期',
+        '图纸状态',
+        '厚度',
+        '规格',
+        '客户订单数量',
+        '已入订单库存',
+        '本次入订单库存',
+        '本次转备货',
+        '完成数量',
+        '单位',
+        '补单来源',
+        '完成时间',
+        '状态'
+      ],
+      rows: receipts.map((row, index) => [
+        index + 1,
+        row.productionTaskNo,
+        row.orderNo,
+        row.customerName,
+        this.formatDateOnly(row.orderDate),
+        this.formatDateOnly(row.deliveryDate),
+        row.partCode,
+        row.partName,
+        this.warehouseLineTypeLabel(row.lineType),
+        row.partCategory || '',
+        row.componentNo || '',
+        row.parentComponentNo || '',
+        row.drawingNo || '',
+        row.drawingVersion || '',
+        row.drawingDate || '',
+        row.drawingStatus || '',
+        row.partThickness ?? '',
+        row.partSpecification || '',
+        row.customerOrderQuantity ?? row.quantity,
+        row.receivedOrderQuantity ?? 0,
+        row.orderReceiptQuantity ?? 0,
+        row.stockQuantity ?? 0,
+        row.completedQuantity ?? row.quantity,
+        row.unit,
+        row.replenishmentSourceLabel || '',
+        this.warehouseExportDateTimeText(row.completedAt),
+        row.status
+      ])
+    });
+
+    this.addWarehouseExportSheet(workbook, {
+      sheetName: '待发货库存',
+      title: '仓库待发货导出',
+      scopeText,
+      headers: [
+        '序号',
+        '批次号',
+        '订单号',
+        '客户',
+        '订单日期',
+        '交期',
+        '零件编码',
+        '零件名称',
+        '行类型',
+        '零件类型',
+        '组件编号',
+        '所属组件',
+        '图号',
+        '图纸版本',
+        '图纸日期',
+        '图纸状态',
+        '厚度',
+        '规格',
+        '账面库存',
+        '预占数量',
+        '建议发货',
+        '客户订单数量',
+        '已发货',
+        '剩余未发',
+        '单位',
+        '库存来源',
+        '生产来源订单',
+        '生产任务',
+        '仓库',
+        '库位',
+        '生产日期',
+        '状态'
+      ],
+      rows: shipments.map((row, index) => [
+        index + 1,
+        row.batchNo,
+        row.orderNo || '',
+        row.customerName || '',
+        this.formatDateOnly(row.orderDate),
+        this.formatDateOnly(row.deliveryDate),
+        row.partCode,
+        row.partName,
+        this.warehouseLineTypeLabel(row.lineType),
+        row.partCategory || '',
+        row.componentNo || '',
+        row.parentComponentNo || '',
+        row.drawingNo || '',
+        row.drawingVersion || '',
+        row.drawingDate || '',
+        row.drawingStatus || '',
+        row.partThickness ?? '',
+        row.partSpecification || '',
+        row.quantity,
+        0,
+        row.suggestedShipmentQuantity ?? row.quantity,
+        row.customerOrderQuantity ?? '',
+        row.shippedQuantity ?? 0,
+        row.remainingQuantity ?? '',
+        row.unit,
+        this.warehouseExportSourceTypeLabel(row.inventorySourceType),
+        row.productionSourceOrderNo || '',
+        row.productionTaskNo || '',
+        row.warehouseName,
+        row.locationName || '',
+        this.formatDateOnly(row.productionDate),
+        row.status
+      ])
+    });
+
+    // 仓库待处理导出只读取待入库和待发货列表，不确认入库、不发货、不追加库存流水。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
   async confirmShipment(batchId: string, dto: ConfirmShipmentDto) {
     return runSerializableTransaction(
       this.prisma,
@@ -1081,31 +1502,38 @@ export class WarehousesService {
           : [scopedWhere];
     }
 
-    const transactions = await this.prisma.inventoryTransaction.findMany({
-      where,
-      include: {
-        warehouse: true,
-        location: true,
-        batch: {
-          include: {
-            sourceOrder: true,
-            sourceOrderLine: true,
-            productionTask: { include: { order: true, orderLine: true } },
-            reservations: {
-              where: { status: InventoryReservationStatus.ACTIVE },
-              select: { quantity: true }
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, transactions] = await Promise.all([
+      this.prisma.inventoryTransaction.count({ where }),
+      this.prisma.inventoryTransaction.findMany({
+        where,
+        include: {
+          warehouse: true,
+          location: true,
+          batch: {
+            include: {
+              sourceOrder: true,
+              sourceOrderLine: true,
+              productionTask: { include: { order: true, orderLine: true } },
+              reservations: {
+                where: { status: InventoryReservationStatus.ACTIVE },
+                select: { quantity: true }
+              }
             }
           }
-        }
-      },
-      orderBy: { transactionTime: 'desc' }
-    });
+        },
+        orderBy: { transactionTime: 'desc' },
+        ...(withPage ? { skip: offset, take: limit } : {})
+      })
+    ]);
 
     const sourceTaskMap = await this.findWarehouseSourceTaskMap(
       transactions.flatMap((item) => [item.productionTaskNo, item.batch?.sourceProductionTaskNo])
     );
 
-    return transactions.map((item) => {
+    const items = transactions.map((item) => {
       const sourceTask = this.resolveWarehouseTransactionSourceTask(item, sourceTaskMap);
       const sourceLine = this.resolveWarehouseTransactionSourceLine(item, sourceTask);
       const batchPhysicalQuantity = item.batch?.status === 'AVAILABLE' ? decimalToNumber(item.batch.quantity) : 0;
@@ -1136,6 +1564,12 @@ export class WarehousesService {
         componentNo: sourceLine?.componentNo || undefined,
         parentComponentNo: sourceLine?.parentComponentNo || undefined,
         importSequence: sourceLine?.importSequence || undefined,
+        drawingNo: sourceLine?.drawingNo,
+        drawingVersion: sourceLine?.drawingVersion,
+        drawingDate: this.formatDateOnly(sourceLine?.drawingDate),
+        drawingStatus: sourceLine?.drawingStatus,
+        drawingFileName: sourceLine?.drawingFileName,
+        drawingFileUrl: sourceLine?.drawingFileUrl,
         orderNo: item.orderNo,
         sourceOrderNo,
         productionSourceOrderNo: sourceTask?.orderNo || sourceTask?.order?.orderNo || item.batch?.productionTask?.orderNo || null,
@@ -1154,6 +1588,150 @@ export class WarehousesService {
         remark: item.remark
       };
     });
+    if (!withPage) {
+      return items;
+    }
+    // 库存流水是长期追加历史，公开页面必须分页；任何库存变化仍只能通过 InventoryTransaction 追加流水。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async buildWarehouseTransactionsExport(query: WarehouseTransactionQueryDto): Promise<Uint8Array> {
+    const transactionResponse = await this.findTransactions({ ...query, withPage: undefined, limit: undefined, offset: undefined });
+    const transactions = Array.isArray(transactionResponse) ? transactionResponse : transactionResponse.items;
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const headers = [
+      '序号',
+      '流水号',
+      '类型',
+      '流水时间',
+      '零件编码',
+      '零件名称',
+      '行类型',
+      '零件类型',
+      '组件编号',
+      '所属组件',
+      '图号',
+      '图纸版本',
+      '图纸日期',
+      '图纸状态',
+      '数量',
+      '单位',
+      '批次号',
+      '批次状态',
+      '账面数量',
+      '预占数量',
+      '可用数量',
+      '来源订单',
+      '当前订单',
+      '生产来源订单',
+      '生产任务',
+      '仓库',
+      '库位',
+      '备注'
+    ];
+    const worksheet = workbook.addWorksheet('库存流水', {
+      pageSetup: {
+        paperSize: 9,
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.2, footer: 0.2 }
+      },
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+    const columnCount = headers.length;
+
+    const titleRow = worksheet.addRow(['库存流水导出']);
+    worksheet.mergeCells(titleRow.number, 1, titleRow.number, columnCount);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    titleRow.height = 26;
+
+    const scopeRow = worksheet.addRow([await this.warehouseTransactionsExportScopeText(query)]);
+    worksheet.mergeCells(scopeRow.number, 1, scopeRow.number, columnCount);
+    scopeRow.font = { color: { argb: 'FF475569' } };
+    scopeRow.alignment = { vertical: 'middle', wrapText: true };
+
+    const generatedRow = worksheet.addRow([`制表时间：${this.warehouseExportDateTimeText(new Date())}`]);
+    worksheet.mergeCells(generatedRow.number, 1, generatedRow.number, columnCount);
+    generatedRow.font = { color: { argb: 'FF475569' } };
+
+    const headerRow = worksheet.addRow(headers);
+    headerRow.font = { bold: true, color: { argb: 'FF0F172A' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      cell.border = this.warehouseExportThinBorder();
+    });
+
+    const rows: WarehouseTransactionExportCellValue[][] = transactions.map((transaction, index) => [
+      index + 1,
+      transaction.transactionNo,
+      this.warehouseTransactionTypeLabel(transaction.transactionType),
+      this.warehouseExportDateTimeText(transaction.transactionTime),
+      transaction.partCode,
+      transaction.partName,
+      this.warehouseLineTypeLabel(transaction.lineType),
+      transaction.partCategory || '',
+      transaction.componentNo || '',
+      transaction.parentComponentNo || '',
+      transaction.drawingNo || '',
+      transaction.drawingVersion || '',
+      transaction.drawingDate || '',
+      transaction.drawingStatus || '',
+      transaction.quantity,
+      transaction.unit,
+      transaction.batchNo || '',
+      this.warehouseBatchStatusLabel(transaction.batchStatus),
+      transaction.physicalQuantity,
+      transaction.reservedQuantity,
+      transaction.availableQuantity,
+      transaction.sourceOrderNo || '',
+      transaction.orderNo || '',
+      transaction.productionSourceOrderNo || '',
+      transaction.productionTaskNo || '',
+      transaction.warehouseName,
+      transaction.locationName || '',
+      transaction.remark || ''
+    ]);
+
+    for (const row of rows) {
+      const dataRow = worksheet.addRow(row);
+      dataRow.alignment = { vertical: 'top', wrapText: true };
+      dataRow.eachCell((cell) => {
+        cell.border = this.warehouseExportThinBorder();
+      });
+    }
+
+    headers.forEach((header, index) => {
+      const column = worksheet.getColumn(index + 1);
+      const maxLength = [header, ...rows.map((row) => row[index])]
+        .map((value) => this.warehouseExportDisplayWidth(value))
+        .reduce((max, width) => Math.max(max, width), 0);
+      column.width = Math.min(Math.max(maxLength + 2, 8), index === 27 ? 42 : 32);
+    });
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: columnCount }
+    };
+
+    // 库存流水导出只读取现有 InventoryTransaction 记录，不能新增、合并或修改库存批次。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   private async buildWarehouseTransactionScopeWhere(query: WarehouseTransactionQueryDto) {
@@ -1225,6 +1803,259 @@ export class WarehousesService {
     }
 
     return { OR: or.length > 0 ? or : [{ id: '__NO_WAREHOUSE_TRANSACTION_MATCH__' }] };
+  }
+
+  private addWarehouseExportSheet(
+    workbook: ExcelJS.Workbook,
+    options: {
+      sheetName: string;
+      title: string;
+      scopeText: string;
+      headers: string[];
+      rows: WarehouseTransactionExportCellValue[][];
+    }
+  ) {
+    const worksheet = workbook.addWorksheet(options.sheetName, {
+      pageSetup: {
+        paperSize: 9,
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.2, footer: 0.2 }
+      },
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+    const columnCount = Math.max(options.headers.length, 1);
+    const titleRow = worksheet.addRow([options.title]);
+    worksheet.mergeCells(titleRow.number, 1, titleRow.number, columnCount);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    titleRow.height = 26;
+
+    const scopeRow = worksheet.addRow([options.scopeText]);
+    worksheet.mergeCells(scopeRow.number, 1, scopeRow.number, columnCount);
+    scopeRow.font = { color: { argb: 'FF475569' } };
+    scopeRow.alignment = { vertical: 'middle', wrapText: true };
+
+    const generatedRow = worksheet.addRow([`制表时间：${this.warehouseExportDateTimeText(new Date())}`]);
+    worksheet.mergeCells(generatedRow.number, 1, generatedRow.number, columnCount);
+    generatedRow.font = { color: { argb: 'FF475569' } };
+
+    const headerRow = worksheet.addRow(options.headers);
+    headerRow.font = { bold: true, color: { argb: 'FF0F172A' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      cell.border = this.warehouseExportThinBorder();
+    });
+
+    for (const row of options.rows) {
+      const dataRow = worksheet.addRow(row);
+      dataRow.alignment = { vertical: 'top', wrapText: true };
+      dataRow.eachCell((cell) => {
+        cell.border = this.warehouseExportThinBorder();
+      });
+    }
+
+    options.headers.forEach((header, index) => {
+      const column = worksheet.getColumn(index + 1);
+      const maxLength = [header, ...options.rows.map((row) => row[index])]
+        .map((value) => this.warehouseExportDisplayWidth(value))
+        .reduce((max, width) => Math.max(max, width), 0);
+      column.width = Math.min(Math.max(maxLength + 2, 8), index === options.headers.length - 1 ? 42 : 34);
+    });
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: columnCount }
+    };
+  }
+
+  private async warehouseWorkExportScopeText(query: WarehouseWorkQueryDto) {
+    const dateText =
+      query.dateFrom || query.dateTo ? `${query.dateFrom || '开始'} 至 ${query.dateTo || '结束'}` : '全部';
+    return [
+      `客户：${await this.warehouseTransactionsExportCustomerLabel(query.customerId)}`,
+      `订单：${query.orderNo?.trim() || '全部'}`,
+      `订单日期：${dateText}`
+    ].join('；');
+  }
+
+  private warehouseConfigExportScopeText(query: WarehouseConfigQueryDto = {}) {
+    const locationStatus = query.locationStatus || query.status || 'ALL';
+    return [
+      `仓库状态：${this.warehouseConfigStatusLabel(query.status) || '全部'}`,
+      `库位状态：${this.warehouseConfigStatusLabel(locationStatus) || '全部'}`
+    ].join('；');
+  }
+
+  private warehouseConfigStatusLabel(status?: string | null) {
+    if (status === 'ENABLED') {
+      return '启用';
+    }
+    if (status === 'DISABLED') {
+      return '停用';
+    }
+    if (status === 'ALL') {
+      return '全部';
+    }
+    return status || '';
+  }
+
+  private async warehouseNoticeExportScopeText(query: WarehouseNoticeQueryDto) {
+    const dateText =
+      query.dateFrom || query.dateTo ? `${query.dateFrom || '开始'} 至 ${query.dateTo || '结束'}` : '全部';
+    return [
+      `状态：${this.warehouseNoticeStatusLabel(query.status) || '全部'}`,
+      `通知类型：${this.warehouseNoticeTypeLabel(query.noticeType) || '全部'}`,
+      `客户：${await this.warehouseTransactionsExportCustomerLabel(query.customerId)}`,
+      `订单：${query.orderNo?.trim() || '全部'}`,
+      `任务：${query.productionTaskNo?.trim() || '全部'}`,
+      `零件：${query.partCode?.trim() || '全部'}`,
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `通知时间：${dateText}`
+    ].join('；');
+  }
+
+  private warehouseNoticeStatusLabel(status?: string | null) {
+    if (status === ProductionNoticeStatus.PENDING) {
+      return '待处理';
+    }
+    if (status === ProductionNoticeStatus.ACKNOWLEDGED) {
+      return '已确认';
+    }
+    return status || '';
+  }
+
+  private warehouseNoticeTypeLabel(noticeType?: string | null) {
+    if (noticeType === 'QUANTITY_INCREASE') {
+      return '客户增量';
+    }
+    if (noticeType === 'QUANTITY_DECREASE') {
+      return '客户减量';
+    }
+    if (noticeType === 'ORDER_CANCELLED') {
+      return '订单取消';
+    }
+    if (noticeType === 'MATERIAL_ADDED') {
+      return '新增物料';
+    }
+    if (noticeType === 'TASK_WITHDRAWN') {
+      return '生产撤回';
+    }
+    return noticeType || '';
+  }
+
+  private warehouseNoticeHandlingPlanText(plan?: any, unit?: string | null) {
+    if (!plan) {
+      return '';
+    }
+    const mode =
+      plan.handlingMode === 'STOCK'
+        ? '转备货'
+        : plan.handlingMode === 'SCRAP'
+          ? '报废'
+          : plan.handlingMode === 'NONE'
+            ? '无实物处理'
+            : plan.handlingMode || '';
+    const quantity = plan.handlingQuantity === undefined || plan.handlingQuantity === null ? '' : `${plan.handlingQuantity}${unit || ''}`;
+    return [mode, quantity, plan.remark || ''].filter(Boolean).join(' / ');
+  }
+
+  private warehouseExportSourceTypeLabel(sourceType?: string | null) {
+    if (sourceType === 'ORDER') {
+      return '订单库存';
+    }
+    if (sourceType === 'STOCK') {
+      return '备货库存';
+    }
+    return sourceType || '';
+  }
+
+  private async warehouseTransactionsExportScopeText(query: WarehouseTransactionQueryDto) {
+    const dateText =
+      query.dateFrom || query.dateTo ? `${query.dateFrom || '开始'} 至 ${query.dateTo || '结束'}` : '全部';
+    return [
+      `流水类型：${query.transactionType ? this.warehouseTransactionTypeLabel(query.transactionType) : '全部'}`,
+      `客户：${await this.warehouseTransactionsExportCustomerLabel(query.customerId)}`,
+      `订单：${query.orderNo?.trim() || '全部'}`,
+      `订单日期：${dateText}`
+    ].join('；');
+  }
+
+  private async warehouseTransactionsExportCustomerLabel(customerId?: string) {
+    if (!customerId?.trim()) {
+      return '全部客户';
+    }
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId.trim() },
+      select: { customerCode: true, customerName: true }
+    });
+    return customer ? `${customer.customerName} / ${customer.customerCode}` : customerId.trim();
+  }
+
+  private warehouseTransactionTypeLabel(transactionType?: string | null) {
+    if (transactionType === 'IN') {
+      return '入库';
+    }
+    if (transactionType === 'OUT') {
+      return '出库';
+    }
+    return transactionType || '';
+  }
+
+  private warehouseLineTypeLabel(lineType?: string | null) {
+    if (lineType === 'COMPONENT') {
+      return '组件';
+    }
+    if (lineType === 'PART') {
+      return '零件';
+    }
+    return lineType || '';
+  }
+
+  private warehouseBatchStatusLabel(status?: string | null) {
+    if (status === 'AVAILABLE') {
+      return '可用';
+    }
+    if (status === 'RESERVED') {
+      return '预占';
+    }
+    if (status === 'USED') {
+      return '已用完';
+    }
+    if (status === 'SCRAPPED') {
+      return '已报废';
+    }
+    return status || '';
+  }
+
+  private warehouseExportDateTimeText(value?: Date | string | null) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '';
+    }
+    const pad = (current: number) => String(current).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+      date.getMinutes()
+    )}`;
+  }
+
+  private warehouseExportDisplayWidth(value: WarehouseTransactionExportCellValue) {
+    const text = String(value ?? '');
+    return Array.from(text).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+  }
+
+  private warehouseExportThinBorder(): Partial<ExcelJS.Borders> {
+    return {
+      top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+    };
   }
 
   private async resolveTargetLocation(dto: ConfirmReceiptDto) {
@@ -1440,6 +2271,8 @@ export class WarehousesService {
       unit: task.unit,
       drawingNo: task.orderLine?.drawingNo,
       drawingVersion: task.orderLine?.drawingVersion,
+      drawingDate: this.formatDateOnly(task.orderLine?.drawingDate),
+      drawingStatus: task.orderLine?.drawingStatus,
       drawingFileName: task.orderLine?.drawingFileName,
       drawingFileUrl: task.orderLine?.drawingFileUrl,
       partThickness:
@@ -1511,8 +2344,10 @@ export class WarehousesService {
       productionSourceOrderNo: batch.productionTask?.order?.orderNo,
       productionSourceCustomerName: batch.productionTask?.order?.customerName || batch.sourceCustomerName,
       productionDate: batch.productionTask?.completedAt || batch.createdAt,
-      drawingNo: batch.productionTask?.orderLine?.drawingNo || batch.sourceOrderLine?.drawingNo,
-      drawingVersion: batch.productionTask?.orderLine?.drawingVersion || batch.sourceOrderLine?.drawingVersion,
+      drawingNo: sourceLine?.drawingNo,
+      drawingVersion: sourceLine?.drawingVersion,
+      drawingDate: this.formatDateOnly(sourceLine?.drawingDate),
+      drawingStatus: sourceLine?.drawingStatus,
       drawingFileName: batch.productionTask?.orderLine?.drawingFileName || batch.sourceOrderLine?.drawingFileName,
       drawingFileUrl: batch.productionTask?.orderLine?.drawingFileUrl || batch.sourceOrderLine?.drawingFileUrl,
       partThickness:
@@ -1941,6 +2776,9 @@ export class WarehousesService {
     if (customerScope) {
       and.push(customerScope);
     }
+    if (query.includeTestFixtures !== 'true') {
+      and.push({ NOT: this.warehouseNoticeFixtureWhere() });
+    }
 
     const keyword = query.keyword?.trim();
     if (keyword) {
@@ -2117,6 +2955,24 @@ export class WarehousesService {
 
   private roundQuantity(value: number) {
     return Math.round((value + Number.EPSILON) * 1000) / 1000;
+  }
+
+  private formatDateOnly(value?: Date | string | null) {
+    if (!value) {
+      return undefined;
+    }
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) {
+        return undefined;
+      }
+      const year = value.getFullYear();
+      const month = String(value.getMonth() + 1).padStart(2, '0');
+      const day = String(value.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    const text = String(value).trim();
+    const dateMatch = text.match(/^(\d{4}-\d{2}-\d{2})/);
+    return dateMatch ? dateMatch[1] : text || undefined;
   }
 
   private async warehouseCodeExists(warehouseCode: string, excludeId?: string) {

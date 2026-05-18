@@ -100,7 +100,7 @@ async function loadCustomerPage(append: boolean) {
   try {
     const result = await erpApi.customersPage(
       customerSearchKeyword.value,
-      props.status,
+      props.status || 'ENABLED',
       customerPageLimit,
       append ? customerPageOffset.value : 0
     );
@@ -166,7 +166,7 @@ const customerEmptyText = computed(() => {
   if (loadErrorText.value) {
     return loadErrorText.value;
   }
-  return '暂无客户，请先在客户模块维护或执行 seed 测试数据';
+  return '暂无可用客户，请先在客户模块维护启用客户';
 });
 
 const visibleOptions = computed(() => {

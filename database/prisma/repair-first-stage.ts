@@ -147,6 +147,12 @@ type ModelBomScopeBlock = {
   bomNames: string[];
 };
 
+type ModelBomScopeApprovalBlock = {
+  scopeKey: string;
+  bomName: string;
+  requestNos: string[];
+};
+
 type ModelBomComponentThicknessRepair = {
   id: string;
   bomName: string;
@@ -267,6 +273,7 @@ async function main() {
   const stockAllocationRepairs = await collectStockAllocationRepairs();
   const componentStructureBlocks = await collectComponentStructureBlocks();
   const modelBomScopeBlocks = await collectModelBomScopeBlocks();
+  const modelBomScopeApprovalBlocks = await collectModelBomScopeApprovalBlocks();
   const modelBomComponentThicknessRepairs = await collectModelBomComponentThicknessRepairs();
   const warehouseLocationStatusRepairs = await collectWarehouseLocationStatusRepairs();
 
@@ -282,6 +289,7 @@ async function main() {
   printStockAllocationRepairs(stockAllocationRepairs);
   printComponentStructureBlocks(componentStructureBlocks);
   printModelBomScopeBlocks(modelBomScopeBlocks);
+  printModelBomScopeApprovalBlocks(modelBomScopeApprovalBlocks);
   printModelBomComponentThicknessRepairs(modelBomComponentThicknessRepairs);
   printWarehouseLocationStatusRepairs(warehouseLocationStatusRepairs);
 
@@ -296,7 +304,8 @@ async function main() {
     consumedReservationRepairs,
     stockAllocationRepairs,
     componentStructureBlocks,
-    modelBomScopeBlocks
+    modelBomScopeBlocks,
+    modelBomScopeApprovalBlocks
   );
 
   await runSerializableRepairWrite(() =>
@@ -508,13 +517,20 @@ function assertNoBlockedRepairs(
   consumedReservationRepairs: ConsumedReservationRepair[],
   stockAllocationRepairs: StockAllocationRepair[],
   componentStructureBlocks: ComponentStructureBlock[],
-  modelBomScopeBlocks: ModelBomScopeBlock[]
+  modelBomScopeBlocks: ModelBomScopeBlock[],
+  modelBomScopeApprovalBlocks: ModelBomScopeApprovalBlock[]
 ) {
   const messages: string[] = [];
   if (modelBomScopeBlocks.length > 0) {
     messages.push(
-      `BOM 范围重复 ${modelBomScopeBlocks.length} 组：` +
+      `BOM 同名范围重复 ${modelBomScopeBlocks.length} 组：` +
         modelBomScopeBlocks.map((block) => `${block.scopeKey} ${block.bomNames.join(' / ')}`).join(' | ')
+    );
+  }
+  if (modelBomScopeApprovalBlocks.length > 0) {
+    messages.push(
+      `BOM 范围审批重复 ${modelBomScopeApprovalBlocks.length} 组：` +
+        modelBomScopeApprovalBlocks.map((block) => `${block.scopeKey} ${block.requestNos.join(' / ')}`).join(' | ')
     );
   }
   if (componentStructureBlocks.length > 0) {
@@ -1257,7 +1273,7 @@ function printProcessSearchRepairs(repairs: ProcessSearchRepair[]) {
 }
 
 async function collectMissingProcessDefinitionRepairs(): Promise<MissingProcessDefinitionRepair[]> {
-  const [definitions, templates, orderSteps, bomLines, transformRules] = await Promise.all([
+  const [definitions, templates, orderSteps, materials, bomLines, transformRules] = await Promise.all([
     prisma.processDefinition.findMany({
       select: {
         id: true,
@@ -1285,6 +1301,15 @@ async function collectMissingProcessDefinitionRepairs(): Promise<MissingProcessD
         }
       },
       orderBy: [{ processName: 'asc' }]
+    }),
+    prisma.material.findMany({
+      where: { defaultProcessRoute: { not: null } },
+      select: {
+        defaultProcessRoute: true,
+        partCode: true,
+        partName: true
+      },
+      orderBy: { partCode: 'asc' }
     }),
     prisma.modelBomLine.findMany({
       where: { defaultProcessRoute: { not: null } },
@@ -1338,6 +1363,12 @@ async function collectMissingProcessDefinitionRepairs(): Promise<MissingProcessD
       step.processName,
       `${step.orderLine.order.orderNo} / ${step.orderLine.partCode} / line ${step.orderLine.lineNo}`
     );
+  }
+
+  for (const material of materials) {
+    for (const processName of splitDefaultProcessRoute(material.defaultProcessRoute)) {
+      addReference(processName, `零件默认工艺 ${material.partCode} / ${material.partName}`);
+    }
   }
 
   for (const line of bomLines) {
@@ -1741,6 +1772,7 @@ async function collectComponentStructureBlocks(): Promise<ComponentStructureBloc
 async function collectModelBomComponentStructureBlocks(blocks: ComponentStructureBlock[]) {
   const boms = await prisma.modelBom.findMany({
     select: {
+      id: true,
       bomName: true,
       lines: {
         select: {
@@ -1932,6 +1964,7 @@ function printComponentStructureBlocks(blocks: ComponentStructureBlock[]) {
 async function collectModelBomScopeBlocks(): Promise<ModelBomScopeBlock[]> {
   const boms = await prisma.modelBom.findMany({
     select: {
+      id: true,
       bomName: true,
       customerScopeKey: true,
       projectModelScopeKey: true,
@@ -1943,30 +1976,74 @@ async function collectModelBomScopeBlocks(): Promise<ModelBomScopeBlock[]> {
   for (const bom of boms) {
     const customerScopeKey = stringValue(bom.customerScopeKey) || 'ALL';
     const projectModelScopeKey = stringValue(bom.projectModelScopeKey).toUpperCase() || 'ALL';
-    const scopeKey = `${customerScopeKey}|${projectModelScopeKey}`;
+    const scopeKey = `${stringValue(bom.bomName).toUpperCase()}|${customerScopeKey}|${projectModelScopeKey}`;
     groups.set(scopeKey, [...(groups.get(scopeKey) || []), bom]);
   }
 
   return [...groups.entries()]
     .filter(([, rows]) => rows.length > 1)
     .map(([scopeKey, rows]) => {
-      const [customerScopeKey, projectModelScopeKey] = scopeKey.split('|');
+      const [, customerScopeKey, projectModelScopeKey] = scopeKey.split('|');
       return {
         scopeKey,
         customerScopeKey,
         projectModelScopeKey,
-        bomNames: rows.map((row) => `${row.bomName}(${row.status})`)
+        bomNames: rows.map((row) => `${row.bomName}(${row.status}/${row.id})`)
       };
     });
 }
 
 function printModelBomScopeBlocks(blocks: ModelBomScopeBlock[]) {
-  console.log(`第一阶段历史数据修复检查：BOM 范围重复 ${blocks.length} 组需要人工合并。`);
+  console.log(`第一阶段历史数据修复检查：BOM 同名范围重复 ${blocks.length} 组需要人工合并。`);
   for (const block of blocks) {
     console.log(
-      `[blocked] BOM scope ${block.scopeKey}: customerScopeKey=${block.customerScopeKey}, ` +
+      `[blocked] BOM name scope ${block.scopeKey}: customerScopeKey=${block.customerScopeKey}, ` +
         `projectModelScopeKey=${block.projectModelScopeKey}, BOM=${block.bomNames.join(' / ')}`
     );
+  }
+}
+
+async function collectModelBomScopeApprovalBlocks(): Promise<ModelBomScopeApprovalBlock[]> {
+  const requests = await prisma.modelBomScopeApprovalRequest.findMany({
+    where: {
+      status: { in: ['PENDING', 'APPROVED'] },
+      usedAt: null
+    },
+    select: {
+      requestNo: true,
+      bomId: true,
+      requestedCustomerScopeMode: true,
+      requestedScopeKey: true,
+      requestedProjectModelScopeKey: true,
+      requestedBomName: true,
+      bom: { select: { bomName: true } }
+    },
+    orderBy: [{ bomId: 'asc' }, { createdAt: 'asc' }]
+  });
+  const groups = new Map<string, typeof requests>();
+  for (const request of requests) {
+    const scopeKey = [
+      request.bomId,
+      stringValue(request.requestedCustomerScopeMode),
+      stringValue(request.requestedScopeKey) || 'ALL',
+      stringValue(request.requestedProjectModelScopeKey).toUpperCase() || 'ALL'
+    ].join('|');
+    groups.set(scopeKey, [...(groups.get(scopeKey) || []), request]);
+  }
+
+  return [...groups.entries()]
+    .filter(([, rows]) => rows.length > 1)
+    .map(([scopeKey, rows]) => ({
+      scopeKey,
+      bomName: rows[0]?.bom?.bomName || rows[0]?.requestedBomName || rows[0]?.bomId || '-',
+      requestNos: rows.map((row) => row.requestNo)
+    }));
+}
+
+function printModelBomScopeApprovalBlocks(blocks: ModelBomScopeApprovalBlock[]) {
+  console.log(`第一阶段历史数据修复检查：BOM 范围审批重复 ${blocks.length} 组需要人工处理。`);
+  for (const block of blocks) {
+    console.log(`[blocked] BOM scope approval ${block.scopeKey}: BOM=${block.bomName}, requests=${block.requestNos.join(' / ')}`);
   }
 }
 

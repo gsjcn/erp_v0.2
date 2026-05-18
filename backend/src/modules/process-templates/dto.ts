@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsIn, IsInt, IsNotEmpty, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 import { CommonStatus } from '@prisma/client';
 
 export class ProcessTemplateQueryDto {
@@ -10,6 +10,28 @@ export class ProcessTemplateQueryDto {
   @IsOptional()
   @IsIn(['ENABLED', 'DISABLED', 'ALL'])
   status?: CommonStatus | 'ALL';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class ProcessTemplateStepDto {

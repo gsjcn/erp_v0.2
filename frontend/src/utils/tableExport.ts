@@ -15,20 +15,6 @@ export function formatFileDateTime(date = new Date()) {
   )}${pad(safeDate.getMinutes())}`;
 }
 
-export function downloadHtmlAsExcel(html: string, filename: string) {
-  // Excel 可以直接打开带表格的 HTML；首部 BOM 用于避免中文乱码。
-  const blob = new Blob([`\ufeff${html}`], {
-    type: 'application/vnd.ms-excel;charset=utf-8'
-  });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(link.href);
-}
-
 export function openPrintHtml(html: string, features = 'width=1200,height=800') {
   const printWindow = window.open('', '_blank', features);
   if (!printWindow) {

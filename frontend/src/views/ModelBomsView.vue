@@ -7,6 +7,8 @@
       </div>
       <div class="page-actions">
         <el-button @click="returnFromModelBom">{{ modelBomReturnButtonText }}</el-button>
+        <el-button v-if="!isMobileLayout" :loading="bomScopeApprovalLoading" @click="openBomScopeApprovalDialog">范围审批</el-button>
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="modelBomExporting" @click="exportModelBomsExcel">导出 Excel</el-button>
         <el-button v-if="!isMobileLayout" type="primary" @click="openBomCreateDialog">新增零件包</el-button>
       </div>
     </div>
@@ -120,7 +122,7 @@
         @click="applyModelBomScopeFilter(item.value)"
       >
         <strong>{{ item.label }}</strong>
-        <span>{{ item.description }}</span>
+        <span :title="item.description">{{ modelBomScopeGuideDescriptionPreview(item.description) }}</span>
       </button>
       <small>BOM 范围筛选或上方统计可直接区分通用 BOM、指定客户可用 BOM 和客户私有 BOM。</small>
     </div>
@@ -135,9 +137,48 @@
           <div class="section-actions">
             <el-button size="small" :disabled="modelBoms.length === 0" @click="openModelBomListTextDialog">查看列表格式</el-button>
             <el-button size="small" :disabled="modelBoms.length === 0" @click="copyModelBomListText">复制列表</el-button>
+            <div class="model-bom-table-height-actions" aria-label="零件包列表表格高度">
+              <el-tooltip content="降低表格高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Minus"
+                  :disabled="modelBomWorkTableHeights.list <= modelBomWorkTableHeightLimits.min"
+                  aria-label="降低零件包列表表格高度"
+                  @click="adjustModelBomWorkTableHeight('list', -modelBomWorkTableHeightLimits.step)"
+                />
+              </el-tooltip>
+              <el-tooltip content="提高表格高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Plus"
+                  :disabled="modelBomWorkTableHeights.list >= modelBomWorkTableHeightLimits.max"
+                  aria-label="提高零件包列表表格高度"
+                  @click="adjustModelBomWorkTableHeight('list', modelBomWorkTableHeightLimits.step)"
+                />
+              </el-tooltip>
+              <el-tooltip content="恢复默认高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="RefreshLeft"
+                  :disabled="modelBomWorkTableHeights.list === modelBomWorkTableDefaultHeights.list"
+                  aria-label="恢复零件包列表表格默认高度"
+                  @click="resetModelBomWorkTableHeight('list')"
+                />
+              </el-tooltip>
+            </div>
           </div>
         </div>
-        <el-table class="model-bom-list-table" v-loading="loading" :data="modelBoms" max-height="360" highlight-current-row @row-click="selectBom">
+        <el-table
+          class="model-bom-list-table"
+          v-loading="loading"
+          :data="modelBoms"
+          :max-height="modelBomWorkTableHeights.list"
+          highlight-current-row
+          @row-click="selectBom"
+        >
           <el-table-column label="常用排序" width="100">
             <template #default="{ row }">
               <div v-if="row.status === 'ENABLED' && row.isCommon" class="common-bom-sort-cell">
@@ -178,7 +219,13 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="scopeLabel" label="适用范围" min-width="260" />
+          <el-table-column label="适用范围" min-width="260">
+            <template #default="{ row }">
+              <el-tooltip :content="modelBomScopeTitle(row)" placement="top">
+                <span class="model-bom-scope-cell">{{ modelBomScopeText(row) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
           <el-table-column label="有效推荐行" width="120">
             <template #default="{ row }">
               <span title="只统计启用且基础零件未停用的 BOM 明细；停用内容不参与后续下单推荐。">
@@ -200,7 +247,7 @@
                   type="danger"
                   role="button"
                   tabindex="0"
-                  :title="formatThicknessReviewBreakdown(row.lines || [])"
+                  :title="modelBomListThicknessReviewTitle(row)"
                   @click.stop="openBomThicknessReview(row)"
                   @keydown.enter.prevent.stop="openBomThicknessReview(row)"
                   @keydown.space.prevent.stop="openBomThicknessReview(row)"
@@ -309,7 +356,7 @@
         <div class="section-heading">
           <div>
             <strong>{{ activeBom ? `${activeBom.bomName} 明细` : '零件包明细' }}</strong>
-            <span>{{ activeBom ? activeBom.scopeLabel : '先选择上方零件包' }}</span>
+            <span :title="activeBom ? modelBomScopeTitle(activeBom) : '先选择上方零件包'">{{ activeBom ? modelBomScopeText(activeBom) : '先选择上方零件包' }}</span>
           </div>
           <div v-if="!isMobileLayout" class="section-actions">
             <el-button type="primary" plain :disabled="!activeBom || activeBom.status === 'DISABLED'" @click="openLineCreateDialog('COMPONENT')">添加组件</el-button>
@@ -333,6 +380,45 @@
           show-icon
           title="当前零件包已停用；不会参与下单推荐。恢复启用后才允许新增包内明细，已有明细仍可查看和编辑。"
         />
+        <div v-if="activeBom" v-loading="bomRevisionLoading" class="bom-revision-panel">
+          <div class="bom-revision-panel__header">
+            <div>
+              <strong>版本记录</strong>
+              <span>已记录 {{ bomRevisionPagination.total }} 次变更</span>
+            </div>
+            <el-button size="small" :icon="RefreshLeft" @click="loadBomRevisions()">刷新</el-button>
+          </div>
+          <el-table :data="bomRevisions" size="small" max-height="220" empty-text="暂无版本记录">
+            <el-table-column prop="revisionNo" label="版本" width="90">
+              <template #default="{ row }">V{{ row.revisionNo }}</template>
+            </el-table-column>
+            <el-table-column label="动作" min-width="150">
+              <template #default="{ row }">{{ formatBomRevisionAction(row.action) }}</template>
+            </el-table-column>
+            <el-table-column label="操作来源" min-width="130">
+              <template #default="{ row }">
+                <span :title="modelBomRevisionChangedByTitle(row)">{{ modelBomRevisionChangedByPreview(row) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="changeRemark" label="备注" min-width="220">
+              <template #default="{ row }">
+                <span :title="modelBomRevisionChangeRemarkTitle(row)">{{ modelBomRevisionChangeRemarkPreview(row) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="记录时间" width="180">
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openBomRevisionDetail(row)">查看快照</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="bomRevisionHasMore" class="bom-revision-panel__footer">
+            <span>已显示 {{ bomRevisions.length }} / {{ bomRevisionPagination.total }} 条</span>
+            <el-button size="small" :loading="bomRevisionLoading" @click="loadMoreBomRevisions">加载更多</el-button>
+          </div>
+        </div>
         <el-alert
           v-if="activeBom"
           class="bom-line-order-alert"
@@ -341,7 +427,7 @@
           show-icon
           title="顺序列显示连续编号 1、2、3；拖拽保存后仍按连续编号查看。"
         />
-        <div v-if="activeBom" class="bom-structure-panel">
+        <div v-if="activeBom" v-loading="activeBomDetailLoading" class="bom-structure-panel">
           <div class="bom-structure-panel__header">
             <div>
               <strong>固定格式清单</strong>
@@ -350,6 +436,38 @@
             <div class="section-actions">
               <el-button size="small" :disabled="!bomStructureText" @click="openBomStructureTextDialog">查看固定格式</el-button>
               <el-button size="small" :disabled="!bomStructureText" @click="copyBomStructureText">复制清单</el-button>
+              <div class="model-bom-table-height-actions" aria-label="BOM 明细表格高度">
+                <el-tooltip content="降低表格高度" placement="top">
+                  <el-button
+                    circle
+                    size="small"
+                    :icon="Minus"
+                    :disabled="modelBomWorkTableHeights.lines <= modelBomWorkTableHeightLimits.min"
+                    aria-label="降低 BOM 明细表格高度"
+                    @click="adjustModelBomWorkTableHeight('lines', -modelBomWorkTableHeightLimits.step)"
+                  />
+                </el-tooltip>
+                <el-tooltip content="提高表格高度" placement="top">
+                  <el-button
+                    circle
+                    size="small"
+                    :icon="Plus"
+                    :disabled="modelBomWorkTableHeights.lines >= modelBomWorkTableHeightLimits.max"
+                    aria-label="提高 BOM 明细表格高度"
+                    @click="adjustModelBomWorkTableHeight('lines', modelBomWorkTableHeightLimits.step)"
+                  />
+                </el-tooltip>
+                <el-tooltip content="恢复默认高度" placement="top">
+                  <el-button
+                    circle
+                    size="small"
+                    :icon="RefreshLeft"
+                    :disabled="modelBomWorkTableHeights.lines === modelBomWorkTableDefaultHeights.lines"
+                    aria-label="恢复 BOM 明细表格默认高度"
+                    @click="resetModelBomWorkTableHeight('lines')"
+                  />
+                </el-tooltip>
+              </div>
             </div>
           </div>
           <div class="bom-summary-tags">
@@ -420,7 +538,24 @@
               <el-tag :type="sourceBomDiffIssues.length === 0 ? 'success' : 'warning'" effect="plain">
                 {{ sourceBomDiffIssues.length === 0 ? '无差异' : `${sourceBomDiffIssues.length} 项差异 / ${sourceBomDiffReviewedCount} 项已核对` }}
               </el-tag>
-              <el-button size="small" :disabled="sourceBomDiffReviews.length === 0" @click="sourceBomReviewListDialogVisible = true">查看核对记录</el-button>
+              <el-button
+                v-if="!isMobileLayout"
+                size="small"
+                :icon="Download"
+                :loading="sourceBomDiffReviewExporting"
+                :disabled="!activeBom?.sourceBomId"
+                @click="exportSourceBomDiffReviewsExcel"
+              >
+                导出核对
+              </el-button>
+              <el-button
+                size="small"
+                :loading="sourceBomDiffReviewLoading"
+                :disabled="sourceBomDiffReviewLoading || sourceBomDiffReviews.length === 0"
+                @click="sourceBomReviewListDialogVisible = true"
+              >
+                查看核对记录 {{ sourceBomDiffReviews.length }} 条
+              </el-button>
               <el-button size="small" :disabled="sourceBomDiffIssues.length === 0" @click="copySourceBomDiffText">复制差异</el-button>
             </div>
           </div>
@@ -444,7 +579,7 @@
               </el-tag>
               <div>
                 <strong>{{ issue.title }}</strong>
-                <span>{{ issue.detail }}</span>
+                <span :title="sourceBomDiffIssueDetailTitle(issue)">{{ sourceBomDiffIssueDetailPreview(issue) }}</span>
                 <small class="bom-source-diff-action-hint">{{ issue.suggestedAction }}</small>
                 <small v-if="isSourceBomDiffReviewed(issue)">{{ sourceBomDiffReviewRecordText(issue) }}</small>
               </div>
@@ -468,7 +603,12 @@
             客户 BOM 与来源百胜通用 BOM 当前一致；后续来源更新只提示差异，不自动覆盖客户 BOM。
           </div>
         </div>
-        <div class="bom-line-table" @dragover.self.prevent="handleLineListDragOverEnd" @drop.self.prevent="dropLineDragAtEnd">
+        <div
+          class="bom-line-table"
+          :style="{ maxHeight: `${modelBomWorkTableHeights.lines}px` }"
+          @dragover.self.prevent="handleLineListDragOverEnd"
+          @drop.self.prevent="dropLineDragAtEnd"
+        >
           <div class="bom-line-row bom-line-row--head">
             <div>顺序</div>
             <div>结构</div>
@@ -531,7 +671,7 @@
               <div class="bom-line-text">{{ row.partName }}</div>
               <div>{{ formatQuantity(row.defaultQuantity, row.unit) }}</div>
               <div class="bom-line-text">{{ formatLineDrawing(row) }}</div>
-              <div class="bom-line-text">{{ row.defaultProcessRoute || '-' }}</div>
+              <div class="bom-line-text" :title="formatLineDefaultProcessRouteFull(row)">{{ formatLineDefaultProcessRoute(row) }}</div>
               <div class="bom-line-text">
                 <el-tag
                   :class="{ 'clickable-review-tag': lineNeedsThicknessReview(row) && !isMobileLayout }"
@@ -713,22 +853,78 @@
           show-icon
           :title="bomScopeReviewAlertText"
         />
-        <el-table :data="bomScopeReviewRows" border class="bom-scope-review-table">
+        <div class="model-bom-dialog-table-toolbar">
+          <strong>BOM 适用范围核对表</strong>
+          <div class="model-bom-table-height-actions" aria-label="BOM 适用范围核对表格高度">
+            <el-button-group>
+              <el-button
+                :icon="Minus"
+                :disabled="modelBomWorkTableHeights.scopeReview <= modelBomWorkTableHeightLimits.min"
+                aria-label="降低 BOM 适用范围核对表格高度"
+                @click="adjustModelBomWorkTableHeight('scopeReview', -modelBomWorkTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="Plus"
+                :disabled="modelBomWorkTableHeights.scopeReview >= modelBomWorkTableHeightLimits.max"
+                aria-label="提高 BOM 适用范围核对表格高度"
+                @click="adjustModelBomWorkTableHeight('scopeReview', modelBomWorkTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="RefreshLeft"
+                :disabled="modelBomWorkTableHeights.scopeReview === modelBomWorkTableDefaultHeights.scopeReview"
+                aria-label="恢复 BOM 适用范围核对表格默认高度"
+                @click="resetModelBomWorkTableHeight('scopeReview')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <el-table :data="bomScopeReviewRows" border class="bom-scope-review-table" :max-height="modelBomWorkTableHeights.scopeReview">
           <el-table-column prop="field" label="核对项" width="150" />
-          <el-table-column prop="before" label="修改前" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="after" label="修改后" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="impact" label="影响" min-width="170" show-overflow-tooltip />
+          <el-table-column label="修改前" min-width="220">
+            <template #default="{ row }">
+              <span :title="formatBomScopeReviewCellTitle(row.before)">{{ formatBomScopeReviewCellPreview(row.before) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="修改后" min-width="220">
+            <template #default="{ row }">
+              <span :title="formatBomScopeReviewCellTitle(row.after)">{{ formatBomScopeReviewCellPreview(row.after) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="影响" min-width="170">
+            <template #default="{ row }">
+              <span :title="formatBomScopeReviewCellTitle(row.impact)">{{ formatBomScopeReviewCellPreview(row.impact, 24) }}</span>
+            </template>
+          </el-table-column>
         </el-table>
         <div class="bom-scope-review-notes">
           <strong>保存影响</strong>
           <span>只修改 BOM 后续可见范围和推荐范围，不会删除 BOM 明细、历史订单、生产任务或库存流水。</span>
-          <span v-if="bomScopeChangeBroadens()">范围扩大后，新增可见客户可能在下单推荐中看到该 BOM，请确认它确实适合作为通用或共享 BOM。</span>
+          <span v-if="bomScopeChangeBroadens()">范围扩大后，新增可见客户可能在下单推荐中看到该 BOM；该动作必须先提交管理员审批申请，批准后才能保存。</span>
           <span v-else>范围缩小后，被移除的客户后续不再看到该 BOM；历史订单和已经复制出的客户 BOM 不受影响。</span>
+        </div>
+        <div v-if="bomScopeChangeBroadens()" class="bom-scope-approval-apply">
+          <el-alert
+            type="warning"
+            :closable="false"
+            show-icon
+            title="扩大到更多客户或全部机型属于特殊动作。请先提交审批申请，管理员批准后再点击保存。"
+          />
+          <el-form label-width="90px">
+            <el-form-item label="申请人" required>
+              <el-input v-model="bomScopeApprovalForm.requestedBy" placeholder="填写操作员姓名" />
+            </el-form-item>
+            <el-form-item label="申请原因" required>
+              <el-input v-model="bomScopeApprovalForm.requestReason" type="textarea" :rows="3" placeholder="说明为什么需要扩大 BOM 可见范围" />
+            </el-form-item>
+          </el-form>
         </div>
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="resolveBomScopeReview(false)">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="resolveBomScopeReview(true)">确认并保存</el-button>
+        <el-button v-if="bomScopeChangeBroadens()" type="warning" :loading="bomScopeApprovalSubmitting" @click="submitBomScopeApprovalRequest">
+          提交管理员申请
+        </el-button>
+        <el-button v-else type="primary" :loading="saving" @click="resolveBomScopeReview(true)">确认并保存</el-button>
       </template>
     </el-dialog>
 
@@ -1042,59 +1238,88 @@
           <span v-if="isMobileLayout">手机端仅查看厚度核对清单，核对并保存厚度请在电脑端操作。</span>
           <span v-else>点击任意行可逐条核对；BOM 顺序与下方明细表连续编号一致，保存后会继续提示剩余厚度核对项。</span>
         </div>
-        <el-table
-          v-if="thicknessReviewLines.length > 0"
-          :data="thicknessReviewLines"
-          border
-          highlight-current-row
-          class="bom-thickness-review-table"
-          :row-class-name="thicknessReviewRowClassName"
-          @row-click="handleThicknessReviewLineAction"
-        >
-          <el-table-column label="BOM 顺序" width="90">
-            <template #default="{ row }">{{ displayBomLineOrder(row) || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="结构" min-width="180">
-            <template #default="{ row }">
-              <el-tag :type="lineStructureTagType(row)" effect="plain">{{ formatLineStructure(row) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="partCode" label="零件编码" min-width="150" />
-          <el-table-column prop="partName" label="零件名称" min-width="180" />
-          <el-table-column label="默认图纸" min-width="220">
-            <template #default="{ row }">{{ formatLineDrawing(row) }}</template>
-          </el-table-column>
-          <el-table-column prop="partSpecification" label="规格" min-width="180" />
-          <el-table-column label="当前厚度" width="140">
-            <template #default="{ row }">
-              <el-tag
-                :class="{ 'clickable-review-tag': !isMobileLayout }"
-                type="danger"
-                effect="plain"
-                :role="!isMobileLayout ? 'button' : undefined"
-                :tabindex="!isMobileLayout ? 0 : undefined"
-                :title="lineThicknessReviewActionTitle(row)"
-                @click.stop="handleThicknessReviewLineAction(row)"
-                @keydown.enter.prevent.stop="handleThicknessReviewLineAction(row)"
-                @keydown.space.prevent.stop="handleThicknessReviewLineAction(row)"
-              >
-                {{ formatLineThickness(row) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="厚度来源" width="150">
-            <template #default="{ row }">
-              <el-tag :type="lineThicknessSourceTagType(row)" effect="plain">
-                {{ formatLineThicknessSourceLabel(row) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="核对原因" min-width="260">
-            <template #default="{ row }">
-              <span class="thickness-review-reason">{{ formatLineThicknessReviewReason(row) }}</span>
-            </template>
-          </el-table-column>
-        </el-table>
+        <div v-if="thicknessReviewLines.length > 0" class="table-card bom-thickness-review-table-card">
+          <div class="model-bom-dialog-table-toolbar">
+            <strong>BOM 厚度核对明细</strong>
+            <div class="model-bom-table-height-actions" aria-label="BOM 厚度核对表格高度">
+              <el-button-group>
+                <el-button
+                  :icon="Minus"
+                  :disabled="modelBomWorkTableHeights.thicknessReview <= modelBomWorkTableHeightLimits.min"
+                  aria-label="降低 BOM 厚度核对表格高度"
+                  @click="adjustModelBomWorkTableHeight('thicknessReview', -modelBomWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  :icon="Plus"
+                  :disabled="modelBomWorkTableHeights.thicknessReview >= modelBomWorkTableHeightLimits.max"
+                  aria-label="提高 BOM 厚度核对表格高度"
+                  @click="adjustModelBomWorkTableHeight('thicknessReview', modelBomWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  :icon="RefreshLeft"
+                  :disabled="modelBomWorkTableHeights.thicknessReview === modelBomWorkTableDefaultHeights.thicknessReview"
+                  aria-label="恢复 BOM 厚度核对表格默认高度"
+                  @click="resetModelBomWorkTableHeight('thicknessReview')"
+                />
+              </el-button-group>
+            </div>
+          </div>
+          <el-table
+            :data="thicknessReviewLines"
+            border
+            highlight-current-row
+            class="bom-thickness-review-table"
+            :max-height="modelBomWorkTableHeights.thicknessReview"
+            :row-class-name="thicknessReviewRowClassName"
+            @row-click="handleThicknessReviewLineAction"
+          >
+            <el-table-column label="BOM 顺序" width="90">
+              <template #default="{ row }">{{ displayBomLineOrder(row) || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="结构" min-width="180">
+              <template #default="{ row }">
+                <el-tag :type="lineStructureTagType(row)" effect="plain">{{ formatLineStructure(row) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="partCode" label="零件编码" min-width="150" />
+            <el-table-column prop="partName" label="零件名称" min-width="180" />
+            <el-table-column label="默认图纸" min-width="220">
+              <template #default="{ row }">{{ formatLineDrawing(row) }}</template>
+            </el-table-column>
+            <el-table-column prop="partSpecification" label="规格" min-width="180" />
+            <el-table-column label="当前厚度" width="140">
+              <template #default="{ row }">
+                <el-tag
+                  :class="{ 'clickable-review-tag': !isMobileLayout }"
+                  type="danger"
+                  effect="plain"
+                  :role="!isMobileLayout ? 'button' : undefined"
+                  :tabindex="!isMobileLayout ? 0 : undefined"
+                  :title="lineThicknessReviewActionTitle(row)"
+                  @click.stop="handleThicknessReviewLineAction(row)"
+                  @keydown.enter.prevent.stop="handleThicknessReviewLineAction(row)"
+                  @keydown.space.prevent.stop="handleThicknessReviewLineAction(row)"
+                >
+                  {{ formatLineThickness(row) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="厚度来源" width="150">
+              <template #default="{ row }">
+                <el-tag :type="lineThicknessSourceTagType(row)" effect="plain">
+                  {{ formatLineThicknessSourceLabel(row) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="核对原因" min-width="260">
+              <template #default="{ row }">
+                <span class="thickness-review-reason" :title="lineThicknessReviewTitle(row)">
+                  {{ formatLineThicknessReviewReasonPreview(row) }}
+                </span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
         <el-empty v-else description="当前 BOM 没有需要核对厚度的子零件或单独零件" />
       </div>
       <template #footer>
@@ -1117,7 +1342,9 @@
           </el-tag>
           <div>
             <strong>{{ selectedSourceBomDiffIssue.title }}</strong>
-            <span>{{ selectedSourceBomDiffIssue.detail }}</span>
+            <span :title="sourceBomDiffIssueDetailTitle(selectedSourceBomDiffIssue)">
+              {{ sourceBomDiffIssueDetailPreview(selectedSourceBomDiffIssue, 72) }}
+            </span>
           </div>
         </div>
         <el-alert
@@ -1138,14 +1365,49 @@
         <div class="source-bom-review-lines">
           <section>
             <strong>来源 BOM 行</strong>
-            <p>{{ sourceBomReviewLineText(selectedSourceBomDiffIssue.sourceLine) }}</p>
+            <p :title="sourceBomReviewLineTitle(selectedSourceBomDiffIssue.sourceLine)">
+              {{ sourceBomReviewLinePreview(selectedSourceBomDiffIssue.sourceLine) }}
+            </p>
           </section>
           <section>
             <strong>当前客户 BOM 行</strong>
-            <p>{{ sourceBomReviewLineText(selectedSourceBomDiffIssue.targetLine) }}</p>
+            <p :title="sourceBomReviewLineTitle(selectedSourceBomDiffIssue.targetLine)">
+              {{ sourceBomReviewLinePreview(selectedSourceBomDiffIssue.targetLine) }}
+            </p>
           </section>
         </div>
-        <el-table :data="selectedSourceBomDiffIssue.fields" border class="source-bom-review-table" row-key="label" max-height="420">
+        <div class="model-bom-dialog-table-toolbar">
+          <strong>来源 BOM 差异字段</strong>
+          <div class="model-bom-table-height-actions" aria-label="来源 BOM 差异字段表格高度">
+            <el-button-group>
+              <el-button
+                :icon="Minus"
+                :disabled="modelBomWorkTableHeights.sourceDiffFields <= modelBomWorkTableHeightLimits.min"
+                aria-label="降低来源 BOM 差异字段表格高度"
+                @click="adjustModelBomWorkTableHeight('sourceDiffFields', -modelBomWorkTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="Plus"
+                :disabled="modelBomWorkTableHeights.sourceDiffFields >= modelBomWorkTableHeightLimits.max"
+                aria-label="提高来源 BOM 差异字段表格高度"
+                @click="adjustModelBomWorkTableHeight('sourceDiffFields', modelBomWorkTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="RefreshLeft"
+                :disabled="modelBomWorkTableHeights.sourceDiffFields === modelBomWorkTableDefaultHeights.sourceDiffFields"
+                aria-label="恢复来源 BOM 差异字段表格默认高度"
+                @click="resetModelBomWorkTableHeight('sourceDiffFields')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <el-table
+          :data="selectedSourceBomDiffIssue.fields"
+          border
+          class="source-bom-review-table"
+          row-key="label"
+          :max-height="modelBomWorkTableHeights.sourceDiffFields"
+        >
           <el-table-column prop="label" label="核对字段" width="130" />
           <el-table-column label="来源 BOM">
             <template #default="{ row }">
@@ -1187,18 +1449,147 @@
       </template>
     </el-dialog>
 
+    <el-dialog
+      v-model="bomRevisionDetailDialogVisible"
+      class="responsive-dialog"
+      :title="selectedBomRevision ? `BOM 版本快照 V${selectedBomRevision.revisionNo}` : 'BOM 版本快照'"
+      width="1080px"
+    >
+      <div v-if="selectedBomRevision" class="bom-revision-detail">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="该快照仅用于人工核对历史状态，不会恢复、替换或覆盖当前 BOM。"
+        />
+        <el-descriptions border :column="2" size="small">
+          <el-descriptions-item label="动作">{{ formatBomRevisionAction(selectedBomRevision.action) }}</el-descriptions-item>
+          <el-descriptions-item label="记录时间">{{ formatDateTime(selectedBomRevision.createdAt) }}</el-descriptions-item>
+          <el-descriptions-item label="操作来源">{{ selectedBomRevision.changedBy || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="备注">
+            <span :title="modelBomRevisionChangeRemarkTitle(selectedBomRevision)">{{ modelBomRevisionChangeRemarkPreview(selectedBomRevision) }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="BOM 名称">{{ selectedBomRevisionSnapshot.bom?.bomName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="适用范围">{{ formatBomRevisionSnapshotScope(selectedBomRevisionSnapshot) }}</el-descriptions-item>
+          <el-descriptions-item label="来源 BOM">{{ selectedBomRevisionSnapshot.bom?.sourceBomNameSnapshot || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="状态">{{ formatModelBomStatusText(selectedBomRevisionSnapshot.bom?.status) }}</el-descriptions-item>
+        </el-descriptions>
+        <el-table :data="selectedBomRevisionLines" border max-height="520" empty-text="该版本暂无明细快照">
+          <el-table-column label="顺序" width="80">
+            <template #default="{ row }">{{ Number(row.sortOrder ?? 0) }}</template>
+          </el-table-column>
+          <el-table-column label="结构" min-width="150">
+            <template #default="{ row }">{{ formatBomRevisionLineStructure(row) }}</template>
+          </el-table-column>
+          <el-table-column label="零件编码" min-width="150">
+            <template #default="{ row }">
+              <span :title="formatBomRevisionLinePartCodeTitle(row)">{{ formatBomRevisionLinePartCode(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="零件名称" min-width="180">
+            <template #default="{ row }">
+              <span :title="formatBomRevisionLinePartNameTitle(row)">{{ formatBomRevisionLinePartName(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="默认数量" width="120">
+            <template #default="{ row }">{{ formatBomRevisionLineQuantity(row) }}</template>
+          </el-table-column>
+          <el-table-column label="默认图纸" min-width="180">
+            <template #default="{ row }">
+              <span :title="formatBomRevisionLineDrawingTitle(row)">{{ formatBomRevisionLineDrawing(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="默认工艺" min-width="180">
+            <template #default="{ row }">
+              <span :title="formatBomRevisionLineDefaultProcessRouteTitle(row)">
+                {{ formatBomRevisionLineDefaultProcessRoute(row) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="厚度" width="110">
+            <template #default="{ row }">{{ formatBomRevisionLineThickness(row) }}</template>
+          </el-table-column>
+          <el-table-column label="规格" min-width="160">
+            <template #default="{ row }">
+              <span :title="formatBomRevisionLineSpecificationTitle(row)">{{ formatBomRevisionLineSpecification(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">{{ formatBomRevisionLineStatus(row) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="bomRevisionDetailDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!selectedBomRevisionSnapshotText" @click="copyBomRevisionSnapshotText">复制快照</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="sourceBomReviewListDialogVisible" class="responsive-dialog" title="BOM 差异核对记录" width="980px">
-      <el-table :data="sourceBomDiffReviews" border max-height="520">
+      <div class="model-bom-dialog-table-toolbar">
+        <div>
+          <strong>来源 BOM 差异核对记录</strong>
+          <div class="bom-scope-help">已显示 {{ sourceBomDiffReviews.length }} / {{ sourceBomDiffReviewPagination.total }} 条核对记录</div>
+        </div>
+        <div class="model-bom-table-height-actions" aria-label="来源 BOM 差异核对记录表格高度">
+          <el-button
+            v-if="!isMobileLayout"
+            size="small"
+            :icon="Download"
+            :loading="sourceBomDiffReviewExporting"
+            :disabled="!activeBom?.sourceBomId"
+            @click="exportSourceBomDiffReviewsExcel"
+          >
+            导出 Excel
+          </el-button>
+          <el-button
+            size="small"
+            :icon="RefreshLeft"
+            :loading="sourceBomDiffReviewLoading"
+            :disabled="!activeBom?.sourceBomId"
+            @click="loadSourceBomDiffReviews()"
+          >
+            刷新
+          </el-button>
+          <el-button-group>
+            <el-button
+              :icon="Minus"
+              :disabled="modelBomWorkTableHeights.sourceDiffReviews <= modelBomWorkTableHeightLimits.min"
+              aria-label="降低来源 BOM 差异核对记录表格高度"
+              @click="adjustModelBomWorkTableHeight('sourceDiffReviews', -modelBomWorkTableHeightLimits.step)"
+            />
+            <el-button
+              :icon="Plus"
+              :disabled="modelBomWorkTableHeights.sourceDiffReviews >= modelBomWorkTableHeightLimits.max"
+              aria-label="提高来源 BOM 差异核对记录表格高度"
+              @click="adjustModelBomWorkTableHeight('sourceDiffReviews', modelBomWorkTableHeightLimits.step)"
+            />
+            <el-button
+              :icon="RefreshLeft"
+              :disabled="modelBomWorkTableHeights.sourceDiffReviews === modelBomWorkTableDefaultHeights.sourceDiffReviews"
+              aria-label="恢复来源 BOM 差异核对记录表格默认高度"
+              @click="resetModelBomWorkTableHeight('sourceDiffReviews')"
+            />
+          </el-button-group>
+        </div>
+      </div>
+      <el-table v-loading="sourceBomDiffReviewLoading" :data="sourceBomDiffReviews" border :max-height="modelBomWorkTableHeights.sourceDiffReviews">
         <el-table-column prop="issueKind" label="类型" width="120" />
-        <el-table-column prop="issueTitle" label="差异项" min-width="260" show-overflow-tooltip />
+        <el-table-column label="差异项" min-width="260">
+          <template #default="{ row }">
+            <span :title="sourceBomDiffReviewIssueTitle(row)">{{ sourceBomDiffReviewIssuePreview(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="reviewedBy" label="核对人" width="130">
           <template #default="{ row }">{{ row.reviewedBy || '-' }}</template>
         </el-table-column>
         <el-table-column label="核对时间" width="180">
           <template #default="{ row }">{{ formatSourceBomReviewAt(row.reviewedAt) }}</template>
         </el-table-column>
-        <el-table-column prop="reviewRemark" label="备注" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.reviewRemark || '保留为客户 BOM 差异' }}</template>
+        <el-table-column prop="reviewRemark" label="备注" min-width="220">
+          <template #default="{ row }">
+            <span :title="sourceBomDiffReviewRemarkTitle(row)">{{ sourceBomDiffReviewRemarkPreview(row) }}</span>
+          </template>
         </el-table-column>
         <el-table-column v-if="!isMobileLayout" label="操作" width="120" fixed="right">
           <template #default="{ row }">
@@ -1206,8 +1597,87 @@
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="sourceBomDiffReviewHasMore" class="model-bom-dialog-table-footer">
+        <span>已显示 {{ sourceBomDiffReviews.length }} / {{ sourceBomDiffReviewPagination.total }} 条</span>
+        <el-button size="small" :loading="sourceBomDiffReviewLoading" @click="loadMoreSourceBomDiffReviews">加载更多</el-button>
+      </div>
       <template #footer>
         <el-button @click="sourceBomReviewListDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="bomScopeApprovalDialogVisible" class="responsive-dialog" title="BOM 范围审批申请" width="1100px">
+      <div class="bom-scope-approval-panel">
+        <div class="model-bom-dialog-table-toolbar">
+          <div class="scope-approval-filters">
+            <el-select v-model="bomScopeApprovalFilters.status" style="width: 150px" @change="refreshBomScopeApprovalRequests()">
+              <el-option label="待审批" value="PENDING" />
+              <el-option label="已批准" value="APPROVED" />
+              <el-option label="已驳回" value="REJECTED" />
+              <el-option label="已使用" value="USED" />
+              <el-option label="全部" value="ALL" />
+            </el-select>
+            <el-input v-model="bomScopeApprovalReviewForm.reviewedBy" placeholder="管理员姓名" style="width: 180px" />
+            <el-input v-model="bomScopeApprovalReviewForm.reviewRemark" clearable placeholder="审批备注" style="width: 260px" />
+            <span class="bom-scope-help">已显示 {{ bomScopeApprovalRequests.length }} / {{ bomScopeApprovalTotal }} 条</span>
+          </div>
+          <div class="scope-approval-actions">
+            <el-button :loading="bomScopeApprovalLoading" @click="refreshBomScopeApprovalRequests()">刷新</el-button>
+            <el-button v-if="bomScopeApprovalHasMore" :loading="bomScopeApprovalLoading" @click="loadMoreBomScopeApprovalRequests">加载更多</el-button>
+          </div>
+        </div>
+        <el-table v-loading="bomScopeApprovalLoading" :data="bomScopeApprovalRequests" border max-height="560" empty-text="暂无 BOM 范围审批申请">
+          <el-table-column label="申请号" min-width="210">
+            <template #default="{ row }">
+              <span :title="formatBomScopeApprovalRequestNoTitle(row)">{{ formatBomScopeApprovalRequestNoPreview(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="BOM" min-width="180">
+            <template #default="{ row }">
+              <span :title="formatBomScopeApprovalBomNameTitle(row)">{{ formatBomScopeApprovalBomNamePreview(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="申请范围" min-width="260">
+            <template #default="{ row }">
+              <span :title="formatBomScopeApprovalRequestedScopeTitle(row)">{{ formatBomScopeApprovalRequestedScopePreview(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="requestedBy" label="申请人" width="110" />
+          <el-table-column label="申请原因" min-width="220">
+            <template #default="{ row }">
+              <span :title="formatBomScopeApprovalReasonTitle(row)">{{ formatBomScopeApprovalReasonPreview(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="bomScopeApprovalStatusTagType(row.status)" effect="plain">{{ formatBomScopeApprovalStatus(row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="申请时间" width="170">
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+          </el-table-column>
+          <el-table-column label="审批信息" min-width="180">
+            <template #default="{ row }">
+              <span :title="formatBomScopeApprovalReviewTitle(row)">{{ formatBomScopeApprovalReviewPreview(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" fixed="right">
+            <template #default="{ row }">
+              <template v-if="row.status === 'PENDING'">
+                <el-button link type="success" :loading="bomScopeApprovalSavingId === `${row.id}:approve`" @click="reviewBomScopeApprovalRequest(row, true)">
+                  批准
+                </el-button>
+                <el-button link type="danger" :loading="bomScopeApprovalSavingId === `${row.id}:reject`" @click="reviewBomScopeApprovalRequest(row, false)">
+                  驳回
+                </el-button>
+              </template>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="bomScopeApprovalDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1241,7 +1711,8 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { Rank } from '@element-plus/icons-vue';
+import { Download } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
 import { erpApi, type CopyModelBomPayload, type SaveModelBomLinePayload, type SaveModelBomPayload } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import MaterialSuggestionOption from '../components/MaterialSuggestionOption.vue';
@@ -1255,11 +1726,15 @@ import type {
   ModelBom,
   ModelBomDiffReview,
   ModelBomLine,
+  ModelBomLineSummary,
+  ModelBomRevision,
+  ModelBomScopeApprovalRequest,
   ModelBomScopeSummary,
   ProcessDefinition
 } from '../types/erp';
 import { formatDateTime, formatNumber, formatQuantity } from '../utils/format';
 import { filterPinyinSearchOptions, normalizeSearchKeyword, pinyinSearchMatches } from '../utils/pinyinSearch';
+import { formatFileDateTime } from '../utils/tableExport';
 
 type BomLineStructureType = 'STANDALONE_PART' | 'COMPONENT' | 'CHILD_PART';
 type BomCustomerScope = 'ALL' | 'PRIVATE' | 'SELECTED';
@@ -1290,14 +1765,58 @@ type BomDiffIssue = {
   fields: BomDiffField[];
   suggestedAction: string;
 };
-type BomLineSummary = {
-  componentCount: number;
-  childPartCount: number;
-  standalonePartCount: number;
-  orphanPartCount: number;
-  missingThicknessCount: number;
-  disabledCount: number;
-  materialDisabledCount: number;
+type BomLineSummary = ModelBomLineSummary;
+type ModelBomWorkTableKey = 'list' | 'lines' | 'scopeReview' | 'thicknessReview' | 'sourceDiffFields' | 'sourceDiffReviews';
+const modelBomWorkTableKeys: ModelBomWorkTableKey[] = ['list', 'lines', 'scopeReview', 'thicknessReview', 'sourceDiffFields', 'sourceDiffReviews'];
+
+type ModelBomRevisionSnapshotLine = {
+  id?: string;
+  materialId?: string;
+  partCodeSnapshot?: string;
+  partNameSnapshot?: string;
+  unitSnapshot?: string;
+  partSpecificationSnapshot?: string | null;
+  partThicknessSnapshot?: number | null;
+  lineType?: string;
+  partCategory?: string | null;
+  componentNo?: string | null;
+  parentComponentNo?: string | null;
+  defaultDrawingRevisionId?: string | null;
+  defaultDrawingRevision?: {
+    drawingNo?: string | null;
+    drawingVersion?: string | null;
+    drawingDate?: string | null;
+    drawingStatus?: string | null;
+    drawingFileName?: string | null;
+    drawingFileUrl?: string | null;
+  } | null;
+  defaultProcessRoute?: string | null;
+  defaultQuantity?: number;
+  remark?: string | null;
+  sortOrder?: number;
+  status?: CommonStatus;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type ModelBomRevisionSnapshot = {
+  bom?: {
+    bomName?: string;
+    customerNameSnapshot?: string | null;
+    projectModel?: string;
+    customerScopeMode?: string;
+    sourceBomNameSnapshot?: string | null;
+    isCommon?: boolean;
+    remark?: string | null;
+    status?: CommonStatus;
+    updatedAt?: string;
+  };
+  customerScopes?: Array<{
+    customerId?: string;
+    customerNameSnapshot?: string | null;
+    status?: CommonStatus;
+  }>;
+  lines?: ModelBomRevisionSnapshotLine[];
 };
 
 function emptyModelBomScopeSummary(): ModelBomScopeSummary {
@@ -1317,6 +1836,7 @@ const modelBomReturnPath = computed(() => (routeQueryText(route.query.returnTo) 
 const modelBomReturnButtonText = computed(() => (modelBomReturnPath.value === '/orders' ? '返回订单' : '返回零件管理'));
 const loading = ref(false);
 const saving = ref(false);
+const modelBomExporting = ref(false);
 const modelBomOperationSavingKey = ref('');
 const modelBomLineOperationSavingKey = ref('');
 const bomDialogVisible = ref(false);
@@ -1325,11 +1845,18 @@ const lineDialogVisible = ref(false);
 const bomStructureTextDialogVisible = ref(false);
 const bomListTextDialogVisible = ref(false);
 const bomScopeReviewDialogVisible = ref(false);
+const bomScopeApprovalDialogVisible = ref(false);
+const bomScopeApprovalLoading = ref(false);
+const bomScopeApprovalSubmitting = ref(false);
+const bomScopeApprovalSavingId = ref('');
+const bomScopeApprovalTotal = ref(0);
+const bomScopeApprovalPageLimit = Number(100);
 const thicknessReviewDialogVisible = ref(false);
 const thicknessReviewBomId = ref('');
 const thicknessReviewLineId = ref('');
 const sourceBomReviewDialogVisible = ref(false);
 const sourceBomReviewListDialogVisible = ref(false);
+const bomRevisionDetailDialogVisible = ref(false);
 const modelBomConfirmDialogVisible = ref(false);
 const modelBomConfirmTitle = ref('');
 const modelBomConfirmMessage = ref('');
@@ -1337,6 +1864,22 @@ const modelBomConfirmDetails = ref<string[]>([]);
 const modelBomConfirmButtonText = ref('确认');
 const modelBomConfirmButtonType = ref<ModelBomConfirmButtonType>('primary');
 const modelBoms = ref<ModelBom[]>([]);
+const modelBomWorkTableHeightLimits = {
+  min: 320,
+  max: 840,
+  step: 80
+};
+const modelBomWorkTableDefaultHeights: Record<ModelBomWorkTableKey, number> = {
+  list: 440,
+  lines: 640,
+  scopeReview: 360,
+  thicknessReview: 520,
+  sourceDiffFields: 420,
+  sourceDiffReviews: 520
+};
+const modelBomWorkTableHeightStorageKey = 'baisheng.erp.modelBomWorkTableHeights.v1';
+// 机型零件包维护和核对弹窗表格高度只作为本机 UI 偏好，不写入 BOM、订单、生产或库存业务资料。
+const modelBomWorkTableHeights = reactive<Record<ModelBomWorkTableKey, number>>({ ...modelBomWorkTableDefaultHeights });
 const modelBomScopeSummaryTotals = ref<ModelBomScopeSummary>(emptyModelBomScopeSummary());
 const modelBomPagination = reactive({
   page: Number(1),
@@ -1349,13 +1892,34 @@ const customerOptionsLoading = ref(false);
 const customerOptionsTotal = ref(Number(0));
 const customerOptionBatchLimit = Number(200);
 const activeBomId = ref('');
+const activeBomDetail = ref<ModelBom | null>(null);
+const activeBomDetailLoading = ref(false);
+let activeBomDetailRequestSeq = 0;
+const bomRevisions = ref<ModelBomRevision[]>([]);
+const selectedBomRevision = ref<ModelBomRevision | null>(null);
+const bomScopeApprovalRequests = ref<ModelBomScopeApprovalRequest[]>([]);
+const bomScopeApprovalHasMore = computed(() => bomScopeApprovalRequests.value.length < bomScopeApprovalTotal.value);
+const bomRevisionLoading = ref(false);
+const bomRevisionPagination = reactive({
+  limit: Number(10),
+  offset: Number(0),
+  total: Number(0)
+});
 const sourceBomForDiff = ref<ModelBom | null>(null);
 const selectedSourceBomDiffIssue = ref<BomDiffIssue | null>(null);
 const sourceBomDiffReviews = ref<ModelBomDiffReview[]>([]);
 const sourceBomReviewedDiffKeys = ref<Set<string>>(new Set());
+const sourceBomDiffReviewPagination = reactive({
+  limit: Number(50),
+  offset: Number(0),
+  total: Number(0)
+});
+const sourceBomDiffReviewHasMore = computed(() => sourceBomDiffReviews.value.length < sourceBomDiffReviewPagination.total);
 const sourceBomDiffLoading = ref(false);
+const sourceBomDiffReviewLoading = ref(false);
 const sourceBomDiffReviewSaving = ref(false);
 const sourceBomDiffReviewRevoking = ref(false);
+const sourceBomDiffReviewExporting = ref(false);
 const sourceBomDiffRequestSeq = ref(0);
 const sourceBomDiffReviewRequestSeq = ref(0);
 const lineDrawingRevisions = ref<MaterialDrawingRevision[]>([]);
@@ -1382,6 +1946,8 @@ const highlightedBomLineId = ref('');
 const routeTargetAction = ref('');
 const routeTargetKey = ref('');
 const routeTargetActionApplied = ref(false);
+const routeTargetBomManuallySelected = ref(false);
+const routeTargetMultipleBomChoiceWarned = ref(false);
 const selectedCustomerName = ref('');
 const originalBomCustomerScope = ref<BomCustomerScope>('ALL');
 const originalBomCustomerId = ref('');
@@ -1450,6 +2016,22 @@ const copyForm = reactive<{
   remark: ''
 });
 
+const bomScopeApprovalForm = reactive({
+  requestedBy: '',
+  requestReason: ''
+});
+
+const bomScopeApprovalFilters = reactive<{
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'USED' | 'ALL';
+}>({
+  status: 'PENDING'
+});
+
+const bomScopeApprovalReviewForm = reactive({
+  reviewedBy: '管理员',
+  reviewRemark: ''
+});
+
 const sourceBomReviewForm = reactive({
   reviewedBy: '',
   reviewRemark: ''
@@ -1500,8 +2082,19 @@ const lineForm = reactive<{
 const lineFormOriginalPartThickness = ref<number | null>(null);
 const lineFormOriginalPartThicknessSource = ref<string | null>(null);
 
-const activeBom = computed(() => modelBoms.value.find((item) => item.id === activeBomId.value));
-const thicknessReviewBom = computed(() => modelBoms.value.find((item) => item.id === thicknessReviewBomId.value) || activeBom.value);
+const activeBomListItem = computed(() => modelBoms.value.find((item) => item.id === activeBomId.value));
+const activeBom = computed(() => (activeBomDetail.value?.id === activeBomId.value ? activeBomDetail.value : activeBomListItem.value));
+const selectedBomRevisionSnapshot = computed(() => parseModelBomRevisionSnapshot(selectedBomRevision.value));
+const selectedBomRevisionLines = computed(() => selectedBomRevisionSnapshot.value.lines || []);
+const selectedBomRevisionSnapshotText = computed(() =>
+  selectedBomRevision.value ? buildBomRevisionSnapshotText(selectedBomRevision.value, selectedBomRevisionSnapshot.value) : ''
+);
+const bomRevisionHasMore = computed(() => bomRevisions.value.length < bomRevisionPagination.total);
+const thicknessReviewBom = computed(() =>
+  activeBomDetail.value?.id === thicknessReviewBomId.value
+    ? activeBomDetail.value
+    : modelBoms.value.find((item) => item.id === thicknessReviewBomId.value) || activeBom.value
+);
 const thicknessReviewLines = computed(() => (thicknessReviewBom.value?.lines || []).filter(lineNeedsThicknessReview));
 const thicknessReviewSummary = computed(() => summarizeThicknessReviewLines(thicknessReviewBom.value?.lines || []));
 const thicknessReviewText = computed(() => {
@@ -1513,7 +2106,7 @@ const thicknessReviewText = computed(() => {
   const lines = [
     'BOM 厚度核对清单',
     `零件包：${bom.bomName}`,
-    `适用范围：${bom.scopeLabel}`,
+    `适用范围：${modelBomScopeText(bom)}`,
     `统计：需核对 ${summary.totalCount}；未填写 ${summary.noThicknessCount}；历史参考 ${summary.historyReferenceCount}；来源未确认 ${summary.unconfirmedSourceCount}`,
     '说明：父级组件不参与厚度核对；确认厚度只写入当前 BOM 明细，不改历史订单、库存或生产记录。',
     '序号\tBOM顺序\t结构\t零件编码\t零件名称\t当前厚度\t厚度来源\t核对原因\t默认图纸\t规格'
@@ -1618,6 +2211,11 @@ const modelBomScopeGuideItems = computed(() => [
     description: '只属于所属客户，不会显示在其他客户界面。'
   }
 ]);
+
+function modelBomScopeGuideDescriptionPreview(description: string) {
+  return formatModelBomLongTextPreview(description, 28, '-');
+}
+
 const bomScopeSelectedCustomers = computed(() =>
   customerOptions.value.filter((customer) => bomForm.customerIds.includes(customer.id))
 );
@@ -1668,7 +2266,7 @@ const bomScopeCustomerSelectionText = computed(() => {
   }
   const selectedNames = bomScopeSelectedCustomers.value.map((customer) => customer.customerName);
   return selectedNames.length
-    ? `指定客户可用：${selectedNames.join('、')} 可见；共 ${selectedNames.length} 个客户，可使用全部勾选批量开放。`
+    ? `指定客户可用：${formatCustomerNamePreview(selectedNames)} 可见；可使用全部勾选批量开放。`
     : '指定客户可用：请勾选允许使用该 BOM 的客户。';
 });
 const bomScopeNarrowingText = computed(() => {
@@ -1681,7 +2279,7 @@ const bomScopeNarrowingText = computed(() => {
   if (originalBomCustomerScope.value === 'SELECTED' && bomForm.customerScope === 'SELECTED') {
     const removedCustomerNames = removedBomScopeCustomerNames();
     return removedCustomerNames.length
-      ? `范围缩小：将移除可用客户 ${removedCustomerNames.join('、')}；不会删除 BOM 明细、历史订单、生产任务或库存记录。`
+      ? `范围缩小：将移除可用客户 ${formatCustomerNamePreview(removedCustomerNames)}；不会删除 BOM 明细、历史订单、生产任务或库存记录。`
       : '';
   }
   if (originalBomCustomerScope.value === 'SELECTED' && bomForm.customerScope === 'PRIVATE') {
@@ -1701,7 +2299,7 @@ const bomScopeReviewRows = computed(() => {
       field: '客户范围类型',
       before: previousScopeLabel,
       after: nextScopeLabel,
-      impact: bomCustomerScopeBroadens(originalBomCustomerScope.value, bomForm.customerScope) ? '可见客户增加' : '可见客户减少'
+      impact: bomCustomerScopeTypeImpactText()
     });
   }
   const previousCustomerText = bomScopeCustomerText(originalBomCustomerScope.value, originalBomCustomerId.value, originalBomScopeCustomerIds.value);
@@ -1732,23 +2330,35 @@ const bomScopeReviewAlertText = computed(() => {
   }
   return '正在缩小或调整 BOM 适用范围，请核对后续哪些客户和机型还能看到该 BOM。';
 });
+
+function formatBomScopeReviewCellPreview(value?: string | null, maxLength = 32) {
+  return formatModelBomLongTextPreview(value, maxLength, '-');
+}
+
+function formatBomScopeReviewCellTitle(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
 const modelBomCommonDragRows = computed(() => modelBoms.value.filter((row) => row.status === 'ENABLED' && row.isCommon));
 function formatModelBomListLineSummary(row: ModelBom) {
   const summary = modelBomLineSummary(row);
-  const effectiveCount = (row.lines || []).filter(lineCountsAsActiveBomContent).length;
-  const inactiveCount = Math.max((row.lines || []).length - effectiveCount, 0);
-  const activePartLines = (row.lines || []).filter((line) => lineCountsAsActiveBomContent(line) && line.lineType !== 'COMPONENT');
-  const confirmedThicknessCount = activePartLines.filter((line) => Number(line.partThickness ?? 0) > 0 && line.partThicknessSource === 'BOM_LINE').length;
-  const historyThicknessCount = activePartLines.filter((line) => Number(line.partThickness ?? 0) > 0 && line.partThicknessSource === 'ORDER_HISTORY').length;
-  const noThicknessCount = activePartLines.filter((line) => Number(line.partThickness ?? 0) <= 0).length;
   return {
-    effectiveCount,
-    inactiveCount,
+    effectiveCount: summary.effectiveCount,
+    inactiveCount: summary.inactiveCount,
     structureText: `组件 ${summary.componentCount} / 子零件 ${summary.childPartCount} / 单独零件 ${summary.standalonePartCount} / 未匹配父级 ${summary.orphanPartCount}`,
-    reviewText: `厚度已确认 ${confirmedThicknessCount} / 历史参考 ${historyThicknessCount} / 无厚度 ${noThicknessCount} / 需核对 ${summary.missingThicknessCount}`,
+    reviewText: `厚度已确认 ${summary.confirmedThicknessCount} / 历史参考 ${summary.historyThicknessCount} / 无厚度 ${summary.noThicknessCount} / 需核对 ${summary.missingThicknessCount}`,
     inactiveText: `停用 ${summary.disabledCount} / 基础零件停用 ${summary.materialDisabledCount}`
   };
 }
+
+function modelBomListThicknessReviewTitle(row: ModelBom) {
+  if ((row.lines || []).length > 0) {
+    return formatThicknessReviewBreakdown(row.lines || []);
+  }
+  const summary = modelBomLineSummary(row);
+  return `列表只显示摘要；需核对 ${summary.missingThicknessCount} 行，点击后读取 BOM 详情再处理。`;
+}
+
 const modelBomListText = computed(() => {
   if (modelBoms.value.length === 0) {
     return '';
@@ -1780,7 +2390,7 @@ const modelBomListText = computed(() => {
       row.isCommon ? '常用' : '非常用',
       row.isCommon ? modelBomCommonDisplayOrder(row) : '-',
       row.bomName,
-      row.scopeLabel,
+      modelBomScopeText(row),
       modelBomCustomerText(row),
       row.projectModel || '全部机型/项目',
       formatModelBomStatusText(row.status),
@@ -1946,8 +2556,18 @@ function summarizeModelBomLines(lines: ModelBomLine[]): BomLineSummary {
       if (!lineCountsAsActiveBomContent(line)) {
         return summary;
       }
+      summary.effectiveCount += 1;
       if (lineNeedsThicknessReview(line)) {
         summary.missingThicknessCount += 1;
+      }
+      if (line.lineType !== 'COMPONENT') {
+        if (Number(line.partThickness ?? 0) > 0 && line.partThicknessSource === 'BOM_LINE') {
+          summary.confirmedThicknessCount += 1;
+        } else if (Number(line.partThickness ?? 0) > 0 && line.partThicknessSource === 'ORDER_HISTORY') {
+          summary.historyThicknessCount += 1;
+        } else {
+          summary.noThicknessCount += 1;
+        }
       }
       if (line.lineType === 'COMPONENT') {
         summary.componentCount += 1;
@@ -1967,13 +2587,18 @@ function summarizeModelBomLines(lines: ModelBomLine[]): BomLineSummary {
       orphanPartCount: 0,
       missingThicknessCount: 0,
       disabledCount: 0,
-      materialDisabledCount: 0
+      materialDisabledCount: 0,
+      effectiveCount: 0,
+      inactiveCount: Math.max(lines.length - activeContentLines.length, 0),
+      confirmedThicknessCount: 0,
+      historyThicknessCount: 0,
+      noThicknessCount: 0
     }
   );
 }
 
 function modelBomLineSummary(row: ModelBom) {
-  return summarizeModelBomLines(row.lines || []);
+  return row.lineSummary || summarizeModelBomLines(row.lines || []);
 }
 
 function modelBomScopeMode(row: ModelBom) {
@@ -1999,7 +2624,34 @@ function modelBomCustomerText(row: ModelBom) {
     return row.customerName;
   }
   const scopeCustomerNames = (row.scopeCustomers || []).map((item) => item.customerName).filter(Boolean);
-  return scopeCustomerNames.length > 0 ? scopeCustomerNames.join('、') : '-';
+  return formatCustomerNamePreview(scopeCustomerNames, '指定客户', row.scopeCustomerCount);
+}
+
+function modelBomScopeText(row: ModelBom) {
+  return `${modelBomScopeTypeLabel(row)} / ${modelBomCustomerText(row)} / ${row.projectModel || '全部机型/项目'}`;
+}
+
+function modelBomScopeTitle(row: ModelBom) {
+  const scopeMode = modelBomScopeMode(row);
+  const projectModel = row.projectModel || '全部机型/项目';
+  if (scopeMode === 'ALL') {
+    return `适用范围：全部客户 / ${projectModel}。列表只显示摘要，不代表自动覆盖客户 BOM。`;
+  }
+  if (scopeMode === 'PRIVATE') {
+    return `适用范围：客户私有 / ${row.customerName || '指定客户'} / ${projectModel}。只影响该客户，不覆盖其他客户 BOM。`;
+  }
+  const scopeCustomerNames = (row.scopeCustomers || []).map((item) => item.customerName).filter(Boolean);
+  return `适用范围：指定客户可用 / ${formatCustomerNamePreview(scopeCustomerNames, '指定客户', row.scopeCustomerCount)} / ${projectModel}。完整客户范围请进入 BOM 详情核对；扩大可见范围必须先走审批。`;
+}
+
+function formatCustomerNamePreview(names: Array<string | null | undefined>, emptyText = '-', totalCount?: number) {
+  const filtered = names.map((name) => String(name || '').trim()).filter(Boolean);
+  const displayTotal = Math.max(totalCount ?? 0, filtered.length);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  return displayTotal > 3 ? `${preview} 等 ${displayTotal} 个客户` : preview;
 }
 
 function modelBomScopeTagType(row: ModelBom): 'success' | 'warning' | 'info' {
@@ -2228,16 +2880,71 @@ const sourceBomDiffText = computed(() => {
   const lines = [
     'BOM 差异固定格式清单',
     `来源 BOM：${activeSourceBomName.value}`,
-    `当前 BOM：${activeBom.value.bomName} / ${activeBom.value.scopeLabel}`,
+    `当前 BOM：${activeBom.value.bomName} / ${modelBomScopeText(activeBom.value)}`,
     `差异数量：${sourceBomDiffIssues.value.length}`
   ];
   sourceBomDiffIssues.value.forEach((issue, index) => {
-    lines.push(`${index + 1}. ${sourceBomDiffStatusLabel(issue)} | ${issue.title} | ${issue.detail} | 建议：${issue.suggestedAction}`);
+    lines.push(`${index + 1}. ${sourceBomDiffStatusLabel(issue)} | ${issue.title} | ${sourceBomDiffIssueDetailPreview(issue, 72)} | 建议：${issue.suggestedAction}`);
   });
   return lines.join('\n');
 });
 
+function clampModelBomWorkTableHeight(value: number) {
+  return Math.min(modelBomWorkTableHeightLimits.max, Math.max(modelBomWorkTableHeightLimits.min, value));
+}
+
+function adjustModelBomWorkTableHeight(key: ModelBomWorkTableKey, delta: number) {
+  modelBomWorkTableHeights[key] = clampModelBomWorkTableHeight(modelBomWorkTableHeights[key] + delta);
+}
+
+function resetModelBomWorkTableHeight(key: ModelBomWorkTableKey) {
+  modelBomWorkTableHeights[key] = modelBomWorkTableDefaultHeights[key];
+}
+
+function restoreModelBomWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(modelBomWorkTableHeightStorageKey);
+    if (!rawValue) {
+      return;
+    }
+    const savedHeights = JSON.parse(rawValue) as Partial<Record<ModelBomWorkTableKey, number>>;
+    modelBomWorkTableKeys.forEach((key) => {
+      const savedHeight = Number(savedHeights[key]);
+      if (Number.isFinite(savedHeight)) {
+        modelBomWorkTableHeights[key] = clampModelBomWorkTableHeight(savedHeight);
+      }
+    });
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响 BOM 维护。
+  }
+}
+
+function saveModelBomWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      modelBomWorkTableHeightStorageKey,
+      JSON.stringify({
+        list: modelBomWorkTableHeights.list,
+        lines: modelBomWorkTableHeights.lines,
+        scopeReview: modelBomWorkTableHeights.scopeReview,
+        thicknessReview: modelBomWorkTableHeights.thicknessReview,
+        sourceDiffFields: modelBomWorkTableHeights.sourceDiffFields,
+        sourceDiffReviews: modelBomWorkTableHeights.sourceDiffReviews
+      })
+    );
+  } catch {
+    // 本机 UI 偏好写入失败不阻断 BOM 查询、复制或明细维护。
+  }
+}
+
 onMounted(() => {
+  restoreModelBomWorkTableHeights();
   applyRouteQueryFilters();
   void loadModelBoms();
   void loadCustomerOptions();
@@ -2245,9 +2952,23 @@ onMounted(() => {
 });
 
 watch(
+  () => modelBomWorkTableKeys.map((key) => modelBomWorkTableHeights[key]),
+  () => saveModelBomWorkTableHeights()
+);
+
+watch(
   () => activeBom.value?.sourceBomId || '',
   (sourceBomId) => {
     void loadSourceBomForDiff(sourceBomId);
+  },
+  { immediate: true }
+);
+
+watch(
+  () => activeBom.value?.id || '',
+  (bomId) => {
+    bomRevisionPagination.offset = Number(0);
+    void loadBomRevisions(bomId);
   },
   { immediate: true }
 );
@@ -2397,6 +3118,8 @@ function applyRouteQueryFilters() {
   if (nextRouteTargetKey !== routeTargetKey.value) {
     routeTargetKey.value = nextRouteTargetKey;
     routeTargetActionApplied.value = false;
+    routeTargetBomManuallySelected.value = false;
+    routeTargetMultipleBomChoiceWarned.value = false;
   }
   filters.keyword = keyword;
   filters.customerId = customerId;
@@ -2462,6 +3185,12 @@ async function loadModelBoms() {
     if (!activeBomId.value || !modelBoms.value.some((item) => item.id === activeBomId.value)) {
       activeBomId.value = modelBoms.value[0]?.id || '';
     }
+    if (activeBomId.value) {
+      await loadActiveBomDetail(activeBomId.value);
+      void loadBomRevisions(activeBomId.value);
+    } else {
+      activeBomDetail.value = null;
+    }
     selectRouteCreateLineTargetBom();
     await focusRouteTargetLine();
     await openRouteTargetCreateBomDialog();
@@ -2472,9 +3201,58 @@ async function loadModelBoms() {
     modelBomPagination.total = Number(0);
     modelBomScopeSummaryTotals.value = emptyModelBomScopeSummary();
     activeBomId.value = '';
+    activeBomDetail.value = null;
     ElMessage.error(error instanceof Error ? error.message : '机型零件包加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
+  }
+}
+
+function modelBomExportFilters() {
+  return {
+    keyword: filters.keyword.trim() || undefined,
+    customerId: filters.customerId || undefined,
+    projectModel: filters.projectModel.trim() || undefined,
+    scopeMode: filters.scopeMode || undefined,
+    excludeGlobalAllProject: filters.excludeGlobalAllProject || undefined,
+    commonOnly: filters.commonOnly || undefined,
+    status: filters.status
+  };
+}
+
+async function exportModelBomsExcel() {
+  if (modelBomExporting.value) {
+    return;
+  }
+  modelBomExporting.value = true;
+  try {
+    await erpApi.downloadModelBomsExport(modelBomExportFilters(), `机型零件包_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('机型零件包 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '机型零件包导出失败，请稍后重试');
+  } finally {
+    modelBomExporting.value = false;
+  }
+}
+
+async function exportSourceBomDiffReviewsExcel() {
+  const bom = activeBom.value;
+  const sourceBomId = bom?.sourceBomId || sourceBomForDiff.value?.id || '';
+  if (sourceBomDiffReviewExporting.value || !bom?.id || !sourceBomId) {
+    return;
+  }
+  sourceBomDiffReviewExporting.value = true;
+  try {
+    await erpApi.downloadModelBomDiffReviewsExport(
+      bom.id,
+      sourceBomId,
+      `BOM差异核对_${bom.bomName}_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('BOM 差异核对记录 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM 差异核对记录导出失败，请稍后重试');
+  } finally {
+    sourceBomDiffReviewExporting.value = false;
   }
 }
 
@@ -2486,6 +3264,34 @@ function searchModelBoms() {
 function handleModelBomPageChange(page: number) {
   modelBomPagination.page = page;
   void loadModelBoms();
+}
+
+async function loadActiveBomDetail(bomId = activeBomId.value) {
+  const targetBomId = String(bomId || '').trim();
+  if (!targetBomId) {
+    activeBomDetail.value = null;
+    return null;
+  }
+  const requestSeq = ++activeBomDetailRequestSeq;
+  activeBomDetailLoading.value = true;
+  try {
+    const detail = await erpApi.modelBom(targetBomId);
+    if (requestSeq === activeBomDetailRequestSeq && activeBomId.value === targetBomId) {
+      activeBomDetail.value = detail;
+      modelBoms.value = modelBoms.value.map((item) => (item.id === detail.id ? { ...item, ...detail } : item));
+    }
+    return detail;
+  } catch (error) {
+    if (requestSeq === activeBomDetailRequestSeq && activeBomId.value === targetBomId) {
+      activeBomDetail.value = null;
+      ElMessage.error(error instanceof Error ? error.message : '零件包详情加载失败，请刷新后重试');
+    }
+    return null;
+  } finally {
+    if (requestSeq === activeBomDetailRequestSeq) {
+      activeBomDetailLoading.value = false;
+    }
+  }
 }
 
 async function appendRouteTargetBom(bomId: string) {
@@ -2500,6 +3306,7 @@ async function appendRouteTargetBom(bomId: string) {
 function ensureModelBomVisible(bom: ModelBom) {
   modelBoms.value = [bom, ...modelBoms.value.filter((item) => item.id !== bom.id)];
   activeBomId.value = bom.id;
+  void loadBomRevisions(bom.id);
 }
 
 function syncModelBomFiltersToSavedBom(bom: ModelBom) {
@@ -2596,10 +3403,18 @@ function selectRouteCreateLineTargetBom() {
   if (!isRouteCreateLineAction()) {
     return;
   }
-  const exactBom = modelBoms.value.find(isExactRouteCreateLineBom);
-  if (exactBom) {
-    activeBomId.value = exactBom.id;
+  const exactBoms = routeCreateLineExactBoms();
+  if (exactBoms.length === 1) {
+    activeBomId.value = exactBoms[0].id;
   }
+}
+
+function routeCreateLineExactBoms() {
+  return isRouteCreateLineAction() ? modelBoms.value.filter(isExactRouteCreateLineBom) : [];
+}
+
+function routeCreateLineNeedsManualBomChoice() {
+  return !routeTargetBomId.value && routeCreateLineExactBoms().length > 1 && !routeTargetBomManuallySelected.value;
 }
 
 function routeCreateLineNeedsNewScopedBom(row?: ModelBom) {
@@ -2638,7 +3453,7 @@ function currentCustomerBomForSource(row: ModelBom) {
 }
 
 function canCopyModelBomToCurrentCustomer(row: ModelBom) {
-  return isAllCustomerBom(row) && !currentCustomerBomForSource(row);
+  return isAllCustomerBom(row);
 }
 
 function openCurrentCustomerBom(row: ModelBom) {
@@ -2656,6 +3471,24 @@ async function findExistingCustomerBomForCopy(customerId: string, projectModel: 
   return existing?.customerId ? existing : undefined;
 }
 
+async function loadModelBomScopePages(filters: Parameters<typeof erpApi.modelBomsPage>[0]) {
+  const rows: ModelBom[] = [];
+  const pageLimit = Number(100);
+  let offset = Number(filters?.offset || 0);
+  let hasMore = true;
+  while (hasMore) {
+    const result = await erpApi.modelBomsPage({
+      ...filters,
+      limit: pageLimit,
+      offset
+    });
+    rows.push(...result.items);
+    hasMore = result.hasMore && result.items.length > 0;
+    offset = result.offset + result.items.length;
+  }
+  return rows;
+}
+
 async function findExistingModelBomForScope(customerId: string, projectModel: string) {
   const normalizedProjectModel = normalizeRouteScopeText(projectModel);
   const cached = modelBoms.value.find((item) => {
@@ -2665,7 +3498,7 @@ async function findExistingModelBomForScope(customerId: string, projectModel: st
   if (cached) {
     return cached;
   }
-  const rows = await erpApi.modelBoms({ customerId: customerId || undefined, projectModel, status: 'ALL' });
+  const rows = await loadModelBomScopePages({ customerId: customerId || undefined, projectModel, status: 'ALL' });
   return rows.find((item) => {
     const customerMatched = customerId ? item.customerId === customerId : !item.customerId;
     return customerMatched && normalizeRouteScopeText(item.projectModel) === normalizedProjectModel;
@@ -2673,22 +3506,20 @@ async function findExistingModelBomForScope(customerId: string, projectModel: st
 }
 
 async function guardDuplicateCustomerBomCopy(customerId: string, projectModel: string) {
-  const existing = await findExistingCustomerBomForCopy(customerId, projectModel);
-  if (!existing) {
-    return false;
-  }
-  copyDialogVisible.value = false;
-  syncModelBomFiltersToSavedBom(existing);
-  ensureModelBomVisible(existing);
-  ElMessage.warning('当前客户和机型已存在客户 BOM，已定位到现有 BOM，请继续维护，避免重复复制');
-  return true;
+  void customerId;
+  void projectModel;
+  // 同一客户同一机型允许保留多个不同用途 BOM；复制时只保留同名查重。
+  return false;
 }
 
 async function guardExistingBomBeforeRouteCreateLine() {
   if (!isRouteCreateLineAction()) {
     return false;
   }
-  const existing = await findExistingModelBomForScope(filters.customerId, filters.projectModel.trim());
+  const existing =
+    routeTargetBomManuallySelected.value && activeBom.value && isExactRouteCreateLineBom(activeBom.value)
+      ? activeBom.value
+      : await findExistingModelBomForScope(filters.customerId, filters.projectModel.trim());
   if (!existing || existing.id === activeBom.value?.id) {
     return false;
   }
@@ -2705,15 +3536,11 @@ async function guardExistingBomBeforeRouteCreateLine() {
 }
 
 async function guardDuplicateBomScopeBeforeSave(customerId: string, projectModel: string, currentBomId = '') {
-  const existing = await findExistingModelBomForScope(customerId, projectModel);
-  if (!existing || existing.id === currentBomId) {
-    return false;
-  }
-  bomDialogVisible.value = false;
-  syncModelBomFiltersToSavedBom(existing);
-  ensureModelBomVisible(existing);
-  ElMessage.warning('当前客户/机型范围已存在 BOM，已定位到现有 BOM，请直接维护现有零件包');
-  return true;
+  void customerId;
+  void projectModel;
+  void currentBomId;
+  // 同一客户同一机型可以保存多个 BOM，禁止范围级别拦截；后端仍按同名 + 范围查重。
+  return false;
 }
 
 async function focusRouteTargetLine() {
@@ -2794,6 +3621,13 @@ async function openRouteTargetCreateLineDialog() {
   if (!routeTargetMaterialId.value) {
     return;
   }
+  if (routeCreateLineNeedsManualBomChoice()) {
+    if (!routeTargetMultipleBomChoiceWarned.value) {
+      ElMessage.warning('当前客户/机型范围存在多个 BOM，请先点击要加入的 BOM 的“查看明细”；系统不会自动选择，避免加错 BOM。');
+      routeTargetMultipleBomChoiceWarned.value = true;
+    }
+    return;
+  }
   if (await guardExistingBomBeforeRouteCreateLine()) {
     return;
   }
@@ -2858,6 +3692,62 @@ function defaultRouteBomName(projectModel: string, isCustomerBom: boolean) {
   return `${projectModel} ${isCustomerBom ? '客户零件包' : '百胜通用零件包'}`;
 }
 
+async function loadBomRevisions(bomId = activeBom.value?.id || '', append = false) {
+  bomRevisionLoading.value = true;
+  if (!append) {
+    bomRevisionPagination.offset = Number(0);
+    bomRevisions.value = [];
+    bomRevisionPagination.total = Number(0);
+  }
+  if (!bomId) {
+    bomRevisionLoading.value = false;
+    return;
+  }
+  const requestOffset = append ? bomRevisions.value.length : bomRevisionPagination.offset;
+  try {
+    const result = await erpApi.modelBomRevisions(bomId, {
+      limit: bomRevisionPagination.limit,
+      offset: requestOffset
+    });
+    if (activeBom.value?.id === bomId) {
+      const nextItems = append
+        ? [
+            ...bomRevisions.value,
+            ...result.items.filter((item) => !bomRevisions.value.some((existing) => existing.id === item.id))
+          ]
+        : result.items;
+      bomRevisions.value = nextItems;
+      bomRevisionPagination.total = result.totalCount;
+      bomRevisionPagination.offset = nextItems.length;
+    }
+  } catch (error) {
+    if (activeBom.value?.id === bomId) {
+      if (!append) {
+        bomRevisions.value = [];
+        bomRevisionPagination.total = Number(0);
+      }
+      ElMessage.warning(error instanceof Error ? error.message : 'BOM 版本记录加载失败');
+    }
+  } finally {
+    if (activeBom.value?.id === bomId) {
+      bomRevisionLoading.value = false;
+    }
+  }
+}
+
+function loadMoreBomRevisions() {
+  const bomId = activeBom.value?.id || '';
+  if (!bomId || bomRevisionLoading.value || !bomRevisionHasMore.value) {
+    return;
+  }
+  void loadBomRevisions(bomId, true);
+}
+
+function openBomRevisionDetail(row: ModelBomRevision) {
+  selectedBomRevision.value = row;
+  bomRevisionDetailDialogVisible.value = true;
+}
+
 async function loadSourceBomForDiff(sourceBomId: string) {
   const requestSeq = sourceBomDiffRequestSeq.value + 1;
   sourceBomDiffRequestSeq.value = requestSeq;
@@ -2892,32 +3782,67 @@ async function loadSourceBomForDiff(sourceBomId: string) {
   }
 }
 
-async function loadSourceBomDiffReviews() {
+async function loadSourceBomDiffReviews(options: { append?: boolean } = {}) {
   const requestSeq = sourceBomDiffReviewRequestSeq.value + 1;
   sourceBomDiffReviewRequestSeq.value = requestSeq;
-  sourceBomDiffReviews.value = [];
-  sourceBomReviewedDiffKeys.value = new Set();
+  if (!options.append) {
+    sourceBomDiffReviews.value = [];
+    sourceBomReviewedDiffKeys.value = new Set();
+    sourceBomDiffReviewPagination.offset = Number(0);
+    sourceBomDiffReviewPagination.total = Number(0);
+  }
   const bom = activeBom.value;
   if (!bom?.id || !bom.sourceBomId) {
+    sourceBomDiffReviewLoading.value = false;
     return;
   }
+  sourceBomDiffReviewLoading.value = true;
+  const requestOffset = options.append ? sourceBomDiffReviews.value.length : 0;
   try {
-    const reviews = await erpApi.modelBomDiffReviews(bom.id, bom.sourceBomId);
+    const result = await erpApi.modelBomDiffReviewsPage(bom.id, {
+      sourceBomId: bom.sourceBomId,
+      limit: sourceBomDiffReviewPagination.limit,
+      offset: requestOffset,
+      withPage: true
+    });
     if (
       sourceBomDiffReviewRequestSeq.value === requestSeq &&
       activeBom.value?.id === bom.id &&
       activeBom.value?.sourceBomId === bom.sourceBomId
     ) {
-      sourceBomDiffReviews.value = reviews;
-      sourceBomReviewedDiffKeys.value = new Set(reviews.map((review) => review.reviewKey));
+      const nextItems = options.append
+        ? [
+            ...sourceBomDiffReviews.value,
+            ...result.items.filter((item) => !sourceBomDiffReviews.value.some((existing) => existing.id === item.id))
+          ]
+        : result.items;
+      sourceBomDiffReviews.value = nextItems;
+      sourceBomReviewedDiffKeys.value = new Set(result.reviewKeys);
+      sourceBomDiffReviewPagination.total = result.totalCount;
+      sourceBomDiffReviewPagination.offset = nextItems.length;
     }
   } catch (error) {
     if (sourceBomDiffReviewRequestSeq.value === requestSeq) {
-      sourceBomDiffReviews.value = [];
-      sourceBomReviewedDiffKeys.value = new Set();
+      if (!options.append) {
+        sourceBomDiffReviews.value = [];
+        sourceBomReviewedDiffKeys.value = new Set();
+        sourceBomDiffReviewPagination.offset = Number(0);
+        sourceBomDiffReviewPagination.total = Number(0);
+      }
       ElMessage.warning(error instanceof Error ? error.message : 'BOM 差异核对记录加载失败，请确认当前 BOM 和后端服务');
     }
+  } finally {
+    if (sourceBomDiffReviewRequestSeq.value === requestSeq) {
+      sourceBomDiffReviewLoading.value = false;
+    }
   }
+}
+
+function loadMoreSourceBomDiffReviews() {
+  if (sourceBomDiffReviewLoading.value || !sourceBomDiffReviewHasMore.value) {
+    return;
+  }
+  void loadSourceBomDiffReviews({ append: true });
 }
 
 async function loadProcessDefinitions() {
@@ -2991,10 +3916,19 @@ function resetFilters() {
   searchModelBoms();
 }
 
-function selectBom(row: ModelBom) {
+async function selectBom(row: ModelBom) {
   activeBomId.value = row.id;
+  await loadActiveBomDetail(row.id);
+  void loadBomRevisions(row.id);
   if (row.id !== routeTargetBomId.value) {
     highlightedBomLineId.value = '';
+  }
+  if (isRouteCreateLineAction() && !routeTargetBomId.value && isExactRouteCreateLineBom(row)) {
+    routeTargetBomManuallySelected.value = true;
+    routeTargetMultipleBomChoiceWarned.value = false;
+    void nextTick(() => {
+      void openRouteTargetCreateLineDialog();
+    });
   }
 }
 
@@ -3002,9 +3936,10 @@ async function openBomThicknessReview(row?: ModelBom | null) {
   if (!row) {
     return;
   }
-  selectBom(row);
+  await selectBom(row);
   thicknessReviewBomId.value = row.id;
-  const lines = (row.lines || []).filter(lineNeedsThicknessReview);
+  const bom = activeBom.value?.id === row.id ? activeBom.value : row;
+  const lines = (bom.lines || []).filter(lineNeedsThicknessReview);
   if (lines.length === 0) {
     ElMessage.info('当前 BOM 没有需要核对厚度的子零件或单独零件');
     return;
@@ -3191,25 +4126,35 @@ function openBomCreateDialog() {
   bomDialogVisible.value = true;
 }
 
-function openBomEditDialog(row: ModelBom) {
+async function openBomEditDialog(row: ModelBom) {
   if (guardDesktopOperation('编辑零件包')) {
     return;
   }
-  bomForm.id = row.id;
-  bomForm.bomName = row.bomName;
-  bomForm.customerScope = modelBomScopeMode(row);
+  let fullRow = row;
+  try {
+    // 列表只展示客户范围摘要；编辑前重新读取完整 BOM，避免多客户范围被摘要预览影响保存。
+    fullRow = await erpApi.modelBom(row.id);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件包详情加载失败，请刷新后重试');
+    return;
+  }
+  bomForm.id = fullRow.id;
+  bomForm.bomName = fullRow.bomName;
+  bomForm.customerScope = modelBomScopeMode(fullRow);
   originalBomCustomerScope.value = bomForm.customerScope;
-  originalBomCustomerId.value = row.customerId || '';
-  originalBomScopeCustomerIds.value = [...(row.scopeCustomerIds || [])];
-  originalBomProjectModel.value = row.projectModel || '';
+  originalBomCustomerId.value = fullRow.customerId || '';
+  originalBomScopeCustomerIds.value = [...(fullRow.scopeCustomerIds || [])];
+  originalBomProjectModel.value = fullRow.projectModel || '';
   confirmedBomCustomerScope.value = bomForm.customerScope;
   bomCustomerScopeChangeConfirmed.value = false;
-  bomForm.customerId = row.customerId || '';
-  bomForm.customerIds = row.scopeCustomerIds || [];
-  bomForm.projectModel = row.projectModel;
-  bomForm.remark = row.remark || '';
-  bomForm.isCommon = Boolean(row.isCommon);
-  bomForm.status = row.status;
+  bomForm.customerId = fullRow.customerId || '';
+  bomForm.customerIds = fullRow.scopeCustomerIds || [];
+  bomForm.projectModel = fullRow.projectModel;
+  bomForm.remark = fullRow.remark || '';
+  bomForm.isCommon = Boolean(fullRow.isCommon);
+  bomForm.status = fullRow.status;
+  bomScopeApprovalForm.requestedBy = '';
+  bomScopeApprovalForm.requestReason = '';
   bomDialogVisible.value = true;
 }
 
@@ -3242,11 +4187,6 @@ function openBomCopyDialog(row: ModelBom) {
     ElMessage.warning('当前阶段只允许从全部客户通用零件包复制为客户私有 BOM');
     return;
   }
-  const existingCustomerBom = currentCustomerBomForSource(row);
-  if (existingCustomerBom) {
-    openCurrentCustomerBom(row);
-    return;
-  }
   prefillCopyFormFromSourceBom(row, filters.customerId);
   copyDialogVisible.value = true;
 }
@@ -3272,12 +4212,7 @@ function normalizeBomCustomerScopeFields() {
 }
 
 function bomCustomerScopeBroadens(previousScope: BomCustomerScope, nextScope: BomCustomerScope) {
-  const scopeRank: Record<BomCustomerScope, number> = {
-    PRIVATE: 1,
-    SELECTED: 2,
-    ALL: 3
-  };
-  return scopeRank[nextScope] > scopeRank[previousScope];
+  return previousScope !== 'ALL' && nextScope === 'ALL';
 }
 
 function bomProjectScopeBroadens(previousProjectModel: string, nextProjectModel: string) {
@@ -3292,18 +4227,42 @@ function normalizedBomCustomerIds(customerIds: string[]) {
   return [...new Set(customerIds.map((customerId) => customerId.trim()).filter(Boolean))].sort();
 }
 
-function bomSelectedCustomerScopeAdds(previousScope: BomCustomerScope, previousCustomerIds: string[], nextScope: BomCustomerScope, nextCustomerIds: string[]) {
-  if (previousScope !== 'SELECTED' || nextScope !== 'SELECTED') {
+function bomVisibleCustomerIds(scope: BomCustomerScope, customerId: string, customerIds: string[]) {
+  if (scope === 'PRIVATE') {
+    return customerId.trim() ? [customerId.trim()] : [];
+  }
+  if (scope === 'SELECTED') {
+    return normalizedBomCustomerIds(customerIds);
+  }
+  return [];
+}
+
+function bomCustomerScopeExposesNewCustomers(
+  previousScope: BomCustomerScope,
+  previousCustomerId: string,
+  previousCustomerIds: string[],
+  nextScope: BomCustomerScope,
+  nextCustomerId: string,
+  nextCustomerIds: string[]
+) {
+  if (previousScope === 'ALL' || nextScope === 'ALL') {
     return false;
   }
-  const previousCustomerIdSet = new Set(normalizedBomCustomerIds(previousCustomerIds));
-  return normalizedBomCustomerIds(nextCustomerIds).some((customerId) => !previousCustomerIdSet.has(customerId));
+  const previousCustomerIdSet = new Set(bomVisibleCustomerIds(previousScope, previousCustomerId, previousCustomerIds));
+  return bomVisibleCustomerIds(nextScope, nextCustomerId, nextCustomerIds).some((customerId) => !previousCustomerIdSet.has(customerId));
 }
 
 function bomCustomerScopeExpansionNeedsConfirmation() {
   return (
     bomCustomerScopeBroadens(originalBomCustomerScope.value, bomForm.customerScope) ||
-    bomSelectedCustomerScopeAdds(originalBomCustomerScope.value, originalBomScopeCustomerIds.value, bomForm.customerScope, bomForm.customerIds) ||
+    bomCustomerScopeExposesNewCustomers(
+      originalBomCustomerScope.value,
+      originalBomCustomerId.value,
+      originalBomScopeCustomerIds.value,
+      bomForm.customerScope,
+      bomForm.customerId,
+      bomForm.customerIds
+    ) ||
     bomProjectScopeBroadens(originalBomProjectModel.value, bomForm.projectModel)
   );
 }
@@ -3344,7 +4303,7 @@ function bomScopeCustomerText(scope: BomCustomerScope, customerId: string, custo
     return bomCustomerName(customerId);
   }
   const names = normalizedBomCustomerIds(customerIds).map((id) => bomCustomerName(id));
-  return names.length ? `${names.length} 个客户：${names.join('、')}` : '未勾选客户';
+  return names.length ? formatCustomerNamePreview(names) : '未勾选客户';
 }
 
 function bomCustomerVisibilityImpactText() {
@@ -3356,17 +4315,43 @@ function bomCustomerVisibilityImpactText() {
   return removedCustomerNames.length ? `移除 ${removedCustomerNames.length} 个客户` : '可见范围调整';
 }
 
+function bomCustomerScopeTypeImpactText() {
+  if (
+    bomCustomerScopeBroadens(originalBomCustomerScope.value, bomForm.customerScope) ||
+    bomCustomerScopeExposesNewCustomers(
+      originalBomCustomerScope.value,
+      originalBomCustomerId.value,
+      originalBomScopeCustomerIds.value,
+      bomForm.customerScope,
+      bomForm.customerId,
+      bomForm.customerIds
+    )
+  ) {
+    return '可见客户增加';
+  }
+  const removedCustomerNames = removedBomScopeCustomerNames();
+  return removedCustomerNames.length ? '可见客户减少' : '可见客户不变';
+}
+
 function addedBomScopeCustomerNames() {
-  const previousCustomerIdSet = new Set(normalizedBomCustomerIds(originalBomScopeCustomerIds.value));
-  const addedCustomerIds = normalizedBomCustomerIds(bomForm.customerIds).filter((customerId) => !previousCustomerIdSet.has(customerId));
+  const previousCustomerIdSet = new Set(
+    bomVisibleCustomerIds(originalBomCustomerScope.value, originalBomCustomerId.value, originalBomScopeCustomerIds.value)
+  );
+  const addedCustomerIds = bomVisibleCustomerIds(bomForm.customerScope, bomForm.customerId, bomForm.customerIds).filter(
+    (customerId) => !previousCustomerIdSet.has(customerId)
+  );
   return customerOptions.value
     .filter((customer) => addedCustomerIds.includes(customer.id))
     .map((customer) => customer.customerName);
 }
 
 function removedBomScopeCustomerNames() {
-  const nextCustomerIdSet = new Set(normalizedBomCustomerIds(bomForm.customerIds));
-  const removedCustomerIds = normalizedBomCustomerIds(originalBomScopeCustomerIds.value).filter((customerId) => !nextCustomerIdSet.has(customerId));
+  const nextCustomerIdSet = new Set(bomVisibleCustomerIds(bomForm.customerScope, bomForm.customerId, bomForm.customerIds));
+  const removedCustomerIds = bomVisibleCustomerIds(
+    originalBomCustomerScope.value,
+    originalBomCustomerId.value,
+    originalBomScopeCustomerIds.value
+  ).filter((customerId) => !nextCustomerIdSet.has(customerId));
   return customerOptions.value
     .filter((customer) => removedCustomerIds.includes(customer.id))
     .map((customer) => customer.customerName);
@@ -3406,6 +4391,303 @@ function resolveBomScopeReview(confirmed: boolean) {
   if (resolver) {
     resolver(confirmed);
   }
+}
+
+function bomFormCustomerScopeKey() {
+  if (bomForm.customerScope === 'ALL') {
+    return 'ALL';
+  }
+  if (bomForm.customerScope === 'PRIVATE') {
+    return bomForm.customerId;
+  }
+  return `SELECTED:${normalizedBomCustomerIds(bomForm.customerIds).join(',')}`;
+}
+
+function bomFormProjectModelScopeKey() {
+  return bomForm.projectModel.trim() || 'ALL';
+}
+
+function bomScopeApprovalCurrentFormFilters() {
+  return {
+    bomId: bomForm.id,
+    requestedCustomerScopeMode: bomForm.customerScope,
+    requestedScopeKey: bomFormCustomerScopeKey(),
+    requestedProjectModelScopeKey: bomFormProjectModelScopeKey()
+  };
+}
+
+function buildBomScopeApprovalPayload(): SaveModelBomPayload {
+  return {
+    bomName: bomForm.bomName.trim(),
+    customerScopeMode: bomForm.customerScope,
+    customerId: bomForm.customerScope === 'PRIVATE' ? bomForm.customerId : undefined,
+    customerIds: bomForm.customerScope === 'SELECTED' ? bomForm.customerIds : undefined,
+    projectModel: bomForm.projectModel.trim() || undefined,
+    remark: bomForm.remark.trim() || undefined,
+    status: bomForm.status,
+    isCommon: bomForm.status === 'DISABLED' ? false : bomForm.isCommon
+  };
+}
+
+function bomScopeApprovalTargetMatchesCurrentForm(row: ModelBomScopeApprovalRequest) {
+  return (
+    row.bomId === bomForm.id &&
+    row.requestedCustomerScopeMode === bomForm.customerScope &&
+    row.requestedScopeKey === bomFormCustomerScopeKey() &&
+    row.requestedProjectModelScopeKey === bomFormProjectModelScopeKey()
+  );
+}
+
+function bomScopeApprovalMatchesCurrentForm(row: ModelBomScopeApprovalRequest) {
+  return row.status === 'APPROVED' && !row.usedAt && bomScopeApprovalTargetMatchesCurrentForm(row);
+}
+
+function bomScopeApprovalBlocksNewRequest(row: ModelBomScopeApprovalRequest) {
+  return (row.status === 'PENDING' || (row.status === 'APPROVED' && !row.usedAt)) && bomScopeApprovalTargetMatchesCurrentForm(row);
+}
+
+async function findApprovedBomScopeApprovalForCurrentForm() {
+  if (!bomForm.id || !bomCustomerScopeExpansionNeedsConfirmation()) {
+    return '';
+  }
+  const result = await erpApi.modelBomScopeApprovalRequests({
+    ...bomScopeApprovalCurrentFormFilters(),
+    status: 'APPROVED',
+    limit: bomScopeApprovalPageLimit,
+    offset: 0
+  });
+  return result.items.find(bomScopeApprovalMatchesCurrentForm)?.id || '';
+}
+
+async function findOpenBomScopeApprovalForCurrentForm() {
+  if (!bomForm.id || !bomCustomerScopeExpansionNeedsConfirmation()) {
+    return null;
+  }
+  const statuses: Array<'PENDING' | 'APPROVED'> = ['PENDING', 'APPROVED'];
+  for (const status of statuses) {
+    const result = await erpApi.modelBomScopeApprovalRequests({
+      ...bomScopeApprovalCurrentFormFilters(),
+      status,
+      limit: bomScopeApprovalPageLimit,
+      offset: 0
+    });
+    const matched = result.items.find(bomScopeApprovalBlocksNewRequest);
+    if (matched) {
+      return matched;
+    }
+  }
+  return null;
+}
+
+async function submitBomScopeApprovalRequest() {
+  if (!bomForm.id) {
+    return;
+  }
+  if (!bomScopeApprovalForm.requestedBy.trim()) {
+    ElMessage.warning('请填写申请人');
+    return;
+  }
+  if (!bomScopeApprovalForm.requestReason.trim()) {
+    ElMessage.warning('请填写申请原因');
+    return;
+  }
+  bomScopeApprovalSubmitting.value = true;
+  try {
+    const existingRequest = await findOpenBomScopeApprovalForCurrentForm();
+    if (existingRequest) {
+      bomScopeApprovalFilters.status = existingRequest.status;
+      resolveBomScopeReview(false);
+      bomScopeApprovalDialogVisible.value = true;
+      await loadBomScopeApprovalRequests();
+      if (existingRequest.status === 'APPROVED') {
+        ElMessage.success('相同范围已有已批准且未使用的 BOM 范围审批申请，请重新保存 BOM。');
+      } else {
+        ElMessage.warning('相同范围已有待审批的 BOM 范围申请，请等待管理员处理。');
+      }
+      return;
+    }
+    await erpApi.createModelBomScopeApprovalRequest(bomForm.id, {
+      ...buildBomScopeApprovalPayload(),
+      requestedBy: bomScopeApprovalForm.requestedBy.trim(),
+      requestReason: bomScopeApprovalForm.requestReason.trim()
+    });
+    resolveBomScopeReview(false);
+    bomScopeApprovalFilters.status = 'PENDING';
+    await loadBomScopeApprovalRequests();
+    ElMessage.success('BOM 范围扩大申请已提交，管理员批准后再保存');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM 范围扩大申请提交失败');
+  } finally {
+    bomScopeApprovalSubmitting.value = false;
+  }
+}
+
+async function openBomScopeApprovalDialog() {
+  if (guardDesktopOperation('审批 BOM 范围申请')) {
+    return;
+  }
+  bomScopeApprovalDialogVisible.value = true;
+  await loadBomScopeApprovalRequests();
+}
+
+async function loadBomScopeApprovalRequests(options: { append?: boolean } = {}) {
+  bomScopeApprovalLoading.value = true;
+  try {
+    const offset = options.append ? bomScopeApprovalRequests.value.length : 0;
+    const result = await erpApi.modelBomScopeApprovalRequests({
+      status: bomScopeApprovalFilters.status,
+      limit: bomScopeApprovalPageLimit,
+      offset
+    });
+    bomScopeApprovalRequests.value = options.append ? [...bomScopeApprovalRequests.value, ...result.items] : result.items;
+    bomScopeApprovalTotal.value = result.totalCount;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM 范围审批申请加载失败');
+  } finally {
+    bomScopeApprovalLoading.value = false;
+  }
+}
+
+async function refreshBomScopeApprovalRequests() {
+  await loadBomScopeApprovalRequests();
+}
+
+async function loadMoreBomScopeApprovalRequests() {
+  if (bomScopeApprovalLoading.value || !bomScopeApprovalHasMore.value) {
+    return;
+  }
+  await loadBomScopeApprovalRequests({ append: true });
+}
+
+async function reviewBomScopeApprovalRequest(row: ModelBomScopeApprovalRequest, approved: boolean) {
+  if (!bomScopeApprovalReviewForm.reviewedBy.trim()) {
+    ElMessage.warning('请填写管理员姓名');
+    return;
+  }
+  const action = approved ? 'approve' : 'reject';
+  bomScopeApprovalSavingId.value = `${row.id}:${action}`;
+  try {
+    const payload = {
+      reviewedBy: bomScopeApprovalReviewForm.reviewedBy.trim(),
+      reviewRemark: bomScopeApprovalReviewForm.reviewRemark.trim() || undefined
+    };
+    if (approved) {
+      await erpApi.approveModelBomScopeApprovalRequest(row.id, payload);
+    } else {
+      await erpApi.rejectModelBomScopeApprovalRequest(row.id, payload);
+    }
+    ElMessage.success(approved ? 'BOM 范围申请已批准' : 'BOM 范围申请已驳回');
+    await loadBomScopeApprovalRequests();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM 范围审批失败');
+  } finally {
+    bomScopeApprovalSavingId.value = '';
+  }
+}
+
+function formatBomScopeApprovalStatus(status: ModelBomScopeApprovalRequest['status']) {
+  const labels: Record<ModelBomScopeApprovalRequest['status'], string> = {
+    PENDING: '待审批',
+    APPROVED: '已批准',
+    REJECTED: '已驳回',
+    USED: '已使用'
+  };
+  return labels[status] || status;
+}
+
+function bomScopeApprovalStatusTagType(status: ModelBomScopeApprovalRequest['status']) {
+  if (status === 'APPROVED') {
+    return 'success';
+  }
+  if (status === 'REJECTED') {
+    return 'danger';
+  }
+  if (status === 'USED') {
+    return 'info';
+  }
+  return 'warning';
+}
+
+function formatBomScopeApprovalRequestedScope(row: ModelBomScopeApprovalRequest) {
+  const customerText =
+    row.requestedCustomerScopeMode === 'ALL'
+      ? '全部客户'
+      : row.requestedCustomerScopeMode === 'PRIVATE'
+        ? row.requestedCustomerNameSnapshot || '指定客户'
+        : formatBomScopeApprovalSelectedCustomers(row.requestedCustomerIds);
+  return `${customerText} / ${row.requestedProjectModel || '全部机型/项目'}`;
+}
+
+function formatBomScopeApprovalRequestedScopePreview(row: ModelBomScopeApprovalRequest) {
+  return formatModelBomLongTextPreview(formatBomScopeApprovalRequestedScope(row), 34, '-');
+}
+
+function formatBomScopeApprovalRequestedScopeTitle(row: ModelBomScopeApprovalRequest) {
+  return formatBomScopeApprovalRequestedScope(row);
+}
+
+function formatBomScopeApprovalRequestNoPreview(row: ModelBomScopeApprovalRequest) {
+  return formatModelBomLongTextPreview(row.requestNo, 28, '-');
+}
+
+function formatBomScopeApprovalRequestNoTitle(row: ModelBomScopeApprovalRequest) {
+  return row.requestNo || '-';
+}
+
+function formatBomScopeApprovalBomNamePreview(row: ModelBomScopeApprovalRequest) {
+  return formatModelBomLongTextPreview(row.bomName, 24, '-');
+}
+
+function formatBomScopeApprovalBomNameTitle(row: ModelBomScopeApprovalRequest) {
+  return row.bomName || '-';
+}
+
+function formatBomScopeApprovalReasonPreview(row: ModelBomScopeApprovalRequest) {
+  return formatModelBomLongTextPreview(row.reason, 32, '-');
+}
+
+function formatBomScopeApprovalReasonTitle(row: ModelBomScopeApprovalRequest) {
+  return row.reason || '-';
+}
+
+function formatBomScopeApprovalSelectedCustomers(value: unknown) {
+  if (!Array.isArray(value)) {
+    return '指定客户';
+  }
+  const names = value
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+      const row = item as { customerName?: unknown; customerId?: unknown };
+      return String(row.customerName || row.customerId || '').trim();
+    })
+    .filter(Boolean);
+  return names.length ? formatCustomerNamePreview(names, '指定客户') : '指定客户';
+}
+
+function formatBomScopeApprovalReviewText(row: ModelBomScopeApprovalRequest) {
+  if (row.status === 'APPROVED') {
+    return `${row.approvedBy || '-'} / ${formatDateTime(row.approvedAt)}`;
+  }
+  if (row.status === 'REJECTED') {
+    return `${row.rejectedBy || '-'} / ${formatDateTime(row.rejectedAt)}`;
+  }
+  if (row.status === 'USED') {
+    return `已用于保存 / ${formatDateTime(row.usedAt)}`;
+  }
+  return '-';
+}
+
+function formatBomScopeApprovalReviewPreview(row: ModelBomScopeApprovalRequest) {
+  const reviewText = formatBomScopeApprovalReviewText(row);
+  return formatModelBomLongTextPreview(reviewText, 26, '-');
+}
+
+function formatBomScopeApprovalReviewTitle(row: ModelBomScopeApprovalRequest) {
+  const reviewText = formatBomScopeApprovalReviewText(row);
+  const remark = String(row.reviewRemark || '').trim();
+  return remark && reviewText !== '-' ? `${reviewText} / ${remark}` : reviewText;
 }
 
 function customerSearchParts(customer: Customer) {
@@ -3482,7 +4764,17 @@ async function saveBom(addFirstLineAfterSave = false) {
   const payloadCustomerId = bomForm.customerScope === 'PRIVATE' ? bomForm.customerId : '';
   const payloadProjectModel = bomForm.projectModel.trim();
   const scopeExpansionNeedsConfirmation = isEditing && bomCustomerScopeExpansionNeedsConfirmation();
-  if (isEditing && bomScopeChangeNeedsReview() && !bomCustomerScopeChangeConfirmed.value) {
+  let scopeApprovalRequestId = '';
+  if (scopeExpansionNeedsConfirmation) {
+    scopeApprovalRequestId = await findApprovedBomScopeApprovalForCurrentForm();
+    if (!scopeApprovalRequestId) {
+      const confirmed = await openBomScopeChangeReviewDialog();
+      if (!confirmed) {
+        return;
+      }
+      return;
+    }
+  } else if (isEditing && bomScopeChangeNeedsReview() && !bomCustomerScopeChangeConfirmed.value) {
     const confirmed = await openBomScopeChangeReviewDialog();
     if (!confirmed) {
       return;
@@ -3504,7 +4796,8 @@ async function saveBom(addFirstLineAfterSave = false) {
       remark: bomForm.remark.trim() || undefined,
       status: bomForm.status,
       isCommon: bomForm.status === 'DISABLED' ? false : bomForm.isCommon,
-      scopeChangeConfirmed: scopeExpansionNeedsConfirmation ? bomCustomerScopeChangeConfirmed.value : undefined
+      scopeChangeConfirmed: scopeExpansionNeedsConfirmation ? undefined : bomCustomerScopeChangeConfirmed.value || undefined,
+      scopeApprovalRequestId: scopeApprovalRequestId || undefined
     };
     const saved = bomForm.id ? await erpApi.updateModelBom(bomForm.id, payload) : await erpApi.createModelBom(payload);
     bomDialogVisible.value = false;
@@ -3819,7 +5112,7 @@ async function enableBom(row: ModelBom) {
     await loadModelBoms();
     ensureModelBomVisible(saved);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '机型零件包启用失败，请确认客户和机型范围没有冲突');
+    ElMessage.error(error instanceof Error ? error.message : '机型零件包启用失败，请确认后端服务、BOM 状态或同名范围重复');
   } finally {
     if (modelBomOperationSavingKey.value === operationKey) {
       modelBomOperationSavingKey.value = '';
@@ -3938,7 +5231,7 @@ function bomLineReviewFields(sourceLine?: ModelBomLine, targetLine?: ModelBomLin
     ['零件类型', sourceLine?.partCategory || '', targetLine?.partCategory || ''],
     ['默认数量', sourceLine ? formatQuantity(sourceLine.defaultQuantity, sourceLine.unit) : '', targetLine ? formatQuantity(targetLine.defaultQuantity, targetLine.unit) : ''],
     ['默认图纸', sourceLine ? bomLineDrawingSignature(sourceLine) : '', targetLine ? bomLineDrawingSignature(targetLine) : ''],
-    ['默认工艺', sourceLine?.defaultProcessRoute || '', targetLine?.defaultProcessRoute || ''],
+    ['默认工艺', sourceLine ? explicitBomLineDefaultProcessRoute(sourceLine) : '', targetLine ? explicitBomLineDefaultProcessRoute(targetLine) : ''],
     ['厚度', sourceLine?.partThickness ? formatNumber(sourceLine.partThickness) : '', targetLine?.partThickness ? formatNumber(targetLine.partThickness) : ''],
     ['规格', sourceLine?.partSpecification || '', targetLine?.partSpecification || ''],
     ['状态', sourceLine?.status || '', targetLine?.status || '']
@@ -4002,6 +5295,14 @@ function sourceBomDiffStatusLabel(issue: BomDiffIssue) {
   return issue.severity === 'warning' ? '需核对' : '客户差异';
 }
 
+function sourceBomDiffIssueDetailPreview(issue: BomDiffIssue, maxLength = 48) {
+  return formatModelBomLongTextPreview(issue.detail, maxLength, '-');
+}
+
+function sourceBomDiffIssueDetailTitle(issue: BomDiffIssue) {
+  return String(issue.detail || '').trim() || '-';
+}
+
 function sourceBomDiffStatusTagType(issue: BomDiffIssue) {
   if (isSourceBomDiffReviewed(issue)) {
     return 'success';
@@ -4052,10 +5353,10 @@ async function confirmSourceBomDiffReviewed() {
       reviewedBy: sourceBomReviewForm.reviewedBy.trim(),
       reviewRemark: sourceBomReviewForm.reviewRemark.trim() || undefined
     });
-    sourceBomDiffReviews.value = [saved, ...sourceBomDiffReviews.value.filter((review) => review.reviewKey !== saved.reviewKey)];
     const nextKeys = new Set(sourceBomReviewedDiffKeys.value);
     nextKeys.add(saved.reviewKey);
     sourceBomReviewedDiffKeys.value = nextKeys;
+    await loadSourceBomDiffReviews();
     ElMessage.success('BOM 差异核对记录已保存，客户 BOM 不会被来源 BOM 自动覆盖');
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : 'BOM 差异核对保存失败');
@@ -4089,10 +5390,10 @@ async function revokeSourceBomDiffReviewRow(review: ModelBomDiffReview) {
   sourceBomDiffReviewRevoking.value = true;
   try {
     await erpApi.disableModelBomDiffReview(review.id);
-    sourceBomDiffReviews.value = sourceBomDiffReviews.value.filter((item) => item.id !== review.id);
     const nextKeys = new Set(sourceBomReviewedDiffKeys.value);
     nextKeys.delete(review.reviewKey);
     sourceBomReviewedDiffKeys.value = nextKeys;
+    await loadSourceBomDiffReviews();
     ElMessage.success('BOM 差异核对已撤销，差异将重新进入需核对状态');
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : 'BOM 差异核对撤销失败');
@@ -4103,6 +5404,14 @@ async function revokeSourceBomDiffReviewRow(review: ModelBomDiffReview) {
 
 function sourceBomReviewLineText(line?: ModelBomLine) {
   return line ? bomLineShortText(line) : '无对应行';
+}
+
+function sourceBomReviewLinePreview(line?: ModelBomLine) {
+  return formatModelBomLongTextPreview(sourceBomReviewLineText(line), 44, '无对应行');
+}
+
+function sourceBomReviewLineTitle(line?: ModelBomLine) {
+  return sourceBomReviewLineText(line);
 }
 
 async function focusSourceBomReviewTargetLine() {
@@ -4156,7 +5465,7 @@ async function createCustomerLineFromSourceBomReview() {
   lineForm.componentNo = sourceLine.lineType === 'COMPONENT' ? normalizeComponentNo(sourceLine.componentNo) || nextComponentNo() || '' : '';
   lineForm.parentComponentNo = lineForm.structureType === 'CHILD_PART' ? normalizeComponentNo(sourceLine.parentComponentNo) : '';
   lineForm.defaultDrawingRevisionId = sourceLine.defaultDrawingRevisionId || '';
-  lineForm.defaultProcessRouteSteps = splitDefaultProcessRoute(sourceLine.defaultProcessRoute || '');
+  lineForm.defaultProcessRouteSteps = splitDefaultProcessRoute(explicitBomLineDefaultProcessRoute(sourceLine));
   lineForm.partThickness = sourceLine.lineType === 'COMPONENT' ? 0 : Number(sourceLine.partThickness ?? 0);
   lineFormOriginalPartThickness.value = Number(sourceLine.partThickness ?? 0);
   lineFormOriginalPartThicknessSource.value = sourceLine.partThicknessSource || null;
@@ -4254,6 +5563,38 @@ function formatLineDrawing(row: ModelBomLine) {
   }
   const suffix = row.drawingSource === 'BOM_LINE' ? 'BOM指定' : row.drawingSource === 'MATERIAL_LATEST' ? '零件最新' : '零件默认';
   return `${[row.drawingNo, row.drawingVersion, row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ')}（${suffix}）`;
+}
+
+function explicitBomLineDefaultProcessRoute(row: ModelBomLine) {
+  return row.defaultProcessRouteSource === 'BOM_LINE' ? row.bomLineDefaultProcessRoute || row.defaultProcessRoute || '' : '';
+}
+
+function formatLineDefaultProcessRoute(row: ModelBomLine) {
+  if (!row.defaultProcessRoute) {
+    return '-';
+  }
+  const processText = formatProcessRoutePreview(row.defaultProcessRoute);
+  return row.defaultProcessRouteSource === 'MATERIAL' ? `${processText}（零件默认）` : `${processText}（BOM指定）`;
+}
+
+function formatLineDefaultProcessRouteFull(row: ModelBomLine) {
+  if (!row.defaultProcessRoute) {
+    return '-';
+  }
+  return row.defaultProcessRouteSource === 'MATERIAL' ? `${row.defaultProcessRoute}（零件默认）` : `${row.defaultProcessRoute}（BOM指定）`;
+}
+
+function formatProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const routeText = String(value || '').trim();
+  if (!routeText) {
+    return emptyText;
+  }
+  const steps = splitDefaultProcessRoute(routeText);
+  if (steps.length <= 1) {
+    return routeText;
+  }
+  const preview = steps.filter((_, index) => index < 3).join('、');
+  return steps.length > 3 ? `${preview} 等 ${steps.length} 个工序` : preview;
 }
 
 function displayBomLineOrder(row: ModelBomLine) {
@@ -4355,6 +5696,50 @@ function formatLineThicknessReviewReason(row: ModelBomLine) {
   return '当前 BOM 明细厚度已确认';
 }
 
+function formatModelBomLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function modelBomRevisionChangeRemarkPreview(revision?: ModelBomRevision | null) {
+  return formatModelBomLongTextPreview(revision?.changeRemark, 32, '-');
+}
+
+function modelBomRevisionChangeRemarkTitle(revision?: ModelBomRevision | null) {
+  return String(revision?.changeRemark || '').trim() || '-';
+}
+
+function modelBomRevisionChangedByPreview(revision?: ModelBomRevision | null) {
+  return formatModelBomLongTextPreview(revision?.changedBy, 18, '-');
+}
+
+function modelBomRevisionChangedByTitle(revision?: ModelBomRevision | null) {
+  return String(revision?.changedBy || '').trim() || '-';
+}
+
+function sourceBomDiffReviewRemarkPreview(review: ModelBomDiffReview) {
+  return formatModelBomLongTextPreview(review.reviewRemark, 32, '保留为客户 BOM 差异');
+}
+
+function sourceBomDiffReviewRemarkTitle(review: ModelBomDiffReview) {
+  return String(review.reviewRemark || '').trim() || '保留为客户 BOM 差异';
+}
+
+function sourceBomDiffReviewIssuePreview(review: ModelBomDiffReview) {
+  return formatModelBomLongTextPreview(review.issueTitle, 34, '-');
+}
+
+function sourceBomDiffReviewIssueTitle(review: ModelBomDiffReview) {
+  return review.issueTitle || '-';
+}
+
+function formatLineThicknessReviewReasonPreview(row: ModelBomLine) {
+  return formatModelBomLongTextPreview(formatLineThicknessReviewReason(row), 34, '-');
+}
+
 function lineThicknessReviewTitle(row: ModelBomLine) {
   return `${formatLineThicknessReviewReason(row)}。点击核对并保存为当前 BOM 明细厚度`;
 }
@@ -4378,13 +5763,163 @@ function formatModelBomStatusText(status?: CommonStatus | null) {
   return status === 'DISABLED' ? '停用' : '启用';
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseModelBomRevisionSnapshot(revision?: ModelBomRevision | null): ModelBomRevisionSnapshot {
+  return isPlainObject(revision?.snapshotJson) ? (revision?.snapshotJson as ModelBomRevisionSnapshot) : {};
+}
+
+function formatBomRevisionSnapshotScope(snapshot: ModelBomRevisionSnapshot) {
+  const bom = snapshot.bom;
+  if (!bom) {
+    return '-';
+  }
+  const projectModel = bom.projectModel || '全部机型/项目';
+  if (bom.customerScopeMode === 'PRIVATE') {
+    return `${bom.customerNameSnapshot || '指定客户'} / ${projectModel}`;
+  }
+  if (bom.customerScopeMode === 'SELECTED') {
+    const customerNames = (snapshot.customerScopes || []).map((scope) => scope.customerNameSnapshot).filter(Boolean);
+    return `${formatCustomerNamePreview(customerNames, '指定客户')} / ${projectModel}`;
+  }
+  return `全部客户 / ${projectModel}`;
+}
+
+function formatBomRevisionLineStructure(row: ModelBomRevisionSnapshotLine) {
+  if (row.lineType === 'COMPONENT') {
+    return `组件 ${row.componentNo || '-'}`;
+  }
+  if (row.parentComponentNo) {
+    return `子零件 -> ${row.parentComponentNo}`;
+  }
+  return '单独零件';
+}
+
+function formatBomRevisionLineQuantity(row: ModelBomRevisionSnapshotLine) {
+  return formatQuantity(Number(row.defaultQuantity ?? 0), row.unitSnapshot || '件');
+}
+
+function formatBomRevisionLinePartCode(row: ModelBomRevisionSnapshotLine) {
+  return formatModelBomLongTextPreview(row.partCodeSnapshot, 24, '-');
+}
+
+function formatBomRevisionLinePartCodeTitle(row: ModelBomRevisionSnapshotLine) {
+  return row.partCodeSnapshot || '-';
+}
+
+function formatBomRevisionLinePartName(row: ModelBomRevisionSnapshotLine) {
+  return formatModelBomLongTextPreview(row.partNameSnapshot, 28, '-');
+}
+
+function formatBomRevisionLinePartNameTitle(row: ModelBomRevisionSnapshotLine) {
+  return row.partNameSnapshot || '-';
+}
+
+function formatBomRevisionLineDrawingText(row: ModelBomRevisionSnapshotLine) {
+  const drawing = row.defaultDrawingRevision;
+  if (!drawing) {
+    return row.defaultDrawingRevisionId ? '已指定图纸' : '-';
+  }
+  return [drawing.drawingNo, drawing.drawingVersion, drawing.drawingDate, drawing.drawingStatus].filter(Boolean).join(' / ') || '-';
+}
+
+function formatBomRevisionLineDrawing(row: ModelBomRevisionSnapshotLine) {
+  return formatModelBomLongTextPreview(formatBomRevisionLineDrawingText(row), 30, '-');
+}
+
+function formatBomRevisionLineDrawingTitle(row: ModelBomRevisionSnapshotLine) {
+  return formatBomRevisionLineDrawingText(row);
+}
+
+function formatBomRevisionLineDefaultProcessRoute(row: ModelBomRevisionSnapshotLine) {
+  return formatProcessRoutePreview(row.defaultProcessRoute);
+}
+
+function formatBomRevisionLineDefaultProcessRouteTitle(row: ModelBomRevisionSnapshotLine) {
+  return String(row.defaultProcessRoute || '').trim() || '-';
+}
+
+function formatBomRevisionLineThickness(row: ModelBomRevisionSnapshotLine) {
+  return Number(row.partThicknessSnapshot ?? 0) > 0 ? formatNumber(Number(row.partThicknessSnapshot)) : '-';
+}
+
+function formatBomRevisionLineSpecification(row: ModelBomRevisionSnapshotLine) {
+  return formatModelBomLongTextPreview(row.partSpecificationSnapshot, 28, '-');
+}
+
+function formatBomRevisionLineSpecificationTitle(row: ModelBomRevisionSnapshotLine) {
+  return row.partSpecificationSnapshot || '-';
+}
+
+function formatBomRevisionLineStatus(row: ModelBomRevisionSnapshotLine) {
+  return row.status === 'DISABLED' ? '停用' : '启用';
+}
+
+function buildBomRevisionSnapshotText(revision: ModelBomRevision, snapshot: ModelBomRevisionSnapshot) {
+  const bom = snapshot.bom;
+  const rows = snapshot.lines || [];
+  const lines = [
+    `BOM 版本快照 V${revision.revisionNo}`,
+    `动作：${formatBomRevisionAction(revision.action)}`,
+    `记录时间：${formatDateTime(revision.createdAt)}`,
+    `操作来源：${revision.changedBy || '-'}`,
+    `备注：${revision.changeRemark || '-'}`,
+    `BOM名称：${bom?.bomName || '-'}`,
+    `适用范围：${formatBomRevisionSnapshotScope(snapshot)}`,
+    `来源BOM：${bom?.sourceBomNameSnapshot || '-'}`,
+    `状态：${formatModelBomStatusText(bom?.status)}`,
+    '说明：该快照仅用于人工核对，不会恢复、替换或覆盖当前 BOM。',
+    '序号\t顺序\t结构\t零件编码\t零件名称\t默认数量\t默认图纸\t默认工艺\t厚度\t规格\t状态'
+  ];
+  rows.forEach((row, index) => {
+    lines.push(
+      [
+        index + 1,
+        Number(row.sortOrder ?? 0),
+        formatBomRevisionLineStructure(row),
+        row.partCodeSnapshot || '-',
+        row.partNameSnapshot || '-',
+        formatBomRevisionLineQuantity(row),
+        formatBomRevisionLineDrawingTitle(row),
+        formatBomRevisionLineDefaultProcessRoute(row),
+        formatBomRevisionLineThickness(row),
+        row.partSpecificationSnapshot || '-',
+        formatBomRevisionLineStatus(row)
+      ].join('\t')
+    );
+  });
+  return lines.join('\n');
+}
+
+function formatBomRevisionAction(action: string) {
+  const actionLabels: Record<string, string> = {
+    CREATE: '新建 BOM',
+    COPY_FROM_SOURCE: '复制 BOM',
+    ORDER_IMPORT_DRAFT_COMMIT: '订单导入草稿确认',
+    UPDATE_HEADER: '编辑表头',
+    SET_COMMON: '设为常用',
+    UNSET_COMMON: '取消常用',
+    SET_COMMON_BATCH: '批量设为常用',
+    UNSET_COMMON_BATCH: '批量取消常用',
+    REORDER_COMMON: '调整常用排序',
+    DISABLE_BOM: '停用 BOM',
+    CREATE_LINE: '新增明细',
+    UPDATE_LINE: '编辑明细',
+    REORDER_LINES: '明细排序',
+    DISABLE_LINE: '停用明细'
+  };
+  return actionLabels[action] || action;
+}
+
 function formatFixedLineCore(row: ModelBomLine) {
   return `${row.partCode || '-'} | ${row.partName || '-'} | ${formatQuantity(row.defaultQuantity, row.unit)}`;
 }
 
 function formatFixedLineMeta(row: ModelBomLine) {
   const drawingText = formatLineDrawing(row);
-  const processText = row.defaultProcessRoute || '-';
+  const processText = formatLineDefaultProcessRoute(row);
   const specificationText = row.partSpecification || '-';
   const thicknessText = formatLineThicknessForText(row);
   return `${formatLineOrderText(row)} | 结构 ${formatLineStructure(row)} | 图纸 ${drawingText} | 工艺 ${processText} | 厚度 ${thicknessText} | 规格 ${specificationText} | 状态 ${formatLineStatusText(row)}`;
@@ -4393,7 +5928,7 @@ function formatFixedLineMeta(row: ModelBomLine) {
 function formatBomStructureTextLine(row: ModelBomLine, prefix: string) {
   const categoryText = row.partCategory || '-';
   const thicknessText = formatLineThicknessForText(row);
-  return `${prefix} | ${formatLineOrderText(row)} | 结构 ${formatLineStructure(row)} | ${row.partCode || '-'} | ${row.partName || '-'} | ${categoryText} | 默认 ${formatQuantity(row.defaultQuantity, row.unit)} | 图纸 ${formatLineDrawing(row)} | 工艺 ${row.defaultProcessRoute || '-'} | 厚度 ${thicknessText} | 规格 ${row.partSpecification || '-'} | 状态 ${formatLineStatusText(row)}`;
+  return `${prefix} | ${formatLineOrderText(row)} | 结构 ${formatLineStructure(row)} | ${row.partCode || '-'} | ${row.partName || '-'} | ${categoryText} | 默认 ${formatQuantity(row.defaultQuantity, row.unit)} | 图纸 ${formatLineDrawing(row)} | 工艺 ${formatLineDefaultProcessRoute(row)} | 厚度 ${thicknessText} | 规格 ${row.partSpecification || '-'} | 状态 ${formatLineStatusText(row)}`;
 }
 
 function appendBomStructureTextGroups(lines: string[], groups: BomStructureGroup[]) {
@@ -4467,6 +6002,20 @@ async function copyBomStructureText() {
   try {
     await navigator.clipboard.writeText(text);
     ElMessage.success('固定格式清单已复制');
+  } catch {
+    ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
+  }
+}
+
+async function copyBomRevisionSnapshotText() {
+  const text = selectedBomRevisionSnapshotText.value.trim();
+  if (!text) {
+    ElMessage.warning('暂无可复制的 BOM 版本快照');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success('BOM 版本快照已复制');
   } catch {
     ElMessage.error('复制失败，请在浏览器中允许剪贴板权限后重试');
   }
@@ -4839,7 +6388,7 @@ async function openLineEditDialog(row: ModelBomLine, options: { thicknessReview?
   lineForm.componentNo = row.componentNo || '';
   lineForm.parentComponentNo = row.parentComponentNo || '';
   lineForm.defaultDrawingRevisionId = row.defaultDrawingRevisionId || '';
-  lineForm.defaultProcessRouteSteps = splitDefaultProcessRoute(row.defaultProcessRoute || '');
+  lineForm.defaultProcessRouteSteps = splitDefaultProcessRoute(explicitBomLineDefaultProcessRoute(row));
   resetDefaultProcessDragState();
   lineDefaultProcessFilterKeyword.value = '';
   lineForm.partThickness = row.lineType === 'COMPONENT' ? 0 : Number(row.partThickness ?? 0);
@@ -4915,8 +6464,7 @@ async function selectMaterial(item: InventoryMaterialSuggestion) {
 }
 
 async function resolveSuggestionMaterialId(item: InventoryMaterialSuggestion) {
-  const rows = await erpApi.inventoryMaterials({ keyword: item.partCode, status: 'ENABLED' });
-  const matched = rows.find((row) => row.partCode.trim().toLocaleLowerCase() === item.partCode.trim().toLocaleLowerCase());
+  const matched = await erpApi.inventoryMaterialByPartCode(item.partCode, 'ENABLED');
   return matched?.id || '';
 }
 
@@ -5352,6 +6900,77 @@ async function enableLine(row: ModelBomLine) {
   margin-bottom: 16px;
 }
 
+.bom-revision-panel {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.bom-revision-panel__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.bom-revision-panel__header span {
+  margin-left: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.bom-revision-panel__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.model-bom-dialog-table-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.bom-revision-detail {
+  display: grid;
+  gap: 12px;
+}
+
+.bom-scope-approval-apply,
+.bom-scope-approval-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.bom-scope-approval-apply {
+  margin-top: 12px;
+}
+
+.scope-approval-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.scope-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .model-bom-confirm-panel {
   display: grid;
   gap: 10px;
@@ -5526,6 +7145,15 @@ async function enableLine(row: ModelBomLine) {
   gap: 6px;
 }
 
+.model-bom-scope-cell {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  color: #334155;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mobile-readonly-note {
   display: inline-flex;
   align-items: center;
@@ -5628,6 +7256,24 @@ async function enableLine(row: ModelBomLine) {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.model-bom-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-bom-dialog-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 4px 0 8px;
+}
+
+.model-bom-dialog-table-toolbar strong {
+  color: #0f172a;
 }
 
 .empty-line-actions {

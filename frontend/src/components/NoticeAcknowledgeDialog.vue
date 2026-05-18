@@ -11,7 +11,7 @@
     <div class="notice-acknowledge">
       <div class="notice-summary">
         <strong>{{ noticeTitle || '-' }}</strong>
-        <p>{{ noticeReason || '-' }}</p>
+        <p :title="noticeReasonTitle">{{ noticeReasonPreview }}</p>
         <small v-if="createdAtText">{{ createdAtText }}</small>
       </div>
 
@@ -99,6 +99,8 @@ const acknowledgedBy = ref('');
 const acknowledgeTime = ref(new Date());
 
 const acknowledgeTimeText = computed(() => formatLocalDateTime(acknowledgeTime.value));
+const noticeReasonPreview = computed(() => formatLongTextPreview(props.noticeReason, 72, '-'));
+const noticeReasonTitle = computed(() => String(props.noticeReason || '').trim() || '-');
 
 watch(
   () => props.modelValue,
@@ -123,6 +125,14 @@ function formatLocalDateTime(value: Date) {
   const minutes = String(value.getMinutes()).padStart(2, '0');
   const seconds = String(value.getSeconds()).padStart(2, '0');
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 72, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 function handleSelectSearch(keyword: string) {

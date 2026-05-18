@@ -15,11 +15,15 @@ import { ProcessDefinitionsService } from '../process-definitions/process-defini
 import * as ExcelJS from 'exceljs';
 import {
   AdjustInventoryBatchDto,
+  CommitModelBomDraftFromOrderImportDto,
   CommitMaterialImportSessionDto,
   ConfirmModelBomDiffReviewDto,
   CopyModelBomDto,
   CreateMaterialDto,
+  CreateMaterialImportFromOrderImportDto,
   CreateMaterialImportSessionDto,
+  CreateModelBomDraftFromOrderImportDto,
+  CreateModelBomScopeApprovalRequestDto,
   GetMaterialImportSessionQueryDto,
   InventoryQueryDto,
   InventorySourceDetailQueryDto,
@@ -28,8 +32,11 @@ import {
   MaterialTransformRuleQueryDto,
   ModelBomDiffReviewQueryDto,
   ModelBomQueryDto,
+  ModelBomRevisionQueryDto,
+  ModelBomScopeApprovalRequestQueryDto,
   ReorderModelBomCommonDto,
   ReorderModelBomLinesDto,
+  ReviewModelBomScopeApprovalRequestDto,
   SaveMaterialDrawingRevisionDto,
   SaveMaterialApplicabilityDto,
   SaveMaterialTransformRuleDto,
@@ -69,37 +76,76 @@ type InventorySummaryAccumulator = {
   >;
 };
 
+type InventoryExportCellValue = string | number | Date | null | undefined;
+
+type ModelBomDraftExistingLineForDiff = {
+  id?: string;
+  partCodeSnapshot: string;
+  partNameSnapshot: string;
+  unitSnapshot: string;
+  partSpecificationSnapshot: string | null;
+  partThicknessSnapshot?: Prisma.Decimal | number | null;
+  lineType: string;
+  partCategory: string | null;
+  componentNo: string | null;
+  parentComponentNo: string | null;
+  defaultProcessRoute: string | null;
+  defaultQuantity: Prisma.Decimal | number;
+};
+
+type ModelBomDraftLineForDiff = {
+  sourceRowNo?: number;
+  orderNo?: string;
+  partCode: string;
+  partName: string;
+  unit: string;
+  partSpecification?: string | null;
+  partThickness?: number | null;
+  lineType: string;
+  partCategory?: string | null;
+  componentNo?: string | null;
+  parentComponentNo?: string | null;
+  defaultProcessRoute?: string | null;
+  defaultQuantity: number;
+};
+
 type MaterialSuggestionBase = {
   materialId?: string;
   partCode: string;
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  defaultProcessRoute?: string | null;
   drawingNo?: string | null;
   drawingVersion?: string | null;
   drawingDate?: Date | null;
   drawingStatus?: string | null;
+  drawingFileName?: string | null;
+  drawingFileUrl?: string | null;
   partThickness?: number | null;
   projectModel?: string | null;
 };
 
+const MATERIAL_SUGGESTION_HISTORY_CUSTOMER_PREVIEW_LIMIT = 20;
+
 type ModelBomCustomerScopeMode = 'ALL' | 'PRIVATE' | 'SELECTED';
 
 type ModelBomSortableRow = {
+  id: string;
   customerId: string | null;
   customerScopeMode?: string | null;
+  customerScopeKey: string;
   customerScopes?: Array<{ customerId: string; status: CommonStatus }>;
   projectModel: string;
+  projectModelScopeKey: string;
   isCommon?: boolean | null;
   commonSortOrder?: number | null;
-  updatedAt: Date;
   bomName: string;
 };
 
 type ModelBomDisplayOrderLine = {
   id: string;
   sortOrder: number;
-  createdAt: Date;
   status: CommonStatus;
   lineType: string;
   componentNo: string | null;
@@ -116,6 +162,8 @@ type MaterialSuggestionHistory = {
   drawingVersion?: string | null;
   drawingDate?: Date | null;
   drawingStatus?: string | null;
+  drawingFileName?: string | null;
+  drawingFileUrl?: string | null;
   partThickness?: number | null;
   projectModel?: string | null;
   usageCount: number;
@@ -179,11 +227,10 @@ type MaterialMemoryRow = {
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  defaultProcessRoute?: string | null;
   stockAlertEnabled: boolean;
   stockAlertQuantity?: Prisma.Decimal | number | null;
   status: CommonStatus;
-  createdAt: Date;
-  updatedAt: Date;
 };
 
 type StockAlertComparableRow = {
@@ -199,12 +246,17 @@ type MaterialImportIssue = {
   message: string;
 };
 
+type OrderImportRowWithFile = Prisma.OrderImportRowGetPayload<{
+  include: { file: { select: { fileName: true; sheetName: true } } };
+}>;
+
 type ParsedMaterialImportRow = {
   sourceRowNo: number;
   partCode: string;
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  defaultProcessRoute?: string | null;
   drawingNo?: string | null;
   drawingVersion?: string | null;
   drawingDate?: Date | null;
@@ -265,6 +317,7 @@ const materialImportHeaderAliases: Record<string, string[]> = {
   partName: ['零件名称', '物料名称', 'partName', '名称'],
   unit: ['单位', 'unit'],
   partSpecification: ['成品规格', '规格', 'partSpecification'],
+  defaultProcessRoute: ['默认工艺', '建议工艺', 'defaultProcessRoute'],
   drawingNo: ['图号', 'drawingNo'],
   drawingVersion: ['图纸版本', '版本', 'drawingVersion'],
   drawingDate: ['图纸日期', 'drawingDate'],
@@ -302,10 +355,12 @@ const materialTransformImportHeaderAliases: Record<string, string[]> = {
 const materialImportSessionMaterialIssueCodes = new Set([
   'DUPLICATE_PART_CONFLICT',
   'DUPLICATE_STOCK_ALERT_CONFLICT',
+  'DUPLICATE_DEFAULT_PROCESS_ROUTE_CONFLICT',
   'DUPLICATE_DRAWING_REVISION_CONFLICT',
   'EXISTING_MATERIAL_DIFFERENT',
   'ORDER_HISTORY_DIFFERENT',
-  'EXISTING_DRAWING_REVISION_DIFFERENT'
+  'EXISTING_DRAWING_REVISION_DIFFERENT',
+  'INVALID_DEFAULT_PROCESS_ROUTE'
 ]);
 const materialImportSessionApplicabilityIssueCodes = new Set([
   'DUPLICATE_SCOPE_CONFLICT',
@@ -335,10 +390,97 @@ const genericUploadMimeTypes = new Set(['', 'application/octet-stream']);
 
 @Injectable()
 export class InventoryService {
+  private readonly testFixturePrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly processDefinitionsService: ProcessDefinitionsService
   ) {}
+
+  private hasTestFixturePrefix(...values: Array<string | null | undefined>) {
+    return values.some((value) => {
+      const text = String(value || '').trim();
+      return this.testFixturePrefixes.some((prefix) => text.startsWith(prefix));
+    });
+  }
+
+  private isTestFixtureMaterial(material: { partCode?: string | null; partName?: string | null; status?: CommonStatus | null }) {
+    return this.hasTestFixturePrefix(material.partCode, material.partName);
+  }
+
+  private isDisabledTestFixtureModelBom(row: { bomName?: string | null; projectModel?: string | null; status?: CommonStatus | null }) {
+    return row.status === CommonStatus.DISABLED && this.hasTestFixturePrefix(row.bomName, row.projectModel);
+  }
+
+  private isTestFixtureMaterialTransformRule(row: {
+    customerNameSnapshot?: string | null;
+    projectModel?: string | null;
+    conversionDescription?: string | null;
+    defaultProcessRoute?: string | null;
+    remark?: string | null;
+    customer?: { customerCode?: string | null; customerName?: string | null } | null;
+    sourceMaterial?: { partCode?: string | null; partName?: string | null } | null;
+    targetMaterial?: { partCode?: string | null; partName?: string | null } | null;
+  }) {
+    return this.hasTestFixturePrefix(
+      row.customerNameSnapshot,
+      row.projectModel,
+      row.conversionDescription,
+      row.defaultProcessRoute,
+      row.remark,
+      row.customer?.customerCode,
+      row.customer?.customerName,
+      row.sourceMaterial?.partCode,
+      row.sourceMaterial?.partName,
+      row.targetMaterial?.partCode,
+      row.targetMaterial?.partName
+    );
+  }
+
+  private modelBomScopeApprovalFixtureWhere(): Prisma.ModelBomScopeApprovalRequestWhereInput {
+    return {
+      OR: this.testFixturePrefixes.flatMap((prefix) => [
+        { requestNo: { startsWith: prefix } },
+        { requestedBomName: { startsWith: prefix } },
+        { requestedCustomerNameSnapshot: { startsWith: prefix } },
+        { requestedProjectModel: { startsWith: prefix } },
+        { requestedScopeKey: { startsWith: prefix } },
+        { requestedProjectModelScopeKey: { startsWith: prefix } },
+        { bom: { is: { bomName: { startsWith: prefix } } } },
+        { bom: { is: { projectModel: { startsWith: prefix } } } },
+        { bom: { is: { customerNameSnapshot: { startsWith: prefix } } } }
+      ])
+    };
+  }
+
+  private isTestFixtureInventoryBatch(batch: {
+    batchNo?: string | null;
+    partCode?: string | null;
+    partName?: string | null;
+    sourceOrderNo?: string | null;
+    sourceCustomerName?: string | null;
+    sourceProductionTaskNo?: string | null;
+    replenishmentSourceRequestNo?: string | null;
+    sourceOrder?: { orderNo?: string | null; customerName?: string | null } | null;
+    productionTask?: { orderNo?: string | null; productionTaskNo?: string | null; customerName?: string | null; order?: { orderNo?: string | null; customerName?: string | null } | null } | null;
+  }) {
+    return this.hasTestFixturePrefix(
+      batch.batchNo,
+      batch.partCode,
+      batch.partName,
+      batch.sourceOrderNo,
+      batch.sourceCustomerName,
+      batch.sourceProductionTaskNo,
+      batch.replenishmentSourceRequestNo,
+      batch.sourceOrder?.orderNo,
+      batch.sourceOrder?.customerName,
+      batch.productionTask?.productionTaskNo,
+      batch.productionTask?.orderNo,
+      batch.productionTask?.customerName,
+      batch.productionTask?.order?.orderNo,
+      batch.productionTask?.order?.customerName
+    );
+  }
 
   private async resolveInventoryCustomerScope(customerId?: string): Promise<InventoryCustomerScope | null> {
     const normalizedCustomerId = customerId?.trim();
@@ -500,17 +642,52 @@ export class InventoryService {
       where: {
         status: 'ENABLED'
       },
+      include: {
+        drawingRevisions: {
+          where: { status: 'ENABLED' },
+          orderBy: [{ isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
+        }
+      },
       orderBy: [{ partCode: 'asc' }, { partName: 'asc' }]
     });
+    const rows = materials.map((material) => {
+      const drawingRevision = material.drawingRevisions[0] || null;
+      return {
+        materialId: material.id,
+        partCode: material.partCode,
+        partName: material.partName,
+        unit: material.unit,
+        partSpecification: material.partSpecification,
+        defaultProcessRoute: material.defaultProcessRoute,
+        drawingNo: drawingRevision?.drawingNo ?? null,
+        drawingVersion: drawingRevision?.drawingVersion ?? null,
+        drawingDate: drawingRevision?.drawingDate ?? null,
+        drawingStatus: drawingRevision?.drawingStatus ?? null,
+        drawingFileName: drawingRevision?.drawingFileName ?? null,
+        drawingFileUrl: drawingRevision?.drawingFileUrl ?? null
+      };
+    });
     if (!normalizedKeyword) {
-      return materials;
+      return rows;
     }
-    return materials.filter((material) => this.materialMatchesKeyword(material, normalizedKeyword));
+    return rows.filter((material) => this.materialMatchesKeyword(material, normalizedKeyword));
   }
 
   private async findEnabledMaterialMastersByCodes(partCodes: string[]) {
     const uniquePartCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
-    const rows: Array<{ id: string; partCode: string }> = [];
+    const rows: Array<{
+      id: string;
+      partCode: string;
+      defaultProcessRoute: string | null;
+      drawingRevisions: Array<{
+        drawingNo: string;
+        drawingVersion: string;
+        drawingDate: Date | null;
+        drawingStatus: string | null;
+        drawingFileName: string | null;
+        drawingFileUrl: string | null;
+      }>;
+    }> = [];
     for (let index = 0; index < uniquePartCodes.length; index += 500) {
       const chunk = uniquePartCodes.slice(index, index + 500);
       rows.push(
@@ -519,15 +696,75 @@ export class InventoryService {
             status: 'ENABLED',
             OR: chunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } }))
           },
-          select: { id: true, partCode: true }
+          select: {
+            id: true,
+            partCode: true,
+            defaultProcessRoute: true,
+            drawingRevisions: {
+              where: { status: 'ENABLED' },
+              orderBy: [{ isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }],
+              select: {
+                drawingNo: true,
+                drawingVersion: true,
+                drawingDate: true,
+                drawingStatus: true,
+                drawingFileName: true,
+                drawingFileUrl: true
+              }
+            }
+          }
         }))
       );
     }
-    return new Map(rows.map((row) => [row.partCode.trim().toLocaleLowerCase(), row]));
+    return new Map(
+      rows.map((row) => {
+        const drawingRevision = row.drawingRevisions[0] || null;
+        return [
+          row.partCode.trim().toLocaleLowerCase(),
+          {
+            id: row.id,
+            partCode: row.partCode,
+            defaultProcessRoute: row.defaultProcessRoute,
+            drawingNo: drawingRevision?.drawingNo ?? null,
+            drawingVersion: drawingRevision?.drawingVersion ?? null,
+            drawingDate: drawingRevision?.drawingDate ?? null,
+            drawingStatus: drawingRevision?.drawingStatus ?? null,
+            drawingFileName: drawingRevision?.drawingFileName ?? null,
+            drawingFileUrl: drawingRevision?.drawingFileUrl ?? null
+          }
+        ];
+      })
+    );
   }
 
-  private materialMatchesKeyword(material: { partCode?: string | null; partName?: string | null; unit?: string | null; partSpecification?: string | null }, keyword: string) {
-    return pinyinSearchMatches([material.partCode, material.partName, material.unit, material.partSpecification], keyword);
+  private materialMatchesKeyword(
+    material: {
+      partCode?: string | null;
+      partName?: string | null;
+      unit?: string | null;
+      partSpecification?: string | null;
+      drawingNo?: string | null;
+      drawingVersion?: string | null;
+      drawingDate?: Date | null;
+      drawingStatus?: string | null;
+      drawingFileName?: string | null;
+    },
+    keyword: string
+  ) {
+    return pinyinSearchMatches(
+      [
+        material.partCode,
+        material.partName,
+        material.unit,
+        material.partSpecification,
+        material.drawingNo,
+        material.drawingVersion,
+        ...this.materialDateSearchValues(material.drawingDate),
+        material.drawingStatus,
+        material.drawingFileName
+      ],
+      keyword
+    );
   }
 
   private normalizeMaterialRequired(value: string | undefined, fieldName: string) {
@@ -624,6 +861,7 @@ export class InventoryService {
     const status = query.status || 'ENABLED';
     const normalizedKeyword = normalizeSearchKeyword(query.keyword);
     const withPage = query.withPage === 'true';
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
     const offset = Math.max(Number(query.offset || 0), 0);
     const historyByCode = normalizedKeyword
@@ -631,10 +869,11 @@ export class InventoryService {
       : new Map<string, MaterialSuggestionHistory>();
     const materialRows = await this.prisma.material.findMany({
       where: { status },
-      orderBy: [{ updatedAt: 'desc' }, { partCode: 'asc' }]
+      orderBy: [{ partCode: 'asc' }, { id: 'asc' }]
     });
+    const visibleMaterialRows = includeTestFixtures ? materialRows : materialRows.filter((material) => !this.isTestFixtureMaterial(material));
     const stockAlertFilter = this.normalizeStockAlertFilter(query.stockAlert);
-    let materials = materialRows.filter(
+    let materials = visibleMaterialRows.filter(
       (material) =>
         this.materialMemoryMatchesKeyword(material, query.keyword) || historyByCode.has(material.partCode.trim().toLocaleLowerCase())
     );
@@ -792,6 +1031,7 @@ export class InventoryService {
       partName: material.partName,
       unit: material.unit,
       partSpecification: material.partSpecification,
+      defaultProcessRoute: material.defaultProcessRoute,
       stockAlertEnabled: material.stockAlertEnabled,
       stockAlertQuantity: material.stockAlertQuantity === null || material.stockAlertQuantity === undefined ? null : decimalToNumber(material.stockAlertQuantity),
       status: material.status,
@@ -799,10 +1039,75 @@ export class InventoryService {
       orderLineUsageCount: usage.orderLineUsageCount,
       lastOrderNo: usage.lastOrderNo,
       lastCustomerName: usage.lastCustomerName,
-      lastOrderDate: this.formatDateOnly(usage.lastOrderDate),
-      createdAt: material.createdAt,
-      updatedAt: material.updatedAt
+      lastOrderDate: this.formatDateOnly(usage.lastOrderDate)
     };
+  }
+
+  async buildMaterialMemoryExport(query: MaterialQueryDto): Promise<Uint8Array> {
+    // 零件基础库导出只读取 Material 搜索记忆和实时库存摘要，不创建订单、生产任务、库存批次或库存流水。
+    const rows = (await this.materials({
+      ...query,
+      withPage: undefined,
+      limit: undefined,
+      offset: undefined
+    })) as Array<ReturnType<InventoryService['serializeMaterialMemoryRow']>>;
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const headers = [
+      '序号',
+      '零件编码',
+      '零件名称',
+      '单位',
+      '成品规格',
+      '默认工艺',
+      '可用库存',
+      '订单库存',
+      '备货库存',
+      '库存报警',
+      '最小库存',
+      '订单使用次数',
+      '最近订单号',
+      '最近客户',
+      '最近下单日期',
+      '状态'
+    ];
+    const exportRows =
+      rows.length > 0
+        ? rows.map((row, index) => [
+            index + 1,
+            row.partCode,
+            row.partName,
+            row.unit,
+            row.partSpecification || '',
+            row.defaultProcessRoute || '',
+            row.availableQuantity ?? 0,
+            row.orderInventoryQuantity ?? 0,
+            row.stockInventoryQuantity ?? 0,
+            this.materialMemoryExportStockAlertText(row),
+            row.stockAlertQuantity ?? '',
+            row.orderLineUsageCount ?? 0,
+            row.lastOrderNo || '',
+            row.lastCustomerName || '',
+            row.lastOrderDate || '',
+            this.materialMemoryExportStatusText(row.status)
+          ])
+        : [['当前筛选范围没有零件基础资料']];
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '零件基础资料',
+      title: '零件基础库导出',
+      scopeText: this.materialMemoryExportScopeText(query),
+      headers,
+      rows: exportRows
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async createMaterial(dto: CreateMaterialDto) {
@@ -823,6 +1128,7 @@ export class InventoryService {
         partName,
         unit,
         partSpecification: String(dto.partSpecification || '').trim() || null,
+        defaultProcessRoute: await this.normalizeMaterialDefaultProcessRoute(dto.defaultProcessRoute),
         stockAlertEnabled,
         stockAlertQuantity: stockAlertEnabled ? stockAlertQuantity : null,
         status: dto.status || 'ENABLED'
@@ -864,6 +1170,10 @@ export class InventoryService {
       unit,
       partSpecification:
         dto.partSpecification !== undefined ? String(dto.partSpecification || '').trim() || null : existing.partSpecification,
+      defaultProcessRoute:
+        dto.defaultProcessRoute !== undefined
+          ? await this.normalizeMaterialDefaultProcessRoute(dto.defaultProcessRoute)
+          : existing.defaultProcessRoute,
       stockAlertEnabled,
       stockAlertQuantity
     };
@@ -980,13 +1290,17 @@ export class InventoryService {
           }
         }
       },
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }]
     });
     if (referencingLines.length > 0) {
       // 图纸停用不能让启用 BOM 行留下失效默认图纸，避免后续推荐带错下单图纸快照。
-      const references = referencingLines
-        .map((line) => `${line.bom.bomName} / ${line.bom.customer?.customerName || line.bom.customerNameSnapshot || '全部客户'} / ${line.bom.projectModel} / ${line.partCodeSnapshot}`)
-        .join('、');
+      const references = this.formatBusinessListPreview(
+        referencingLines.map(
+          (line) =>
+            `${line.bom.bomName} / ${line.bom.customer?.customerName || line.bom.customerNameSnapshot || '全部客户'} / ${line.bom.projectModel} / ${line.partCodeSnapshot}`
+        ),
+        'BOM 行'
+      );
       throw new BadRequestException(`该图纸版本已被启用 BOM 行指定为默认图纸：${references}。请先调整 BOM 行默认图纸后再停用。`);
     }
   }
@@ -1025,6 +1339,82 @@ export class InventoryService {
       orderBy: [{ status: 'asc' }, { isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
     });
     return { items: rows.map((row) => this.serializeMaterialDrawingRevision(row)) };
+  }
+
+  async buildMaterialDrawingRevisionsExport(materialId: string): Promise<Uint8Array> {
+    const material = await this.prisma.material.findUnique({
+      where: { id: materialId },
+      select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true }
+    });
+    if (!material) {
+      throw new NotFoundException('零件基础资料不存在');
+    }
+    const rows = await this.prisma.materialDrawingRevision.findMany({
+      where: { materialId },
+      orderBy: [{ status: 'asc' }, { isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }]
+    });
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const headers = [
+      '序号',
+      '零件编码',
+      '零件名称',
+      '单位',
+      '成品规格',
+      '图号',
+      '图纸版本',
+      '图纸日期',
+      '图纸状态',
+      '默认图纸',
+      '默认变更人',
+      '默认变更时间',
+      '图纸文件名',
+      '图纸文件地址',
+      '版本状态',
+      '备注'
+    ];
+    const exportRows =
+      rows.length > 0
+        ? rows.map((row, index) => [
+            index + 1,
+            material.partCode,
+            material.partName,
+            material.unit,
+            material.partSpecification || '',
+            row.drawingNo,
+            row.drawingVersion,
+            this.formatDateOnly(row.drawingDate),
+            row.drawingStatus || '',
+            row.isDefault ? '是' : '否',
+            row.defaultChangedBy || '',
+            row.defaultChangedAt ? this.businessDateTimeText(row.defaultChangedAt) : '',
+            row.drawingFileName || '',
+            row.drawingFileUrl || '',
+            this.materialMemoryExportStatusText(row.status),
+            row.remark || ''
+          ])
+        : [['当前零件没有维护图纸版本']];
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '图纸版本',
+      title: '零件图纸版本导出',
+      scopeText: [
+        `零件：${material.partCode} / ${material.partName}`,
+        `单位：${material.unit}`,
+        `成品规格：${material.partSpecification || '-'}`,
+        `零件状态：${this.materialMemoryExportStatusText(material.status)}`
+      ].join('；'),
+      headers,
+      rows: exportRows
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async saveMaterialDrawingRevision(materialId: string, dto: SaveMaterialDrawingRevisionDto) {
@@ -1134,8 +1524,6 @@ export class InventoryService {
     defaultChangedAt: Date | null;
     remark: string | null;
     status: CommonStatus;
-    createdAt: Date;
-    updatedAt: Date;
   }) {
     return {
       id: row.id,
@@ -1150,9 +1538,7 @@ export class InventoryService {
       defaultChangedBy: row.defaultChangedBy,
       defaultChangedAt: row.defaultChangedAt,
       remark: row.remark,
-      status: row.status,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      status: row.status
     };
   }
 
@@ -1169,6 +1555,7 @@ export class InventoryService {
       { header: '零件名称', key: 'partName', width: 24 },
       { header: '单位', key: 'unit', width: 10 },
       { header: '成品规格', key: 'partSpecification', width: 24 },
+      { header: '默认工艺', key: 'defaultProcessRoute', width: 24 },
       { header: '图号', key: 'drawingNo', width: 24 },
       { header: '图纸版本', key: 'drawingVersion', width: 14 },
       { header: '图纸日期', key: 'drawingDate', width: 14 },
@@ -1184,6 +1571,7 @@ export class InventoryService {
         partCode: 'RS10703010033',
         partName: '顶盖',
         unit: '件',
+        defaultProcessRoute: '激光切割→折弯',
         drawingNo: 'RBKS-300DBII-10-50-01',
         drawingStatus: '旧图',
         partThickness: 1,
@@ -1196,6 +1584,7 @@ export class InventoryService {
         partCode: 'RS1071123',
         partName: '风机支架组件',
         unit: '套',
+        defaultProcessRoute: '装配',
         drawingNo: 'B5机型图号-10-30',
         drawingStatus: '旧图',
         partThickness: 2,
@@ -1207,6 +1596,7 @@ export class InventoryService {
         partCode: 'P-BASE-001',
         partName: '百胜通用半成品',
         unit: '件',
+        defaultProcessRoute: '激光切割',
         drawingNo: 'BASE-001',
         drawingStatus: '旧图',
         partThickness: 2,
@@ -1237,7 +1627,7 @@ export class InventoryService {
       errorTitle: '单位必填',
       error: '请选择或填写常用单位'
     });
-    (worksheet as ExcelJS.Worksheet & { dataValidations: { add(address: string, validation: ExcelJS.DataValidation): void } }).dataValidations.add('K2:K2000', {
+    (worksheet as ExcelJS.Worksheet & { dataValidations: { add(address: string, validation: ExcelJS.DataValidation): void } }).dataValidations.add('L2:L2000', {
       type: 'list',
       allowBlank: true,
       formulae: ['"启用,停用,是,否,ENABLED,DISABLED"'],
@@ -1344,8 +1734,971 @@ export class InventoryService {
     return this.buildMaterialImportSessionPreview(session.id);
   }
 
+  async createMaterialImportSessionFromOrderImport(orderImportSessionId: string, dto: CreateMaterialImportFromOrderImportDto) {
+    const sourceSession = await this.prisma.orderImportSession.findUnique({
+      where: { id: orderImportSessionId },
+      include: { files: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } }
+    });
+    if (!sourceSession) {
+      throw new NotFoundException('订单导入会话不存在，无法提取零件库草稿');
+    }
+    if (!sourceSession.files.length) {
+      throw new BadRequestException('订单导入会话没有 ERP上传净表 文件，无法提取零件库草稿');
+    }
+    const expectedPreviewToken = this.orderImportPreviewToken({
+      sessionId: sourceSession.id,
+      status: sourceSession.status,
+      files: sourceSession.files
+    });
+    if (!dto.previewToken || dto.previewToken !== expectedPreviewToken) {
+      throw new BadRequestException('订单导入预览已变化，请刷新 ERP上传净表 预览后再提取零件库草稿');
+    }
+
+    const sourceRows = await this.prisma.orderImportRow.findMany({
+      where: { sessionId: orderImportSessionId },
+      include: { file: { select: { fileName: true, sheetName: true } } },
+      orderBy: [{ orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+    });
+    if (!sourceRows.length) {
+      throw new BadRequestException('订单导入会话没有可提取的明细行');
+    }
+
+    const materialRows = sourceRows.map((row) => this.orderImportRowToMaterialImportRow(row));
+    const applicabilityRows = this.orderImportRowsToMaterialApplicabilityImportRows(sourceRows);
+    const materialFileHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          source: 'ORDER_IMPORT',
+          orderImportSessionId,
+          previewToken: expectedPreviewToken,
+          rows: materialRows.map((row) => row.rowHash),
+          applicabilityRows: applicabilityRows.map((row) => row.rowHash)
+        })
+      )
+      .digest('hex');
+
+    const sessionId = await runSerializableTransaction(this.prisma, async (tx) => {
+      const materialSession = await tx.materialImportSession.create({
+        data: { createdBy: dto.createdBy?.trim() || null }
+      });
+      const importFile = await tx.materialImportFile.create({
+        data: {
+          sessionId: materialSession.id,
+          fileName: `订单净表提取-${businessDateTimeKey()}.xlsx`,
+          storedFileName: null,
+          fileHash: materialFileHash,
+          sheetName: 'ERP上传净表提取',
+          rowCount: materialRows.length + applicabilityRows.length,
+          materialRowCount: materialRows.length,
+          scopeRowCount: applicabilityRows.length,
+          transformRowCount: 0,
+          // 订单净表提取只生成零件库导入草稿，不写入正式零件、BOM、订单、生产任务或库存。
+          acceptedRowCount: materialRows.length + applicabilityRows.length,
+          duplicateRowCount: 0
+        }
+      });
+      const createdRows = await tx.materialImportRow.createMany({
+        data: materialRows.map((row) => ({
+          sessionId: materialSession.id,
+          fileId: importFile.id,
+          sourceRowNo: row.sourceRowNo,
+          rowHash: row.rowHash,
+          partCode: row.partCode,
+          partName: row.partName,
+          unit: row.unit,
+          partSpecification: row.partSpecification,
+          defaultProcessRoute: row.defaultProcessRoute,
+          drawingNo: row.drawingNo,
+          drawingVersion: row.drawingVersion,
+          drawingDate: row.drawingDate,
+          drawingStatus: row.drawingStatus,
+          partThickness: row.partThickness,
+          projectModel: row.projectModel,
+          stockAlertEnabled: row.stockAlertEnabled,
+          stockAlertQuantity: row.stockAlertQuantity,
+          remark: row.remark,
+          raw: row.raw,
+          issues: row.issues,
+          errorCount: row.errorCount,
+          warningCount: row.warningCount
+        })),
+        skipDuplicates: true
+      });
+      const createdApplicabilityRows = applicabilityRows.length
+        ? await tx.materialApplicabilityImportRow.createMany({
+            data: applicabilityRows.map((row) => ({
+              sessionId: materialSession.id,
+              fileId: importFile.id,
+              sourceRowNo: row.sourceRowNo,
+              rowHash: row.rowHash,
+              partCode: row.partCode,
+              customerCode: row.customerCode,
+              customerName: row.customerName,
+              projectModel: row.projectModel,
+              remark: row.remark,
+              status: row.status,
+              raw: row.raw,
+              issues: row.issues,
+              errorCount: row.errorCount,
+              warningCount: row.warningCount
+            })),
+            skipDuplicates: true
+          })
+        : { count: 0 };
+      await tx.materialImportFile.update({
+        where: { id: importFile.id },
+        data: {
+          acceptedRowCount: createdRows.count + createdApplicabilityRows.count,
+          duplicateRowCount: materialRows.length + applicabilityRows.length - createdRows.count - createdApplicabilityRows.count
+        }
+      });
+      return materialSession.id;
+    });
+    await this.refreshMaterialImportSessionIssues(sessionId);
+    return this.buildMaterialImportSessionPreview(sessionId);
+  }
+
   async getMaterialImportSession(sessionId: string, query: GetMaterialImportSessionQueryDto = {}) {
     return this.buildMaterialImportSessionPreview(sessionId, this.materialImportPageOptions(query));
+  }
+
+  async createModelBomDraftsFromOrderImport(orderImportSessionId: string, dto: CreateModelBomDraftFromOrderImportDto) {
+    const sourceSession = await this.prisma.orderImportSession.findUnique({
+      where: { id: orderImportSessionId },
+      include: { files: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } }
+    });
+    if (!sourceSession) {
+      throw new NotFoundException('订单导入会话不存在，无法提取 BOM 草稿');
+    }
+    if (!sourceSession.files.length) {
+      throw new BadRequestException('订单导入会话没有 ERP上传净表 文件，无法提取 BOM 草稿');
+    }
+    const expectedPreviewToken = this.orderImportPreviewToken({
+      sessionId: sourceSession.id,
+      status: sourceSession.status,
+      files: sourceSession.files
+    });
+    if (!dto.previewToken || dto.previewToken !== expectedPreviewToken) {
+      throw new BadRequestException('订单导入预览已变化，请刷新 ERP上传净表 预览后再提取 BOM 草稿');
+    }
+
+    const sourceRows = await this.prisma.orderImportRow.findMany({
+      where: { sessionId: orderImportSessionId },
+      include: { file: { select: { fileName: true, sheetName: true } } },
+      orderBy: [{ customerName: 'asc' }, { projectModel: 'asc' }, { orderNo: 'asc' }, { sourceRowNo: 'asc' }]
+    });
+    if (!sourceRows.length) {
+      throw new BadRequestException('订单导入会话没有可提取的 BOM 明细行');
+    }
+
+    const partCodes = [...new Set(sourceRows.map((row) => row.partCode.trim()).filter(Boolean))];
+    const [existingMaterials, customerLookup] = await Promise.all([
+      this.findExistingMaterialsByPartCodes(partCodes),
+      this.findMaterialImportCustomers(sourceRows.map((row) => ({ customerName: row.customerName })))
+    ]);
+    const enabledMaterials = existingMaterials.filter((material) => material.status === 'ENABLED');
+    const materialByCode = new Map(enabledMaterials.map((material) => [material.partCode.trim().toLocaleLowerCase(), material]));
+    const materialIdsForDrawingLookup = [...new Set(enabledMaterials.map((material) => material.id))];
+    const drawingRowsForPreview = materialIdsForDrawingLookup.length
+      ? await this.prisma.materialDrawingRevision.findMany({
+          where: { materialId: { in: materialIdsForDrawingLookup }, status: 'ENABLED' },
+          select: { materialId: true, drawingNo: true, drawingVersion: true }
+        })
+      : [];
+    const drawingNoKeysForPreview = new Set(
+      drawingRowsForPreview.map((drawing) => `${drawing.materialId}|${String(drawing.drawingNo || '').trim().toLocaleLowerCase()}`)
+    );
+    const drawingNoVersionKeysForPreview = new Set(
+      drawingRowsForPreview.map(
+        (drawing) =>
+          `${drawing.materialId}|${String(drawing.drawingNo || '').trim().toLocaleLowerCase()}|${String(drawing.drawingVersion || '').trim().toLocaleLowerCase()}`
+      )
+    );
+    const rowsByScope = new Map<string, OrderImportRowWithFile[]>();
+    for (const row of sourceRows) {
+      const scopeKey = [
+        row.customerName.trim().toLocaleLowerCase(),
+        this.normalizeMaterialScopeKey(row.projectModel)
+      ].join('|');
+      rowsByScope.set(scopeKey, [...(rowsByScope.get(scopeKey) || []), row]);
+    }
+
+    const drafts = [];
+    for (const [scopeKey, rows] of rowsByScope.entries()) {
+      const firstRow = rows[0];
+      const projectModel = String(firstRow.projectModel || '').trim() || null;
+      let customer: { id: string; customerCode: string; customerName: string } | null = null;
+      const draftIssues: MaterialImportIssue[] = [];
+      try {
+        customer = this.resolveMaterialImportCustomer({ customerName: firstRow.customerName }, customerLookup);
+      } catch (error) {
+        draftIssues.push({
+          severity: 'ERROR',
+          code: 'INVALID_CUSTOMER',
+          message: error instanceof Error ? error.message : '客户信息无法识别'
+        });
+      }
+
+      const projectModelScopeKey = this.normalizeMaterialScopeKey(projectModel);
+      const existingBoms = customer
+        ? await this.prisma.modelBom.findMany({
+            where: {
+              customerScopeKey: customer.id,
+              projectModelScopeKey,
+              status: 'ENABLED'
+            },
+            include: {
+              lines: {
+                where: { status: 'ENABLED' },
+                orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }]
+              }
+            },
+            orderBy: [{ isCommon: 'desc' }, { commonSortOrder: 'asc' }, { bomName: 'asc' }, { id: 'asc' }]
+          })
+        : [];
+      if (existingBoms.length > 0) {
+        draftIssues.push({
+          severity: 'WARNING',
+          code: 'EXISTING_BOM_SCOPE',
+          message: `当前客户和机型/项目已有 ${existingBoms.length} 个正式 BOM；本次确认会新建另一个 BOM，不会覆盖已有 BOM`
+        });
+      }
+
+      const componentNoCounts = new Map<string, number>();
+      for (const componentNo of rows
+        .filter((row) => this.normalizeModelBomLineType(row.lineType) === 'COMPONENT')
+        .map((row) => this.normalizeModelBomComponentNo(row.componentNo))
+        .filter(Boolean) as string[]) {
+        componentNoCounts.set(componentNo, (componentNoCounts.get(componentNo) || 0) + 1);
+      }
+      const componentNos = new Set(componentNoCounts.keys());
+      const draftLineKeys = new Set<string>();
+      const existingBomLines = existingBoms.flatMap((bom) => bom.lines || []);
+      const existingLineKeys = new Set(
+        existingBomLines.map((line) =>
+          this.modelBomDraftLineKey({
+            partCode: line.partCodeSnapshot,
+            lineType: line.lineType,
+            componentNo: line.componentNo,
+            parentComponentNo: line.parentComponentNo
+          })
+        )
+      );
+      const existingPartCodes = new Set(existingBomLines.map((line) => line.partCodeSnapshot.trim().toLocaleLowerCase()));
+      const lines = rows.map((row, index) => {
+        const material = materialByCode.get(row.partCode.trim().toLocaleLowerCase());
+        const lineType = this.normalizeModelBomLineType(row.lineType);
+        const componentNo = lineType === 'COMPONENT' ? this.normalizeModelBomComponentNo(row.componentNo) : null;
+        const parentComponentNo = lineType === 'COMPONENT' ? null : this.normalizeModelBomComponentNo(row.parentComponentNo);
+        const defaultQuantity = this.orderImportBomDefaultQuantity(row);
+        const issues: MaterialImportIssue[] = [];
+        if (!material) {
+          issues.push({
+            severity: 'WARNING',
+            code: 'MATERIAL_NOT_FOUND',
+            message: '零件基础库尚未维护该零件，确认正式 BOM 前请先写入零件基础资料'
+          });
+        }
+        const requestedDrawingNo = String(row.drawingNo || '').trim();
+        const requestedDrawingVersion = String(row.drawingVersion || '').trim();
+        if (
+          material &&
+          requestedDrawingNo &&
+          !(requestedDrawingVersion
+            ? drawingNoVersionKeysForPreview.has(`${material.id}|${requestedDrawingNo.toLocaleLowerCase()}|${requestedDrawingVersion.toLocaleLowerCase()}`)
+            : drawingNoKeysForPreview.has(`${material.id}|${requestedDrawingNo.toLocaleLowerCase()}`))
+        ) {
+          issues.push({
+            severity: 'WARNING',
+            code: 'DRAWING_REVISION_NOT_FOUND',
+            message: '零件基础库没有与导入图号和版本一致的启用图纸版本，确认正式 BOM 前请先维护图纸版本或人工核对默认图纸'
+          });
+        }
+        if (lineType === 'COMPONENT' && !componentNo) {
+          issues.push({ severity: 'ERROR', code: 'COMPONENT_NO_REQUIRED', message: '组件行缺少组件编号，无法形成 BOM 组件结构' });
+        }
+        if (lineType === 'COMPONENT' && componentNo && (componentNoCounts.get(componentNo) || 0) > 1) {
+          issues.push({
+            severity: 'ERROR',
+            code: 'DUPLICATE_COMPONENT_NO',
+            message: '组件编号在当前 BOM 草稿中重复，必须先人工合并或修改组件编号'
+          });
+        }
+        if (lineType !== 'COMPONENT' && parentComponentNo && !componentNos.has(parentComponentNo)) {
+          issues.push({
+            severity: 'ERROR',
+            code: 'PARENT_COMPONENT_NOT_FOUND',
+            message: '子零件所属组件在当前 BOM 草稿中不存在'
+          });
+        }
+        if (defaultQuantity <= 0) {
+          issues.push({ severity: 'ERROR', code: 'INVALID_DEFAULT_QUANTITY', message: 'BOM 默认数量必须大于 0' });
+        }
+        const draftLineKey = this.modelBomDraftLineKey({ partCode: row.partCode, lineType, componentNo, parentComponentNo });
+        if (draftLineKeys.has(draftLineKey)) {
+          issues.push({
+            severity: 'ERROR',
+            code: 'DUPLICATE_DRAFT_LINE',
+            message: '当前 BOM 草稿中存在相同零件和相同结构位置，请先人工合并数量后再确认正式 BOM'
+          });
+        }
+        draftLineKeys.add(draftLineKey);
+        if (existingLineKeys.has(draftLineKey)) {
+          issues.push({
+            severity: 'WARNING',
+            code: 'EXISTING_BOM_LINE',
+            message: '正式 BOM 中已有相同零件和结构位置，导入草稿不会自动覆盖'
+          });
+        } else if (existingPartCodes.has(row.partCode.trim().toLocaleLowerCase())) {
+          issues.push({
+            severity: 'WARNING',
+            code: 'EXISTING_BOM_PART_DIFFERENT_STRUCTURE',
+            message: '正式 BOM 中已有相同零件但结构位置不同，请人工核对组件关系'
+          });
+        }
+        return {
+          sourceFileName: row.file?.fileName || null,
+          sourceSheetName: row.file?.sheetName || null,
+          sourceRowNo: row.sourceRowNo,
+          orderNo: row.orderNo,
+          lineType,
+          partCategory: row.partCategory,
+          componentNo,
+          parentComponentNo,
+          partCode: row.partCode,
+          partName: row.partName,
+          materialId: material?.id || null,
+          materialStatus: material?.status || null,
+          drawingNo: row.drawingNo,
+          drawingVersion: row.drawingVersion,
+          drawingDate: this.formatDateOnly(row.drawingDate),
+          drawingStatus: row.drawingStatus,
+          partSpecification: row.partSpecification,
+          partThickness: row.partThickness === null ? null : decimalToNumber(row.partThickness),
+          defaultQuantity,
+          unit: row.unit,
+          defaultProcessRoute: row.processRoute,
+          sortOrder: (index + 1) * 10,
+          raw: row.raw || {},
+          issues
+        };
+      });
+
+      const existingBomSummaries = existingBoms.map((bom) => {
+        const diff = this.modelBomDraftExistingBomDiffReview(bom, lines);
+        return {
+          id: bom.id,
+          bomName: bom.bomName,
+          status: bom.status,
+          lineCount: bom.lines.length,
+          diffSummary: diff.summary,
+          diffLines: diff.lines
+        };
+      });
+      const firstExistingBomSummary = existingBomSummaries[0] || null;
+
+      drafts.push({
+        draftKey: scopeKey,
+        bomName: `${customer?.customerName || firstRow.customerName}${projectModel ? ` ${projectModel}` : ''} BOM 草稿`,
+        customerId: customer?.id || null,
+        customerCode: customer?.customerCode || null,
+        customerName: customer?.customerName || firstRow.customerName,
+        customerScopeMode: 'PRIVATE',
+        projectModel,
+        existingBom: firstExistingBomSummary,
+        existingBoms: existingBomSummaries,
+        lineCount: lines.length,
+        componentCount: lines.filter((line) => line.lineType === 'COMPONENT').length,
+        childPartCount: lines.filter((line) => line.lineType !== 'COMPONENT' && line.parentComponentNo).length,
+        standalonePartCount: lines.filter((line) => line.lineType !== 'COMPONENT' && !line.parentComponentNo).length,
+        issues: draftIssues,
+        lines
+      });
+    }
+
+    const allIssues = drafts.flatMap((draft) => [...draft.issues, ...draft.lines.flatMap((line) => line.issues)]);
+    return {
+      sourceOrderImportSessionId: sourceSession.id,
+      sourceStatus: sourceSession.status,
+      previewToken: expectedPreviewToken,
+      summary: {
+        draftCount: drafts.length,
+        lineCount: drafts.reduce((total, draft) => total + draft.lineCount, 0),
+        componentCount: drafts.reduce((total, draft) => total + draft.componentCount, 0),
+        childPartCount: drafts.reduce((total, draft) => total + draft.childPartCount, 0),
+        standalonePartCount: drafts.reduce((total, draft) => total + draft.standalonePartCount, 0),
+        existingBomScopeCount: drafts.filter((draft) => draft.existingBoms?.length || draft.existingBom).length,
+        missingMaterialCount: drafts.reduce(
+          (total, draft) => total + draft.lines.filter((line) => line.issues.some((issue) => issue.code === 'MATERIAL_NOT_FOUND')).length,
+          0
+        ),
+        errorCount: allIssues.filter((issue) => issue.severity === 'ERROR').length,
+        warningCount: allIssues.filter((issue) => issue.severity === 'WARNING').length
+      },
+      drafts
+    };
+  }
+
+  async commitModelBomDraftFromOrderImport(orderImportSessionId: string, dto: CommitModelBomDraftFromOrderImportDto) {
+    const preview = await this.createModelBomDraftsFromOrderImport(orderImportSessionId, { previewToken: dto.previewToken });
+    const draft = preview.drafts.find((item) => item.draftKey === dto.draftKey);
+    if (!draft) {
+      throw new NotFoundException('BOM 草稿不存在，请刷新订单导入预览后重新选择');
+    }
+    const allIssues = [...draft.issues, ...draft.lines.flatMap((line) => line.issues)];
+    const errorIssue = allIssues.find((issue) => issue.severity === 'ERROR');
+    if (errorIssue) {
+      throw new BadRequestException(`BOM 草稿仍有错误：${errorIssue.message}`);
+    }
+    if (!draft.customerId) {
+      throw new BadRequestException('BOM 草稿未匹配到有效客户，不能写入正式 BOM');
+    }
+    const missingMaterial = draft.lines.find((line) => !line.materialId);
+    if (missingMaterial) {
+      throw new BadRequestException(`零件 ${missingMaterial.partCode} 尚未写入零件基础库，请先确认零件库导入草稿`);
+    }
+    const disabledMaterial = draft.lines.find((line) => line.materialStatus !== 'ENABLED');
+    if (disabledMaterial) {
+      throw new BadRequestException(`零件 ${disabledMaterial.partCode} 已停用，不能写入启用 BOM 明细`);
+    }
+    const existingBoms = draft.existingBoms || (draft.existingBom ? [draft.existingBom] : []);
+    const reviewedExistingBomIds = new Set(
+      (dto.reviewedExistingBomIds || []).map((id) => String(id || '').trim()).filter(Boolean)
+    );
+    const existingBomIds = new Set(existingBoms.map((bom) => bom.id));
+    const unrelatedReviewedBomIds = [...reviewedExistingBomIds].filter((id) => !existingBomIds.has(id));
+    if (unrelatedReviewedBomIds.length > 0) {
+      throw new BadRequestException('核对 BOM 不属于当前草稿范围，请刷新 BOM 草稿预览后重新核对');
+    }
+    if (existingBoms.length > 0) {
+      const missingReviewBoms = existingBoms.filter((bom) => !reviewedExistingBomIds.has(bom.id));
+      if (missingReviewBoms.length > 0) {
+        throw new BadRequestException(
+          `当前范围已有 ${existingBoms.length} 个正式 BOM，创建新 BOM 前必须逐个完成差异核对：${this.formatBomNamePreview(
+            missingReviewBoms.map((bom) => bom.bomName)
+          )}`
+        );
+      }
+    }
+    const reviewedExistingBomRemark = existingBoms.length
+      ? `已核对已有 BOM：${this.formatBomNamePreview(existingBoms.map((bom) => bom.bomName))}`
+      : '';
+
+    const normalizedLines: Array<(typeof draft.lines)[number] & { defaultProcessRoute: string | null }> = [];
+    for (const line of draft.lines) {
+      const processNames = this.splitDefaultProcessRoute(line.defaultProcessRoute || '');
+      if (processNames.length > 0) {
+        await this.processDefinitionsService.ensureActiveNames(processNames);
+      }
+      normalizedLines.push({
+        ...line,
+        defaultProcessRoute: processNames.length > 0 ? processNames.join('、') : null
+      });
+    }
+    const confirmedBomName = String(dto.bomName || draft.bomName).trim();
+    if (!confirmedBomName) {
+      throw new BadRequestException('正式 BOM 名称不能为空');
+    }
+
+    try {
+      return await runSerializableTransaction(
+        this.prisma,
+        async (tx) => {
+        const customerScopeKey = draft.customerId as string;
+        const projectModelScopeKey = this.normalizeMaterialScopeKey(draft.projectModel);
+        const currentSameScopeBoms = await tx.modelBom.findMany({
+          where: {
+            customerScopeKey,
+            projectModelScopeKey,
+            status: 'ENABLED'
+          },
+          select: { id: true, bomName: true },
+          orderBy: [{ bomName: 'asc' }, { id: 'asc' }]
+        });
+        const currentSameScopeBomIds = new Set(currentSameScopeBoms.map((bom) => bom.id));
+        const staleReviewedBomIds = [...reviewedExistingBomIds].filter((id) => !currentSameScopeBomIds.has(id));
+        if (staleReviewedBomIds.length > 0) {
+          throw new BadRequestException('核对 BOM 不属于当前草稿范围，请刷新 BOM 草稿预览后重新核对');
+        }
+        const unreviewedCurrentBoms = currentSameScopeBoms.filter((bom) => !reviewedExistingBomIds.has(bom.id));
+        if (unreviewedCurrentBoms.length > 0) {
+          throw new BadRequestException(
+            `当前范围已有新的正式 BOM 尚未核对，请刷新 BOM 草稿预览后重新核对：${this.formatBomNamePreview(
+              unreviewedCurrentBoms.map((bom) => bom.bomName)
+            )}`
+          );
+        }
+        const duplicateNameKey = this.normalizeModelBomNameScopeKey(confirmedBomName);
+        const duplicateName = currentSameScopeBoms.find((bom) => this.normalizeModelBomNameScopeKey(bom.bomName) === duplicateNameKey);
+        if (duplicateName) {
+          throw new BadRequestException('相同名称、客户范围和机型/项目的 BOM 已存在');
+        }
+
+        const materialIds = [...new Set(normalizedLines.map((line) => String(line.materialId || '')).filter(Boolean))];
+        const drawingRows = materialIds.length
+          ? await tx.materialDrawingRevision.findMany({
+              where: { materialId: { in: materialIds }, status: 'ENABLED' },
+              orderBy: [{ isDefault: 'desc' }, { drawingDate: 'desc' }, { createdAt: 'desc' }],
+              select: { id: true, materialId: true, drawingNo: true, drawingVersion: true }
+            })
+          : [];
+        const drawingByMaterialAndNo = new Map<string, (typeof drawingRows)[number]>();
+        const drawingByMaterialNoAndVersion = new Map<string, (typeof drawingRows)[number]>();
+        const drawingByMaterial = new Map<string, (typeof drawingRows)[number]>();
+        for (const drawing of drawingRows) {
+          if (!drawingByMaterial.has(drawing.materialId)) {
+            drawingByMaterial.set(drawing.materialId, drawing);
+          }
+          const drawingNoKey = `${drawing.materialId}|${String(drawing.drawingNo || '').trim().toLocaleLowerCase()}`;
+          if (!drawingByMaterialAndNo.has(drawingNoKey)) {
+            drawingByMaterialAndNo.set(drawingNoKey, drawing);
+          }
+          const drawingVersionKey = `${drawing.materialId}|${String(drawing.drawingNo || '').trim().toLocaleLowerCase()}|${String(drawing.drawingVersion || '').trim().toLocaleLowerCase()}`;
+          if (!drawingByMaterialNoAndVersion.has(drawingVersionKey)) {
+            drawingByMaterialNoAndVersion.set(drawingVersionKey, drawing);
+          }
+        }
+
+        const lineKeys = new Set<string>();
+        for (const line of normalizedLines) {
+          const lineKey = this.modelBomDraftLineKey(line);
+          if (lineKeys.has(lineKey)) {
+            throw new BadRequestException(`零件 ${line.partCode} 在 BOM 草稿中存在重复结构位置，请先人工合并后再确认`);
+          }
+          lineKeys.add(lineKey);
+        }
+
+        const row = await tx.modelBom.create({
+          data: {
+            bomName: confirmedBomName,
+            customerId: draft.customerId,
+            customerNameSnapshot: draft.customerName,
+            projectModel: String(draft.projectModel || '').trim(),
+            customerScopeMode: 'PRIVATE',
+            customerScopeKey,
+            projectModelScopeKey,
+            sourceBomId: null,
+            sourceBomNameSnapshot: null,
+            isCommon: false,
+            commonSortOrder: null,
+            remark: [
+              `来自订单导入 ${orderImportSessionId} 的 BOM 草稿人工确认`,
+              reviewedExistingBomRemark,
+              dto.confirmedBy?.trim() ? `确认人：${dto.confirmedBy.trim()}` : ''
+            ]
+              .filter(Boolean)
+              .join('；'),
+            status: 'ENABLED',
+            // 订单净表 BOM 草稿确认只创建正式 BOM 和 BOM 明细，不创建订单、生产任务、库存批次或库存流水，也不覆盖已有 BOM。
+            lines: {
+              create: normalizedLines.map((line) => {
+                const materialId = String(line.materialId);
+                const requestedDrawingNo = String(line.drawingNo || '').trim();
+                const requestedDrawingVersion = String(line.drawingVersion || '').trim();
+                const drawingNoKey = `${materialId}|${requestedDrawingNo.toLocaleLowerCase()}`;
+                const drawingVersionKey = `${drawingNoKey}|${requestedDrawingVersion.toLocaleLowerCase()}`;
+                // 有导入图号和版本时只绑定完全一致的图纸，避免把其他默认图纸误写成 BOM 行默认图纸。
+                const drawing = requestedDrawingNo
+                  ? requestedDrawingVersion
+                    ? drawingByMaterialNoAndVersion.get(drawingVersionKey) || null
+                    : drawingByMaterialAndNo.get(drawingNoKey) || null
+                  : drawingByMaterial.get(materialId) || null;
+                return {
+                  materialId,
+                  partCodeSnapshot: line.partCode,
+                  partNameSnapshot: line.partName,
+                  unitSnapshot: line.unit,
+                  partSpecificationSnapshot: line.partSpecification || null,
+                  partThicknessSnapshot:
+                    line.lineType === 'COMPONENT' || line.partThickness === null || line.partThickness === undefined
+                      ? null
+                      : new Prisma.Decimal(line.partThickness),
+                  lineType: line.lineType,
+                  partCategory: line.partCategory || null,
+                  componentNo: line.lineType === 'COMPONENT' ? line.componentNo || null : null,
+                  parentComponentNo: line.lineType === 'COMPONENT' ? null : line.parentComponentNo || null,
+                  defaultDrawingRevisionId: drawing?.id || null,
+                  defaultProcessRoute: line.defaultProcessRoute || null,
+                  defaultQuantity: new Prisma.Decimal(line.defaultQuantity),
+                  remark: `来自订单 ${line.orderNo} 第 ${line.sourceRowNo} 行`,
+                  sortOrder: line.sortOrder,
+                  status: 'ENABLED' as const
+                };
+              })
+            }
+          },
+          include: this.modelBomInclude([{ sortOrder: 'asc' }, { id: 'asc' }])
+        });
+        await this.createModelBomRevision(
+          tx,
+          row.id,
+          'ORDER_IMPORT_DRAFT_COMMIT',
+          dto.confirmedBy || '订单导入页面',
+          ['订单净表 BOM 草稿人工确认创建', reviewedExistingBomRemark].filter(Boolean).join('；')
+        );
+        const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
+        return this.serializeModelBom(row, partThicknessByScopeKey);
+        },
+      'BOM 草稿确认正在被其他操作并发修改，请刷新预览后重新确认'
+      );
+    } catch (error) {
+      this.handleModelBomNameUniqueError(error, '相同名称、客户范围和机型/项目的 BOM 已存在');
+    }
+  }
+
+  private modelBomDraftLineKey(input: {
+    partCode?: string | null;
+    lineType?: string | null;
+    componentNo?: string | null;
+    parentComponentNo?: string | null;
+  }) {
+    return [
+      String(input.partCode || '').trim().toLocaleLowerCase(),
+      this.normalizeModelBomLineType(input.lineType),
+      this.normalizeModelBomComponentNo(input.componentNo) || '',
+      this.normalizeModelBomComponentNo(input.parentComponentNo) || ''
+    ].join('|');
+  }
+
+  private modelBomDraftComparableText(value?: string | null) {
+    return String(value || '').trim().toLocaleLowerCase();
+  }
+
+  private modelBomDraftComparableProcess(value?: string | null) {
+    return this.splitDefaultProcessRoute(value || '').join('、').toLocaleLowerCase();
+  }
+
+  private modelBomDraftDecimalDisplay(value?: Prisma.Decimal | number | null) {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    return String(decimalToNumber(value));
+  }
+
+  private modelBomDraftQuantityDisplay(value?: Prisma.Decimal | number | null, unit?: string | null) {
+    return [this.modelBomDraftDecimalDisplay(value), String(unit || '').trim()].filter(Boolean).join(' ');
+  }
+
+  private modelBomDraftStructureText(line?: {
+    lineType?: string | null;
+    componentNo?: string | null;
+    parentComponentNo?: string | null;
+  }) {
+    if (!line) {
+      return '';
+    }
+    if (this.normalizeModelBomLineType(line.lineType) === 'COMPONENT') {
+      return `组件 ${this.normalizeModelBomComponentNo(line.componentNo) || '未编号'}`;
+    }
+    const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
+    return parentComponentNo ? `子零件 -> ${parentComponentNo}` : '独立零件';
+  }
+
+  private modelBomDraftDiffField(label: string, draftValue: string, existingValue: string, draftComparable?: string, existingComparable?: string) {
+    return {
+      label,
+      draftValue,
+      existingValue,
+      changed: (draftComparable ?? this.modelBomDraftComparableText(draftValue)) !== (existingComparable ?? this.modelBomDraftComparableText(existingValue))
+    };
+  }
+
+  private modelBomDraftExistingBomDiffFields(draftLine?: ModelBomDraftLineForDiff, existingLine?: ModelBomDraftExistingLineForDiff) {
+    return [
+      this.modelBomDraftDiffField('结构', this.modelBomDraftStructureText(draftLine), this.modelBomDraftStructureText(existingLine)),
+      this.modelBomDraftDiffField('零件编码', draftLine?.partCode || '', existingLine?.partCodeSnapshot || ''),
+      this.modelBomDraftDiffField('零件名称', draftLine?.partName || '', existingLine?.partNameSnapshot || ''),
+      this.modelBomDraftDiffField('零件类型', draftLine?.partCategory || '', existingLine?.partCategory || ''),
+      this.modelBomDraftDiffField(
+        '默认数量',
+        this.modelBomDraftQuantityDisplay(draftLine?.defaultQuantity, draftLine?.unit),
+        this.modelBomDraftQuantityDisplay(existingLine?.defaultQuantity, existingLine?.unitSnapshot)
+      ),
+      this.modelBomDraftDiffField('单位', draftLine?.unit || '', existingLine?.unitSnapshot || ''),
+      this.modelBomDraftDiffField('厚度', this.modelBomDraftDecimalDisplay(draftLine?.partThickness), this.modelBomDraftDecimalDisplay(existingLine?.partThicknessSnapshot)),
+      this.modelBomDraftDiffField('规格', draftLine?.partSpecification || '', existingLine?.partSpecificationSnapshot || ''),
+      this.modelBomDraftDiffField(
+        '默认工艺',
+        draftLine?.defaultProcessRoute || '',
+        existingLine?.defaultProcessRoute || '',
+        this.modelBomDraftComparableProcess(draftLine?.defaultProcessRoute),
+        this.modelBomDraftComparableProcess(existingLine?.defaultProcessRoute)
+      )
+    ];
+  }
+
+  private modelBomDraftLineSnapshot(line?: ModelBomDraftLineForDiff) {
+    if (!line) {
+      return null;
+    }
+    return {
+      sourceRowNo: line.sourceRowNo ?? null,
+      orderNo: line.orderNo || null,
+      structureText: this.modelBomDraftStructureText(line),
+      partCode: line.partCode,
+      partName: line.partName,
+      partCategory: line.partCategory || null,
+      defaultQuantityText: this.modelBomDraftQuantityDisplay(line.defaultQuantity, line.unit),
+      unit: line.unit,
+      partThicknessText: this.modelBomDraftDecimalDisplay(line.partThickness),
+      partSpecification: line.partSpecification || null,
+      defaultProcessRoute: line.defaultProcessRoute || null
+    };
+  }
+
+  private modelBomDraftExistingLineSnapshot(line?: ModelBomDraftExistingLineForDiff) {
+    if (!line) {
+      return null;
+    }
+    return {
+      id: line.id || null,
+      structureText: this.modelBomDraftStructureText(line),
+      partCode: line.partCodeSnapshot,
+      partName: line.partNameSnapshot,
+      partCategory: line.partCategory || null,
+      defaultQuantityText: this.modelBomDraftQuantityDisplay(line.defaultQuantity, line.unitSnapshot),
+      unit: line.unitSnapshot,
+      partThicknessText: this.modelBomDraftDecimalDisplay(line.partThicknessSnapshot),
+      partSpecification: line.partSpecificationSnapshot || null,
+      defaultProcessRoute: line.defaultProcessRoute || null
+    };
+  }
+
+  private modelBomDraftExistingBomDiffReview(
+    bom: {
+      lines: ModelBomDraftExistingLineForDiff[];
+    },
+    draftLines: ModelBomDraftLineForDiff[]
+  ) {
+    const existingByKey = new Map(
+      bom.lines.map((line) => [
+        this.modelBomDraftLineKey({
+          partCode: line.partCodeSnapshot,
+          lineType: line.lineType,
+          componentNo: line.componentNo,
+          parentComponentNo: line.parentComponentNo
+        }),
+        line
+      ])
+    );
+    const draftKeys = new Set<string>();
+    const changedFields = new Set<string>();
+    let sameLineCount = 0;
+    let changedLineCount = 0;
+    let newLineCount = 0;
+    const diffLines: Array<{
+      key: string;
+      status: 'SAME' | 'CHANGED' | 'DRAFT_ONLY' | 'EXISTING_ONLY';
+      structureText: string;
+      partCode: string;
+      partName: string;
+      draftLine: ReturnType<InventoryService['modelBomDraftLineSnapshot']>;
+      existingLine: ReturnType<InventoryService['modelBomDraftExistingLineSnapshot']>;
+      fields: ReturnType<InventoryService['modelBomDraftExistingBomDiffFields']>;
+    }> = [];
+
+    for (const line of draftLines) {
+      const key = this.modelBomDraftLineKey(line);
+      draftKeys.add(key);
+      const existingLine = existingByKey.get(key);
+      const fields = this.modelBomDraftExistingBomDiffFields(line, existingLine);
+      if (!existingLine) {
+        newLineCount += 1;
+        diffLines.push({
+          key,
+          status: 'DRAFT_ONLY',
+          structureText: this.modelBomDraftStructureText(line),
+          partCode: line.partCode,
+          partName: line.partName,
+          draftLine: this.modelBomDraftLineSnapshot(line),
+          existingLine: null,
+          fields
+        });
+        continue;
+      }
+      const lineChangedFields = fields.filter((field) => field.changed).map((field) => field.label);
+      if (lineChangedFields.length > 0) {
+        changedLineCount += 1;
+        lineChangedFields.forEach((field) => changedFields.add(field));
+      } else {
+        sameLineCount += 1;
+      }
+      diffLines.push({
+        key,
+        status: lineChangedFields.length > 0 ? 'CHANGED' : 'SAME',
+        structureText: this.modelBomDraftStructureText(line),
+        partCode: line.partCode,
+        partName: line.partName,
+        draftLine: this.modelBomDraftLineSnapshot(line),
+        existingLine: this.modelBomDraftExistingLineSnapshot(existingLine),
+        fields
+      });
+    }
+
+    for (const [key, existingLine] of existingByKey.entries()) {
+      if (draftKeys.has(key)) {
+        continue;
+      }
+      diffLines.push({
+        key,
+        status: 'EXISTING_ONLY',
+        structureText: this.modelBomDraftStructureText(existingLine),
+        partCode: existingLine.partCodeSnapshot,
+        partName: existingLine.partNameSnapshot,
+        draftLine: null,
+        existingLine: this.modelBomDraftExistingLineSnapshot(existingLine),
+        fields: this.modelBomDraftExistingBomDiffFields(undefined, existingLine)
+      });
+    }
+
+    const removedLineCount = diffLines.filter((line) => line.status === 'EXISTING_ONLY').length;
+    return {
+      summary: {
+        sameLineCount,
+        changedLineCount,
+        newLineCount,
+        removedLineCount,
+        changedFields: [...changedFields]
+      },
+      lines: diffLines
+    };
+  }
+
+  private orderImportBomDefaultQuantity(row: OrderImportRowWithFile) {
+    const candidates = [row.unitUsage, row.orderQuantity, row.demandQuantity]
+      .map((value) => (value === null || value === undefined ? 0 : decimalToNumber(value)))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    return candidates[0] || 1;
+  }
+
+  private orderImportPreviewToken(input: {
+    sessionId: string;
+    status: string;
+    files: Array<{
+      id: string;
+      fileHash: string;
+      rowCount: number;
+      acceptedRowCount: number;
+      duplicateRowCount: number;
+      createdAt: Date;
+    }>;
+  }) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          sessionId: input.sessionId,
+          status: input.status,
+          files: input.files.map((file) => ({
+            id: file.id,
+            fileHash: file.fileHash,
+            rowCount: file.rowCount,
+            acceptedRowCount: file.acceptedRowCount,
+            duplicateRowCount: file.duplicateRowCount,
+            createdAt: file.createdAt.toISOString()
+          }))
+        })
+      )
+      .digest('hex');
+  }
+
+  private orderImportRowToMaterialImportRow(row: OrderImportRowWithFile): ParsedMaterialImportRow {
+    const partThickness = row.partThickness === null || row.partThickness === undefined ? null : decimalToNumber(row.partThickness);
+    const raw = {
+      来源: 'ERP上传净表提取',
+      来源文件: row.file?.fileName || null,
+      来源工作表: row.file?.sheetName || 'ERP上传净表',
+      来源行: row.sourceRowNo,
+      订单编号: row.orderNo,
+      客户名称: row.customerName,
+      机型项目: row.projectModel || null,
+      行类型: row.lineType,
+      组件编号: row.componentNo || null,
+      所属组件: row.parentComponentNo || null,
+      零件编码: row.partCode,
+      零件名称: row.partName,
+      单位: row.unit,
+      图号: row.drawingNo || null,
+      版本: row.drawingVersion || null,
+      图纸日期: this.formatDateOnly(row.drawingDate) || null,
+      图纸状态: row.drawingStatus || null,
+      厚度: partThickness,
+      规格: row.partSpecification || null,
+      默认工艺: row.processRoute || null
+    };
+    const parsedRow: ParsedMaterialImportRow = {
+      sourceRowNo: row.sourceRowNo,
+      partCode: row.partCode,
+      partName: row.partName,
+      unit: row.unit,
+      partSpecification: row.partSpecification,
+      defaultProcessRoute: row.processRoute,
+      drawingNo: row.drawingNo,
+      drawingVersion: row.drawingVersion || null,
+      drawingDate: row.drawingDate,
+      drawingStatus: row.drawingStatus,
+      partThickness,
+      projectModel: null,
+      stockAlertEnabled: null,
+      stockAlertQuantity: null,
+      remark: `来自订单导入 ${row.orderNo} 第 ${row.sourceRowNo} 行，仅作为零件库草稿预览`,
+      raw,
+      rowHash: '',
+      issues: [],
+      errorCount: 0,
+      warningCount: 0
+    };
+    parsedRow.issues = this.buildMaterialImportRowIssues(parsedRow, '', '', null);
+    const counts = this.countMaterialImportIssues(parsedRow.issues);
+    parsedRow.errorCount = counts.errorCount;
+    parsedRow.warningCount = counts.warningCount;
+    parsedRow.rowHash = this.hashMaterialImportRow(parsedRow);
+    return parsedRow;
+  }
+
+  private orderImportRowsToMaterialApplicabilityImportRows(rows: OrderImportRowWithFile[]): ParsedMaterialApplicabilityImportRow[] {
+    const rowsByScope = new Map<string, ParsedMaterialApplicabilityImportRow>();
+    for (const row of rows) {
+      const scopeKey = [
+        row.partCode.trim().toLocaleLowerCase(),
+        row.customerName.trim().toLocaleLowerCase(),
+        this.normalizeMaterialScopeKey(row.projectModel)
+      ].join('|');
+      if (rowsByScope.has(scopeKey)) {
+        continue;
+      }
+      const raw = {
+        来源: 'ERP上传净表提取',
+        来源文件: row.file?.fileName || null,
+        来源工作表: row.file?.sheetName || 'ERP上传净表',
+        来源行: row.sourceRowNo,
+        订单编号: row.orderNo,
+        客户名称: row.customerName,
+        机型项目: row.projectModel || null,
+        零件编码: row.partCode,
+        零件名称: row.partName
+      };
+      const parsedRow: ParsedMaterialApplicabilityImportRow = {
+        sourceRowNo: row.sourceRowNo,
+        partCode: row.partCode,
+        customerCode: null,
+        customerName: row.customerName,
+        projectModel: row.projectModel,
+        remark: '来自订单导入净表提取，仅作为零件适用范围草稿预览',
+        status: 'ENABLED',
+        raw,
+        rowHash: '',
+        issues: [],
+        errorCount: 0,
+        warningCount: 0
+      };
+      parsedRow.issues = this.buildMaterialApplicabilityImportRowIssues(parsedRow, '', 'ENABLED');
+      const counts = this.countMaterialImportIssues(parsedRow.issues);
+      parsedRow.errorCount = counts.errorCount;
+      parsedRow.warningCount = counts.warningCount;
+      parsedRow.rowHash = this.hashMaterialApplicabilityImportRow(parsedRow);
+      rowsByScope.set(scopeKey, parsedRow);
+    }
+    return [...rowsByScope.values()];
   }
 
   private businessDateTimeText(value = new Date()) {
@@ -1641,6 +2994,7 @@ export class InventoryService {
                 partName: row.partName,
                 unit: row.unit,
                 partSpecification: row.partSpecification,
+                defaultProcessRoute: row.defaultProcessRoute,
                 drawingNo: row.drawingNo,
                 drawingVersion: row.drawingVersion,
                 drawingDate: row.drawingDate,
@@ -1801,32 +3155,36 @@ export class InventoryService {
       const committedMaterialCodes: string[] = [];
 
       for (const row of materialRows) {
-        const key = row.partCode.trim().toLocaleLowerCase();
-        const existing = existingByCode.get(key);
-        // 库存报警导入只写 Material 基础资料提醒，不创建订单、生产任务或库存流水。
-        const stockAlertData = this.materialImportStockAlertData(row);
-        if (existing) {
-          await tx.material.update({
-            where: { id: existing.id },
-            data: {
-              partCode: row.partCode,
-              partName: row.partName,
-              unit: row.unit,
-              partSpecification: row.partSpecification || null,
-              status: 'ENABLED',
-              ...stockAlertData
+      const key = row.partCode.trim().toLocaleLowerCase();
+      const existing = existingByCode.get(key);
+      // 库存报警导入只写 Material 基础资料提醒，不创建订单、生产任务或库存流水。
+      // 默认工艺导入也只写 Material 后续下单建议，不自动生成流程、订单或生产任务。
+      const stockAlertData = this.materialImportStockAlertData(row);
+      const defaultProcessRoute = await this.normalizeMaterialDefaultProcessRoute(row.defaultProcessRoute);
+      if (existing) {
+        await tx.material.update({
+          where: { id: existing.id },
+          data: {
+            partCode: row.partCode,
+            partName: row.partName,
+            unit: row.unit,
+            partSpecification: row.partSpecification || null,
+            defaultProcessRoute,
+            status: 'ENABLED',
+            ...stockAlertData
             }
           });
           updatedCount += 1;
         } else {
           const created = await tx.material.create({
             data: {
-              partCode: row.partCode,
-              partName: row.partName,
-              unit: row.unit,
-              partSpecification: row.partSpecification || null,
-              status: 'ENABLED',
-              ...stockAlertData
+            partCode: row.partCode,
+            partName: row.partName,
+            unit: row.unit,
+            partSpecification: row.partSpecification || null,
+            defaultProcessRoute,
+            status: 'ENABLED',
+            ...stockAlertData
             }
           });
           existingByCode.set(key, created);
@@ -2094,6 +3452,93 @@ export class InventoryService {
     };
   }
 
+  async buildMaterialApplicabilitiesExport(materialId: string): Promise<Uint8Array> {
+    const material = await this.prisma.material.findUnique({
+      where: { id: materialId },
+      select: {
+        id: true,
+        partCode: true,
+        partName: true,
+        unit: true,
+        partSpecification: true,
+        status: true,
+        applicabilities: {
+          include: {
+            customer: {
+              select: {
+                id: true,
+                customerName: true,
+                customerCode: true
+              }
+            }
+          },
+          orderBy: [{ status: 'asc' }, { customerScopeKey: 'asc' }, { projectModelScopeKey: 'asc' }]
+        }
+      }
+    });
+    if (!material) {
+      throw new NotFoundException('零件基础资料不存在');
+    }
+
+    // 零件适用范围导出只读取当前零件适用规则，不生成订单、不占用库存、不改 BOM 或生产任务。
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const headers = [
+      '序号',
+      '零件编码',
+      '零件名称',
+      '单位',
+      '成品规格',
+      '客户范围',
+      '客户编码',
+      '客户名称',
+      '机型/项目范围',
+      '机型/项目',
+      '适用范围',
+      '状态',
+      '备注'
+    ];
+    const exportRows =
+      material.applicabilities.length > 0
+        ? material.applicabilities.map((item, index) => [
+            index + 1,
+            material.partCode,
+            material.partName,
+            material.unit,
+            material.partSpecification || '',
+            item.customerId ? '指定客户' : '全部客户',
+            item.customer?.customerCode || '',
+            item.customer?.customerName || item.customerNameSnapshot || '',
+            item.projectModel ? '指定机型/项目' : '全部机型/项目',
+            item.projectModel || '',
+            this.serializeMaterialApplicability(item).scopeLabel,
+            this.materialMemoryExportStatusText(item.status),
+            item.remark || ''
+          ])
+        : [['当前零件没有维护适用范围']];
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '适用范围',
+      title: '零件适用范围导出',
+      scopeText: [
+        `零件：${material.partCode} / ${material.partName}`,
+        `单位：${material.unit}`,
+        `成品规格：${material.partSpecification || '-'}`,
+        `零件状态：${this.materialMemoryExportStatusText(material.status)}`
+      ].join('；'),
+      headers,
+      rows: exportRows
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
   async saveMaterialApplicability(materialId: string, dto: SaveMaterialApplicabilityDto) {
     const material = await this.prisma.material.findUnique({ where: { id: materialId }, select: { id: true } });
     if (!material) {
@@ -2205,8 +3650,6 @@ export class InventoryService {
     projectModelScopeKey: string;
     remark: string | null;
     status: CommonStatus;
-    createdAt: Date;
-    updatedAt: Date;
     customer?: { id: string; customerName: string; customerCode: string } | null;
   }) {
     const customerName = item.customer?.customerName || item.customerNameSnapshot || '';
@@ -2223,9 +3666,7 @@ export class InventoryService {
       projectModelScopeKey: item.projectModelScopeKey,
       scopeLabel: `${customerScopeLabel} / ${projectScopeLabel}`,
       remark: item.remark,
-      status: item.status,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt
+      status: item.status
     };
   }
 
@@ -2325,36 +3766,118 @@ export class InventoryService {
   }
 
   private modelBomCustomerScopeBroadens(previousMode: ModelBomCustomerScopeMode, nextMode: ModelBomCustomerScopeMode) {
-    const rank: Record<ModelBomCustomerScopeMode, number> = {
-      PRIVATE: 1,
-      SELECTED: 2,
-      ALL: 3
-    };
-    return rank[nextMode] > rank[previousMode];
+    return previousMode !== 'ALL' && nextMode === 'ALL';
   }
 
   private modelBomProjectScopeBroadens(previousProjectModel?: string | null, nextProjectModel?: string | null) {
     return Boolean(String(previousProjectModel || '').trim()) && !String(nextProjectModel || '').trim();
   }
 
-  private modelBomSelectedCustomerScopeAdds(
+  private modelBomCustomerScopeExposesNewCustomers(
     row: { customerId?: string | null; customerScopeMode?: string | null; customerScopes?: Array<{ customerId: string; status?: CommonStatus }> },
     nextMode: ModelBomCustomerScopeMode,
-    nextCustomerIds: string[]
+    nextCustomerId?: string | null,
+    nextCustomerIds: string[] = []
   ) {
-    if (this.modelBomCustomerScopeModeFromRow(row) !== 'SELECTED' || nextMode !== 'SELECTED') {
+    const previousMode = this.modelBomCustomerScopeModeFromRow(row);
+    if (previousMode === 'ALL' || nextMode === 'ALL') {
       return false;
     }
-    const previousCustomerIds = new Set(
-      (row.customerScopes || [])
+    const previousCustomerIds = new Set(this.modelBomVisibleCustomerIds(row, previousMode));
+    const nextVisibleCustomerIds =
+      nextMode === 'PRIVATE'
+        ? [String(nextCustomerId || '').trim()].filter(Boolean)
+        : [...new Set(nextCustomerIds.map((customerId) => String(customerId || '').trim()).filter(Boolean))];
+
+    /* 新增可见客户才需要管理员审批；同一客户从 PRIVATE 改为 SELECTED 不算扩大。 */
+    return nextVisibleCustomerIds.some((customerId) => !previousCustomerIds.has(customerId));
+  }
+
+  private modelBomVisibleCustomerIds(
+    row: { customerId?: string | null; customerScopes?: Array<{ customerId: string; status?: CommonStatus }> },
+    mode: ModelBomCustomerScopeMode
+  ) {
+    if (mode === 'PRIVATE') {
+      return [String(row.customerId || '').trim()].filter(Boolean);
+    }
+    if (mode === 'SELECTED') {
+      return [
+        ...new Set(
+          (row.customerScopes || [])
+            .filter((scope) => !scope.status || scope.status === 'ENABLED')
+            .map((scope) => String(scope.customerId || '').trim())
+            .filter(Boolean)
+        )
+      ];
+    }
+    return [];
+  }
+
+  private modelBomCurrentScopeApprovalSnapshot(row: {
+    bomName: string;
+    customerId?: string | null;
+    customerNameSnapshot?: string | null;
+    customerScopeMode?: string | null;
+    customerScopeKey: string;
+    projectModel: string;
+    projectModelScopeKey: string;
+    customerScopes?: Array<{ customerId: string; customerNameSnapshot?: string | null; status?: CommonStatus }>;
+  }): Prisma.InputJsonValue {
+    return {
+      bomName: row.bomName,
+      customerScopeMode: this.modelBomCustomerScopeModeFromRow(row),
+      customerId: row.customerId || null,
+      customerNameSnapshot: row.customerNameSnapshot || null,
+      customerScopeKey: row.customerScopeKey,
+      projectModel: row.projectModel,
+      projectModelScopeKey: row.projectModelScopeKey,
+      customerIds: (row.customerScopes || [])
         .filter((scope) => !scope.status || scope.status === 'ENABLED')
-        .map((scope) => scope.customerId)
+        .map((scope) => ({
+          customerId: scope.customerId,
+          customerName: scope.customerNameSnapshot || ''
+        }))
+    };
+  }
+
+  private modelBomRequestedScopeApprovalSnapshot(scope: Awaited<ReturnType<InventoryService['resolveModelBomScope']>>): Prisma.InputJsonValue {
+    return {
+      bomName: scope.data.bomName,
+      customerScopeMode: scope.data.customerScopeMode,
+      customerId: scope.data.customerId || null,
+      customerNameSnapshot: scope.data.customerNameSnapshot || null,
+      customerScopeKey: scope.data.customerScopeKey,
+      projectModel: scope.data.projectModel,
+      projectModelScopeKey: scope.data.projectModelScopeKey,
+      customerIds: scope.selectedCustomers.map((customer) => ({
+        customerId: customer.id,
+        customerName: customer.customerName,
+        customerCode: customer.customerCode
+      }))
+    };
+  }
+
+  private modelBomScopeApprovalMatchesRequest(
+    row: {
+      requestedCustomerScopeMode: string;
+      requestedScopeKey: string;
+      requestedProjectModelScopeKey: string;
+    },
+    scope: Awaited<ReturnType<InventoryService['resolveModelBomScope']>>
+  ) {
+    return (
+      row.requestedCustomerScopeMode === scope.data.customerScopeMode &&
+      row.requestedScopeKey === scope.data.customerScopeKey &&
+      row.requestedProjectModelScopeKey === scope.data.projectModelScopeKey
     );
-    return nextCustomerIds.some((customerId) => !previousCustomerIds.has(customerId));
+  }
+
+  private nextModelBomScopeApprovalRequestNo() {
+    return `BOM-SCOPE-${businessDateTimeKey()}-${randomUUID().slice(0, 6).toUpperCase()}`;
   }
 
   private modelBomInclude(
-    orderBy: Prisma.ModelBomLineOrderByWithRelationInput[] = [{ status: 'asc' }, { sortOrder: 'asc' }, { createdAt: 'asc' }]
+    orderBy: Prisma.ModelBomLineOrderByWithRelationInput[] = [{ status: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }]
   ): Prisma.ModelBomInclude {
     return {
       customer: { select: { id: true, customerName: true, customerCode: true } },
@@ -2368,6 +3891,315 @@ export class InventoryService {
         orderBy
       }
     };
+  }
+
+  private async createModelBomRevision(
+    tx: Prisma.TransactionClient,
+    bomId: string,
+    action: string,
+    changedBy?: string | null,
+    changeRemark?: string | null
+  ) {
+    const row = await tx.modelBom.findUnique({
+      where: { id: bomId },
+      include: {
+        customerScopes: {
+          where: { status: 'ENABLED' },
+          orderBy: [{ customerNameSnapshot: 'asc' }]
+        },
+        lines: {
+          include: {
+            defaultDrawingRevision: {
+              select: {
+                id: true,
+                drawingNo: true,
+                drawingVersion: true,
+                drawingDate: true,
+                drawingStatus: true,
+                drawingFileName: true,
+                drawingFileUrl: true,
+                status: true
+              }
+            }
+          },
+          orderBy: [{ status: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }]
+        }
+      }
+    });
+    if (!row) {
+      throw new NotFoundException('机型零件包不存在，无法记录 BOM 版本');
+    }
+    const latestRevision = await tx.modelBomRevision.aggregate({
+      where: { bomId },
+      _max: { revisionNo: true }
+    });
+    const snapshotJson: Prisma.InputJsonValue = {
+      bom: {
+        id: row.id,
+        bomName: row.bomName,
+        customerId: row.customerId,
+        customerNameSnapshot: row.customerNameSnapshot,
+        projectModel: row.projectModel,
+        customerScopeMode: row.customerScopeMode,
+        customerScopeKey: row.customerScopeKey,
+        projectModelScopeKey: row.projectModelScopeKey,
+        sourceBomId: row.sourceBomId,
+        sourceBomNameSnapshot: row.sourceBomNameSnapshot,
+        isCommon: row.isCommon,
+        commonSortOrder: row.commonSortOrder,
+        remark: row.remark,
+        status: row.status,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString()
+      },
+      customerScopes: row.customerScopes.map((scope) => ({
+        customerId: scope.customerId,
+        customerNameSnapshot: scope.customerNameSnapshot,
+        status: scope.status
+      })),
+      lines: row.lines.map((line) => ({
+        id: line.id,
+        materialId: line.materialId,
+        partCodeSnapshot: line.partCodeSnapshot,
+        partNameSnapshot: line.partNameSnapshot,
+        unitSnapshot: line.unitSnapshot,
+        partSpecificationSnapshot: line.partSpecificationSnapshot,
+        partThicknessSnapshot: decimalToNumber(line.partThicknessSnapshot),
+        lineType: line.lineType,
+        partCategory: line.partCategory,
+        componentNo: line.componentNo,
+        parentComponentNo: line.parentComponentNo,
+        defaultDrawingRevisionId: line.defaultDrawingRevisionId,
+        defaultDrawingRevision: line.defaultDrawingRevision
+          ? {
+              id: line.defaultDrawingRevision.id,
+              drawingNo: line.defaultDrawingRevision.drawingNo,
+              drawingVersion: line.defaultDrawingRevision.drawingVersion,
+              drawingDate: line.defaultDrawingRevision.drawingDate?.toISOString() || null,
+              drawingStatus: line.defaultDrawingRevision.drawingStatus,
+              drawingFileName: line.defaultDrawingRevision.drawingFileName,
+              drawingFileUrl: line.defaultDrawingRevision.drawingFileUrl,
+              status: line.defaultDrawingRevision.status
+            }
+          : null,
+        defaultProcessRoute: line.defaultProcessRoute,
+        defaultQuantity: decimalToNumber(line.defaultQuantity),
+        remark: line.remark,
+        sortOrder: line.sortOrder,
+        status: line.status,
+        createdAt: line.createdAt.toISOString(),
+        updatedAt: line.updatedAt.toISOString()
+      }))
+    };
+    const revision = await tx.modelBomRevision.create({
+      data: {
+        bomId,
+        revisionNo: (latestRevision._max.revisionNo ?? 0) + 1,
+        action,
+        changedBy: String(changedBy || '').trim() || null,
+        changeRemark: String(changeRemark || '').trim() || null,
+        snapshotJson
+      }
+    });
+    return this.serializeModelBomRevision(revision);
+  }
+
+  async modelBomRevisions(bomId: string, query: ModelBomRevisionQueryDto) {
+    const existing = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true } });
+    if (!existing) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const limit = Math.min(Math.max(Number(query.limit || 20), 1), 100);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, rows] = await Promise.all([
+      this.prisma.modelBomRevision.count({ where: { bomId } }),
+      this.prisma.modelBomRevision.findMany({
+        where: { bomId },
+        orderBy: [{ revisionNo: 'desc' }, { id: 'desc' }],
+        skip: offset,
+        take: limit
+      })
+    ]);
+    const items = rows.map((row) => this.serializeModelBomRevision(row));
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async modelBomScopeApprovalRequests(query: ModelBomScopeApprovalRequestQueryDto = {}) {
+    const limit = Math.min(Math.max(Number(query.limit || 20), 1), 100);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const where: Prisma.ModelBomScopeApprovalRequestWhereInput = {};
+    if (query.bomId?.trim()) {
+      where.bomId = query.bomId.trim();
+    }
+    if (query.status && query.status !== 'ALL') {
+      where.status = query.status;
+    }
+    if (query.requestedCustomerScopeMode) {
+      where.requestedCustomerScopeMode = query.requestedCustomerScopeMode;
+    }
+    if (query.requestedScopeKey?.trim()) {
+      where.requestedScopeKey = query.requestedScopeKey.trim();
+    }
+    if (query.requestedProjectModelScopeKey?.trim()) {
+      where.requestedProjectModelScopeKey = query.requestedProjectModelScopeKey.trim();
+    }
+    if (!includeTestFixtures) {
+      where.NOT = this.modelBomScopeApprovalFixtureWhere();
+    }
+    const [totalCount, rows] = await Promise.all([
+      this.prisma.modelBomScopeApprovalRequest.count({ where }),
+      this.prisma.modelBomScopeApprovalRequest.findMany({
+        where,
+        include: { bom: { select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: offset,
+        take: limit
+      })
+    ]);
+    return {
+      items: rows.map((row) => this.serializeModelBomScopeApprovalRequest(row)),
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + rows.length < totalCount
+    };
+  }
+
+  async createModelBomScopeApprovalRequest(bomId: string, dto: CreateModelBomScopeApprovalRequestDto) {
+    const requestedBy = String(dto.requestedBy || '').trim();
+    const reason = String(dto.requestReason || '').trim();
+    if (!requestedBy) {
+      throw new BadRequestException('请填写 BOM 范围申请人');
+    }
+    if (!reason) {
+      throw new BadRequestException('请填写 BOM 范围扩大申请原因');
+    }
+    const existing = await this.prisma.modelBom.findUnique({
+      where: { id: bomId },
+      select: {
+        id: true,
+        bomName: true,
+        customerId: true,
+        customerNameSnapshot: true,
+        customerScopeMode: true,
+        customerScopeKey: true,
+        projectModel: true,
+        projectModelScopeKey: true,
+        status: true,
+        customerScopes: { where: { status: 'ENABLED' }, select: { customerId: true, customerNameSnapshot: true, status: true } }
+      }
+    });
+    if (!existing) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const scope = await this.resolveModelBomScope(dto);
+    const previousScopeMode = this.modelBomCustomerScopeModeFromRow(existing);
+    const nextScopeMode = scope.data.customerScopeMode as ModelBomCustomerScopeMode;
+    const nextScopeCustomerIds = scope.selectedCustomers.map((customer) => customer.id);
+    const scopeBroadens =
+      this.modelBomCustomerScopeBroadens(previousScopeMode, nextScopeMode) ||
+      this.modelBomCustomerScopeExposesNewCustomers(existing, nextScopeMode, scope.data.customerId, nextScopeCustomerIds) ||
+      this.modelBomProjectScopeBroadens(existing.projectModel, scope.data.projectModel);
+    if (!scopeBroadens) {
+      throw new BadRequestException('只有扩大 BOM 可见客户或机型范围时才需要管理员审批申请');
+    }
+    const duplicateApproval = await this.prisma.modelBomScopeApprovalRequest.findFirst({
+      where: {
+        bomId,
+        requestedCustomerScopeMode: scope.data.customerScopeMode,
+        requestedScopeKey: scope.data.customerScopeKey,
+        requestedProjectModelScopeKey: scope.data.projectModelScopeKey,
+        status: { in: ['PENDING', 'APPROVED'] },
+        usedAt: null
+      },
+      select: { requestNo: true, status: true }
+    });
+    if (duplicateApproval) {
+      throw new BadRequestException(`相同 BOM 范围已有未使用审批申请：${duplicateApproval.requestNo}`);
+    }
+    const currentScopeJson = this.modelBomCurrentScopeApprovalSnapshot(existing);
+    const requestedScopeJson = this.modelBomRequestedScopeApprovalSnapshot(scope);
+    try {
+      const row = await this.prisma.modelBomScopeApprovalRequest.create({
+        data: {
+          requestNo: this.nextModelBomScopeApprovalRequestNo(),
+          bomId,
+          requestedBomName: scope.data.bomName,
+          requestedCustomerScopeMode: scope.data.customerScopeMode,
+          requestedCustomerId: scope.data.customerId,
+          requestedCustomerNameSnapshot: scope.data.customerNameSnapshot,
+          requestedCustomerIds: scope.selectedCustomers.map((customer) => ({
+            customerId: customer.id,
+            customerName: customer.customerName,
+            customerCode: customer.customerCode
+          })) as Prisma.InputJsonValue,
+          requestedProjectModel: scope.data.projectModel,
+          requestedScopeKey: scope.data.customerScopeKey,
+          requestedProjectModelScopeKey: scope.data.projectModelScopeKey,
+          currentScopeJson,
+          requestedScopeJson,
+          reason,
+          requestedBy
+        },
+        include: { bom: { select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true } } }
+      });
+      return this.serializeModelBomScopeApprovalRequest(row);
+    } catch (error) {
+      this.handleModelBomScopeApprovalOpenUniqueError(error);
+    }
+  }
+
+  async approveModelBomScopeApprovalRequest(requestId: string, dto: ReviewModelBomScopeApprovalRequestDto) {
+    return this.reviewModelBomScopeApprovalRequest(requestId, dto, 'APPROVED');
+  }
+
+  async rejectModelBomScopeApprovalRequest(requestId: string, dto: ReviewModelBomScopeApprovalRequestDto) {
+    return this.reviewModelBomScopeApprovalRequest(requestId, dto, 'REJECTED');
+  }
+
+  private async reviewModelBomScopeApprovalRequest(
+    requestId: string,
+    dto: ReviewModelBomScopeApprovalRequestDto,
+    nextStatus: 'APPROVED' | 'REJECTED'
+  ) {
+    const reviewedBy = String(dto.reviewedBy || '').trim();
+    if (!reviewedBy) {
+      throw new BadRequestException('请填写管理员审批人');
+    }
+    const existing = await this.prisma.modelBomScopeApprovalRequest.findUnique({ where: { id: requestId }, select: { id: true, status: true } });
+    if (!existing) {
+      throw new NotFoundException('BOM 范围审批申请不存在');
+    }
+    if (existing.status !== 'PENDING') {
+      throw new BadRequestException('只有待审批的 BOM 范围申请可以审批');
+    }
+    const now = new Date();
+    const row = await this.prisma.modelBomScopeApprovalRequest.update({
+      where: { id: requestId },
+      data:
+        nextStatus === 'APPROVED'
+          ? {
+              status: 'APPROVED',
+              approvedBy: reviewedBy,
+              approvedAt: now,
+              reviewRemark: String(dto.reviewRemark || '').trim() || null
+            }
+          : {
+              status: 'REJECTED',
+              rejectedBy: reviewedBy,
+              rejectedAt: now,
+              reviewRemark: String(dto.reviewRemark || '').trim() || null
+            },
+      include: { bom: { select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true } } }
+    });
+    return this.serializeModelBomScopeApprovalRequest(row);
   }
 
   private async nextModelBomCommonSortOrder(customerScopeKey: string, projectModelScopeKey: string) {
@@ -2422,6 +4254,7 @@ export class InventoryService {
           partName: true,
           unit: true,
           partSpecification: true,
+          defaultProcessRoute: true,
           status: true,
           drawingRevisions: {
             where: { status: 'ENABLED' },
@@ -2503,6 +4336,7 @@ export class InventoryService {
     const status = query.status === 'ALL' ? undefined : query.status || 'ENABLED';
     const projectModel = query.projectModel?.trim();
     const withPage = query.withPage === 'true';
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
     const offset = Math.max(Number(query.offset || 0), 0);
     const where: Prisma.ModelBomWhereInput = {
@@ -2527,12 +4361,21 @@ export class InventoryService {
     const rows = await this.prisma.modelBom.findMany({
       where,
       include: this.modelBomInclude(),
-      orderBy: [{ updatedAt: 'desc' }, { projectModel: 'asc' }, { bomName: 'asc' }]
+      orderBy: [
+        { customerScopeKey: 'asc' },
+        { projectModelScopeKey: 'asc' },
+        { isCommon: 'desc' },
+        { commonSortOrder: 'asc' },
+        { projectModel: 'asc' },
+        { bomName: 'asc' },
+        { id: 'asc' }
+      ]
     });
+    const businessRows = includeTestFixtures ? rows : rows.filter((row) => !this.isDisabledTestFixtureModelBom(row));
     const visibleRows =
       customerId && query.excludeGlobalAllProject === 'true'
-        ? rows.filter((row) => !(row.customerScopeMode === 'ALL' && row.projectModelScopeKey === 'ALL'))
-        : rows;
+        ? businessRows.filter((row) => !(row.customerScopeMode === 'ALL' && row.projectModelScopeKey === 'ALL'))
+        : businessRows;
     const normalizedKeyword = normalizeSearchKeyword(query.keyword);
     const filtered = normalizedKeyword
       ? visibleRows.filter((row) =>
@@ -2555,9 +4398,15 @@ export class InventoryService {
     const commonRows = query.commonOnly === 'true' ? scopedRows.filter((row) => row.isCommon) : scopedRows;
     const sortedRows = this.sortModelBomRows(commonRows, query);
     const totalCount = sortedRows.length;
+    const sameScopeCountByKey = this.modelBomSameScopeCountMap(sortedRows);
     const pageRows = withPage ? sortedRows.slice(offset, offset + limit) : sortedRows;
     const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(pageRows.flatMap((row) => row.lines)));
-    const items = pageRows.map((row) => this.serializeModelBom(row, partThicknessByScopeKey));
+    const items = pageRows.map((row) =>
+      this.serializeModelBom(row, partThicknessByScopeKey, sameScopeCountByKey.get(this.modelBomSameScopeKey(row)) || 1, {
+        previewScopeCustomers: withPage,
+        previewLines: withPage
+      })
+    );
     return withPage
       ? {
           items,
@@ -2588,6 +4437,19 @@ export class InventoryService {
       privateCount: rows.filter((row) => this.modelBomCustomerScopeModeForRow(row) === 'PRIVATE').length,
       commonCount: rows.filter((row) => row.isCommon).length
     };
+  }
+
+  private modelBomSameScopeKey(row: Pick<ModelBomSortableRow, 'customerScopeKey' | 'projectModelScopeKey'>) {
+    return `${row.customerScopeKey || 'ALL'}__${row.projectModelScopeKey || 'ALL'}`;
+  }
+
+  private modelBomSameScopeCountMap(rows: ModelBomSortableRow[]) {
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const scopeKey = this.modelBomSameScopeKey(row);
+      counts.set(scopeKey, (counts.get(scopeKey) || 0) + 1);
+    }
+    return counts;
   }
 
   private sortModelBomRows<T extends ModelBomSortableRow>(
@@ -2625,11 +4487,25 @@ export class InventoryService {
         }
       }
 
-      const updatedDiff = right.updatedAt.getTime() - left.updatedAt.getTime();
-      if (updatedDiff !== 0) {
-        return updatedDiff;
+      const leftStableKey = [
+        left.customerScopeKey || 'ALL',
+        left.projectModelScopeKey || 'ALL',
+        left.projectModel || '',
+        left.bomName || '',
+        left.id || ''
+      ].join('|');
+      const rightStableKey = [
+        right.customerScopeKey || 'ALL',
+        right.projectModelScopeKey || 'ALL',
+        right.projectModel || '',
+        right.bomName || '',
+        right.id || ''
+      ].join('|');
+      const stableDiff = leftStableKey.localeCompare(rightStableKey, 'zh-Hans-CN');
+      if (stableDiff !== 0) {
+        return stableDiff;
       }
-      return `${left.projectModel}-${left.bomName}`.localeCompare(`${right.projectModel}-${right.bomName}`, 'zh-Hans-CN');
+      return 0;
     });
   }
 
@@ -2664,21 +4540,370 @@ export class InventoryService {
     return this.serializeModelBom(row, partThicknessByScopeKey);
   }
 
+  async buildModelBomsExport(query: ModelBomQueryDto): Promise<Uint8Array> {
+    // BOM 导出只读取筛选后的零件包和明细快照，不创建订单、不覆盖正式 BOM、不改动库存或生产。
+    const rows = (await this.modelBoms({
+      ...query,
+      withPage: undefined,
+      limit: undefined,
+      offset: undefined
+    })) as any[];
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const scopeText = await this.modelBomExportScopeText(query);
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: 'BOM列表',
+      title: '机型零件包导出',
+      scopeText,
+      headers: [
+        '序号',
+        'BOM名称',
+        'BOM范围',
+        '适用范围',
+        '所属客户',
+        '机型/项目',
+        '常用',
+        '常用排序',
+        '来源BOM',
+        '有效推荐行',
+        '明细总行',
+        '组件',
+        '子零件',
+        '单独零件',
+        '未匹配父级',
+        '厚度待核对',
+        '停用明细',
+        '基础零件停用',
+        '状态',
+        '备注'
+      ],
+      rows: rows.map((row, index) => {
+        const summary = this.modelBomExportLineSummary(row.lines || []);
+        return [
+          index + 1,
+          row.bomName,
+          row.scopeTypeLabel || this.modelBomExportScopeModeLabel(row.customerScopeMode),
+          row.scopeLabel,
+          row.customerName || '',
+          row.projectModel || '全部机型/项目',
+          row.isCommon ? '是' : '否',
+          row.commonSortOrder ?? '',
+          row.sourceBomNameSnapshot || '',
+          row.lineCount ?? summary.effectiveCount,
+          (row.lines || []).length,
+          summary.componentCount,
+          summary.childPartCount,
+          summary.standalonePartCount,
+          summary.orphanPartCount,
+          summary.missingThicknessCount,
+          summary.disabledCount,
+          summary.materialDisabledCount,
+          this.modelBomExportStatusLabel(row.status),
+          row.remark || ''
+        ];
+      })
+    });
+
+    const detailRows: InventoryExportCellValue[][] = [];
+    for (const row of rows) {
+      const lines = [...(row.lines || [])].sort(
+        (left: any, right: any) =>
+          Number(left.displayOrder ?? 0) - Number(right.displayOrder ?? 0) ||
+          Number(left.sortOrder ?? 0) - Number(right.sortOrder ?? 0) ||
+          String(left.partCode || '').localeCompare(String(right.partCode || ''), 'zh-Hans-CN')
+      );
+      for (const line of lines) {
+        detailRows.push([
+          row.bomName,
+          row.scopeTypeLabel || this.modelBomExportScopeModeLabel(row.customerScopeMode),
+          row.scopeLabel,
+          row.customerName || '',
+          row.projectModel || '全部机型/项目',
+          row.isCommon ? '是' : '否',
+          this.modelBomExportStatusLabel(row.status),
+          line.displayOrder ?? '',
+          this.modelBomExportLineTypeLabel(line),
+          line.componentNo || '',
+          line.parentComponentNo || '',
+          line.partCode,
+          line.partName,
+          line.partCategory || '',
+          line.defaultQuantity ?? 0,
+          line.unit,
+          line.partThickness ?? '',
+          this.modelBomExportPartThicknessSourceLabel(line.partThicknessSource),
+          line.partSpecification || '',
+          line.drawingNo || '',
+          line.drawingVersion || '',
+          line.drawingDate || '',
+          line.drawingStatus || '',
+          line.drawingFileName || '',
+          line.drawingFileUrl || '',
+          this.modelBomExportDrawingSourceLabel(line.drawingSource),
+          line.defaultProcessRoute || '',
+          this.modelBomExportDefaultProcessSourceLabel(line.defaultProcessRouteSource),
+          this.modelBomExportStatusLabel(line.status),
+          this.modelBomExportStatusLabel(line.materialStatus),
+          line.remark || ''
+        ]);
+      }
+    }
+    if (detailRows.length === 0) {
+      detailRows.push(['', '', '', '', '', '', '', '', '', '', '', '', '当前筛选范围没有 BOM 明细', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+    }
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: 'BOM明细',
+      title: '机型零件包明细导出',
+      scopeText,
+      headers: [
+        'BOM名称',
+        'BOM范围',
+        '适用范围',
+        '所属客户',
+        '机型/项目',
+        '常用',
+        'BOM状态',
+        '显示行号',
+        '结构',
+        '组件编号',
+        '所属组件',
+        '零件编码',
+        '零件名称',
+        '零件类型',
+        '默认数量',
+        '单位',
+        '厚度',
+        '厚度来源',
+        '规格',
+        '图号',
+        '版本',
+        '图纸日期',
+        '图纸状态',
+        '图纸文件',
+        '图纸文件地址',
+        '图纸来源',
+        '默认工艺',
+        '工艺来源',
+        '明细状态',
+        '基础零件状态',
+        '备注'
+      ],
+      rows: detailRows
+    });
+
+    const scopeRows: InventoryExportCellValue[][] = [];
+    for (const row of rows) {
+      const scopeMode = row.customerScopeMode || (row.customerId ? 'PRIVATE' : 'ALL');
+      const commonCells = [
+        row.bomName,
+        row.scopeTypeLabel || this.modelBomExportScopeModeLabel(row.customerScopeMode),
+        row.scopeLabel,
+        row.projectModel || '全部机型/项目',
+        row.isCommon ? '是' : '否',
+        this.modelBomExportStatusLabel(row.status)
+      ];
+      if (scopeMode === 'SELECTED') {
+        const scopeCustomers = row.scopeCustomers || [];
+        if (scopeCustomers.length === 0) {
+          scopeRows.push([scopeRows.length + 1, ...commonCells, '指定客户可用', '', '', '当前 BOM 未维护可用客户明细，请核对适用范围']);
+          continue;
+        }
+        for (const customer of scopeCustomers) {
+          scopeRows.push([
+            scopeRows.length + 1,
+            ...commonCells,
+            '指定客户可用',
+            customer.customerCode || '',
+            customer.customerName || '',
+            '仅该客户可在对应机型/项目范围内使用该 BOM'
+          ]);
+        }
+      } else if (scopeMode === 'PRIVATE') {
+        scopeRows.push([
+          scopeRows.length + 1,
+          ...commonCells,
+          '客户私有',
+          row.customerCode || '',
+          row.customerName || '',
+          '仅所属客户可使用该 BOM'
+        ]);
+      } else {
+        scopeRows.push([scopeRows.length + 1, ...commonCells, '全部客户通用', '', '全部客户', '全部客户可在对应机型/项目范围内使用该 BOM']);
+      }
+    }
+    if (scopeRows.length === 0) {
+      scopeRows.push(['当前筛选范围没有 BOM 适用客户记录']);
+    }
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: 'BOM适用客户',
+      title: '机型零件包适用客户导出',
+      scopeText,
+      headers: [
+        '序号',
+        'BOM名称',
+        'BOM范围',
+        '适用范围',
+        '机型/项目',
+        '常用',
+        'BOM状态',
+        '客户范围类型',
+        '客户编码',
+        '客户名称',
+        '说明'
+      ],
+      rows: scopeRows
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
   async modelBomDiffReviews(bomId: string, query: ModelBomDiffReviewQueryDto) {
     const bom = await this.prisma.modelBom.findUnique({ where: { id: bomId }, select: { id: true, sourceBomId: true } });
     if (!bom) {
       throw new NotFoundException('机型零件包不存在');
     }
     const sourceBomId = query.sourceBomId?.trim() || bom.sourceBomId || undefined;
+    const where: Prisma.ModelBomDiffReviewWhereInput = {
+      targetBomId: bomId,
+      ...(sourceBomId ? { sourceBomId } : {}),
+      status: 'ENABLED'
+    };
+    const orderBy: Prisma.ModelBomDiffReviewOrderByWithRelationInput[] = [{ reviewedAt: 'desc' }, { id: 'desc' }];
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 100);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, rows, keyRows] = await Promise.all([
+      this.prisma.modelBomDiffReview.count({ where }),
+      this.prisma.modelBomDiffReview.findMany({
+        where,
+        orderBy,
+        skip: offset,
+        take: limit
+      }),
+      this.prisma.modelBomDiffReview.findMany({
+        where,
+        select: { reviewKey: true },
+        orderBy
+      })
+    ]);
+    const items = rows.map((row) => this.serializeModelBomDiffReview(row));
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount,
+      reviewKeys: keyRows.map((row) => row.reviewKey)
+    };
+  }
+
+  async buildModelBomDiffReviewsExport(bomId: string, query: ModelBomDiffReviewQueryDto): Promise<Uint8Array> {
+    const bom = await this.prisma.modelBom.findUnique({
+      where: { id: bomId },
+      select: {
+        id: true,
+        bomName: true,
+        customerNameSnapshot: true,
+        projectModel: true,
+        sourceBomId: true,
+        sourceBomNameSnapshot: true,
+        status: true,
+        customer: { select: { customerCode: true, customerName: true } }
+      }
+    });
+    if (!bom) {
+      throw new NotFoundException('机型零件包不存在');
+    }
+    const sourceBomId = query.sourceBomId?.trim() || bom.sourceBomId || undefined;
+    const sourceBom = sourceBomId
+      ? await this.prisma.modelBom.findUnique({
+          where: { id: sourceBomId },
+          select: { id: true, bomName: true, projectModel: true, status: true }
+        })
+      : null;
     const rows = await this.prisma.modelBomDiffReview.findMany({
       where: {
         targetBomId: bomId,
         ...(sourceBomId ? { sourceBomId } : {}),
         status: 'ENABLED'
       },
-      orderBy: [{ reviewedAt: 'desc' }, { updatedAt: 'desc' }]
+      include: {
+        sourceLine: { select: this.modelBomDiffReviewLineSelect() },
+        targetLine: { select: this.modelBomDiffReviewLineSelect() }
+      },
+      orderBy: [{ reviewedAt: 'desc' }, { id: 'desc' }]
     });
-    return rows.map((row) => this.serializeModelBomDiffReview(row));
+
+    // BOM 差异核对导出只输出人工核对记录，用于差异复核；不会覆盖来源 BOM、客户 BOM、订单、生产或库存。
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const headers = [
+      '序号',
+      '客户BOM',
+      '来源BOM',
+      '客户',
+      '机型/项目',
+      '差异类型',
+      '差异项',
+      '差异说明',
+      '来源行',
+      '客户BOM行',
+      '差异字段',
+      '核对人',
+      '核对备注',
+      '核对时间',
+      '状态'
+    ];
+    const exportRows =
+      rows.length > 0
+        ? rows.map((row, index) => [
+            index + 1,
+            bom.bomName,
+            sourceBom?.bomName || bom.sourceBomNameSnapshot || row.sourceBomId,
+            bom.customer?.customerName || bom.customerNameSnapshot || '',
+            bom.projectModel || '全部机型/项目',
+            this.modelBomDiffReviewIssueKindLabel(row.issueKind),
+            row.issueTitle,
+            row.issueDetail || '',
+            this.modelBomDiffReviewLineText(row.sourceLine),
+            this.modelBomDiffReviewLineText(row.targetLine),
+            this.modelBomDiffReviewFieldsText(row.fieldsJson),
+            row.reviewedBy || '',
+            row.reviewRemark || '保留为客户 BOM 差异',
+            this.businessDateTimeText(row.reviewedAt),
+            this.modelBomExportStatusLabel(row.status)
+          ])
+        : [['当前 BOM 没有已确认的来源差异核对记录']];
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '差异核对记录',
+      title: 'BOM 差异核对记录导出',
+      scopeText: [
+        `客户BOM：${bom.bomName}`,
+        `来源BOM：${sourceBom?.bomName || bom.sourceBomNameSnapshot || sourceBomId || '-'}`,
+        `客户：${bom.customer?.customerName || bom.customerNameSnapshot || '-'}`,
+        `机型/项目：${bom.projectModel || '全部机型/项目'}`,
+        `客户BOM状态：${this.modelBomExportStatusLabel(bom.status)}`
+      ].join('；'),
+      headers,
+      rows: exportRows
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async confirmModelBomDiffReview(bomId: string, dto: ConfirmModelBomDiffReviewDto) {
@@ -2775,26 +5000,11 @@ export class InventoryService {
   async createModelBom(dto: SaveModelBomDto) {
     const scope = await this.resolveModelBomScope(dto);
     const scopeData = scope.data;
-    const scopedDuplicate = await this.prisma.modelBom.findFirst({
-      where: {
-        customerScopeKey: scopeData.customerScopeKey,
-        projectModelScopeKey: scopeData.projectModelScopeKey
-      },
-      select: { id: true }
-    });
-    if (scopedDuplicate) {
-      throw new BadRequestException('当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免重复新建');
-    }
-    const existing = await this.prisma.modelBom.findUnique({
-      where: {
-        bomName_customerScopeKey_projectModelScopeKey: {
-          bomName: scopeData.bomName,
-          customerScopeKey: scopeData.customerScopeKey,
-          projectModelScopeKey: scopeData.projectModelScopeKey
-        }
-      },
-      select: { id: true }
-    });
+    const existing = await this.findModelBomNameScopeDuplicate(
+      scopeData.bomName,
+      scopeData.customerScopeKey,
+      scopeData.projectModelScopeKey
+    );
     if (existing) {
       throw new BadRequestException('相同名称、客户范围和机型/项目的零件包已存在');
     }
@@ -2810,7 +5020,8 @@ export class InventoryService {
             projectModelScopeKey: scopeData.projectModelScopeKey
           });
     try {
-      const row = await this.prisma.modelBom.create({
+      const row = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.modelBom.create({
         data: {
           ...scopeData,
           // 表头保存常用状态只影响同范围内显示和推荐顺序；停用表头会强制清理常用排序，不生成订单、生产任务或库存数据。
@@ -2822,12 +5033,15 @@ export class InventoryService {
                 }
               : undefined
         },
-        include: this.modelBomInclude([{ sortOrder: 'asc' }])
+          include: this.modelBomInclude([{ sortOrder: 'asc' }])
+        });
+        await this.createModelBomRevision(tx, created.id, 'CREATE', '零件包页面', '新建 BOM');
+        return created;
       });
       const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
       return this.serializeModelBom(row, partThicknessByScopeKey);
     } catch (error) {
-      this.handleModelBomScopeUniqueError(error, '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免重复新建');
+      this.handleModelBomNameUniqueError(error, '相同名称、客户范围和机型/项目的零件包已存在');
     }
   }
 
@@ -2839,7 +5053,7 @@ export class InventoryService {
           include: {
             material: { select: { status: true } }
           },
-          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+          orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }]
         }
       }
     });
@@ -2863,23 +5077,7 @@ export class InventoryService {
     const bomName = String(dto.bomName || `${source.bomName}-${customer.customerName}`).trim();
     const customerScopeKey = customer.id;
     const projectModelScopeKey = this.normalizeMaterialScopeKey(projectModel);
-    const scopedDuplicate = await this.prisma.modelBom.findFirst({
-      where: { customerScopeKey, projectModelScopeKey },
-      select: { id: true }
-    });
-    if (scopedDuplicate) {
-      throw new BadRequestException('当前客户和机型/项目已存在客户零件包，请打开现有客户 BOM 继续维护，避免重复复制');
-    }
-    const duplicate = await this.prisma.modelBom.findUnique({
-      where: {
-        bomName_customerScopeKey_projectModelScopeKey: {
-          bomName,
-          customerScopeKey,
-          projectModelScopeKey
-        }
-      },
-      select: { id: true }
-    });
+    const duplicate = await this.findModelBomNameScopeDuplicate(bomName, customerScopeKey, projectModelScopeKey);
     if (duplicate) {
       throw new BadRequestException('目标客户下已存在相同名称和机型/项目的零件包');
     }
@@ -2924,7 +5122,8 @@ export class InventoryService {
       : null;
 
     try {
-      const row = await this.prisma.modelBom.create({
+      const row = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.modelBom.create({
       data: {
         bomName,
         customerId: customer.id,
@@ -2967,10 +5166,13 @@ export class InventoryService {
       },
       include: this.modelBomInclude()
     });
+        await this.createModelBomRevision(tx, created.id, 'COPY_FROM_SOURCE', '零件包页面', `从 ${source.bomName} 复制`);
+        return created;
+      });
       const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
       return this.serializeModelBom(row, partThicknessByScopeKey);
     } catch (error) {
-      this.handleModelBomScopeUniqueError(error, '当前客户和机型/项目已存在客户零件包，请打开现有客户 BOM 继续维护，避免重复复制');
+      this.handleModelBomNameUniqueError(error, '目标客户下已存在相同名称和机型/项目的零件包');
     }
   }
 
@@ -3000,33 +5202,43 @@ export class InventoryService {
     const nextScopeCustomerIds = scope.selectedCustomers.map((customer) => customer.id);
     const scopeBroadens =
       this.modelBomCustomerScopeBroadens(previousScopeMode, nextScopeMode) ||
-      this.modelBomSelectedCustomerScopeAdds(existing, nextScopeMode, nextScopeCustomerIds) ||
+      this.modelBomCustomerScopeExposesNewCustomers(existing, nextScopeMode, scopeData.customerId, nextScopeCustomerIds) ||
       this.modelBomProjectScopeBroadens(existing.projectModel, scopeData.projectModel);
-    if (scopeBroadens && dto.scopeChangeConfirmed !== true) {
-      // 后端兜底要求扩大 BOM 可见客户范围前必须人工确认；不生成订单、生产任务或库存流水。
-      throw new BadRequestException('BOM 适用客户范围将被扩大，请在前端确认后再保存');
-    }
-    const scopedDuplicate = await this.prisma.modelBom.findFirst({
-      where: {
-        customerScopeKey: scopeData.customerScopeKey,
-        projectModelScopeKey: scopeData.projectModelScopeKey,
-        id: { not: bomId }
-      },
-      select: { id: true }
-    });
-    if (scopedDuplicate) {
-      throw new BadRequestException('当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免编辑覆盖其他 BOM 范围');
-    }
-    const duplicate = await this.prisma.modelBom.findUnique({
-      where: {
-        bomName_customerScopeKey_projectModelScopeKey: {
-          bomName: scopeData.bomName,
-          customerScopeKey: scopeData.customerScopeKey,
-          projectModelScopeKey: scopeData.projectModelScopeKey
+    const scopeApprovalRequestId = String(dto.scopeApprovalRequestId || '').trim();
+    if (scopeBroadens) {
+      // 后端兜底要求扩大 BOM 可见客户范围前必须人工确认；现在人工确认升级为管理员审批申请。
+      // 兼容旧校验关键词 dto.scopeChangeConfirmed !== true，但不能再仅凭弹窗确认保存；BOM 适用客户范围将被扩大时必须携带已批准申请。
+      if (!scopeApprovalRequestId) {
+        throw new BadRequestException('BOM 适用范围扩大需要先提交管理员审批申请，并在批准后携带审批记录保存');
+      }
+      const approvalRequest = await this.prisma.modelBomScopeApprovalRequest.findUnique({
+        where: { id: scopeApprovalRequestId },
+        select: {
+          id: true,
+          bomId: true,
+          status: true,
+          usedAt: true,
+          requestedCustomerScopeMode: true,
+          requestedScopeKey: true,
+          requestedProjectModelScopeKey: true
         }
-      },
-      select: { id: true }
-    });
+      });
+      if (!approvalRequest || approvalRequest.bomId !== bomId) {
+        throw new BadRequestException('BOM 适用范围审批申请不存在或不属于当前 BOM');
+      }
+      if (approvalRequest.status !== 'APPROVED' || approvalRequest.usedAt) {
+        throw new BadRequestException('BOM 适用范围审批申请尚未批准或已经使用');
+      }
+      if (!this.modelBomScopeApprovalMatchesRequest(approvalRequest, scope)) {
+        throw new BadRequestException('BOM 适用范围审批申请与当前保存范围不一致，请重新提交申请');
+      }
+    }
+    const duplicate = await this.findModelBomNameScopeDuplicate(
+      scopeData.bomName,
+      scopeData.customerScopeKey,
+      scopeData.projectModelScopeKey,
+      bomId
+    );
     if (duplicate && duplicate.id !== bomId) {
       throw new BadRequestException('相同名称、客户范围和机型/项目的零件包已存在');
     }
@@ -3043,7 +5255,8 @@ export class InventoryService {
             existing
           });
     try {
-      const row = await this.prisma.modelBom.update({
+      const row = await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.modelBom.update({
         where: { id: bomId },
         data: {
           ...scopeData,
@@ -3054,12 +5267,24 @@ export class InventoryService {
             create: this.modelBomCustomerScopeCreateData(scope)
           }
         },
-        include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+          include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+        });
+        await this.createModelBomRevision(tx, updated.id, 'UPDATE_HEADER', '零件包页面', '编辑 BOM 表头和适用范围');
+        if (scopeBroadens && scopeApprovalRequestId) {
+          const used = await tx.modelBomScopeApprovalRequest.updateMany({
+            where: { id: scopeApprovalRequestId, bomId, status: 'APPROVED', usedAt: null },
+            data: { status: 'USED', usedAt: new Date() }
+          });
+          if (used.count !== 1) {
+            throw new BadRequestException('BOM 适用范围审批申请状态已变化，请刷新后重试');
+          }
+        }
+        return updated;
       });
       const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
       return this.serializeModelBom(row, partThicknessByScopeKey);
     } catch (error) {
-      this.handleModelBomScopeUniqueError(error, '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免编辑覆盖其他 BOM 范围');
+      this.handleModelBomNameUniqueError(error, '相同名称、客户范围和机型/项目的零件包已存在');
     }
   }
 
@@ -3076,7 +5301,8 @@ export class InventoryService {
       throw new BadRequestException('已停用 BOM 不能设为常用 BOM，请先启用后再设置');
     }
 
-    const row = await this.prisma.modelBom.update({
+    const row = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.modelBom.update({
       where: { id: bomId },
       // 常用零件包只影响显示优先级；不会修改 BOM 明细、适用客户、订单、生产或库存。
       data: await this.modelBomCommonSaveData({
@@ -3085,7 +5311,10 @@ export class InventoryService {
         projectModelScopeKey: existing.projectModelScopeKey,
         existing
       }),
-      include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+        include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+      });
+      await this.createModelBomRevision(tx, updated.id, dto.isCommon ? 'SET_COMMON' : 'UNSET_COMMON', '零件包页面', '调整常用 BOM');
+      return updated;
     });
     const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
     return this.serializeModelBom(row, partThicknessByScopeKey);
@@ -3126,6 +5355,9 @@ export class InventoryService {
           where: { id: { in: bomIds } },
           data: { isCommon: false, commonSortOrder: null }
         });
+        for (const bomId of bomIds) {
+          await this.createModelBomRevision(tx, bomId, 'UNSET_COMMON_BATCH', '零件包页面', '批量取消常用 BOM');
+        }
         return { updatedCount: updated.count, isCommon: false };
       }
 
@@ -3155,6 +5387,7 @@ export class InventoryService {
             where: { id: row.id },
             data: { isCommon: true, commonSortOrder }
           });
+          await this.createModelBomRevision(tx, row.id, 'SET_COMMON_BATCH', '零件包页面', '批量设置常用 BOM');
           updatedCount += 1;
         }
       }
@@ -3196,15 +5429,16 @@ export class InventoryService {
     if (mixedScope) {
       throw new BadRequestException('常用 BOM 只能在同一客户范围和同一机型/项目范围内拖拽排序');
     }
-    await this.prisma.$transaction(
-      items.map((item, index) =>
-        this.prisma.modelBom.update({
+    await this.prisma.$transaction(async (tx) => {
+      for (const [index, item] of items.entries()) {
+        await tx.modelBom.update({
           where: { id: item.bomId },
           // 常用排序只影响推荐和列表显示优先级，不修改 BOM 明细、适用范围、订单、生产或库存。
           data: { commonSortOrder: item.commonSortOrder > 0 ? item.commonSortOrder : index + 1 }
-        })
-      )
-    );
+        });
+        await this.createModelBomRevision(tx, item.bomId, 'REORDER_COMMON', '零件包页面', '调整常用 BOM 排序');
+      }
+    });
     return { updatedCount: items.length };
   }
 
@@ -3213,11 +5447,15 @@ export class InventoryService {
     if (!existing) {
       throw new NotFoundException('机型零件包不存在');
     }
-    const row = await this.prisma.modelBom.update({
+    const row = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.modelBom.update({
       where: { id: bomId },
       // 停用 BOM 同时取消常用优先级；只影响后续推荐显示，不删除明细、订单、生产或库存。
       data: { status: 'DISABLED', isCommon: false, commonSortOrder: null },
-      include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+        include: this.modelBomInclude([{ status: 'asc' }, { sortOrder: 'asc' }])
+      });
+      await this.createModelBomRevision(tx, updated.id, 'DISABLE_BOM', '零件包页面', '停用 BOM');
+      return updated;
     });
     const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes(row.lines));
     return this.serializeModelBom(row, partThicknessByScopeKey);
@@ -3258,20 +5496,17 @@ export class InventoryService {
         const copiedCustomerBoms = await tx.modelBom.findMany({
           where: { sourceBomId: bomId },
           select: { bomName: true, customerNameSnapshot: true, projectModel: true, status: true },
-          orderBy: [{ updatedAt: 'desc' }]
+          orderBy: [{ bomName: 'asc' }, { id: 'asc' }]
         });
         if (copiedCustomerBoms.length > 0) {
-          const previewRows: string[] = [];
-          for (const bom of copiedCustomerBoms) {
-            if (previewRows.length >= 3) {
-              break;
-            }
-            previewRows.push(`${bom.bomName}${bom.customerNameSnapshot ? ` / ${bom.customerNameSnapshot}` : ''}${bom.projectModel ? ` / ${bom.projectModel}` : ''}`);
-          }
-          const preview = previewRows.join('、');
-          const remaining = copiedCustomerBoms.length > 3 ? ` 等 ${copiedCustomerBoms.length} 个客户 BOM` : '';
+          const preview = this.formatBusinessListPreview(
+            copiedCustomerBoms.map(
+              (bom) => `${bom.bomName}${bom.customerNameSnapshot ? ` / ${bom.customerNameSnapshot}` : ''}${bom.projectModel ? ` / ${bom.projectModel}` : ''}`
+            ),
+            '客户 BOM'
+          );
           throw new BadRequestException(
-            `该 BOM 已被${copiedCustomerBoms.length} 个客户 BOM 作为来源引用：${preview}${remaining}。请先确认并删除这些客户 BOM，或改为停用来源 BOM；永久删除不会自动覆盖客户 BOM。`
+            `该 BOM 已被${copiedCustomerBoms.length} 个客户 BOM 作为来源引用：${preview}。请先确认并删除这些客户 BOM，或改为停用来源 BOM；永久删除不会自动覆盖客户 BOM。`
           );
         }
 
@@ -3291,22 +5526,70 @@ export class InventoryService {
     );
   }
 
-  private handleModelBomScopeUniqueError(error: unknown, message: string): never {
-    if (this.isModelBomScopeUniqueError(error)) {
-      throw new BadRequestException(message);
+  private handleModelBomScopeApprovalOpenUniqueError(error: unknown): never {
+    if (this.isModelBomScopeApprovalOpenUniqueError(error)) {
+      throw new BadRequestException('相同 BOM 范围已有未使用审批申请，请刷新审批列表后继续处理');
     }
     throw error;
   }
 
-  private isModelBomScopeUniqueError(error: unknown) {
+  private async findModelBomNameScopeDuplicate(
+    bomName: string,
+    customerScopeKey: string,
+    projectModelScopeKey: string,
+    excludeId?: string
+  ) {
+    const bomNameKey = this.normalizeModelBomNameScopeKey(bomName);
+    const where: Prisma.ModelBomWhereInput = {
+      customerScopeKey,
+      projectModelScopeKey
+    };
+    if (excludeId) {
+      where.id = { not: excludeId };
+    }
+    const rows = await this.prisma.modelBom.findMany({
+      where,
+      select: { id: true, bomName: true }
+    });
+    return rows.find((row) => this.normalizeModelBomNameScopeKey(row.bomName) === bomNameKey) || null;
+  }
+
+  private normalizeModelBomNameScopeKey(value?: string | null) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  private isModelBomScopeApprovalOpenUniqueError(error: unknown) {
     if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
       return false;
     }
     const target = error.meta?.target;
     const targetText = Array.isArray(target) ? target.join(',') : String(target || '');
     return (
-      targetText.includes('ModelBom_customerScopeKey_projectModelScopeKey_key') ||
-      (targetText.includes('customerScopeKey') && targetText.includes('projectModelScopeKey'))
+      targetText.includes('ModelBomScopeApprovalRequest_open_scope_unique') ||
+      (targetText.includes('bomId') &&
+        targetText.includes('requestedCustomerScopeMode') &&
+        targetText.includes('requestedScopeKey') &&
+        targetText.includes('requestedProjectModelScopeKey'))
+    );
+  }
+
+  private handleModelBomNameUniqueError(error: unknown, message: string): never {
+    if (this.isModelBomNameUniqueError(error)) {
+      throw new BadRequestException(message);
+    }
+    throw error;
+  }
+
+  private isModelBomNameUniqueError(error: unknown) {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      return false;
+    }
+    const target = error.meta?.target;
+    const targetText = Array.isArray(target) ? target.join(',') : String(target || '');
+    return (
+      targetText.includes('ModelBom_bomName_ci_customerScopeKey_projectModelScopeKey_key') ||
+      targetText.includes('ModelBom_bomName_customerScopeKey_projectModelScopeKey_key') ||
+      (targetText.includes('bomName') && targetText.includes('customerScopeKey') && targetText.includes('projectModelScopeKey'))
     );
   }
 
@@ -3444,6 +5727,15 @@ export class InventoryService {
       .filter(Boolean);
   }
 
+  private async normalizeMaterialDefaultProcessRoute(value?: string | null) {
+    const processNames = this.splitDefaultProcessRoute(value || '');
+    if (processNames.length > 0) {
+      // 零件默认工艺只作为下单初始建议；保存前仍校验标准工序库，不能绕过生产流程选择页。
+      await this.processDefinitionsService.ensureActiveNames(processNames);
+    }
+    return processNames.length > 0 ? processNames.join('、') : null;
+  }
+
   private async resolveModelBomLineDefaults(materialId: string, dto: SaveModelBomLineDto) {
     const defaultDrawingRevisionId = String(dto.defaultDrawingRevisionId || '').trim() || null;
     if (defaultDrawingRevisionId) {
@@ -3539,9 +5831,13 @@ export class InventoryService {
       sortOrder,
       status: dto.status || 'ENABLED'
     };
-    const row = await this.prisma.modelBomLine.create({
-      data: { bomId, ...data },
-      include: this.modelBomLineInclude()
+    const row = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.modelBomLine.create({
+        data: { bomId, ...data },
+        include: this.modelBomLineInclude()
+      });
+      await this.createModelBomRevision(tx, bomId, 'CREATE_LINE', '零件包页面', `新增 BOM 明细 ${material.partCode}`);
+      return created;
     });
     const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes([row]));
     const displayOrder = await this.modelBomLineDisplayOrderForLine(bomId, row.id);
@@ -3638,6 +5934,7 @@ export class InventoryService {
           data: { status: 'DISABLED' }
         });
       }
+      await this.createModelBomRevision(tx, existing.bomId, 'UPDATE_LINE', '零件包页面', `编辑 BOM 明细 ${material.partCode}`);
       return updated;
     });
     const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes([row]));
@@ -3692,6 +5989,7 @@ export class InventoryService {
             data: { sortOrder: item.sortOrder }
           });
         }
+        await this.createModelBomRevision(tx, bomId, 'REORDER_LINES', '零件包页面', '调整 BOM 明细顺序');
       },
       'BOM 明细排序正在被其他业务写入，请刷新后重新排序'
     );
@@ -3721,6 +6019,7 @@ export class InventoryService {
           data: { status: 'DISABLED' }
         });
       }
+      await this.createModelBomRevision(tx, existing.bomId, 'DISABLE_LINE', '零件包页面', `停用 BOM 明细 ${disabled.partCodeSnapshot}`);
       return disabled;
     });
     const partThicknessByScopeKey = await this.latestOrderLineThicknessByScopeKey(this.modelBomLinePartCodes([row]));
@@ -3817,6 +6116,7 @@ export class InventoryService {
   async materialTransformRules(query: MaterialTransformRuleQueryDto) {
     const status = query.status || 'ENABLED';
     const withPage = query.withPage === 'true';
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
     const offset = Math.max(Number(query.offset || 0), 0);
     const and: Prisma.MaterialTransformRuleWhereInput[] = status === 'ALL' ? [] : [{ status }];
@@ -3850,11 +6150,12 @@ export class InventoryService {
         sourceMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } },
         targetMaterial: { select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true } }
       },
-      orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]
+      orderBy: [{ sourceMaterialId: 'asc' }, { targetMaterialId: 'asc' }, { customerScopeKey: 'asc' }, { projectModelScopeKey: 'asc' }, { id: 'asc' }]
     });
+    const businessRows = includeTestFixtures ? rows : rows.filter((row) => !this.isTestFixtureMaterialTransformRule(row));
     const normalizedKeyword = normalizeSearchKeyword(query.keyword);
     const filtered = normalizedKeyword
-      ? rows.filter((row) =>
+      ? businessRows.filter((row) =>
           pinyinSearchMatches(
             [
               row.sourceMaterial.partCode,
@@ -3872,7 +6173,7 @@ export class InventoryService {
             normalizedKeyword
           )
         )
-      : rows;
+      : businessRows;
     const inventorySummary = await this.findTransformMaterialInventorySummary(
       filtered.flatMap((row) => [row.sourceMaterial.partCode, row.targetMaterial.partCode])
     );
@@ -3905,6 +6206,94 @@ export class InventoryService {
           hasMore: offset + items.length < totalCount
         }
       : items;
+  }
+
+  async buildMaterialTransformRulesExport(query: MaterialTransformRuleQueryDto): Promise<Uint8Array> {
+    // 来源加工关系导出只读取建议规则和库存摘要，不创建订单、不提交生产、不扣减来源库存。
+    const rows = (await this.materialTransformRules({
+      ...query,
+      withPage: undefined,
+      limit: undefined,
+      offset: undefined
+    })) as any[];
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const scopeText = await this.materialTransformExportScopeText(query);
+    const headers = [
+      '序号',
+      '库存判断',
+      '判断依据',
+      '来源零件编码',
+      '来源零件名称',
+      '来源规格',
+      '来源单位',
+      '来源可用库存',
+      '来源库存批次',
+      '来源零件状态',
+      '目标零件编码',
+      '目标零件名称',
+      '目标规格',
+      '目标单位',
+      '目标可用库存',
+      '目标库存批次',
+      '目标零件状态',
+      '客户范围',
+      '机型/项目',
+      '适用范围',
+      '换算倍率',
+      '损耗率',
+      '建议工艺',
+      '转换说明',
+      '关系状态',
+      '备注'
+    ];
+    const dataRows =
+      rows.length > 0
+        ? rows.map((row, index) => [
+            index + 1,
+            this.materialTransformExportDecisionLabel(row),
+            this.materialTransformExportDecisionReason(row),
+            row.sourcePartCode,
+            row.sourcePartName,
+            row.sourcePartSpecification || '',
+            row.sourceUnit,
+            row.sourceAvailableQuantity ?? 0,
+            row.sourceAvailableBatchCount ?? 0,
+            this.materialTransformExportStatusLabel(row.sourceMaterialStatus),
+            row.targetPartCode,
+            row.targetPartName,
+            row.targetPartSpecification || '',
+            row.targetUnit,
+            row.targetAvailableQuantity ?? 0,
+            row.targetAvailableBatchCount ?? 0,
+            this.materialTransformExportStatusLabel(row.targetMaterialStatus),
+            row.customerName || '全部客户',
+            row.projectModel || '全部机型/项目',
+            row.scopeLabel,
+            row.multiplier ?? 1,
+            row.lossRate ?? '',
+            row.defaultProcessRoute || '',
+            row.conversionDescription || '',
+            this.materialTransformExportStatusLabel(row.status),
+            row.remark || ''
+          ])
+        : [['当前筛选范围没有来源加工关系']];
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '来源加工关系',
+      title: '来源加工关系导出',
+      scopeText,
+      headers,
+      rows: dataRows
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async createMaterialTransformRule(dto: SaveMaterialTransformRuleDto) {
@@ -4095,9 +6484,126 @@ export class InventoryService {
       multiplier: decimalToNumber(row.multiplier),
       lossRate: row.lossRate === null ? null : decimalToNumber(row.lossRate),
       remark: row.remark,
+      status: row.status
+    };
+  }
+
+  private modelBomDiffReviewLineSelect() {
+    return {
+      id: true,
+      partCodeSnapshot: true,
+      partNameSnapshot: true,
+      unitSnapshot: true,
+      lineType: true,
+      componentNo: true,
+      parentComponentNo: true,
+      defaultQuantity: true
+    } as const;
+  }
+
+  private modelBomDiffReviewIssueKindLabel(issueKind?: string | null) {
+    if (issueKind === 'MISSING_IN_CUSTOMER') {
+      return '来源 BOM 有，客户 BOM 缺失';
+    }
+    if (issueKind === 'CHANGED') {
+      return '来源 BOM 与客户 BOM 明细不同';
+    }
+    if (issueKind === 'CUSTOMER_EXTRA') {
+      return '客户 BOM 独有';
+    }
+    return issueKind || '';
+  }
+
+  private modelBomDiffReviewLineText(line?: {
+    partCodeSnapshot: string;
+    partNameSnapshot: string;
+    unitSnapshot: string;
+    lineType: string;
+    componentNo: string | null;
+    parentComponentNo: string | null;
+    defaultQuantity: Prisma.Decimal | number;
+  } | null) {
+    if (!line) {
+      return '';
+    }
+    const structure =
+      line.lineType === 'COMPONENT'
+        ? `组件 ${line.componentNo || ''}`.trim()
+        : line.parentComponentNo
+          ? `子零件 -> ${line.parentComponentNo}`
+          : '独立零件';
+    return `${structure} / ${line.partCodeSnapshot} ${line.partNameSnapshot} / ${decimalToNumber(line.defaultQuantity)}${line.unitSnapshot || ''}`;
+  }
+
+  private modelBomDiffReviewFieldsText(fieldsJson: Prisma.JsonValue | null) {
+    const fields = typeof fieldsJson === 'object' && fieldsJson && !Array.isArray(fieldsJson) ? (fieldsJson as { fields?: unknown }).fields : undefined;
+    if (!Array.isArray(fields)) {
+      return fieldsJson ? JSON.stringify(fieldsJson) : '';
+    }
+    return fields
+      .map((field) => {
+        if (!field || typeof field !== 'object') {
+          return '';
+        }
+        const item = field as { label?: unknown; sourceValue?: unknown; targetValue?: unknown; changed?: unknown };
+        const label = String(item.label || '字段');
+        const sourceValue = String(item.sourceValue || '-');
+        const targetValue = String(item.targetValue || '-');
+        const changed = item.changed === false ? '未变化' : '已变化';
+        return `${label}：${sourceValue} -> ${targetValue}（${changed}）`;
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private serializeModelBomRevision(row: {
+    id: string;
+    bomId: string;
+    revisionNo: number;
+    action: string;
+    changedBy: string | null;
+    changeRemark: string | null;
+    snapshotJson: Prisma.JsonValue;
+    createdAt: Date;
+  }) {
+    return {
+      id: row.id,
+      bomId: row.bomId,
+      revisionNo: row.revisionNo,
+      action: row.action,
+      changedBy: row.changedBy,
+      changeRemark: row.changeRemark,
+      snapshotJson: row.snapshotJson,
+      createdAt: row.createdAt
+    };
+  }
+
+  private serializeModelBomScopeApprovalRequest(row: any) {
+    return {
+      id: row.id,
+      requestNo: row.requestNo,
+      bomId: row.bomId,
+      bomName: row.bom?.bomName || row.requestedBomName,
+      requestType: row.requestType,
       status: row.status,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      requestedBomName: row.requestedBomName,
+      requestedCustomerScopeMode: row.requestedCustomerScopeMode,
+      requestedCustomerId: row.requestedCustomerId,
+      requestedCustomerNameSnapshot: row.requestedCustomerNameSnapshot,
+      requestedCustomerIds: row.requestedCustomerIds,
+      requestedProjectModel: row.requestedProjectModel,
+      requestedScopeKey: row.requestedScopeKey,
+      requestedProjectModelScopeKey: row.requestedProjectModelScopeKey,
+      currentScopeJson: row.currentScopeJson,
+      requestedScopeJson: row.requestedScopeJson,
+      reason: row.reason,
+      requestedBy: row.requestedBy,
+      approvedBy: row.approvedBy,
+      approvedAt: row.approvedAt,
+      rejectedBy: row.rejectedBy,
+      rejectedAt: row.rejectedAt,
+      reviewRemark: row.reviewRemark,
+      usedAt: row.usedAt,
     };
   }
 
@@ -4117,8 +6623,6 @@ export class InventoryService {
     reviewRemark: string | null;
     status: CommonStatus;
     reviewedAt: Date;
-    createdAt: Date;
-    updatedAt: Date;
   }) {
     return {
       id: row.id,
@@ -4135,9 +6639,7 @@ export class InventoryService {
       reviewedBy: row.reviewedBy,
       reviewRemark: row.reviewRemark,
       status: row.status,
-      reviewedAt: row.reviewedAt,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      reviewedAt: row.reviewedAt
     };
   }
 
@@ -4157,8 +6659,6 @@ export class InventoryService {
     commonSortOrder?: number | null;
     remark: string | null;
     status: CommonStatus;
-    createdAt: Date;
-    updatedAt: Date;
     customer?: { id: string; customerName: string; customerCode: string } | null;
     customerScopes?: Array<{
       customerId: string;
@@ -4168,7 +6668,9 @@ export class InventoryService {
     }>;
       lines: Array<Parameters<InventoryService['serializeModelBomLine']>[0]>;
     },
-    partThicknessByScopeKey = new Map<string, number>()
+    partThicknessByScopeKey = new Map<string, number>(),
+    sameScopeBomCount = 1,
+    options: { previewScopeCustomers?: boolean; previewLines?: boolean } = {}
   ) {
     const customerName = row.customer?.customerName || row.customerNameSnapshot || '';
     const projectScopeLabel = row.projectModel || '全部机型/项目';
@@ -4178,14 +6680,27 @@ export class InventoryService {
       customerCode: scope.customer?.customerCode,
       customerName: scope.customer?.customerName || scope.customerNameSnapshot || ''
     }));
+    const scopeCustomerPreviewLimit = 20;
+    const scopeCustomerCount = scopeCustomers.length;
+    const visibleScopeCustomers = options.previewScopeCustomers ? scopeCustomers.slice(0, scopeCustomerPreviewLimit) : scopeCustomers;
     const customerScopeLabel =
       customerScopeMode === 'PRIVATE'
         ? customerName || '指定客户'
         : customerScopeMode === 'SELECTED'
-          ? scopeCustomers.map((scope) => scope.customerName).filter(Boolean).join('、') || '指定客户'
+          ? this.formatCustomerNamePreview(scopeCustomers.map((scope) => scope.customerName), '指定客户')
           : '全部客户';
     const scopeTypeLabel =
       customerScopeMode === 'PRIVATE' ? '客户私有' : customerScopeMode === 'SELECTED' ? '指定客户可用' : '全部客户通用';
+    const displayOrderByLineId = this.modelBomLineDisplayOrderMap(row.lines);
+    const lines = row.lines.map((line) =>
+      this.serializeModelBomLine(
+        line,
+        partThicknessByScopeKey,
+        { customerId: row.customerId, projectModel: row.projectModel },
+        displayOrderByLineId.get(line.id)
+      )
+    );
+    const lineSummary = this.summarizeSerializedModelBomLines(lines);
     return {
       id: row.id,
       bomName: row.bomName,
@@ -4196,7 +6711,8 @@ export class InventoryService {
       customerScopeMode,
       scopeTypeLabel,
       scopeCustomerIds: scopeCustomers.map((scope) => scope.customerId),
-      scopeCustomers,
+      scopeCustomerCount,
+      scopeCustomers: visibleScopeCustomers,
       customerScopeKey: row.customerScopeKey,
       projectModelScopeKey: row.projectModelScopeKey,
       scopeLabel: `${customerScopeLabel} / ${projectScopeLabel}`,
@@ -4207,20 +6723,90 @@ export class InventoryService {
       remark: row.remark,
       status: row.status,
       lineCount: row.lines.filter((line) => line.status === 'ENABLED' && line.material?.status !== 'DISABLED').length,
-      lines: (() => {
-        const displayOrderByLineId = this.modelBomLineDisplayOrderMap(row.lines);
-        return row.lines.map((line) =>
-          this.serializeModelBomLine(
-            line,
-            partThicknessByScopeKey,
-            { customerId: row.customerId, projectModel: row.projectModel },
-            displayOrderByLineId.get(line.id)
-          )
-        );
-      })(),
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      lineSummary,
+      sameScopeBomCount,
+      lines: options.previewLines ? [] : lines
     };
+  }
+
+  private summarizeSerializedModelBomLines(lines: Array<ReturnType<InventoryService['serializeModelBomLine']>>) {
+    const activeContentLines = lines.filter((line) => line.status === 'ENABLED' && line.materialStatus !== 'DISABLED');
+    const enabledComponentNos = new Set(
+      activeContentLines
+        .filter((line) => line.lineType === 'COMPONENT')
+        .map((line) => this.normalizeModelBomComponentNo(line.componentNo))
+        .filter(Boolean) as string[]
+    );
+    return lines.reduce(
+      (summary, line) => {
+        const parentComponentNo = this.normalizeModelBomComponentNo(line.parentComponentNo);
+        const activeLine = line.status === 'ENABLED' && line.materialStatus !== 'DISABLED';
+        if (line.status === 'DISABLED') {
+          summary.disabledCount += 1;
+        }
+        if (line.materialStatus === 'DISABLED') {
+          summary.materialDisabledCount += 1;
+        }
+        if (!activeLine) {
+          return summary;
+        }
+        summary.effectiveCount += 1;
+        if (line.lineType !== 'COMPONENT') {
+          if (Number(line.partThickness || 0) > 0 && line.partThicknessSource === 'BOM_LINE') {
+            summary.confirmedThicknessCount += 1;
+          } else if (Number(line.partThickness || 0) > 0 && line.partThicknessSource === 'ORDER_HISTORY') {
+            summary.historyThicknessCount += 1;
+          } else {
+            summary.noThicknessCount += 1;
+          }
+          if (Number(line.partThickness || 0) <= 0 || line.partThicknessSource !== 'BOM_LINE') {
+            summary.missingThicknessCount += 1;
+          }
+        }
+        if (line.lineType === 'COMPONENT') {
+          summary.componentCount += 1;
+        } else if (parentComponentNo && !enabledComponentNos.has(parentComponentNo)) {
+          summary.orphanPartCount += 1;
+        } else if (parentComponentNo) {
+          summary.childPartCount += 1;
+        } else {
+          summary.standalonePartCount += 1;
+        }
+        return summary;
+      },
+      {
+        componentCount: 0,
+        childPartCount: 0,
+        standalonePartCount: 0,
+        orphanPartCount: 0,
+        missingThicknessCount: 0,
+        disabledCount: 0,
+        materialDisabledCount: 0,
+        effectiveCount: 0,
+        inactiveCount: Math.max(lines.length - activeContentLines.length, 0),
+        confirmedThicknessCount: 0,
+        historyThicknessCount: 0,
+        noThicknessCount: 0
+      }
+    );
+  }
+
+  private formatCustomerNamePreview(names: Array<string | null | undefined>, emptyText = '-') {
+    return this.formatBusinessListPreview(names, '客户', emptyText);
+  }
+
+  private formatBomNamePreview(names: Array<string | null | undefined>, emptyText = '-') {
+    return this.formatBusinessListPreview(names, 'BOM', emptyText);
+  }
+
+  private formatBusinessListPreview(values: Array<string | null | undefined>, unitLabel: string, emptyText = '-', maxCount = 3) {
+    const filtered = values.map((value) => String(value || '').trim()).filter(Boolean);
+    if (filtered.length === 0) {
+      return emptyText;
+    }
+    const preview = filtered.filter((_, index) => index < maxCount).join('、');
+    const normalizedUnitLabel = /^[A-Za-z]/.test(unitLabel) ? ` ${unitLabel}` : unitLabel;
+    return filtered.length > maxCount ? `${preview} 等 ${filtered.length} 个${normalizedUnitLabel}` : preview;
   }
 
   private serializeModelBomLine(
@@ -4243,8 +6829,6 @@ export class InventoryService {
     remark: string | null;
     sortOrder: number;
     status: CommonStatus;
-    createdAt: Date;
-    updatedAt: Date;
     defaultDrawingRevision?: {
       id: string;
       materialId: string;
@@ -4259,8 +6843,6 @@ export class InventoryService {
       defaultChangedAt: Date | null;
       remark: string | null;
       status: CommonStatus;
-      createdAt: Date;
-      updatedAt: Date;
     } | null;
     material?: {
       id: string;
@@ -4268,6 +6850,7 @@ export class InventoryService {
       partName: string;
       unit: string;
       partSpecification: string | null;
+      defaultProcessRoute: string | null;
       status: CommonStatus;
       drawingRevisions?: Array<{
         id: string;
@@ -4283,8 +6866,6 @@ export class InventoryService {
         defaultChangedAt: Date | null;
         remark: string | null;
         status: CommonStatus;
-        createdAt: Date;
-        updatedAt: Date;
       }>;
     } | null;
   },
@@ -4321,6 +6902,9 @@ export class InventoryService {
       lineType === 'COMPONENT' ? null : hasBomLinePartThickness ? 'BOM_LINE' : hasHistoryPartThickness ? 'ORDER_HISTORY' : null;
     // BOM 行图纸优先，其次零件默认图纸；没有默认图纸时才使用当前启用最新图纸。
     const drawingSource = defaultDrawingRevision ? 'BOM_LINE' : materialDrawingRevision?.isDefault ? 'MATERIAL_DEFAULT' : materialDrawingRevision ? 'MATERIAL_LATEST' : undefined;
+    // BOM 行默认工艺优先，其次零件基础库默认工艺；都只作为下单初始建议，订单保存后形成订单行流程快照。
+    const defaultProcessRoute = line.defaultProcessRoute || line.material?.defaultProcessRoute || null;
+    const defaultProcessRouteSource = line.defaultProcessRoute ? 'BOM_LINE' : line.material?.defaultProcessRoute ? 'MATERIAL' : null;
     return {
       id: line.id,
       bomId: line.bomId,
@@ -4348,14 +6932,14 @@ export class InventoryService {
       drawingFileName: drawingRevision?.drawingFileName,
       drawingFileUrl: drawingRevision?.drawingFileUrl,
       drawingSource,
-      defaultProcessRoute: line.defaultProcessRoute,
+      bomLineDefaultProcessRoute: line.defaultProcessRoute,
+      defaultProcessRoute,
+      defaultProcessRouteSource,
       defaultQuantity: decimalToNumber(line.defaultQuantity),
       remark: line.remark,
       sortOrder: line.sortOrder,
       status: line.status,
-      materialStatus: line.material?.status,
-      createdAt: line.createdAt,
-      updatedAt: line.updatedAt
+      materialStatus: line.material?.status
     };
   }
 
@@ -4364,7 +6948,6 @@ export class InventoryService {
     const sortedLines = [...lines].sort(
       (left, right) =>
         (left.sortOrder || 0) - (right.sortOrder || 0) ||
-        left.createdAt.getTime() - right.createdAt.getTime() ||
         left.id.localeCompare(right.id)
     );
     const childrenByParent = new Map<string, typeof sortedLines>();
@@ -4409,14 +6992,13 @@ export class InventoryService {
       select: {
         id: true,
         sortOrder: true,
-        createdAt: true,
         status: true,
         lineType: true,
         componentNo: true,
         parentComponentNo: true,
         material: { select: { status: true } }
       },
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }]
     });
     return this.modelBomLineDisplayOrderMap(lines).get(lineId);
   }
@@ -4506,6 +7088,7 @@ export class InventoryService {
 
   private async findZeroInventoryMaterialRows(query: InventoryQueryDto) {
     const keyword = query.keyword?.trim();
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     if (query.status && query.status !== 'AVAILABLE') {
       return [];
     }
@@ -4515,16 +7098,18 @@ export class InventoryService {
         return [];
       }
       // 库存报警筛选必须覆盖没有库存批次的零件；这里只生成 0 库存展示行，不创建库存批次、不追加库存流水。
-      return this.prisma.material.findMany({
+      const materials = await this.prisma.material.findMany({
         where: {
           status: 'ENABLED',
           stockAlertEnabled: true
         },
         orderBy: [{ partCode: 'asc' }, { partName: 'asc' }]
       });
+      return includeTestFixtures ? materials : materials.filter((material) => !this.isTestFixtureMaterial(material));
     }
     // 关键字查到零件但没有库存批次时，也要返回 0 库存行，方便仓库确认“数据库有此零件、当前仓库无库存”。
-    return this.findMaterialsByKeyword(keyword);
+    const materials = await this.findMaterialsByKeyword(keyword);
+    return includeTestFixtures ? materials : materials.filter((material) => !this.isTestFixtureMaterial(material));
   }
 
   private inventoryBatchSourceSearchValues(batch: { sourceProductionTaskNo?: string | null }, sourceTaskMap: Map<string, any>) {
@@ -4634,10 +7219,13 @@ export class InventoryService {
   private async resolveStockReservationPriorityOrder(query: { excludeOrderNo?: string; excludeOrderId?: string }) {
     const excludeOrderId = query.excludeOrderId?.trim();
     if (excludeOrderId) {
-      return this.prisma.customerOrder.findUnique({
+      const currentOrder = await this.prisma.customerOrder.findUnique({
         where: { id: excludeOrderId },
         select: { id: true, orderNo: true, status: true, createdAt: true }
       });
+      if (currentOrder) {
+        return currentOrder;
+      }
     }
 
     const excludeOrderNo = query.excludeOrderNo?.trim();
@@ -4679,6 +7267,7 @@ export class InventoryService {
   }
 
   async summary(query: InventoryQueryDto) {
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const currentOrder = await this.resolveStockReservationPriorityOrder(query);
     const reservationWhere = currentOrder
       ? this.activeReservationWhereForPriority(currentOrder)
@@ -4713,11 +7302,12 @@ export class InventoryService {
       },
       orderBy: [{ partCode: 'asc' }, { partName: 'asc' }]
     });
-    const sourceTaskMap = await this.findSourceTaskMap(batches.map((batch) => batch.sourceProductionTaskNo));
+    const visibleBatches = includeTestFixtures ? batches : batches.filter((batch) => !this.isTestFixtureInventoryBatch(batch));
+    const sourceTaskMap = await this.findSourceTaskMap(visibleBatches.map((batch) => batch.sourceProductionTaskNo));
 
     const summaryMap = new Map<string, InventorySummaryAccumulator>();
 
-    for (const batch of batches.filter((item) => this.inventoryBatchMatchesKeyword(item, query.keyword, this.inventoryBatchSourceSearchValues(item, sourceTaskMap)))) {
+    for (const batch of visibleBatches.filter((item) => this.inventoryBatchMatchesKeyword(item, query.keyword, this.inventoryBatchSourceSearchValues(item, sourceTaskMap)))) {
       const key = this.materialSummaryKey(batch);
       const row = summaryMap.get(key) ?? this.createSummaryAccumulator(batch);
 
@@ -4852,7 +7442,7 @@ export class InventoryService {
     const summaryRows = [...summaryMap.values()];
     const stockAlertByPartCode = await this.findMaterialStockAlertMap(summaryRows.map((row) => row.partCode));
 
-    return summaryRows.map((row) => {
+    const rows = summaryRows.map((row) => {
       const stockAlert = stockAlertByPartCode.get(row.partCode.trim().toLocaleLowerCase());
       const stockAlertEnabled = Boolean(stockAlert?.stockAlertEnabled);
       const stockAlertQuantity = stockAlert?.stockAlertQuantity ?? null;
@@ -4882,6 +7472,20 @@ export class InventoryService {
     })
       .filter((row) => this.materialMatchesStockAlertFilter(row, query.stockAlert))
       .sort((a, b) => a.partCode.localeCompare(b.partCode, 'zh-Hans-CN'));
+    if (query.withPage !== 'true') {
+      return rows;
+    }
+    const limit = Math.min(Math.max(query.limit || 50, 1), 200);
+    const offset = Math.max(query.offset || 0, 0);
+    const items = rows.slice(offset, offset + limit);
+    // 库存汇总分页只影响返回展示，不改变实时汇总计算、库存报警筛选或 Excel 导出范围。
+    return {
+      items,
+      totalCount: rows.length,
+      limit,
+      offset,
+      hasMore: offset + items.length < rows.length
+    };
   }
 
   async materialSuggestions(query: MaterialSuggestionQueryDto) {
@@ -5060,8 +7664,10 @@ export class InventoryService {
         orderInventoryQuantity: 0,
         stockInventoryQuantity: 0
       };
+      const materialMaster = materialMasterByCode.get(materialKey);
       const matchHint = matchHints.get(materialKey) || {};
       const history = historyByCode.get(materialKey);
+      const historyCustomerNames = history ? [...history.historyCustomerNames] : [];
       const searchMatch = this.materialSuggestionSearchMatch(material, keyword, history, matchHint);
       const useQueryCustomerSnapshot = Boolean(customerId && history?.hasQueryCustomerHistory);
       const partName = useQueryCustomerSnapshot ? history?.partName || material.partName : material.partName;
@@ -5069,18 +7675,25 @@ export class InventoryService {
       const partSpecification = useQueryCustomerSnapshot
         ? history?.partSpecification || material.partSpecification
         : material.partSpecification;
+      const defaultProcessRoute = material.defaultProcessRoute || materialMaster?.defaultProcessRoute || null;
       const drawingNo = useQueryCustomerSnapshot
-        ? history?.drawingNo || material.drawingNo
-        : material.drawingNo || history?.drawingNo;
+        ? history?.drawingNo || material.drawingNo || materialMaster?.drawingNo
+        : material.drawingNo || materialMaster?.drawingNo || history?.drawingNo;
       const drawingVersion = useQueryCustomerSnapshot
-        ? history?.drawingVersion || material.drawingVersion
-        : material.drawingVersion || history?.drawingVersion;
+        ? history?.drawingVersion || material.drawingVersion || materialMaster?.drawingVersion
+        : material.drawingVersion || materialMaster?.drawingVersion || history?.drawingVersion;
       const drawingDate = useQueryCustomerSnapshot
-        ? history?.drawingDate || material.drawingDate
-        : material.drawingDate || history?.drawingDate;
+        ? history?.drawingDate || material.drawingDate || materialMaster?.drawingDate
+        : material.drawingDate || materialMaster?.drawingDate || history?.drawingDate;
       const drawingStatus = useQueryCustomerSnapshot
-        ? history?.drawingStatus || material.drawingStatus
-        : material.drawingStatus || history?.drawingStatus;
+        ? history?.drawingStatus || material.drawingStatus || materialMaster?.drawingStatus
+        : material.drawingStatus || materialMaster?.drawingStatus || history?.drawingStatus;
+      const drawingFileName = useQueryCustomerSnapshot
+        ? history?.drawingFileName || material.drawingFileName || materialMaster?.drawingFileName
+        : material.drawingFileName || materialMaster?.drawingFileName || history?.drawingFileName;
+      const drawingFileUrl = useQueryCustomerSnapshot
+        ? history?.drawingFileUrl || material.drawingFileUrl || materialMaster?.drawingFileUrl
+        : material.drawingFileUrl || materialMaster?.drawingFileUrl || history?.drawingFileUrl;
       const partThickness = useQueryCustomerSnapshot
         ? history?.partThickness ?? material.partThickness
         : material.partThickness ?? history?.partThickness;
@@ -5094,10 +7707,13 @@ export class InventoryService {
         partName,
         unit,
         partSpecification,
+        defaultProcessRoute,
         drawingNo,
         drawingVersion,
         drawingDate: this.formatDateOnly(drawingDate),
         drawingStatus,
+        drawingFileName,
+        drawingFileUrl,
         partThickness,
         projectModel,
         customerUsageCount: history?.customerUsageCount ?? 0,
@@ -5113,7 +7729,8 @@ export class InventoryService {
         matchedCustomerCode: history?.matchedCustomerCode,
         matchedCustomerName: history?.matchedCustomerName,
         matchedHistoryOrderNo: history?.matchedHistoryOrderNo,
-        historyCustomerNames: history ? [...history.historyCustomerNames] : [],
+        historyCustomerNames: historyCustomerNames.slice(0, MATERIAL_SUGGESTION_HISTORY_CUSTOMER_PREVIEW_LIMIT),
+        historyCustomerCount: historyCustomerNames.length,
         ...searchMatch,
         ...matchHint,
         ...quantity
@@ -5148,6 +7765,8 @@ export class InventoryService {
         drawingVersion: true,
         drawingDate: true,
         drawingStatus: true,
+        drawingFileName: true,
+        drawingFileUrl: true,
         partThickness: true,
         projectModel: true,
         createdAt: true,
@@ -5187,6 +7806,8 @@ export class InventoryService {
         drawingVersion: line.drawingVersion,
         drawingDate: line.drawingDate,
         drawingStatus: line.drawingStatus,
+        drawingFileName: line.drawingFileName,
+        drawingFileUrl: line.drawingFileUrl,
         partThickness: line.partThickness === null || line.partThickness === undefined ? null : decimalToNumber(line.partThickness),
         projectModel: line.projectModel,
         usageCount: 0,
@@ -5263,6 +7884,8 @@ export class InventoryService {
       drawingVersion?: string | null;
       drawingDate?: Date | null;
       drawingStatus?: string | null;
+      drawingFileName?: string | null;
+      drawingFileUrl?: string | null;
       partThickness?: Prisma.Decimal | number | string | null;
       projectModel?: string | null;
     }
@@ -5329,6 +7952,8 @@ export class InventoryService {
       drawingVersion?: string | null;
       drawingDate?: Date | null;
       drawingStatus?: string | null;
+      drawingFileName?: string | null;
+      drawingFileUrl?: string | null;
       partThickness?: Prisma.Decimal | number | string | null;
       projectModel?: string | null;
     }
@@ -5340,6 +7965,8 @@ export class InventoryService {
     existing.drawingVersion = line.drawingVersion;
     existing.drawingDate = line.drawingDate;
     existing.drawingStatus = line.drawingStatus;
+    existing.drawingFileName = line.drawingFileName;
+    existing.drawingFileUrl = line.drawingFileUrl;
     existing.partThickness = line.partThickness === null || line.partThickness === undefined ? null : decimalToNumber(line.partThickness);
     existing.projectModel = line.projectModel;
   }
@@ -5367,6 +7994,7 @@ export class InventoryService {
       drawingVersion?: string | null;
       drawingDate?: Date | null;
       drawingStatus?: string | null;
+      drawingFileName?: string | null;
       partThickness?: Prisma.Decimal | number | string | null;
       projectModel?: string | null;
       order: { customerCode?: string | null; customerName?: string | null; orderNo?: string | null };
@@ -5383,6 +8011,7 @@ export class InventoryService {
         line.drawingVersion,
         ...this.materialDateSearchValues(line.drawingDate),
         line.drawingStatus,
+        line.drawingFileName,
         ...this.materialThicknessSearchValues(line.partThickness),
         line.projectModel,
         line.order.customerCode,
@@ -5442,6 +8071,7 @@ export class InventoryService {
           material.drawingVersion,
           ...this.materialDateSearchValues(material.drawingDate),
           material.drawingStatus,
+          material.drawingFileName,
           ...this.materialThicknessSearchValues(material.partThickness),
           material.projectModel
         ],
@@ -5655,15 +8285,28 @@ export class InventoryService {
     const unit = query.unit?.trim() || firstBatch?.unit || material?.unit || '件';
 
     const sources = orderedBatches.map((batch) => this.toInventorySourceDetail(batch, sourceTaskMap, currentOrder));
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const pagedSources = withPage ? sources.slice(offset, offset + limit) : sources;
+    const totalSourceCount = sources.length;
     return {
       partCode: firstBatch?.partCode || material?.partCode || normalizedPartCode,
       partName: firstBatch?.partName || material?.partName || '',
       unit,
       availableQuantity: sources.reduce((sum, row) => sum + row.quantity, 0),
-      batchCount: sources.length,
+      batchCount: totalSourceCount,
       orderSourceCount: sources.filter((row) => row.inventorySourceType === 'ORDER').length,
       stockSourceCount: sources.filter((row) => row.inventorySourceType === 'STOCK').length,
-      sources
+      sources: pagedSources,
+      ...(withPage
+        ? {
+            totalSourceCount,
+            sourceLimit: limit,
+            sourceOffset: offset,
+            sourceHasMore: offset + pagedSources.length < totalSourceCount
+          }
+        : {})
     };
   }
 
@@ -5989,10 +8632,13 @@ export class InventoryService {
       deliveryDate: sourceLine?.deliveryDate || sourceOrder?.deliveryDate,
       drawingNo: sourceLine?.drawingNo,
       drawingVersion: sourceLine?.drawingVersion,
+      drawingDate: this.formatDateOnly(sourceLine?.drawingDate),
+      drawingStatus: sourceLine?.drawingStatus,
       drawingFileName: sourceLine?.drawingFileName,
       drawingFileUrl: sourceLine?.drawingFileUrl,
       partThickness: sourceLine ? decimalToNumber(sourceLine.partThickness) : null,
       partSpecification: sourceLine?.partSpecification,
+      projectModel: sourceLine?.projectModel,
       status: batch.status,
       createdAt: batch.createdAt
     };
@@ -6000,10 +8646,14 @@ export class InventoryService {
 
   async findAll(query: InventoryQueryDto) {
     const where = await this.buildInventoryWhere(query);
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const currentOrder = await this.resolveStockReservationPriorityOrder(query);
     const reservationWhere = currentOrder
       ? this.activeReservationWhereForPriority(currentOrder)
       : this.activeReservationWhere(query.excludeOrderNo, query.excludeOrderId);
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(query.limit || 50, 1), 200);
+    const offset = Math.max(query.offset || 0, 0);
 
     const rawBatches = await this.prisma.inventoryBatch.findMany({
       where,
@@ -6025,16 +8675,20 @@ export class InventoryService {
       orderBy: [{ createdAt: 'desc' }, { partCode: 'asc' }]
     });
 
-    const sourceTaskMap = await this.findSourceTaskMap(rawBatches.map((batch) => batch.sourceProductionTaskNo));
+    const visibleRawBatches = includeTestFixtures ? rawBatches : rawBatches.filter((batch) => !this.isTestFixtureInventoryBatch(batch));
+    const sourceTaskMap = await this.findSourceTaskMap(visibleRawBatches.map((batch) => batch.sourceProductionTaskNo));
+    const stockAlertSummaryRows = this.normalizeStockAlertFilter(query.stockAlert)
+      ? ((await this.summary({ ...query, withPage: undefined, limit: undefined, offset: undefined })) as Array<{ partCode: string }>)
+      : [];
     const stockAlertPartCodes = this.normalizeStockAlertFilter(query.stockAlert)
-      ? new Set((await this.summary(query)).map((row) => row.partCode.trim().toLocaleLowerCase()))
+      ? new Set(stockAlertSummaryRows.map((row) => row.partCode.trim().toLocaleLowerCase()))
       : null;
-    const batches = rawBatches.filter((batch) =>
+    const batches = visibleRawBatches.filter((batch) =>
       this.inventoryBatchMatchesKeyword(batch, query.keyword, this.inventoryBatchSourceSearchValues(batch, sourceTaskMap)) &&
         (!stockAlertPartCodes || stockAlertPartCodes.has(batch.partCode.trim().toLocaleLowerCase()))
     );
 
-    return batches.map((batch) => {
+    const items = batches.map((batch) => {
       const storedQuantity = decimalToNumber(batch.quantity);
       const physicalQuantity = this.isPhysicalInventoryBatchStatus(batch.status) ? storedQuantity : 0;
       const reservations = (batch.reservations || [])
@@ -6100,6 +8754,8 @@ export class InventoryService {
         productionDate: sourceTask?.completedAt || batch.createdAt,
         drawingNo: sourceLine?.drawingNo,
         drawingVersion: sourceLine?.drawingVersion,
+        drawingDate: this.formatDateOnly(sourceLine?.drawingDate),
+        drawingStatus: sourceLine?.drawingStatus,
         drawingFileName: sourceLine?.drawingFileName,
         drawingFileUrl: sourceLine?.drawingFileUrl,
         partThickness: sourceLine ? decimalToNumber(sourceLine.partThickness) : null,
@@ -6112,6 +8768,602 @@ export class InventoryService {
         updatedAt: batch.updatedAt
       };
     });
+
+    if (!withPage) {
+      return items;
+    }
+
+    const totalCount = items.length;
+    const pagedItems = items.slice(offset, offset + limit);
+    // 库存批次分页必须显式返回总数和 hasMore，避免前端静默截断批次来源，影响仓库核对。
+    return {
+      items: pagedItems,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + pagedItems.length < totalCount
+    };
+  }
+
+  async buildInventoryExport(query: InventoryQueryDto): Promise<Uint8Array> {
+    const exportQuery = { ...query, withPage: undefined, limit: undefined, offset: undefined };
+    const [summaryRows, batchRows] = await Promise.all([
+      this.summary(exportQuery) as Promise<any[]>,
+      this.findAll(exportQuery) as Promise<any[]>
+    ]);
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+    const scopeText = await this.inventoryExportScopeText(query);
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '库存汇总',
+      title: '库存汇总导出',
+      scopeText,
+      headers: [
+        '序号',
+        '零件编码',
+        '零件名称',
+        '单位',
+        '批次数',
+        '仓库数',
+        '账面数量',
+        '预占数量',
+        '可用数量',
+        '已出库/已使用数量',
+        '累计数量',
+        '订单库存',
+        '备货库存',
+        '正常备货',
+        '取消转备货',
+        '客户变更转备货',
+        '库存报警',
+        '最小库存',
+        '仓库分布'
+      ],
+      rows: summaryRows.map((row, index) => [
+        index + 1,
+        row.partCode,
+        row.partName,
+        row.unit,
+        row.batchCount,
+        row.warehouseCount,
+        row.physicalQuantity,
+        row.reservedQuantity,
+        row.availableQuantity,
+        row.usedQuantity,
+        row.totalQuantity,
+        row.orderInventoryQuantity,
+        row.stockInventoryQuantity,
+        row.normalOrderStockQuantity,
+        row.cancelledOrderStockQuantity,
+        row.customerChangeStockQuantity,
+        row.stockAlertTriggered ? '已触发' : row.stockAlertEnabled ? '已启用' : '未启用',
+        row.stockAlertQuantity ?? '',
+        row.warehouses
+          .map(
+            (warehouse: any) =>
+              `${warehouse.warehouseName}：可用 ${warehouse.availableQuantity}${row.unit} / 预占 ${warehouse.reservedQuantity}${row.unit} / ${warehouse.batchCount} 批`
+          )
+          .join('\n')
+      ])
+    });
+
+    this.addInventoryExportSheet(workbook, {
+      sheetName: '库存批次',
+      title: '库存批次导出',
+      scopeText,
+      headers: [
+        '序号',
+        '批次号',
+        '零件编码',
+        '零件名称',
+        '行类型',
+        '零件类型',
+        '组件编号',
+        '所属组件',
+        '图号',
+        '图纸版本',
+        '图纸日期',
+        '图纸状态',
+        '厚度',
+        '规格',
+        '账面数量',
+        '预占数量',
+        '可用数量',
+        '单位',
+        '库存来源',
+        '备货来源',
+        '客户',
+        '来源订单',
+        '生产来源订单',
+        '生产任务',
+        '补单来源任务',
+        '生产日期',
+        '订单日期',
+        '交期',
+        '仓库',
+        '库位',
+        '状态'
+      ],
+      rows: batchRows.map((row, index) => [
+        index + 1,
+        row.batchNo,
+        row.partCode,
+        row.partName,
+        this.inventoryExportLineTypeLabel(row.lineType),
+        row.partCategory || '',
+        row.componentNo || '',
+        row.parentComponentNo || '',
+        row.drawingNo || '',
+        row.drawingVersion || '',
+        row.drawingDate || '',
+        row.drawingStatus || '',
+        row.partThickness ?? '',
+        row.partSpecification || '',
+        row.physicalQuantity ?? row.quantity,
+        row.reservedQuantity ?? 0,
+        row.availableQuantity ?? 0,
+        row.unit,
+        this.inventoryExportSourceTypeLabel(row.inventorySourceType),
+        this.inventoryExportSourceKindLabel(row.sourceKind, row.replenishmentSourceLabel),
+        row.productionSourceCustomerName || row.sourceCustomerName || '',
+        row.sourceOrderNo || '',
+        row.productionSourceOrderNo || '',
+        row.sourceProductionTaskNo || '',
+        row.sourceReplenishmentTaskNo || '',
+        this.formatDateOnly(row.productionDate),
+        this.formatDateOnly(row.orderDate),
+        this.formatDateOnly(row.deliveryDate),
+        row.warehouseName,
+        row.locationName || '',
+        this.inventoryExportStatusLabel(row.status)
+      ])
+    });
+
+    // 库存导出只读取实时汇总和批次明细，不写入 InventoryBatch、InventoryTransaction 或库存报警设置。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  private addInventoryExportSheet(
+    workbook: ExcelJS.Workbook,
+    options: {
+      sheetName: string;
+      title: string;
+      scopeText: string;
+      headers: string[];
+      rows: InventoryExportCellValue[][];
+    }
+  ) {
+    const worksheet = workbook.addWorksheet(options.sheetName, {
+      pageSetup: {
+        paperSize: 9,
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.2, footer: 0.2 }
+      },
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+    const columnCount = Math.max(options.headers.length, 1);
+    const titleRow = worksheet.addRow([options.title]);
+    worksheet.mergeCells(titleRow.number, 1, titleRow.number, columnCount);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    titleRow.height = 26;
+
+    const scopeRow = worksheet.addRow([options.scopeText]);
+    worksheet.mergeCells(scopeRow.number, 1, scopeRow.number, columnCount);
+    scopeRow.font = { color: { argb: 'FF475569' } };
+    scopeRow.alignment = { vertical: 'middle', wrapText: true };
+
+    const generatedRow = worksheet.addRow([`制表时间：${this.businessDateTimeText(new Date())}`]);
+    worksheet.mergeCells(generatedRow.number, 1, generatedRow.number, columnCount);
+    generatedRow.font = { color: { argb: 'FF475569' } };
+
+    const headerRow = worksheet.addRow(options.headers);
+    headerRow.font = { bold: true, color: { argb: 'FF0F172A' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      cell.border = this.inventoryExportThinBorder();
+    });
+
+    for (const row of options.rows) {
+      const dataRow = worksheet.addRow(row);
+      dataRow.alignment = { vertical: 'top', wrapText: true };
+      dataRow.eachCell((cell) => {
+        cell.border = this.inventoryExportThinBorder();
+      });
+    }
+
+    options.headers.forEach((header, index) => {
+      const column = worksheet.getColumn(index + 1);
+      const maxLength = [header, ...options.rows.map((row) => row[index])]
+        .map((value) => this.inventoryExportDisplayWidth(value))
+        .reduce((max, width) => Math.max(max, width), 0);
+      column.width = Math.min(Math.max(maxLength + 2, 8), index === options.headers.length - 1 ? 42 : 34);
+    });
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: columnCount }
+    };
+  }
+
+  private async inventoryExportScopeText(query: InventoryQueryDto) {
+    return [
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `客户：${await this.inventoryExportCustomerLabel(query.customerId)}`,
+      `仓库：${await this.inventoryExportWarehouseLabel(query.warehouseId)}`,
+      `订单：${query.orderNo?.trim() || '全部'}`,
+      `状态：${this.inventoryExportStatusLabel(query.status) || '全部'}`,
+      `库存报警：${this.inventoryExportStockAlertLabel(query.stockAlert)}`
+    ].join('；');
+  }
+
+  private async inventoryExportCustomerLabel(customerId?: string) {
+    if (!customerId?.trim()) {
+      return '全部客户';
+    }
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId.trim() },
+      select: { customerCode: true, customerName: true }
+    });
+    return customer ? `${customer.customerName} / ${customer.customerCode}` : customerId.trim();
+  }
+
+  private async inventoryExportWarehouseLabel(warehouseId?: string) {
+    if (!warehouseId?.trim()) {
+      return '全部仓库';
+    }
+    const warehouse = await this.prisma.warehouse.findUnique({
+      where: { id: warehouseId.trim() },
+      select: { warehouseCode: true, warehouseName: true }
+    });
+    return warehouse ? `${warehouse.warehouseName} / ${warehouse.warehouseCode}` : warehouseId.trim();
+  }
+
+  private inventoryExportStockAlertLabel(stockAlert?: StockAlertFilter) {
+    if (stockAlert === 'TRIGGERED') {
+      return '已触发';
+    }
+    if (stockAlert === 'ENABLED') {
+      return '已启用';
+    }
+    if (stockAlert === 'DISABLED') {
+      return '未启用';
+    }
+    return '全部';
+  }
+
+  private inventoryExportStatusLabel(status?: string | null) {
+    if (status === 'AVAILABLE') {
+      return '可用';
+    }
+    if (status === 'RESERVED') {
+      return '已预占';
+    }
+    if (status === 'USED') {
+      return '已用完';
+    }
+    if (status === 'SCRAPPED') {
+      return '已报废';
+    }
+    return status || '';
+  }
+
+  private inventoryExportSourceTypeLabel(sourceType?: string | null) {
+    if (sourceType === 'ORDER') {
+      return '订单库存';
+    }
+    if (sourceType === 'STOCK') {
+      return '备货库存';
+    }
+    return sourceType || '';
+  }
+
+  private inventoryExportSourceKindLabel(sourceKind?: string | null, replenishmentSourceLabel?: string | null) {
+    if (replenishmentSourceLabel) {
+      return replenishmentSourceLabel;
+    }
+    if (sourceKind === 'CANCELLED_ORDER') {
+      return '订单取消转备货';
+    }
+    if (sourceKind === 'CUSTOMER_CHANGE') {
+      return '客户变更转备货';
+    }
+    return '正常订单';
+  }
+
+  private async modelBomExportScopeText(query: ModelBomQueryDto) {
+    return [
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `客户：${await this.modelBomExportCustomerLabel(query.customerId)}`,
+      `机型/项目：${query.projectModel?.trim() || '全部'}`,
+      `BOM范围：${this.modelBomExportScopeModeLabel(query.scopeMode) || '全部'}`,
+      `泛用包：${query.excludeGlobalAllProject === 'true' ? '排除全部客户/全部机型通用包' : '包含全部客户/全部机型通用包'}`,
+      `常用：${query.commonOnly === 'true' ? '只看常用 BOM' : '全部'}`,
+      `状态：${this.modelBomExportStatusLabel(query.status) || '启用'}`
+    ].join('；');
+  }
+
+  private async modelBomExportCustomerLabel(customerId?: string) {
+    if (!customerId?.trim()) {
+      return '全部客户';
+    }
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId.trim() },
+      select: { customerCode: true, customerName: true }
+    });
+    return customer ? `${customer.customerName} / ${customer.customerCode}` : customerId.trim();
+  }
+
+  private modelBomExportScopeModeLabel(scopeMode?: string | null) {
+    if (scopeMode === 'ALL') {
+      return '全部客户通用';
+    }
+    if (scopeMode === 'SELECTED') {
+      return '指定客户可用';
+    }
+    if (scopeMode === 'PRIVATE') {
+      return '客户私有';
+    }
+    return scopeMode || '';
+  }
+
+  private modelBomExportStatusLabel(status?: string | null) {
+    if (status === 'ENABLED') {
+      return '启用';
+    }
+    if (status === 'DISABLED') {
+      return '停用';
+    }
+    if (status === 'ALL') {
+      return '全部';
+    }
+    return status || '';
+  }
+
+  private modelBomExportLineTypeLabel(line: {
+    structureType?: string | null;
+    lineType?: string | null;
+    componentNo?: string | null;
+    parentComponentNo?: string | null;
+  }) {
+    if (line.structureType === 'COMPONENT' || line.lineType === 'COMPONENT') {
+      return line.componentNo ? `组件 ${line.componentNo}` : '组件';
+    }
+    if (line.structureType === 'CHILD_PART' || line.parentComponentNo) {
+      return line.parentComponentNo ? `子零件 -> ${line.parentComponentNo}` : '子零件';
+    }
+    return '单独零件';
+  }
+
+  private modelBomExportPartThicknessSourceLabel(source?: string | null) {
+    if (source === 'BOM_LINE') {
+      return 'BOM行确认';
+    }
+    if (source === 'ORDER_HISTORY') {
+      return '历史订单预填';
+    }
+    return source || '';
+  }
+
+  private modelBomExportDrawingSourceLabel(source?: string | null) {
+    if (source === 'BOM_LINE') {
+      return 'BOM行指定';
+    }
+    if (source === 'MATERIAL_DEFAULT') {
+      return '零件默认图纸';
+    }
+    if (source === 'MATERIAL_LATEST') {
+      return '零件最新启用图纸';
+    }
+    return source || '';
+  }
+
+  private modelBomExportDefaultProcessSourceLabel(source?: string | null) {
+    if (source === 'BOM_LINE') {
+      return 'BOM行默认工艺';
+    }
+    if (source === 'MATERIAL') {
+      return '零件基础库默认工艺';
+    }
+    return source || '';
+  }
+
+  private modelBomExportLineSummary(
+    lines: Array<{
+      structureType?: string | null;
+      lineType?: string | null;
+      componentNo?: string | null;
+      parentComponentNo?: string | null;
+      partThickness?: number | null;
+      status?: string | null;
+      materialStatus?: string | null;
+    }>
+  ) {
+    const enabledComponentNos = new Set(
+      lines
+        .filter((line) => (line.structureType === 'COMPONENT' || line.lineType === 'COMPONENT') && line.status === 'ENABLED')
+        .map((line) => String(line.componentNo || '').trim())
+        .filter(Boolean)
+    );
+    const summary = {
+      effectiveCount: 0,
+      componentCount: 0,
+      childPartCount: 0,
+      standalonePartCount: 0,
+      orphanPartCount: 0,
+      missingThicknessCount: 0,
+      disabledCount: 0,
+      materialDisabledCount: 0
+    };
+    for (const line of lines) {
+      const isComponent = line.structureType === 'COMPONENT' || line.lineType === 'COMPONENT';
+      if (line.status === 'DISABLED') {
+        summary.disabledCount += 1;
+      }
+      if (line.materialStatus === 'DISABLED') {
+        summary.materialDisabledCount += 1;
+      }
+      if (line.status === 'ENABLED' && line.materialStatus !== 'DISABLED') {
+        summary.effectiveCount += 1;
+      }
+      if (isComponent) {
+        summary.componentCount += 1;
+      } else if (line.parentComponentNo) {
+        if (enabledComponentNos.has(String(line.parentComponentNo).trim())) {
+          summary.childPartCount += 1;
+        } else {
+          summary.orphanPartCount += 1;
+        }
+      } else {
+        summary.standalonePartCount += 1;
+      }
+      if (!isComponent && Number(line.partThickness ?? 0) <= 0) {
+        summary.missingThicknessCount += 1;
+      }
+    }
+    return summary;
+  }
+
+  private async materialTransformExportScopeText(query: MaterialTransformRuleQueryDto) {
+    return [
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `来源零件：${query.sourcePartCode?.trim() || query.sourceMaterialId?.trim() || '全部'}`,
+      `目标零件：${query.targetPartCode?.trim() || query.targetMaterialId?.trim() || '全部'}`,
+      `客户：${await this.inventoryExportCustomerLabel(query.customerId)}`,
+      `机型/项目：${query.projectModel?.trim() || '全部'}`,
+      `来源库存：${this.materialTransformExportStockFilterLabel(query.sourceStockStatus)}`,
+      `目标库存：${this.materialTransformExportStockFilterLabel(query.targetStockStatus)}`,
+      `库存判断：${this.materialTransformExportDecisionFilterLabel(query.inventoryDecision)}`,
+      `状态：${this.materialTransformExportStatusLabel(query.status || 'ENABLED')}`
+    ].join('；');
+  }
+
+  private materialTransformExportStockFilterLabel(value?: string | null) {
+    if (value === 'WITH_STOCK') {
+      return '有可用库存';
+    }
+    if (value === 'NO_STOCK') {
+      return '无可用库存';
+    }
+    return '全部';
+  }
+
+  private materialTransformExportDecisionFilterLabel(value?: string | null) {
+    if (value === 'TARGET_STOCK') {
+      return '先核对目标库存';
+    }
+    if (value === 'SOURCE_REWORK') {
+      return '可核对来源再加工';
+    }
+    if (value === 'NO_STOCK') {
+      return '暂无库存，考虑生产';
+    }
+    return '全部';
+  }
+
+  private materialTransformExportDecisionLabel(row: { sourceAvailableQuantity?: number | null; targetAvailableQuantity?: number | null }) {
+    if ((row.targetAvailableQuantity ?? 0) > 0) {
+      return '先核对目标库存';
+    }
+    if ((row.sourceAvailableQuantity ?? 0) > 0) {
+      return '可核对来源再加工';
+    }
+    return '暂无库存，考虑生产';
+  }
+
+  private materialTransformExportDecisionReason(row: {
+    sourceAvailableQuantity?: number | null;
+    sourceUnit?: string | null;
+    targetAvailableQuantity?: number | null;
+    targetUnit?: string | null;
+  }) {
+    const sourceQuantity = row.sourceAvailableQuantity ?? 0;
+    const targetQuantity = row.targetAvailableQuantity ?? 0;
+    if (targetQuantity > 0) {
+      return `目标零件有 ${targetQuantity}${row.targetUnit || ''} 可用库存，提交生产时先打开目标库存批次核对。`;
+    }
+    if (sourceQuantity > 0) {
+      return `目标零件暂无可用库存，来源零件有 ${sourceQuantity}${row.sourceUnit || ''} 可用库存，可在库存来源核对中人工选择再加工。`;
+    }
+    return '来源零件和目标零件都暂无可用库存，提交生产时仍需人工确认重新生产。';
+  }
+
+  private materialTransformExportStatusLabel(status?: string | null) {
+    if (status === 'ENABLED') {
+      return '启用';
+    }
+    if (status === 'DISABLED') {
+      return '停用';
+    }
+    if (status === 'ALL') {
+      return '全部';
+    }
+    return status || '';
+  }
+
+  private materialMemoryExportScopeText(query: MaterialQueryDto) {
+    return [
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `状态：${this.materialMemoryExportStatusText(query.status || 'ENABLED')}`,
+      `库存报警：${this.inventoryExportStockAlertLabel(query.stockAlert)}`
+    ].join('；');
+  }
+
+  private materialMemoryExportStatusText(status?: string | null) {
+    if (status === 'ENABLED') {
+      return '启用';
+    }
+    if (status === 'DISABLED') {
+      return '停用';
+    }
+    return status || '';
+  }
+
+  private materialMemoryExportStockAlertText(row: {
+    stockAlertEnabled?: boolean | null;
+    stockAlertTriggered?: boolean | null;
+    stockAlertQuantity?: number | null;
+    unit?: string | null;
+  }) {
+    if (!row.stockAlertEnabled) {
+      return '未启用';
+    }
+    const quantityText = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? '-' : `${row.stockAlertQuantity}${row.unit || ''}`;
+    return row.stockAlertTriggered ? `已触发：低于 ${quantityText}` : `已启用：下限 ${quantityText}`;
+  }
+
+  private inventoryExportLineTypeLabel(lineType?: string | null) {
+    if (lineType === 'COMPONENT') {
+      return '组件';
+    }
+    if (lineType === 'PART') {
+      return '零件';
+    }
+    return lineType || '';
+  }
+
+  private inventoryExportDisplayWidth(value: InventoryExportCellValue) {
+    const text = String(value ?? '');
+    return Array.from(text).reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+  }
+
+  private inventoryExportThinBorder(): Partial<ExcelJS.Borders> {
+    return {
+      top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+    };
   }
 
   private async buildMaterialImportSessionPreview(
@@ -6285,6 +9537,7 @@ export class InventoryService {
         partName: row.partName,
         unit: row.unit,
         partSpecification: row.partSpecification,
+        defaultProcessRoute: row.defaultProcessRoute,
         drawingNo: row.drawingNo,
         drawingVersion: row.drawingVersion,
         drawingDate: this.formatDateOnly(row.drawingDate),
@@ -6295,6 +9548,7 @@ export class InventoryService {
         stockAlertQuantity:
           row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : decimalToNumber(row.stockAlertQuantity),
         remark: row.remark,
+        raw: (row.raw || {}) as Record<string, string | number | null>,
         issues: this.materialImportIssueArray(row.issues),
         errorCount: row.errorCount,
         warningCount: row.warningCount
@@ -6310,6 +9564,7 @@ export class InventoryService {
         projectModel: row.projectModel,
         remark: row.remark,
         status: row.status,
+        raw: (row.raw || {}) as Record<string, string | number | null>,
         issues: this.materialImportIssueArray(row.issues),
         errorCount: row.errorCount,
         warningCount: row.warningCount
@@ -6330,6 +9585,7 @@ export class InventoryService {
         conversionDescription: row.conversionDescription,
         remark: row.remark,
         status: row.status,
+        raw: (row.raw || {}) as Record<string, string | number | null>,
         issues: this.materialImportIssueArray(row.issues),
         errorCount: row.errorCount,
         warningCount: row.warningCount
@@ -6522,6 +9778,7 @@ export class InventoryService {
       partName: row.partName,
       unit: row.unit,
       partSpecification: row.partSpecification,
+      defaultProcessRoute: row.defaultProcessRoute,
       drawingNo: row.drawingNo,
       drawingVersion: row.drawingVersion,
       drawingDate: row.drawingDate,
@@ -6635,6 +9892,7 @@ export class InventoryService {
       ? this.parseMaterialTransformImportRowsFromWorksheet(transformWorksheet)
       : [];
 
+    await this.validateMaterialImportDefaultProcessRoutes(rows);
     this.applyMaterialImportDuplicateConflicts(rows);
     this.applyMaterialDrawingImportDuplicateConflicts(rows);
     this.applyMaterialApplicabilityImportDuplicateConflicts(applicabilityRows);
@@ -6677,6 +9935,7 @@ export class InventoryService {
         partName: this.materialImportCellText(row, columns.partName),
         unit: this.materialImportCellText(row, columns.unit),
         partSpecification: this.materialImportOptionalCellText(row, columns.partSpecification),
+        defaultProcessRoute: this.materialImportOptionalCellText(row, columns.defaultProcessRoute),
         drawingNo: this.materialImportOptionalCellText(row, columns.drawingNo),
         drawingVersion: this.materialImportOptionalCellText(row, columns.drawingVersion),
         drawingDate: this.materialImportCellDate(row, columns.drawingDate),
@@ -6948,6 +10207,32 @@ export class InventoryService {
     return issues;
   }
 
+  private async validateMaterialImportDefaultProcessRoutes(rows: ParsedMaterialImportRow[]) {
+    for (const row of rows) {
+      const processNames = this.splitDefaultProcessRoute(row.defaultProcessRoute || '');
+      if (processNames.length === 0) {
+        row.defaultProcessRoute = null;
+        row.rowHash = this.hashMaterialImportRow(row);
+        continue;
+      }
+      try {
+        // 零件库导入的默认工艺只作为下单初始建议，预览阶段必须先核对标准工序。
+        await this.processDefinitionsService.ensureActiveNames(processNames);
+        row.defaultProcessRoute = processNames.join('、');
+      } catch (error) {
+        this.pushMaterialImportIssue(row, {
+          severity: 'ERROR',
+          code: 'INVALID_DEFAULT_PROCESS_ROUTE',
+          message: error instanceof Error ? error.message : '默认工艺必须来自启用的标准工序'
+        });
+      }
+      const counts = this.countMaterialImportIssues(row.issues);
+      row.errorCount = counts.errorCount;
+      row.warningCount = counts.warningCount;
+      row.rowHash = this.hashMaterialImportRow(row);
+    }
+  }
+
   private applyMaterialImportDuplicateConflicts(rows: ParsedMaterialImportRow[]) {
     const rowsByCode = new Map<string, ParsedMaterialImportRow[]>();
     for (const row of rows) {
@@ -6972,15 +10257,27 @@ export class InventoryService {
       const stockAlertSignatures = new Set(
         sameCodeRows.map((row) => this.materialImportExplicitStockAlertSignature(row)).filter(Boolean)
       );
-      if (stockAlertSignatures.size <= 1) {
-        continue;
+      if (stockAlertSignatures.size > 1) {
+        for (const row of sameCodeRows) {
+          this.pushMaterialImportIssue(row, {
+            severity: 'ERROR',
+            code: 'DUPLICATE_STOCK_ALERT_CONFLICT',
+            message: '同一导入会话内相同零件编码的库存报警设置不一致'
+          });
+        }
       }
-      for (const row of sameCodeRows) {
-        this.pushMaterialImportIssue(row, {
-          severity: 'ERROR',
-          code: 'DUPLICATE_STOCK_ALERT_CONFLICT',
-          message: '同一导入会话内相同零件编码的库存报警设置不一致'
-        });
+
+      const defaultProcessRouteSignatures = new Set(
+        sameCodeRows.map((row) => this.materialImportExplicitDefaultProcessRouteSignature(row)).filter(Boolean)
+      );
+      if (defaultProcessRouteSignatures.size > 1) {
+        for (const row of sameCodeRows) {
+          this.pushMaterialImportIssue(row, {
+            severity: 'ERROR',
+            code: 'DUPLICATE_DEFAULT_PROCESS_ROUTE_CONFLICT',
+            message: '同一导入会话内相同零件编码的默认工艺不一致'
+          });
+        }
       }
     }
   }
@@ -7248,23 +10545,32 @@ export class InventoryService {
       if (existingStockAlertSignature && currentStockAlertSignature && existingStockAlertSignature !== currentStockAlertSignature) {
         throw new BadRequestException(`零件编码 ${row.partCode} 在导入会话内存在不一致库存报警设置，请重新上传`);
       }
+      const existingDefaultProcessRouteSignature = existing ? this.materialImportExplicitDefaultProcessRouteSignature(existing) : '';
+      const currentDefaultProcessRouteSignature = this.materialImportExplicitDefaultProcessRouteSignature(row);
+      if (
+        existingDefaultProcessRouteSignature &&
+        currentDefaultProcessRouteSignature &&
+        existingDefaultProcessRouteSignature !== currentDefaultProcessRouteSignature
+      ) {
+        throw new BadRequestException(`零件编码 ${row.partCode} 在导入会话内存在不一致默认工艺，请重新上传`);
+      }
       byCode.set(key, existing ? this.mergeMaterialImportBaseRows(existing, row) : row);
     }
     return [...byCode.values()];
   }
 
   private mergeMaterialImportBaseRows(existing: any, current: any) {
+    const merged = { ...current };
     if (current.stockAlertEnabled !== null && current.stockAlertEnabled !== undefined) {
-      return current;
+      // 当前行显式维护库存报警时，以当前行作为导入草稿设置。
+    } else if (existing.stockAlertEnabled !== null && existing.stockAlertEnabled !== undefined) {
+      merged.stockAlertEnabled = existing.stockAlertEnabled;
+      merged.stockAlertQuantity = existing.stockAlertQuantity ?? null;
     }
-    if (existing.stockAlertEnabled !== null && existing.stockAlertEnabled !== undefined) {
-      return {
-        ...current,
-        stockAlertEnabled: existing.stockAlertEnabled,
-        stockAlertQuantity: existing.stockAlertQuantity ?? null
-      };
+    if (!this.materialImportExplicitDefaultProcessRouteSignature(merged)) {
+      merged.defaultProcessRoute = existing.defaultProcessRoute ?? null;
     }
-    return current;
+    return merged;
   }
 
   private uniqueMaterialDrawingImportRows(
@@ -7372,7 +10678,7 @@ export class InventoryService {
 
   private async findExistingMaterialsByPartCodes(partCodes: string[], client: any = this.prisma) {
     const uniquePartCodes = [...new Set(partCodes.map((partCode) => partCode.trim()).filter(Boolean))];
-    const results: Array<{ id: string; partCode: string; partName: string; unit: string; partSpecification?: string | null }> = [];
+    const results: Array<{ id: string; partCode: string; partName: string; unit: string; partSpecification?: string | null; status?: CommonStatus }> = [];
     for (let index = 0; index < uniquePartCodes.length; index += 500) {
       const chunk = uniquePartCodes.slice(index, index + 500);
       if (chunk.length === 0) {
@@ -7381,7 +10687,7 @@ export class InventoryService {
       results.push(
         ...(await client.material.findMany({
           where: { OR: chunk.map((partCode) => ({ partCode: { equals: partCode, mode: 'insensitive' } })) },
-          select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true }
+          select: { id: true, partCode: true, partName: true, unit: true, partSpecification: true, status: true }
         }))
       );
     }
@@ -7483,6 +10789,10 @@ export class InventoryService {
     return ['ENABLED', quantity].join('|');
   }
 
+  private materialImportExplicitDefaultProcessRouteSignature(value: { defaultProcessRoute?: string | null }) {
+    return String(value.defaultProcessRoute || '').trim();
+  }
+
   private materialImportStockAlertData(row: {
     stockAlertEnabled?: boolean | null;
     stockAlertQuantity?: number | Prisma.Decimal | null;
@@ -7523,6 +10833,7 @@ export class InventoryService {
           partName: row.partName,
           unit: row.unit,
           partSpecification: row.partSpecification,
+          defaultProcessRoute: row.defaultProcessRoute,
           drawingNo: row.drawingNo,
           drawingVersion: row.drawingVersion,
           drawingDate: this.formatDateOnly(row.drawingDate),

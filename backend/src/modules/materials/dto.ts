@@ -1,9 +1,10 @@
-import { CommonStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsArray, IsEnum, IsIn, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsArray, IsIn, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
 
 const materialStockAlertFilterValues = ['ALL', 'ENABLED', 'TRIGGERED', 'DISABLED'] as const;
 export type MaterialStockAlertFilter = (typeof materialStockAlertFilterValues)[number];
+const materialDashboardStatusFilterValues = ['ALL', 'ENABLED', 'DISABLED'] as const;
+export type MaterialDashboardStatusFilter = (typeof materialDashboardStatusFilterValues)[number];
 
 export class MaterialDashboardQueryDto {
   @IsOptional()
@@ -71,12 +72,12 @@ export class MaterialDashboardQueryDto {
   lastOrderDateTo?: string;
 
   @IsOptional()
-  @IsEnum(CommonStatus)
-  status?: CommonStatus;
+  @IsIn(materialDashboardStatusFilterValues)
+  status?: MaterialDashboardStatusFilter;
 
   @IsOptional()
-  @IsIn(['LAST_ORDER_DATE', 'DRAWING_DATE', 'BOM_STATUS', 'PART_CODE', 'UPDATED_AT'])
-  sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE' | 'UPDATED_AT';
+  @IsIn(['LAST_ORDER_DATE', 'DRAWING_DATE', 'BOM_STATUS', 'PART_CODE'])
+  sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE';
 
   @IsOptional()
   @IsIn(['ASC', 'DESC'])
@@ -94,12 +95,20 @@ export class MaterialDashboardQueryDto {
   @IsNumber()
   @Min(0)
   offset?: number;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class MaterialProjectOptionsQueryDto {
   @IsOptional()
   @IsString()
   customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class SaveCommonProjectModelsDto {

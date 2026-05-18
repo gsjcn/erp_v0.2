@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, Param, Patch, Post, Query, StreamableFile } from '@nestjs/common';
 import { CreateProcessDefinitionDto, ProcessDefinitionQueryDto, UpdateProcessDefinitionDto } from './dto';
 import { ProcessDefinitionsService } from './process-definitions.service';
 
@@ -8,7 +8,14 @@ export class ProcessDefinitionsController {
 
   @Get()
   findAll(@Query() query: ProcessDefinitionQueryDto) {
-    return this.processDefinitionsService.findAll(query);
+    return this.processDefinitionsService.findAll({ ...query, withPage: 'true' });
+  }
+
+  @Get('export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="process-definitions-export.xlsx"')
+  async exportDefinitions(@Query() query: ProcessDefinitionQueryDto) {
+    return new StreamableFile(await this.processDefinitionsService.buildProcessDefinitionsExport(query));
   }
 
   @Post()

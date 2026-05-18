@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const ExcelJS = require('exceljs');
+const { PrismaClient } = require('@prisma/client');
 const { existsSync, readFileSync } = require('node:fs');
 const { unlink } = require('node:fs/promises');
 const { join, resolve } = require('node:path');
@@ -17,11 +18,15 @@ for (const envPath of [resolve('.env'), resolve('backend/.env')]) {
   }
 }
 
-const apiBaseUrl = (process.env.ORDER_IMPORT_API_BASE_URL || 'http://127.0.0.1:3000/api').replace(/\/$/, '');
+const apiBaseUrl = (process.env.FIRST_STAGE_API_BASE_URL || process.env.ORDER_IMPORT_API_BASE_URL || 'http://127.0.0.1:3000/api').replace(/\/$/, '');
 const uploadedDrawingFiles = [];
 const uploadedInventoryFiles = [];
 const orderImportSessionIds = [];
-const runId = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+const createdCustomerIds = [];
+const runId = 'STABLE';
+const uploadFilenameCustomerCode = 'UPLOAD-FILENAME-CUST-STABLE';
+const uploadFilenameCustomerName = '上传文件名验证客户 STABLE';
+const prisma = new PrismaClient();
 const mojibakePattern =
   /[ÃÂ�]|锟|脙|脗|鈥|绗|\u95c3\u8235|\u95c3\u8236|寮€|涓€|瀵煎|璁㈠崟|鏂囦欢|缂栫爜|鍚嶇О|绮剧‘|鍖归厤|鍓嶇紑|鎷奸煶|鍥剧焊|瀹㈡埛|鍘嗗彶|搴撳瓨|鏉ユ簮|涔辩爜|淇|楠岃瘉|鏃犳硶|鏈壘|鎵惧埌|涓|尮閰|墿鏂|璇蜂粠|嬫媺|閫夋嫨|鏌ヨ|澶辫触|宸ヨ緭|闃绘柇/;
 
@@ -68,10 +73,53 @@ async function requestJson(path, options = {}) {
   return body;
 }
 
-async function firstEnabledCustomerName() {
-  const customers = await requestJson('/customers?status=ENABLED');
-  const customer = Array.isArray(customers) ? customers.find((item) => item.status === 'ENABLED') : null;
-  assert(customer?.customerName, '未找到启用客户，无法执行订单导入文件名回归验证');
+async function createUploadFilenameCustomerName() {
+  const customerData = {
+    customerCode: uploadFilenameCustomerCode,
+    customerName: uploadFilenameCustomerName,
+    contactName: '上传验证',
+    contactPhone: '13800000000',
+    regionType: 'CHINA',
+    country: '中国',
+    province: '江苏省',
+    city: '常州市',
+    detailAddress: '上传文件名验证地址',
+    remark: 'verify-upload-filenames-api 稳定回归客户，脚本结束后软停用。',
+    status: 'ENABLED'
+  };
+  const existingCustomer = await prisma.customer.findFirst({
+    where: {
+      OR: [
+        { customerCode: uploadFilenameCustomerCode },
+        { customerCode: { startsWith: `${uploadFilenameCustomerCode}__DISABLED__` } },
+        { customerName: { startsWith: `${uploadFilenameCustomerName}__DISABLED__` } }
+      ]
+    },
+    orderBy: { createdAt: 'asc' }
+  });
+  const customer = existingCustomer
+    ? await prisma.customer.update({
+        where: { id: existingCustomer.id },
+        data: customerData
+      })
+    : await prisma.customer.create({
+        data: customerData
+      });
+  await prisma.customerContact.updateMany({
+    where: { customerId: customer.id, status: 'ENABLED' },
+    data: { status: 'DISABLED', isPrimary: false }
+  });
+  await prisma.customerContact.create({
+    data: {
+      customerId: customer.id,
+      contactName: '上传验证',
+      contactPhone: '13800000000',
+      isPrimary: true,
+      status: 'ENABLED'
+    }
+  });
+  assert(customer?.id && customer?.customerName, '无法创建上传文件名验证客户');
+  createdCustomerIds.push(customer.id);
   return customer.customerName;
 }
 
@@ -182,6 +230,31 @@ async function uploadDrawingFile(fileName) {
   return result;
 }
 
+async function uploadMaterialDrawingFile(fileName) {
+  const form = new FormData();
+  form.append('file', new Blob([Buffer.from('material drawing upload filename regression')], { type: 'image/png' }), fileName);
+  const result = await requestJson('/inventory/material-drawings/upload', {
+    method: 'POST',
+    body: form
+  });
+  uploadedDrawingFiles.push(result.storedFileName);
+  return result;
+}
+
+function resolveHostUploadRoot(uploadRoot) {
+  if (!uploadRoot) {
+    return '';
+  }
+  if (existsSync(uploadRoot)) {
+    return uploadRoot;
+  }
+  const normalized = String(uploadRoot).replace(/\\/g, '/');
+  if (normalized === '/app/storage/uploads') {
+    return resolve(process.env.UPLOAD_DIR || 'storage/uploads');
+  }
+  return uploadRoot;
+}
+
 async function cleanup() {
   for (const sessionId of orderImportSessionIds) {
     try {
@@ -191,12 +264,42 @@ async function cleanup() {
     }
   }
 
+  for (const customerId of createdCustomerIds) {
+    try {
+      const customer = await prisma.customer.findUnique({
+        where: { id: customerId }
+      });
+      if (!customer) {
+        continue;
+      }
+      const archiveSuffix = `__DISABLED__${customer.id.slice(0, 8)}`;
+      const baseCode = String(customer.customerCode || '').replace(/__DISABLED__.*/, '');
+      const baseName = String(customer.customerName || '').replace(/__DISABLED__.*/, '');
+      await prisma.customerContact.updateMany({
+        where: { customerId: customer.id, status: 'ENABLED' },
+        data: { status: 'DISABLED', isPrimary: false }
+      });
+      await prisma.customer.update({
+        where: { id: customer.id },
+        data: {
+          customerCode: `${baseCode}${archiveSuffix}`,
+          customerName: `${baseName}${archiveSuffix}`,
+          contactName: null,
+          contactPhone: null,
+          status: 'DISABLED'
+        }
+      });
+    } catch {
+      // 验证客户只做软停用清理；失败不掩盖主验证错误，可由 cleanup:test-data 兜底处理。
+    }
+  }
+
   if (uploadedDrawingFiles.length === 0 && uploadedInventoryFiles.length === 0) {
     return undefined;
   }
   try {
     const health = await requestJson('/health');
-    const uploadRoot = health?.storage?.uploads?.path;
+    const uploadRoot = resolveHostUploadRoot(health?.storage?.uploads?.path);
     if (!uploadRoot) {
       return;
     }
@@ -213,7 +316,7 @@ async function cleanup() {
 }
 
 async function main() {
-  const customerName = await firstEnabledCustomerName();
+  const customerName = await createUploadFilenameCustomerName();
 
   const orderImportMojibakeSourceName = '订单导入-乱码修复验证.xlsx';
   const orderImportSession = await createOrderImportSession();
@@ -287,6 +390,28 @@ async function main() {
   );
   assertNoMojibake(decodedDrawingPath.fileName, '订单图纸路径文件名');
 
+  const materialDrawingName = '零件图纸-中文验证.png';
+  const decodedMaterialDrawing = await uploadMaterialDrawingFile(materialDrawingName);
+  assert(decodedMaterialDrawing.fileName === materialDrawingName, `零件图纸普通中文文件名必须保留，实际 ${decodedMaterialDrawing.fileName}`);
+  assertNoMojibake(decodedMaterialDrawing.fileName, '零件图纸普通中文文件名');
+  assert(decodedMaterialDrawing.fileUrl?.includes('/uploads/drawings/'), '零件图纸必须返回可访问的上传地址');
+
+  const materialDrawingPercentName = '零件图纸-percent编码验证.png';
+  const decodedMaterialDrawingPercent = await uploadMaterialDrawingFile(utf8PercentFileName(materialDrawingPercentName));
+  assert(
+    decodedMaterialDrawingPercent.fileName === materialDrawingPercentName,
+    `零件图纸 percent-encoded 文件名必须修复为中文，实际 ${decodedMaterialDrawingPercent.fileName}`
+  );
+  assertNoMojibake(decodedMaterialDrawingPercent.fileName, '零件图纸 percent-encoded 文件名');
+
+  const materialDrawingPathName = '零件图纸-路径清理验证.png';
+  const decodedMaterialDrawingPath = await uploadMaterialDrawingFile(posixPathName(materialDrawingPathName));
+  assert(
+    decodedMaterialDrawingPath.fileName === materialDrawingPathName,
+    `零件图纸路径文件名必须只保留 basename，实际 ${decodedMaterialDrawingPath.fileName}`
+  );
+  assertNoMojibake(decodedMaterialDrawingPath.fileName, '零件图纸路径文件名');
+
   const normalChineseName = '库存盘点照片-中文验证.png';
   const decodedNormal = await uploadInventoryAdjustmentFile(normalChineseName);
   assert(decodedNormal.fileName === normalChineseName, `库存附件普通中文文件名必须保留，实际 ${decodedNormal.fileName}`);
@@ -330,6 +455,9 @@ async function main() {
           decodedDrawingMojibake.fileName,
           decodedDrawingPercent.fileName,
           decodedDrawingPath.fileName,
+          decodedMaterialDrawing.fileName,
+          decodedMaterialDrawingPercent.fileName,
+          decodedMaterialDrawingPath.fileName,
           decodedNormal.fileName,
           decodedMojibake.fileName,
           decodedInventoryPercent.fileName,
@@ -347,4 +475,7 @@ main()
     console.error(error);
     process.exitCode = 1;
   })
-  .finally(cleanup);
+  .finally(async () => {
+    await cleanup();
+    await prisma.$disconnect();
+  });

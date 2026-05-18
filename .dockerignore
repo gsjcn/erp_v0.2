@@ -8,12 +8,18 @@ backend/dist
 .env
 .env.local
 *.log
+logs
+.codex-logs
+.codex-screens
+.runtime-logs
 
 database/postgres-data
 database/backups
 storage
 storage/uploads
 storage/exports
+outputs/logs
+outputs/*.log
 
 **/.DS_Store
 **/Thumbs.db

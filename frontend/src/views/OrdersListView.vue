@@ -3,6 +3,7 @@
     <div class="page-header">
       <h2 class="page-title">订单总列表</h2>
       <div class="page-header-actions orders-page-header-actions">
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="orderExporting" @click="exportOrdersExcel">导出 Excel</el-button>
         <el-button v-if="!isMobileLayout" @click="openImportDialog">导入订单</el-button>
         <el-button v-if="!isMobileLayout" type="primary" @click="openCreate">新增订单</el-button>
       </div>
@@ -93,7 +94,35 @@
     </div>
 
     <div class="table-card orders-table-card desktop-table">
-      <el-table v-loading="loading" :data="orders" max-height="calc(100vh - 315px)" @row-dblclick="goDetail">
+      <div class="orders-table-height-toolbar">
+        <div class="orders-table-height-actions" aria-label="订单总列表表格高度">
+          <span class="orders-table-height-label">订单总列表表格高度</span>
+          <el-button-group>
+            <el-button
+              size="small"
+              :icon="Minus"
+              :disabled="ordersWorkTableHeights.orders <= ordersWorkTableHeightLimits.min"
+              aria-label="降低订单总列表表格高度"
+              @click="adjustOrdersWorkTableHeight('orders', -ordersWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="Plus"
+              :disabled="ordersWorkTableHeights.orders >= ordersWorkTableHeightLimits.max"
+              aria-label="提高订单总列表表格高度"
+              @click="adjustOrdersWorkTableHeight('orders', ordersWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="ordersWorkTableHeights.orders === ordersWorkTableDefaultHeights.orders"
+              aria-label="恢复订单总列表表格默认高度"
+              @click="resetOrdersWorkTableHeight('orders')"
+            />
+          </el-button-group>
+        </div>
+      </div>
+      <el-table v-loading="loading" :data="orders" :max-height="ordersWorkTableHeights.orders" @row-dblclick="goDetail">
         <el-table-column label="订单号" min-width="190">
           <template #default="{ row }">
             <OrderNoLink :order-no="row.orderNo" />
@@ -298,15 +327,15 @@
                 v-model="modelBomSearch.projectModel"
                 clearable
                 placeholder="项目型号 / 机型，例如 B3、B5"
-                @keyup.enter="loadModelBomRecommendations"
+                @keyup.enter="searchModelBomRecommendations"
               />
               <el-input
                 v-model="modelBomSearch.keyword"
                 clearable
                 placeholder="零件包、零件、客户关键字"
-                @keyup.enter="loadModelBomRecommendations"
+                @keyup.enter="searchModelBomRecommendations"
               />
-              <el-button type="primary" :loading="modelBomLoading" @click="loadModelBomRecommendations">
+              <el-button type="primary" :loading="modelBomLoading" @click="searchModelBomRecommendations">
                 搜索零件包
               </el-button>
             </div>
@@ -315,42 +344,119 @@
             v-if="!modelBomLoading && modelBomRecommendations.length === 0"
             description="请选择客户并输入机型后搜索；也可以搜索全局通用零件包。"
           />
-          <div v-else class="model-bom-card-list">
-            <article v-for="bom in modelBomRecommendations" :key="bom.id" class="model-bom-card">
-              <div class="model-bom-card-main">
-                <div class="model-bom-card-title">
-                  <strong>{{ bom.bomName }}</strong>
-                  <el-tag size="small" effect="plain">{{ bom.scopeLabel }}</el-tag>
-                </div>
-                <div class="model-bom-card-meta">
-                  <span>{{ modelBomProjectScopeText(bom) }}</span>
-                  <span>{{ enabledModelBomLineCount(bom) }} 个启用零件</span>
-                  <span v-if="bom.remark">{{ bom.remark }}</span>
-                </div>
-                <div class="model-bom-structure-preview">
-                  <div v-for="(group, groupIndex) in modelBomStructureGroups(bom)" :key="group.id" class="model-bom-structure-group">
-                    <div class="model-bom-structure-main">
-                      <span>{{ groupIndex + 1 }}</span>
-                      <el-tag :type="groupStructureTagType(group.type, group.line)" effect="plain">
-                        {{ groupStructureLabel(group.type, group.line) }}
+          <template v-else>
+            <div class="orders-table-height-toolbar model-bom-recommendation-height-toolbar">
+              <div class="orders-table-height-actions" aria-label="零件包推荐结构预览高度">
+                <span class="orders-table-height-label">零件包推荐结构预览高度</span>
+                <el-button-group>
+                  <el-button
+                    size="small"
+                    :icon="Minus"
+                    :disabled="ordersWorkTableHeights.modelBomRecommendationStructure <= ordersWorkTableHeightLimits.min"
+                    aria-label="降低零件包推荐结构预览高度"
+                    @click="adjustOrdersWorkTableHeight('modelBomRecommendationStructure', -ordersWorkTableHeightLimits.step)"
+                  />
+                  <el-button
+                    size="small"
+                    :icon="Plus"
+                    :disabled="ordersWorkTableHeights.modelBomRecommendationStructure >= ordersWorkTableHeightLimits.max"
+                    aria-label="提高零件包推荐结构预览高度"
+                    @click="adjustOrdersWorkTableHeight('modelBomRecommendationStructure', ordersWorkTableHeightLimits.step)"
+                  />
+                  <el-button
+                    size="small"
+                    :icon="RefreshLeft"
+                    :disabled="ordersWorkTableHeights.modelBomRecommendationStructure === ordersWorkTableDefaultHeights.modelBomRecommendationStructure"
+                    aria-label="恢复零件包推荐结构预览默认高度"
+                    @click="resetOrdersWorkTableHeight('modelBomRecommendationStructure')"
+                  />
+                </el-button-group>
+              </div>
+            </div>
+            <el-alert
+              v-if="modelBomRecommendationMultiChoiceScopeCount > 0"
+              class="model-bom-multi-choice-scope-alert"
+              type="warning"
+              :closable="false"
+              show-icon
+              :title="`当前筛选中有 ${modelBomRecommendationMultiChoiceScopeCount} 个 BOM 所在范围存在多套可选 BOM`"
+              description="同一客户同一机型允许保存多个 BOM；请结合 BOM 名称、短 ID、适用范围和明细预览人工选择，再点击“预览带入”。"
+            />
+            <div class="model-bom-card-list">
+              <article v-for="bom in modelBomRecommendations" :key="bom.id" class="model-bom-card">
+                <div class="model-bom-card-main">
+                  <div class="model-bom-card-title">
+                    <strong>{{ bom.bomName }}</strong>
+                    <el-tooltip :content="modelBomScopeTitle(bom)" placement="top">
+                      <el-tag class="model-bom-scope-tag" size="small" effect="plain">
+                        <span class="model-bom-scope-tag-text">{{ modelBomScopePreview(bom) }}</span>
                       </el-tag>
-                      <strong>{{ formatModelBomStructureCore(group.line) }}</strong>
-                      <span>{{ formatModelBomStructureMeta(group.line) }}</span>
+                    </el-tooltip>
+                    <el-tag v-if="Number(bom.sameScopeBomCount || 0) > 1" size="small" type="warning" effect="plain">
+                      可选 BOM {{ bom.sameScopeBomCount }} 个
+                    </el-tag>
+                  </div>
+                  <div class="model-bom-card-meta">
+                    <span>ID {{ shortModelBomId(bom.id) }}</span>
+                    <span>{{ modelBomProjectScopeText(bom) }}</span>
+                    <span>{{ enabledModelBomLineCount(bom) }} 个启用零件</span>
+                    <span v-if="Number(bom.lineCount || 0) !== enabledModelBomLineCount(bom)">明细 {{ bom.lineCount }} 行</span>
+                    <span v-if="bom.isCommon">常用 BOM</span>
+                    <span v-if="bom.sourceBomNameSnapshot">来源 {{ bom.sourceBomNameSnapshot }}</span>
+                    <span v-if="bom.remark" :title="modelBomRemarkTitle(bom)">备注：{{ modelBomRemarkPreview(bom) }}</span>
+                  </div>
+                  <div class="model-bom-structure-preview" :style="{ maxHeight: `${ordersWorkTableHeights.modelBomRecommendationStructure}px` }">
+                    <div v-if="!modelBomHasLoadedLines(bom)" class="model-bom-structure-empty">
+                      列表仅显示摘要；点击“预览带入”后读取完整 BOM 明细。
                     </div>
-                    <div v-for="(child, childIndex) in group.children" :key="child.id" class="model-bom-structure-child">
-                      <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
-                      <el-tag :type="groupStructureTagType('standalone', child)" effect="plain">
-                        {{ groupStructureLabel('standalone', child) }}
-                      </el-tag>
-                      <strong>{{ formatModelBomStructureCore(child) }}</strong>
-                      <span>{{ formatModelBomStructureMeta(child) }}</span>
+                    <div v-for="(group, groupIndex) in modelBomStructureGroups(bom)" :key="group.id" class="model-bom-structure-group">
+                      <div class="model-bom-structure-main">
+                        <span>{{ groupIndex + 1 }}</span>
+                        <el-tag :type="groupStructureTagType(group.type, group.line)" effect="plain">
+                          {{ groupStructureLabel(group.type, group.line) }}
+                        </el-tag>
+                        <strong>{{ formatModelBomStructureCore(group.line) }}</strong>
+                        <span>{{ formatModelBomStructureMeta(group.line) }}</span>
+                      </div>
+                      <div v-for="(child, childIndex) in group.children" :key="child.id" class="model-bom-structure-child">
+                        <span>{{ `${groupIndex + 1}.${childIndex + 1}` }}</span>
+                        <el-tag :type="groupStructureTagType('standalone', child)" effect="plain">
+                          {{ groupStructureLabel('standalone', child) }}
+                        </el-tag>
+                        <strong>{{ formatModelBomStructureCore(child) }}</strong>
+                        <span>{{ formatModelBomStructureMeta(child) }}</span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-              <el-button type="primary" plain @click="openModelBomApplyDialog(bom)">预览带入</el-button>
-            </article>
-          </div>
+                <el-button
+                  type="primary"
+                  plain
+                  :loading="modelBomRecommendationDetailLoadingId === bom.id"
+                  :disabled="Boolean(modelBomRecommendationDetailLoadingId) && modelBomRecommendationDetailLoadingId !== bom.id"
+                  @click="openModelBomApplyDialog(bom)"
+                >
+                  预览带入
+                </el-button>
+              </article>
+            </div>
+            <div class="model-bom-recommendation-pagination">
+              <span>
+                第 {{ modelBomRecommendationPagination.page }} 页，已显示 {{ modelBomRecommendations.length }} /
+                {{ modelBomRecommendationPagination.total }} 个零件包
+              </span>
+              <el-pagination
+                small
+                background
+                layout="prev, pager, next"
+                :current-page="modelBomRecommendationPagination.page"
+                :page-size="modelBomRecommendationPagination.limit"
+                :total="modelBomRecommendationPagination.total"
+                :disabled="modelBomLoading"
+                @current-change="handleModelBomRecommendationPageChange"
+              />
+            </div>
+          </template>
         </div>
 
         <div class="order-form-structure-panel">
@@ -364,7 +470,35 @@
               <el-button size="small" :disabled="orderFormFilledLineCount === 0" @click="copyOrderFormStructureText">复制清单</el-button>
             </div>
           </div>
-          <div v-if="orderFormStructureGroups.length" class="order-form-structure-list">
+          <div class="orders-table-height-toolbar">
+            <div class="orders-table-height-actions" aria-label="当前草稿固定格式清单高度">
+              <span class="orders-table-height-label">固定格式清单高度</span>
+              <el-button-group>
+                <el-button
+                  size="small"
+                  :icon="Minus"
+                  :disabled="ordersWorkTableHeights.orderFormStructure <= ordersWorkTableHeightLimits.min"
+                  aria-label="降低当前草稿固定格式清单高度"
+                  @click="adjustOrdersWorkTableHeight('orderFormStructure', -ordersWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  size="small"
+                  :icon="Plus"
+                  :disabled="ordersWorkTableHeights.orderFormStructure >= ordersWorkTableHeightLimits.max"
+                  aria-label="提高当前草稿固定格式清单高度"
+                  @click="adjustOrdersWorkTableHeight('orderFormStructure', ordersWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  size="small"
+                  :icon="RefreshLeft"
+                  :disabled="ordersWorkTableHeights.orderFormStructure === ordersWorkTableDefaultHeights.orderFormStructure"
+                  aria-label="恢复当前草稿固定格式清单默认高度"
+                  @click="resetOrdersWorkTableHeight('orderFormStructure')"
+                />
+              </el-button-group>
+            </div>
+          </div>
+          <div v-if="orderFormStructureGroups.length" class="order-form-structure-list" :style="{ maxHeight: `${ordersWorkTableHeights.orderFormStructure}px` }">
             <div v-for="(group, groupIndex) in orderFormStructureGroups" :key="group.id" class="order-form-structure-group">
               <div class="order-form-structure-main">
                 <span>{{ groupIndex + 1 }}</span>
@@ -428,6 +562,24 @@
         <el-button :disabled="!importPreview" :loading="importPreviewLoading" @click="refreshImportPreview">刷新预览</el-button>
         <el-button :loading="importSessionsLoading" @click="loadImportSessionHistory">刷新导入记录</el-button>
         <el-button
+          type="warning"
+          plain
+          :disabled="!canExtractMaterialImportDraft"
+          :loading="materialImportExtracting"
+          @click="extractMaterialImportDraftFromOrderImport"
+        >
+          提取零件库草稿
+        </el-button>
+        <el-button
+          type="warning"
+          plain
+          :disabled="!canExtractMaterialImportDraft"
+          :loading="modelBomDraftPreviewLoading"
+          @click="previewModelBomDraftFromOrderImport"
+        >
+          预览 BOM 草稿
+        </el-button>
+        <el-button
           type="danger"
           plain
           :disabled="!importPreview || importPreview.status !== 'DRAFT'"
@@ -451,8 +603,8 @@
           :loading="importCommittingAll"
           @click="commitAllImportSelectableOrders"
         >
-          创建全部可导入草稿
-        </el-button>
+            创建全部可导入草稿
+          </el-button>
       </div>
       <div
         class="import-drop-zone"
@@ -622,12 +774,40 @@
           </div>
         </article>
       </div>
+      <div v-if="importPreview" class="orders-table-height-toolbar">
+        <div class="orders-table-height-actions" aria-label="订单导入预览表格高度">
+          <span class="orders-table-height-label">订单导入预览表格高度</span>
+          <el-button-group>
+            <el-button
+              size="small"
+              :icon="Minus"
+              :disabled="ordersWorkTableHeights.importPreview <= ordersWorkTableHeightLimits.min"
+              aria-label="降低订单导入预览表格高度"
+              @click="adjustOrdersWorkTableHeight('importPreview', -ordersWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="Plus"
+              :disabled="ordersWorkTableHeights.importPreview >= ordersWorkTableHeightLimits.max"
+              aria-label="提高订单导入预览表格高度"
+              @click="adjustOrdersWorkTableHeight('importPreview', ordersWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="ordersWorkTableHeights.importPreview === ordersWorkTableDefaultHeights.importPreview"
+              aria-label="恢复订单导入预览表格默认高度"
+              @click="resetOrdersWorkTableHeight('importPreview')"
+            />
+          </el-button-group>
+        </div>
+      </div>
       <el-table
         v-if="importPreview"
         ref="importPreviewTable"
         :data="importPreview.orders"
         row-key="orderNo"
-        max-height="520"
+        :max-height="ordersWorkTableHeights.importPreview"
         class="import-preview-table"
         @selection-change="handleImportOrderSelectionChange"
       >
@@ -680,6 +860,9 @@
               <el-table-column prop="partCategory" label="零件类型" width="100" />
               <el-table-column prop="partCode" label="零件编码" min-width="140" />
               <el-table-column prop="drawingNo" label="图号" min-width="170" />
+              <el-table-column prop="drawingVersion" label="版本" width="90" />
+              <el-table-column prop="drawingDate" label="图纸日期" width="120" />
+              <el-table-column prop="drawingStatus" label="图纸状态" width="100" />
               <el-table-column prop="partName" label="产品名称" min-width="160" />
               <el-table-column label="厚度" width="90">
                 <template #default="{ row: line }">{{ formatStructureLineThickness(line) }}</template>
@@ -687,19 +870,18 @@
               <el-table-column label="需求数量" width="120">
                 <template #default="{ row: line }">{{ formatQuantity(line.demandQuantity, line.unit) }}</template>
               </el-table-column>
-              <el-table-column prop="processRoute" label="工艺路线" min-width="180" />
+              <el-table-column prop="processRoute" label="工艺路线" min-width="180">
+                <template #default="{ row: line }">
+                  <span :title="formatFullText(line.processRoute)">{{ formatProcessRoutePreview(line.processRoute) }}</span>
+                </template>
+              </el-table-column>
               <el-table-column label="校验" min-width="240">
                 <template #default="{ row: line }">
-                  <div v-if="line.issues.length" class="import-issues">
-                    <el-tag
-                      v-for="issue in line.issues"
-                      :key="`${line.id}-${issue.code}-${issue.message}`"
-                      :type="issue.severity === 'ERROR' ? 'danger' : 'warning'"
-                      effect="plain"
-                    >
-                      {{ issue.message }}
+                  <el-tooltip v-if="line.issues.length" :content="formatImportIssueTitle(line.issues)" placement="top">
+                    <el-tag :type="importIssueTagType(line.issues)" effect="plain">
+                      {{ formatImportIssuePreview(line.issues) }}
                     </el-tag>
-                  </div>
+                  </el-tooltip>
                   <span v-else class="muted">通过</span>
                 </template>
               </el-table-column>
@@ -760,9 +942,357 @@
             :loading="importCommittingAll"
             @click="commitAllImportSelectableOrders"
           >
-            创建全部可导入草稿
+          创建全部可导入草稿
+        </el-button>
+          <el-button
+            type="warning"
+            plain
+            :disabled="!canExtractMaterialImportDraft"
+            :loading="materialImportExtracting"
+            @click="extractMaterialImportDraftFromOrderImport"
+          >
+            提取零件库草稿
+          </el-button>
+          <el-button
+            type="warning"
+            plain
+            :disabled="!canExtractMaterialImportDraft"
+            :loading="modelBomDraftPreviewLoading"
+            @click="previewModelBomDraftFromOrderImport"
+          >
+            预览 BOM 草稿
           </el-button>
         </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="modelBomDraftPreviewVisible"
+      title="BOM 草稿预览"
+      width="min(1280px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <el-alert
+        v-if="modelBomDraftPreview"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="mb-16"
+        title="BOM 草稿只用于人工核对"
+        description="当前预览不会写入正式 BOM、不会覆盖已有 BOM、不会创建订单、生产任务或库存。缺失零件需要先在零件库导入草稿中人工确认写入后，再维护正式 BOM。"
+      />
+      <div v-if="modelBomDraftPreview && modelBomDraftPreviewedAt" class="import-preview-footer">
+        <span>预览时间：{{ modelBomDraftPreviewedAt }}</span>
+        <span>刷新会按当前零件基础库和正式 BOM 状态重新校验，不会写入业务数据。</span>
+      </div>
+      <div v-if="modelBomDraftPreview" class="import-summary">
+        <div>
+          <strong>{{ modelBomDraftPreview.summary.draftCount }}</strong>
+          <span>BOM 草稿</span>
+        </div>
+        <div>
+          <strong>{{ modelBomDraftPreview.summary.lineCount }}</strong>
+          <span>明细行</span>
+        </div>
+        <div>
+          <strong>{{ modelBomDraftPreview.summary.componentCount }}</strong>
+          <span>组件</span>
+        </div>
+        <div>
+          <strong>{{ modelBomDraftPreview.summary.childPartCount }}</strong>
+          <span>子零件</span>
+        </div>
+        <div>
+          <strong>{{ modelBomDraftPreview.summary.existingBomScopeCount }}</strong>
+          <span>已有正式 BOM</span>
+        </div>
+        <div>
+          <strong class="warning">{{ modelBomDraftPreview.summary.missingMaterialCount }}</strong>
+          <span>缺失基础零件</span>
+        </div>
+        <div>
+          <strong class="danger">{{ modelBomDraftPreview.summary.errorCount }}</strong>
+          <span>错误</span>
+        </div>
+        <div>
+          <strong class="warning">{{ modelBomDraftPreview.summary.warningCount }}</strong>
+          <span>警告</span>
+        </div>
+      </div>
+      <el-tabs v-if="modelBomDraftPreview?.drafts.length" class="import-preview-tabs">
+        <el-tab-pane
+          v-for="draft in modelBomDraftPreview.drafts"
+          :key="draft.draftKey"
+          :label="`${draft.customerName}${draft.projectModel ? ` / ${draft.projectModel}` : ''}`"
+        >
+          <div class="import-structure-header">
+            <div>
+              <strong>{{ draft.bomName }}</strong>
+              <span>
+                {{ draft.lineCount }} 行 / 组件 {{ draft.componentCount }} / 子零件 {{ draft.childPartCount }} / 独立零件 {{ draft.standalonePartCount }}
+              </span>
+              <span v-if="modelBomDraftExistingBoms(draft).length">
+                已有正式 BOM：{{ modelBomDraftExistingBomsSummary(draft) }}
+              </span>
+            </div>
+            <div class="model-bom-draft-name-field">
+              <label>正式 BOM 名称</label>
+              <el-input
+                v-model="draft.commitBomName"
+                placeholder="确认写入前必须核对名称"
+              />
+              <small v-if="modelBomDraftNameConflict(draft)" class="danger-text">同范围已有同名 BOM，请改名后再创建。</small>
+            </div>
+            <el-button
+              v-if="modelBomDraftExistingBoms(draft).length"
+              type="primary"
+              plain
+              @click="openExistingModelBomFromDraft(draft)"
+            >
+              查看已有 BOM
+            </el-button>
+            <el-button
+              type="success"
+              plain
+              :loading="modelBomDraftCommittingKey === draft.draftKey"
+              :disabled="Boolean(modelBomDraftCommittingKey) || !modelBomDraftCanCommit(draft)"
+              :title="modelBomDraftCommitBlockReason(draft)"
+              @click="commitModelBomDraftFromOrderImport(draft)"
+            >
+              新建正式 BOM
+            </el-button>
+          </div>
+          <div v-if="modelBomDraftExistingBoms(draft).length" class="model-bom-draft-diff-list">
+            <article
+              v-for="bom in modelBomDraftExistingBoms(draft)"
+              :key="`${draft.draftKey}-${bom.id}`"
+              class="model-bom-draft-diff-item"
+              :class="{ warning: modelBomDraftDiffHasChange(bom) }"
+            >
+              <div>
+                <strong>{{ bom.bomName }}</strong>
+                <span>{{ bom.lineCount }} 行 / {{ modelBomDraftDiffText(bom) }}</span>
+              </div>
+              <div class="model-bom-draft-diff-tags">
+                <el-tag size="small" effect="plain" type="success">相同 {{ bom.diffSummary?.sameLineCount || 0 }}</el-tag>
+                <el-tag size="small" effect="plain" :type="(bom.diffSummary?.changedLineCount || 0) > 0 ? 'warning' : 'info'">
+                  变更 {{ bom.diffSummary?.changedLineCount || 0 }}
+                </el-tag>
+                <el-tag size="small" effect="plain" :type="(bom.diffSummary?.newLineCount || 0) > 0 ? 'warning' : 'info'">
+                  草稿新增 {{ bom.diffSummary?.newLineCount || 0 }}
+                </el-tag>
+                <el-tag size="small" effect="plain" :type="(bom.diffSummary?.removedLineCount || 0) > 0 ? 'warning' : 'info'">
+                  正式多出 {{ bom.diffSummary?.removedLineCount || 0 }}
+                </el-tag>
+                <el-tag size="small" effect="plain" :type="modelBomDraftDiffReviewed(draft, bom) ? 'success' : 'warning'">
+                  {{ modelBomDraftDiffReviewed(draft, bom) ? '已核对' : '待核对' }}
+                </el-tag>
+              </div>
+              <small v-if="modelBomDraftDiffChangedFieldsText(bom)">
+                变更字段：{{ modelBomDraftDiffChangedFieldsText(bom) }}
+              </small>
+              <div class="model-bom-draft-diff-actions">
+                <el-button size="small" type="primary" plain @click="openExistingModelBomFromDraft(draft, bom)">
+                  查看此 BOM
+                </el-button>
+                <el-button size="small" type="primary" plain @click="openModelBomDraftDiffDialog(draft, bom)">
+                  {{ modelBomDraftDiffViewed(draft, bom) ? '重新比对' : '逐行比对' }}
+                </el-button>
+                <small v-if="!modelBomDraftDiffReviewed(draft, bom)">创建正式 BOM 前必须完成该项核对。</small>
+              </div>
+            </article>
+          </div>
+          <div v-if="draft.issues.length" class="import-issues">
+            <el-tooltip :content="formatImportIssueTitle(draft.issues)" placement="top">
+              <el-tag :type="importIssueTagType(draft.issues)" effect="plain">
+                {{ formatImportIssuePreview(draft.issues) }}
+              </el-tag>
+            </el-tooltip>
+          </div>
+          <div class="orders-table-height-toolbar">
+            <div class="orders-table-height-actions" aria-label="BOM 草稿预览表格高度">
+              <span class="orders-table-height-label">BOM 草稿预览表格高度</span>
+              <el-button-group>
+                <el-button
+                  size="small"
+                  :icon="Minus"
+                  :disabled="ordersWorkTableHeights.modelBomDraft <= ordersWorkTableHeightLimits.min"
+                  aria-label="降低 BOM 草稿预览表格高度"
+                  @click="adjustOrdersWorkTableHeight('modelBomDraft', -ordersWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  size="small"
+                  :icon="Plus"
+                  :disabled="ordersWorkTableHeights.modelBomDraft >= ordersWorkTableHeightLimits.max"
+                  aria-label="提高 BOM 草稿预览表格高度"
+                  @click="adjustOrdersWorkTableHeight('modelBomDraft', ordersWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  size="small"
+                  :icon="RefreshLeft"
+                  :disabled="ordersWorkTableHeights.modelBomDraft === ordersWorkTableDefaultHeights.modelBomDraft"
+                  aria-label="恢复 BOM 草稿预览表格默认高度"
+                  @click="resetOrdersWorkTableHeight('modelBomDraft')"
+                />
+              </el-button-group>
+            </div>
+          </div>
+          <el-table :data="draft.lines" :max-height="ordersWorkTableHeights.modelBomDraft" class="import-line-table">
+            <el-table-column prop="sourceRowNo" label="来源行" width="90" />
+            <el-table-column label="结构" min-width="160">
+              <template #default="{ row }">
+                <div class="import-line-structure-cell">
+                  <el-tag size="small" :type="lineStructureTagType(row)" effect="plain">
+                    {{ lineStructureLabel(row) }}
+                  </el-tag>
+                  <small>{{ lineStructureHint(row) }}</small>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="partCode" label="零件编码" min-width="150" />
+            <el-table-column prop="partName" label="零件名称" min-width="180" />
+            <el-table-column prop="drawingNo" label="图号" min-width="150" />
+            <el-table-column prop="drawingVersion" label="版本" width="90" />
+            <el-table-column prop="drawingDate" label="图纸日期" width="120" />
+            <el-table-column prop="drawingStatus" label="图纸状态" width="100" />
+            <el-table-column label="默认数量" width="120">
+              <template #default="{ row }">{{ formatQuantity(row.defaultQuantity, row.unit) }}</template>
+            </el-table-column>
+            <el-table-column label="厚度" width="90">
+              <template #default="{ row }">{{ formatStructureLineThickness(row) }}</template>
+            </el-table-column>
+            <el-table-column label="默认工艺" min-width="160">
+              <template #default="{ row }">
+                <span :title="formatFullText(row.defaultProcessRoute)">{{ formatProcessRoutePreview(row.defaultProcessRoute) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="核对" min-width="260">
+              <template #default="{ row }">
+                <el-tooltip v-if="row.issues.length" :content="formatImportIssueTitle(row.issues)" placement="top">
+                  <el-tag :type="importIssueTagType(row.issues)" effect="plain">
+                    {{ formatImportIssuePreview(row.issues) }}
+                  </el-tag>
+                </el-tooltip>
+                <span v-else class="muted">通过</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+      <el-empty v-else description="暂无 BOM 草稿预览" />
+      <template #footer>
+        <el-button
+          type="primary"
+          plain
+          :disabled="!canExtractMaterialImportDraft || Boolean(modelBomDraftCommittingKey)"
+          :loading="modelBomDraftPreviewLoading"
+          @click="previewModelBomDraftFromOrderImport"
+        >
+          刷新 BOM 草稿
+        </el-button>
+        <el-button
+          v-if="modelBomDraftHasMissingMaterials"
+          type="warning"
+          plain
+          :disabled="!canExtractMaterialImportDraft || materialImportExtracting"
+          :loading="materialImportExtracting"
+          @click="extractMaterialImportDraftFromOrderImport"
+        >
+          先生成零件库草稿
+        </el-button>
+        <el-button @click="modelBomDraftPreviewVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="modelBomDraftDiffDialogVisible"
+      :title="modelBomDraftDiffDialogTitle"
+      width="min(1280px, calc(100vw - 32px))"
+      class="responsive-dialog"
+      append-to-body
+    >
+      <el-alert
+        title="此处只做人工核对：草稿确认后仍会新建独立 BOM，不会覆盖、停用或合并已有正式 BOM。"
+        type="info"
+        :closable="false"
+        class="mb-16"
+      />
+      <div v-if="selectedModelBomDraftDiffSummary" class="model-bom-draft-diff-dialog-summary">
+        <el-tag effect="plain" type="success">一致 {{ selectedModelBomDraftDiffSummary.sameLineCount }}</el-tag>
+        <el-tag effect="plain" :type="selectedModelBomDraftDiffSummary.changedLineCount > 0 ? 'warning' : 'info'">
+          字段不同 {{ selectedModelBomDraftDiffSummary.changedLineCount }}
+        </el-tag>
+        <el-tag effect="plain" :type="selectedModelBomDraftDiffSummary.newLineCount > 0 ? 'warning' : 'info'">
+          草稿新增 {{ selectedModelBomDraftDiffSummary.newLineCount }}
+        </el-tag>
+        <el-tag effect="plain" :type="selectedModelBomDraftDiffSummary.removedLineCount > 0 ? 'warning' : 'info'">
+          正式多出 {{ selectedModelBomDraftDiffSummary.removedLineCount }}
+        </el-tag>
+      </div>
+      <el-table :data="selectedModelBomDraftDiffLines" max-height="620" class="import-line-table">
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" :type="modelBomDraftDiffLineTagType(row.status)">
+              {{ modelBomDraftDiffLineStatusText(row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="结构 / 零件" min-width="240">
+          <template #default="{ row }">
+            <div class="model-bom-draft-diff-line-main">
+              <strong>{{ row.structureText }}</strong>
+              <span>{{ row.partCode }} / {{ row.partName }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="草稿值" min-width="260">
+          <template #default="{ row }">
+            <div v-if="row.draftLine" class="model-bom-draft-diff-line-detail">
+              <strong>{{ row.draftLine.defaultQuantityText || '-' }}</strong>
+              <span>{{ row.draftLine.partCategory || '-' }} / {{ row.draftLine.partSpecification || '-' }} / 厚度 {{ row.draftLine.partThicknessText || '-' }}</span>
+              <small :title="row.draftLine.defaultProcessRoute || ''">{{ formatProcessRoutePreview(row.draftLine.defaultProcessRoute, '未维护默认工艺') }}</small>
+              <small v-if="row.draftLine.orderNo">来源 {{ row.draftLine.orderNo }} / 第 {{ row.draftLine.sourceRowNo || '-' }} 行</small>
+            </div>
+            <span v-else class="muted">草稿中没有该行</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="正式 BOM 值" min-width="260">
+          <template #default="{ row }">
+            <div v-if="row.existingLine" class="model-bom-draft-diff-line-detail">
+              <strong>{{ row.existingLine.defaultQuantityText || '-' }}</strong>
+              <span>{{ row.existingLine.partCategory || '-' }} / {{ row.existingLine.partSpecification || '-' }} / 厚度 {{ row.existingLine.partThicknessText || '-' }}</span>
+              <small :title="row.existingLine.defaultProcessRoute || ''">{{ formatProcessRoutePreview(row.existingLine.defaultProcessRoute, '未维护默认工艺') }}</small>
+            </div>
+            <span v-else class="muted">正式 BOM 中没有该行</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="差异字段" min-width="320">
+          <template #default="{ row }">
+            <div v-if="modelBomDraftDiffChangedFields(row).length" class="model-bom-draft-diff-field-list">
+              <el-tag
+                v-for="field in modelBomDraftDiffChangedFields(row)"
+                :key="`${row.key}-${field.label}`"
+                size="small"
+                effect="plain"
+                type="warning"
+              >
+                {{ modelBomDraftDiffFieldText(field) }}
+              </el-tag>
+            </div>
+            <span v-else class="muted">无字段差异</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button
+          v-if="selectedModelBomDraftDiffDraft && selectedModelBomDraftDiffBom"
+          type="primary"
+          @click="confirmSelectedModelBomDraftDiffReview"
+        >
+          已核对此 BOM
+        </el-button>
+        <el-button @click="modelBomDraftDiffDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -919,7 +1449,35 @@
                   <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="copyImportFileStructureText">复制全部</el-button>
                 </div>
               </div>
-            <div v-if="importFileStructureOrders.length" class="import-file-structure-orders">
+              <div class="orders-table-height-toolbar">
+                <div class="orders-table-height-actions" aria-label="上传文件固定格式清单高度">
+                  <span class="orders-table-height-label">固定格式清单高度</span>
+                  <el-button-group>
+                    <el-button
+                      size="small"
+                      :icon="Minus"
+                      :disabled="ordersWorkTableHeights.importFileStructure <= ordersWorkTableHeightLimits.min"
+                      aria-label="降低上传文件固定格式清单高度"
+                      @click="adjustOrdersWorkTableHeight('importFileStructure', -ordersWorkTableHeightLimits.step)"
+                    />
+                    <el-button
+                      size="small"
+                      :icon="Plus"
+                      :disabled="ordersWorkTableHeights.importFileStructure >= ordersWorkTableHeightLimits.max"
+                      aria-label="提高上传文件固定格式清单高度"
+                      @click="adjustOrdersWorkTableHeight('importFileStructure', ordersWorkTableHeightLimits.step)"
+                    />
+                    <el-button
+                      size="small"
+                      :icon="RefreshLeft"
+                      :disabled="ordersWorkTableHeights.importFileStructure === ordersWorkTableDefaultHeights.importFileStructure"
+                      aria-label="恢复上传文件固定格式清单默认高度"
+                      @click="resetOrdersWorkTableHeight('importFileStructure')"
+                    />
+                  </el-button-group>
+                </div>
+              </div>
+            <div v-if="importFileStructureOrders.length" class="import-file-structure-orders" :style="{ maxHeight: `${ordersWorkTableHeights.importFileStructure}px` }">
               <section v-for="previewOrder in importFileStructureOrders" :key="previewOrder.orderNo" class="import-file-structure-order">
                 <div class="import-file-structure-order__title">
                   <strong>{{ previewOrder.orderNo }}</strong>
@@ -949,7 +1507,35 @@
             </div>
             <el-empty v-else description="暂无固定格式清单" />
           </div>
-          <el-table :data="importFilePreview.rows" max-height="520" size="small" class="import-line-table">
+          <div class="orders-table-height-toolbar">
+            <div class="orders-table-height-actions" aria-label="上传文件预览表格高度">
+              <span class="orders-table-height-label">上传文件预览表格高度</span>
+              <el-button-group>
+                <el-button
+                  size="small"
+                  :icon="Minus"
+                  :disabled="ordersWorkTableHeights.importFilePreview <= ordersWorkTableHeightLimits.min"
+                  aria-label="降低上传文件预览表格高度"
+                  @click="adjustOrdersWorkTableHeight('importFilePreview', -ordersWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  size="small"
+                  :icon="Plus"
+                  :disabled="ordersWorkTableHeights.importFilePreview >= ordersWorkTableHeightLimits.max"
+                  aria-label="提高上传文件预览表格高度"
+                  @click="adjustOrdersWorkTableHeight('importFilePreview', ordersWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  size="small"
+                  :icon="RefreshLeft"
+                  :disabled="ordersWorkTableHeights.importFilePreview === ordersWorkTableDefaultHeights.importFilePreview"
+                  aria-label="恢复上传文件预览表格默认高度"
+                  @click="resetOrdersWorkTableHeight('importFilePreview')"
+                />
+              </el-button-group>
+            </div>
+          </div>
+          <el-table :data="importFilePreview.rows" :max-height="ordersWorkTableHeights.importFilePreview" size="small" class="import-line-table">
             <el-table-column prop="sourceRowNo" label="Excel行" width="86" />
             <el-table-column prop="orderNo" label="订单编号" min-width="160" />
             <el-table-column prop="importSequence" label="序号" width="86" />
@@ -966,6 +1552,9 @@
             <el-table-column prop="partCategory" label="零件类型" width="100" />
             <el-table-column prop="partCode" label="零件编码" min-width="150" />
             <el-table-column prop="drawingNo" label="图号" min-width="150" />
+            <el-table-column prop="drawingVersion" label="版本" width="90" />
+            <el-table-column prop="drawingDate" label="图纸日期" width="120" />
+            <el-table-column prop="drawingStatus" label="图纸状态" width="100" />
             <el-table-column prop="partName" label="产品名称" min-width="160" />
             <el-table-column label="厚度" width="90">
               <template #default="{ row: line }">{{ formatStructureLineThickness(line) }}</template>
@@ -976,20 +1565,23 @@
                 {{ formatQuantity(row.demandQuantity, row.unit) }}
               </template>
             </el-table-column>
-            <el-table-column prop="processRoute" label="工艺路线" min-width="170" />
-            <el-table-column prop="processRemark" label="工艺备注" min-width="220" />
+            <el-table-column prop="processRoute" label="工艺路线" min-width="170">
+              <template #default="{ row }">
+                <span :title="formatFullText(row.processRoute)">{{ formatProcessRoutePreview(row.processRoute) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="processRemark" label="工艺备注" min-width="220">
+              <template #default="{ row }">
+                <span :title="formatFullText(row.processRemark)">{{ formatLongTextPreview(row.processRemark) }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="校验" min-width="260">
               <template #default="{ row }">
-                <div v-if="row.issues.length" class="import-issues">
-                  <el-tag
-                    v-for="issue in row.issues"
-                    :key="`${row.id}-${issue.code}-${issue.message}`"
-                    :type="issue.severity === 'ERROR' ? 'danger' : 'warning'"
-                    effect="plain"
-                  >
-                    {{ issue.message }}
+                <el-tooltip v-if="row.issues.length" :content="formatImportIssueTitle(row.issues)" placement="top">
+                  <el-tag :type="importIssueTagType(row.issues)" effect="plain">
+                    {{ formatImportIssuePreview(row.issues) }}
                   </el-tag>
-                </div>
+                </el-tooltip>
                 <span v-else class="muted">通过</span>
               </template>
             </el-table-column>
@@ -1029,7 +1621,7 @@
         <div class="model-bom-apply-summary">
           <div>
             <strong>{{ modelBomApplyPreview.bom.bomName }}</strong>
-            <span>{{ modelBomApplyPreview.bom.scopeLabel }}</span>
+            <span>{{ modelBomBusinessSummaryText(modelBomApplyPreview.bom) }}</span>
           </div>
           <div>
             <label>本次数量倍率</label>
@@ -1063,7 +1655,7 @@
           type="warning"
           :closable="false"
           show-icon
-          :title="`当前草稿已存在 ${modelBomApplyPreview.duplicatePartCodes.join('、')}，确认后会追加重复零件。`"
+          :title="modelBomDuplicatePartCodesTitle(modelBomApplyPreview.duplicatePartCodes)"
         />
         <el-alert
           v-if="modelBomApplyMissingThicknessCount > 0"
@@ -1090,7 +1682,35 @@
             <span>{{ formatModelBomApplyMissingThicknessLine(line) }}</span>
           </div>
         </div>
-        <div class="model-bom-apply-structure">
+        <div class="orders-table-height-toolbar">
+          <div class="orders-table-height-actions" aria-label="BOM 预览带入结构清单高度">
+            <span class="orders-table-height-label">BOM 预览结构高度</span>
+            <el-button-group>
+              <el-button
+                size="small"
+                :icon="Minus"
+                :disabled="ordersWorkTableHeights.modelBomApplyStructure <= ordersWorkTableHeightLimits.min"
+                aria-label="降低 BOM 预览带入结构清单高度"
+                @click="adjustOrdersWorkTableHeight('modelBomApplyStructure', -ordersWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="ordersWorkTableHeights.modelBomApplyStructure >= ordersWorkTableHeightLimits.max"
+                aria-label="提高 BOM 预览带入结构清单高度"
+                @click="adjustOrdersWorkTableHeight('modelBomApplyStructure', ordersWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="ordersWorkTableHeights.modelBomApplyStructure === ordersWorkTableDefaultHeights.modelBomApplyStructure"
+                aria-label="恢复 BOM 预览带入结构清单默认高度"
+                @click="resetOrdersWorkTableHeight('modelBomApplyStructure')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <div class="model-bom-apply-structure" :style="{ maxHeight: `${ordersWorkTableHeights.modelBomApplyStructure}px` }">
           <div
             v-for="(group, groupIndex) in modelBomApplyPreviewStructureGroups"
             :key="group.id"
@@ -1191,10 +1811,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { WarningFilled } from '@element-plus/icons-vue';
-import { useRouter } from 'vue-router';
+import { Download } from '@element-plus/icons-vue';
+import { Minus, Plus, RefreshLeft, WarningFilled } from '@element-plus/icons-vue';
+import { useRoute, useRouter } from 'vue-router';
 import {
   erpApi,
   type CreateOrderLinePayload,
@@ -1217,6 +1838,10 @@ import { useDeviceProfile } from '../composables/useDeviceProfile';
 import type {
   InventorySummaryRow,
   ModelBom,
+  ModelBomDraftExistingBomDiffLine,
+  ModelBomDraftExistingBomSummary,
+  ModelBomDraftPreview,
+  ModelBomDraftPreviewItem,
   OrderDetail,
   OrderLine,
   OrderLineProductionTask,
@@ -1234,6 +1859,7 @@ import {
 } from '../utils/orderLineDuplicateChecks';
 import { validateStockModeLines } from '../utils/orderLineStockChecks';
 import { orderDisplayStatus } from '../utils/orderStatus';
+import { formatFileDateTime } from '../utils/tableExport';
 import {
   sanitizeOrderLinePayload,
   suggestedProductionPlanQuantity,
@@ -1251,6 +1877,7 @@ type ImportStructureRow = {
   parentComponentNo?: string;
   partCode?: string;
   drawingNo?: string;
+  drawingVersion?: string;
   drawingDate?: string;
   drawingStatus?: string;
   partName?: string;
@@ -1302,6 +1929,7 @@ type OrderFormStructureGroup = {
   entry: OrderFormStructureLine;
   children: OrderFormStructureLine[];
 };
+type OrdersWorkTableKey = 'orders' | 'orderFormStructure' | 'importPreview' | 'importFilePreview' | 'importFileStructure' | 'modelBomDraft' | 'modelBomRecommendationStructure' | 'modelBomApplyStructure';
 
 type ModelBomApplyPreview = {
   bom: ModelBom;
@@ -1314,6 +1942,7 @@ type ModelBomApplyPreview = {
 type OrderConfirmButtonType = 'primary' | 'success' | 'warning' | 'danger' | 'info';
 
 const router = useRouter();
+const route = useRoute();
 const { isMobileLayout } = useDeviceProfile();
 const orders = ref<OrderSummary[]>([]);
 const orderOptions = ref<OrderSummary[]>([]);
@@ -1321,6 +1950,7 @@ const inventorySummary = ref<InventorySummaryRow[]>([]);
 const dateRange = ref<string[]>([]);
 const orderDateRange = ref<string[]>([]);
 const loading = ref(false);
+const orderExporting = ref(false);
 const saving = ref(false);
 const dialogVisible = ref(false);
 const cancelOrderVisible = ref(false);
@@ -1347,6 +1977,17 @@ const importDragDepth = ref(0);
 const importPreviewLoading = ref(false);
 const importCommitting = ref(false);
 const importCommittingAll = ref(false);
+const materialImportExtracting = ref(false);
+const modelBomDraftPreviewLoading = ref(false);
+const modelBomDraftCommittingKey = ref('');
+const modelBomDraftPreviewVisible = ref(false);
+const modelBomDraftPreview = ref<ModelBomDraftPreview>();
+const modelBomDraftPreviewedAt = ref('');
+const modelBomDraftDiffDialogVisible = ref(false);
+const selectedModelBomDraftDiffDraft = ref<ModelBomDraftPreviewItem>();
+const selectedModelBomDraftDiffBom = ref<ModelBomDraftExistingBomSummary>();
+const modelBomDraftDiffViewedKeys = ref<Set<string>>(new Set());
+const modelBomDraftDiffReviewedKeys = ref<Set<string>>(new Set());
 const importDiscarding = ref(false);
 const importSelectingAllOrders = ref(false);
 const importFileDeletingId = ref('');
@@ -1364,6 +2005,7 @@ const importPreviewOrderPageSize = 50;
 const importFilePreviewRowPageSize = 200;
 const importSessionHistoryTotal = ref(0);
 const importSessionHistoryHasMore = ref(false);
+const routeOrderImportOpenKey = ref('');
 const importConfig = ref<OrderImportConfigResponse>();
 const importFileInput = ref<HTMLInputElement>();
 const importPreviewTable = ref();
@@ -1371,6 +2013,26 @@ const selectedImportOrderNos = ref<Set<string>>(new Set());
 const allSelectableImportOrderNos = ref<Set<string> | null>(null);
 const allSelectableImportOrderWarnings = ref<Map<string, number> | null>(null);
 const selectedImportOrders = ref<OrderImportPreviewOrder[]>([]);
+const ordersWorkTableHeightLimits = {
+  min: 320,
+  max: 860,
+  step: 80
+};
+const ordersWorkTableDefaultHeights = {
+  orders: 620,
+  orderFormStructure: 360,
+  importPreview: 560,
+  importFilePreview: 560,
+  importFileStructure: 360,
+  modelBomDraft: 520,
+  modelBomRecommendationStructure: 320,
+  modelBomApplyStructure: 460
+} satisfies Record<OrdersWorkTableKey, number>;
+const ordersWorkTableHeightStorageKey = 'baisheng.erp.ordersWorkTableHeights.v1';
+// 订单页面表格和固定格式清单高度只保存为本机 UI 偏好，不写入订单、导入会话、BOM、生产或库存业务数据。
+const ordersWorkTableHeights = reactive<Record<OrdersWorkTableKey, number>>({
+  ...ordersWorkTableDefaultHeights
+});
 const importFileStructureOrders = computed<ImportFileStructureOrder[]>(() => {
   const rows = importFilePreview.value?.rows || [];
   const byOrderNo = new Map<string, ImportStructureRow[]>();
@@ -1385,6 +2047,55 @@ const importFileStructureOrders = computed<ImportFileStructureOrder[]>(() => {
     groups: importStructureGroups(orderRows)
   }));
 });
+
+function clampOrdersWorkTableHeight(value: number) {
+  return Math.min(ordersWorkTableHeightLimits.max, Math.max(ordersWorkTableHeightLimits.min, value));
+}
+
+function adjustOrdersWorkTableHeight(key: OrdersWorkTableKey, delta: number) {
+  ordersWorkTableHeights[key] = clampOrdersWorkTableHeight(ordersWorkTableHeights[key] + delta);
+}
+
+function resetOrdersWorkTableHeight(key: OrdersWorkTableKey) {
+  ordersWorkTableHeights[key] = ordersWorkTableDefaultHeights[key];
+}
+
+function restoreOrdersWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(ordersWorkTableHeightStorageKey);
+    const savedValue = rawValue ? JSON.parse(rawValue) : {};
+    for (const key of Object.keys(ordersWorkTableDefaultHeights) as OrdersWorkTableKey[]) {
+      const savedHeight = Number(savedValue[key]);
+      if (Number.isFinite(savedHeight)) {
+        ordersWorkTableHeights[key] = clampOrdersWorkTableHeight(savedHeight);
+      }
+    }
+  } catch {
+    ordersWorkTableHeights.orders = ordersWorkTableDefaultHeights.orders;
+    ordersWorkTableHeights.orderFormStructure = ordersWorkTableDefaultHeights.orderFormStructure;
+    ordersWorkTableHeights.importPreview = ordersWorkTableDefaultHeights.importPreview;
+    ordersWorkTableHeights.importFilePreview = ordersWorkTableDefaultHeights.importFilePreview;
+    ordersWorkTableHeights.importFileStructure = ordersWorkTableDefaultHeights.importFileStructure;
+    ordersWorkTableHeights.modelBomDraft = ordersWorkTableDefaultHeights.modelBomDraft;
+    ordersWorkTableHeights.modelBomRecommendationStructure = ordersWorkTableDefaultHeights.modelBomRecommendationStructure;
+    ordersWorkTableHeights.modelBomApplyStructure = ordersWorkTableDefaultHeights.modelBomApplyStructure;
+  }
+}
+
+function saveOrdersWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(ordersWorkTableHeightStorageKey, JSON.stringify(ordersWorkTableHeights));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断订单查询、草稿编辑、Excel 导入或 BOM 带入预览。
+  }
+}
+
 const activeCancelOrder = ref<OrderSummary>();
 const activeCancelOrderDetail = ref<OrderDetail>();
 const activeDeleteDraftOrder = ref<OrderSummary>();
@@ -1442,7 +2153,16 @@ const orderConfirmMessageLines = computed(() =>
 );
 const modelBomRecommendationVisible = ref(false);
 const modelBomLoading = ref(false);
+const modelBomRecommendationDetailLoadingId = ref('');
 const modelBomRecommendations = ref<ModelBom[]>([]);
+const modelBomRecommendationPagination = reactive({
+  page: Number(1),
+  limit: Number(10),
+  total: Number(0)
+});
+const modelBomRecommendationMultiChoiceScopeCount = computed(
+  () => modelBomRecommendations.value.filter((bom) => Number(bom.sameScopeBomCount || 0) > 1).length
+);
 const modelBomApplyDialogVisible = ref(false);
 const modelBomApplyRefreshLoading = ref(false);
 const modelBomApplySourceOpened = ref(false);
@@ -1545,6 +2265,10 @@ const canCommitAllImportSelectable = computed(
     importPreview.value?.status === 'DRAFT' &&
     (importPreview.value?.summary.selectableOrderCount || 0) > 0
 );
+const canExtractMaterialImportDraft = computed(
+  () => Boolean(importPreview.value?.id && importPreview.value.previewToken && (importPreview.value.summary.rowCount || 0) > 0)
+);
+const modelBomDraftHasMissingMaterials = computed(() => (modelBomDraftPreview.value?.summary.missingMaterialCount || 0) > 0);
 const orderImportNotice = computed(() => {
   const uploadLimitText = importConfig.value
     ? `单个文件最大 ${formatFileSize(importConfig.value.uploadMaxBytes)}。`
@@ -1601,6 +2325,8 @@ function toggleModelBomRecommendation() {
 
 function handleOrderCustomerChange() {
   modelBomRecommendations.value = [];
+  modelBomRecommendationPagination.page = 1;
+  modelBomRecommendationPagination.total = 0;
 }
 
 async function loadModelBomRecommendations() {
@@ -1610,24 +2336,50 @@ async function loadModelBomRecommendations() {
   }
   modelBomLoading.value = true;
   try {
-    modelBomRecommendations.value = await erpApi.modelBoms({
+    const requestPage = Math.max(modelBomRecommendationPagination.page, 1);
+    const requestLimit = modelBomRecommendationPagination.limit;
+    const requestFilters = {
       customerId: orderForm.customerId || undefined,
       projectModel: modelBomSearch.projectModel.trim() || undefined,
       keyword: modelBomSearch.keyword.trim() || undefined,
-      status: 'ENABLED'
-    });
+      status: 'ENABLED' as const,
+      limit: requestLimit,
+      offset: (requestPage - 1) * requestLimit
+    };
+    let result = await erpApi.modelBomsPage(requestFilters);
+    if (result.totalCount > 0 && result.items.length === 0 && requestPage > 1) {
+      modelBomRecommendationPagination.page = Math.max(Math.ceil(result.totalCount / requestLimit), 1);
+      result = await erpApi.modelBomsPage({
+        ...requestFilters,
+        offset: (modelBomRecommendationPagination.page - 1) * requestLimit
+      });
+    }
+    modelBomRecommendations.value = result.items;
+    modelBomRecommendationPagination.total = result.totalCount;
     if (modelBomRecommendations.value.length === 0) {
       ElMessage.info('没有找到适用零件包');
     }
   } catch (error) {
+    modelBomRecommendations.value = [];
+    modelBomRecommendationPagination.total = 0;
     ElMessage.error(error instanceof Error ? error.message : '零件包推荐加载失败');
   } finally {
     modelBomLoading.value = false;
   }
 }
 
+function searchModelBomRecommendations() {
+  modelBomRecommendationPagination.page = 1;
+  void loadModelBomRecommendations();
+}
+
+function handleModelBomRecommendationPageChange(page: number) {
+  modelBomRecommendationPagination.page = page;
+  void loadModelBomRecommendations();
+}
+
 function enabledModelBomLines(bom: ModelBom) {
-  const lines = bom.lines
+  const lines = (bom.lines || [])
     .filter((line) => line.status === 'ENABLED' && line.materialStatus !== 'DISABLED')
     .sort(compareModelBomLinesForImport);
   const childrenByParent = new Map<string, typeof lines>();
@@ -1675,7 +2427,33 @@ function compareModelBomLinesForImport(left: ModelBom['lines'][number], right: M
 }
 
 function enabledModelBomLineCount(bom: ModelBom) {
+  if ((bom.lines || []).length === 0 && bom.lineSummary) {
+    return Number(bom.lineSummary.effectiveCount ?? bom.lineCount ?? 0);
+  }
   return enabledModelBomLines(bom).length;
+}
+
+function modelBomHasLoadedLines(bom: ModelBom) {
+  return (bom.lines || []).length > 0 || Number(bom.lineCount || 0) === 0;
+}
+
+async function loadModelBomRecommendationDetail(bom: ModelBom) {
+  if (modelBomHasLoadedLines(bom)) {
+    return bom;
+  }
+  modelBomRecommendationDetailLoadingId.value = bom.id;
+  try {
+    const detail = await erpApi.modelBom(bom.id);
+    modelBomRecommendations.value = modelBomRecommendations.value.map((item) => (item.id === detail.id ? { ...item, ...detail } : item));
+    return detail;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'BOM 明细加载失败，请刷新后重试');
+    return undefined;
+  } finally {
+    if (modelBomRecommendationDetailLoadingId.value === bom.id) {
+      modelBomRecommendationDetailLoadingId.value = '';
+    }
+  }
 }
 
 function normalizeComponentNo(value?: string | null) {
@@ -1818,7 +2596,7 @@ function displayOrderFormPartCode(line: CreateOrderLinePayload) {
 
 function orderFormProcessText(line: CreateOrderLinePayload) {
   const steps = line.processSteps?.map((step) => step.processName).filter(Boolean) || [];
-  return steps.length ? steps.join('、') : '-';
+  return formatLimitedListPreview(steps, '工序', 3) || '-';
 }
 
 function formatOrderFormStructureCore(line: CreateOrderLinePayload) {
@@ -1940,15 +2718,15 @@ function formatImportStructureCore(line: ImportStructureRow) {
 }
 
 function formatImportStructureMeta(line: ImportStructureRow) {
-  const drawingText = [line.drawingNo, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
-  const processText = line.processRoute || '-';
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const processText = formatProcessRoutePreview(line.processRoute);
   const quantityText =
     line.orderQuantity != null || line.unitUsage != null ? `订单 ${line.orderQuantity ?? '-'} / 单套 ${line.unitUsage ?? '-'}` : '数量 -';
   return `${quantityText} | 图纸 ${drawingText} | 工艺 ${processText}`;
 }
 
 function formatImportStructureTextLine(line: ImportStructureRow, prefix: string, type: StructureGroupType) {
-  const drawingText = [line.drawingNo, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
   return [
     prefix,
     `结构 ${groupStructureLabel(type, line)}`,
@@ -1963,7 +2741,7 @@ function formatImportStructureTextLine(line: ImportStructureRow, prefix: string,
     `订单 ${line.orderQuantity ?? '-'}`,
     `单套 ${line.unitUsage ?? '-'}`,
     `图纸 ${drawingText}`,
-    `工艺 ${line.processRoute || '-'}`
+    `工艺 ${formatProcessRoutePreview(line.processRoute)}`
   ].join(' | ');
 }
 
@@ -2087,10 +2865,12 @@ function formatModelBomStructureMeta(line: ModelBom['lines'][number]) {
   const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
   const drawingSourceText =
     line.drawingSource === 'BOM_LINE' ? 'BOM指定' : line.drawingSource === 'MATERIAL_DEFAULT' ? '零件默认' : line.drawingSource === 'MATERIAL_LATEST' ? '零件最新' : '-';
-  const processText = line.defaultProcessRoute || '-';
+  const processText = formatProcessRoutePreview(line.defaultProcessRoute);
+  const processSourceText =
+    line.defaultProcessRouteSource === 'BOM_LINE' ? 'BOM指定' : line.defaultProcessRouteSource === 'MATERIAL' ? '零件默认' : '-';
   const specificationText = line.partSpecification || '-';
   const thicknessText = line.lineType === 'COMPONENT' ? '不适用（父级组件由子零件维护）' : Number(line.partThickness ?? 0) > 0 ? line.partThickness : '待核对';
-  return `图纸 ${drawingText}（${drawingSourceText}） | 工艺 ${processText} | 厚度 ${thicknessText} | 规格 ${specificationText}`;
+  return `图纸 ${drawingText}（${drawingSourceText}） | 工艺 ${processText}（${processSourceText}） | 厚度 ${thicknessText} | 规格 ${specificationText}`;
 }
 
 function isModelBomLineMissingThickness(line: ModelBom['lines'][number]) {
@@ -2181,6 +2961,42 @@ function orderImportableModelBomLines(bomLines: ModelBom['lines'], componentNoMa
     const sourceParentComponentNo = normalizeComponentNo(bomLine.parentComponentNo);
     return !sourceParentComponentNo || componentNoMap.has(sourceParentComponentNo);
   });
+}
+
+function shortModelBomId(id?: string) {
+  return String(id || '').substring(0, Number(8)) || '-';
+}
+
+function modelBomScopePreview(bom: ModelBom) {
+  return formatLongTextPreview(bom.scopeLabel, 28, '未设置范围');
+}
+
+function modelBomScopeTitle(bom: ModelBom) {
+  return `适用范围：${modelBomScopePreview(bom)}。完整范围请进入 BOM 详情核对；同一客户同一机型允许多个 BOM，请结合名称、短 ID 和明细预览人工选择。`;
+}
+
+function modelBomBusinessSummaryText(bom: ModelBom) {
+  const lineCount = Number(bom.lineCount || 0);
+  const enabledCount = enabledModelBomLineCount(bom);
+  const parts = [modelBomScopePreview(bom), `ID ${shortModelBomId(bom.id)}`, `${enabledCount} 个启用零件`];
+  if (lineCount !== enabledCount) {
+    parts.push(`明细 ${lineCount} 行`);
+  }
+  if (bom.isCommon) {
+    parts.push('常用 BOM');
+  }
+  if (bom.sourceBomNameSnapshot) {
+    parts.push(`来源 ${bom.sourceBomNameSnapshot}`);
+  }
+  return parts.filter(Boolean).join(' / ');
+}
+
+function modelBomRemarkPreview(bom: ModelBom) {
+  return formatLongTextPreview(bom.remark, 24, '-');
+}
+
+function modelBomRemarkTitle(bom: ModelBom) {
+  return formatFullText(bom.remark);
 }
 
 function modelBomProjectScopeText(bom: ModelBom) {
@@ -2280,8 +3096,70 @@ function buildModelBomApplyPreview(bom: ModelBom) {
   };
 }
 
-function openModelBomApplyDialog(bom: ModelBom) {
-  const preview = buildModelBomApplyPreview(bom);
+function formatLimitedListPreview(values: string[], unitLabel: string, maxCount = 5, totalCount?: number) {
+  const visibleValues = values.map((value) => String(value || '').trim()).filter(Boolean);
+  if (visibleValues.length === 0) {
+    return '';
+  }
+  const previewText = visibleValues.filter((_, index) => index < maxCount).join('、');
+  const total = typeof totalCount === 'number' && totalCount > visibleValues.length ? totalCount : visibleValues.length;
+  return total > maxCount ? `${previewText} 等 ${total} 个${unitLabel}` : previewText;
+}
+
+function formatProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const routeText = String(value || '').trim();
+  if (!routeText) {
+    return emptyText;
+  }
+  const steps = routeText
+    .split(/(?:->|→|[、,，;；>]+)/)
+    .map((step) => step.trim())
+    .filter(Boolean);
+  return steps.length > 1 ? formatLimitedListPreview(steps, '工序', 3) || emptyText : routeText;
+}
+
+type ImportIssueLike = {
+  message?: string | null;
+  severity?: string | null;
+};
+
+function formatImportIssuePreview(issues?: ImportIssueLike[]) {
+  const messages = (issues || []).map((issue) => issue.message || '').filter(Boolean);
+  return formatLimitedListPreview(messages, '问题', 3) || '-';
+}
+
+function formatImportIssueTitle(issues?: ImportIssueLike[]) {
+  const messages = (issues || []).map((issue) => issue.message || '').filter(Boolean);
+  return messages.length ? messages.join('；') : '-';
+}
+
+function importIssueTagType(issues?: ImportIssueLike[]): 'danger' | 'warning' {
+  return (issues || []).some((issue) => issue.severity === 'ERROR') ? 'danger' : 'warning';
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function formatFullText(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
+function modelBomDuplicatePartCodesTitle(duplicatePartCodes: string[]) {
+  const duplicateText = formatLimitedListPreview(duplicatePartCodes, '重复零件');
+  return duplicateText ? `当前草稿已存在 ${duplicateText}，确认后会追加重复零件。` : '';
+}
+
+async function openModelBomApplyDialog(bom: ModelBom) {
+  const fullBom = await loadModelBomRecommendationDetail(bom);
+  if (!fullBom) {
+    return;
+  }
+  const preview = buildModelBomApplyPreview(fullBom);
   if (!preview) {
     return;
   }
@@ -2351,7 +3229,7 @@ function formatModelBomApplyMissingThicknessLine(line: CreateOrderLinePayload) {
   const structureText = line.parentComponentNo
     ? `子零件 -> ${normalizeComponentNo(line.parentComponentNo)}`
     : '单独零件';
-  const drawingText = [line.drawingNo, line.drawingVersion].filter(Boolean).join(' / ') || '-';
+  const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
   const specificationText = line.partSpecification || '-';
   return `${structureText} | ${line.partCode || '-'} | ${line.partName || '-'} | 图纸 ${drawingText} | 规格 ${specificationText}`;
 }
@@ -2452,6 +3330,35 @@ async function loadOrders() {
   }
 }
 
+async function exportOrdersExcel() {
+  if (filters.orderStatuses.length === 0 || filters.productionStatuses.length === 0) {
+    ElMessage.warning('当前状态筛选为空，没有可导出订单');
+    return;
+  }
+  if (orderExporting.value) {
+    return;
+  }
+  orderExporting.value = true;
+  try {
+    await erpApi.downloadOrdersExport(
+      {
+        customerId: filters.customerId,
+        orderNo: filters.orderNo,
+        statuses: selectedOrderStatusesForQuery(),
+        productionStatuses: selectedProductionStatusesForQuery(),
+        dateFrom: dateRange.value[0],
+        dateTo: dateRange.value[1]
+      },
+      `订单总列表_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('订单 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '订单导出失败，请稍后重试');
+  } finally {
+    orderExporting.value = false;
+  }
+}
+
 async function loadInventorySummary() {
   try {
     inventorySummary.value = await erpApi.inventorySummary({ status: 'AVAILABLE' });
@@ -2547,14 +3454,23 @@ function formatFileSize(bytes: number) {
 function orderShortageActionText(order: OrderSummary) {
   if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
     const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
-      ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+      ? formatQuantityByUnitPreview(order.pendingProductionReplenishmentQuantityByUnit)
       : formatQuantity(order.pendingProductionReplenishmentQuantity ?? 0, order.pendingProductionReplenishmentUnit || order.unit);
     return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount ?? 0} 个 / ${quantityText}`;
   }
   const quantityText = order.unresolvedShortageQuantityByUnit?.length
-    ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+    ? formatQuantityByUnitPreview(order.unresolvedShortageQuantityByUnit)
     : formatQuantity(order.unresolvedShortageQuantity ?? 0, order.unresolvedShortageUnit || order.unit);
   return `需补单 ${order.unresolvedShortageLineCount ?? 0} 个 / ${quantityText}`;
+}
+
+function formatQuantityByUnitPreview(rows?: Array<{ quantity: number; unit: string }>) {
+  const values = (rows || []).map((row) => formatQuantity(row.quantity, row.unit)).filter(Boolean);
+  if (values.length === 0) {
+    return '-';
+  }
+  const preview = values.filter((_, index) => index < 3).join('、');
+  return values.length > 3 ? `${preview} 等 ${values.length} 个单位` : preview;
 }
 
 function orderNeedsShortageAttention(order: OrderSummary) {
@@ -2585,6 +3501,8 @@ async function openCreate() {
   orderForm.lines = [newLine(0), newLine(1), newLine(2)];
   modelBomRecommendationVisible.value = true;
   modelBomRecommendations.value = [];
+  modelBomRecommendationPagination.page = 1;
+  modelBomRecommendationPagination.total = 0;
   modelBomSearch.projectModel = '';
   modelBomSearch.keyword = '';
   orderNoTouched.value = false;
@@ -2651,15 +3569,7 @@ function importOrderNosSummary(session: OrderImportSessionSummary) {
   if (!orderNos.length) {
     return '无订单';
   }
-  const visibleOrderNos: string[] = [];
-  for (const orderNo of orderNos) {
-    if (visibleOrderNos.length >= 5) {
-      break;
-    }
-    visibleOrderNos.push(orderNo);
-  }
-  const suffix = totalCount > visibleOrderNos.length ? ` 等 ${totalCount} 个订单` : '';
-  return `${visibleOrderNos.join('、')}${suffix}`;
+  return formatLimitedListPreview(orderNos, '订单', 5, totalCount);
 }
 
 function importCurrentCommittedOrderNosSummary(session: OrderImportSessionSummary) {
@@ -2670,15 +3580,7 @@ function importCurrentCommittedOrderNosSummary(session: OrderImportSessionSummar
   if (!orderNos.length) {
     return '无现存订单';
   }
-  const visibleOrderNos: string[] = [];
-  for (const orderNo of orderNos) {
-    if (visibleOrderNos.length >= 5) {
-      break;
-    }
-    visibleOrderNos.push(orderNo);
-  }
-  const suffix = totalCount > visibleOrderNos.length ? ` 等 ${totalCount} 个订单` : '';
-  return `${visibleOrderNos.join('、')}${suffix}`;
+  return formatLimitedListPreview(orderNos, '订单', 5, totalCount);
 }
 
 function displayImportFileName(fileName?: string | null) {
@@ -2691,15 +3593,7 @@ function importFileNamesSummary(session: OrderImportSessionSummary) {
   if (!fileNames.length) {
     return '无文件';
   }
-  const visibleFileNames: string[] = [];
-  for (const fileName of fileNames) {
-    if (visibleFileNames.length >= 5) {
-      break;
-    }
-    visibleFileNames.push(displayImportFileName(fileName));
-  }
-  const suffix = totalCount > visibleFileNames.length ? ` 等 ${totalCount} 个文件` : '';
-  return `${visibleFileNames.join('、')}${suffix}`;
+  return formatLimitedListPreview(fileNames.map((fileName) => displayImportFileName(fileName)), '文件', 5, totalCount);
 }
 
 function importSessionValidationSummary(session: OrderImportSessionSummary) {
@@ -2723,8 +3617,8 @@ function importSessionValidationSummary(session: OrderImportSessionSummary) {
 }
 
 function materialSyncPreviewSuffix(preview?: string[]) {
-  const visiblePreview = (preview || []).filter(Boolean);
-  return visiblePreview.length > 0 ? `：${visiblePreview.join('、')}` : '';
+  const previewText = formatLimitedListPreview(preview || [], '零件编码');
+  return previewText ? `：${previewText}` : '';
 }
 
 function materialSyncPreviewText(preview: string[] | undefined, totalCount: number) {
@@ -2987,6 +3881,9 @@ function mergeImportPreviewOrders(nextPreview: OrderImportSessionPreview) {
 }
 
 async function downloadImportTemplate() {
+  if (importTemplateDownloading.value) {
+    return;
+  }
   importTemplateDownloading.value = true;
   try {
     await erpApi.downloadOrderImportTemplate();
@@ -2999,6 +3896,9 @@ async function downloadImportTemplate() {
 }
 
 async function downloadImportIssueReport() {
+  if (importIssueReportDownloading.value) {
+    return;
+  }
   if (!importPreview.value?.id) {
     ElMessage.warning('请先上传 Excel 并生成导入预览');
     return;
@@ -3011,6 +3911,379 @@ async function downloadImportIssueReport() {
     ElMessage.error(error instanceof Error ? error.message : '问题明细下载失败');
   } finally {
     importIssueReportDownloading.value = false;
+  }
+}
+
+async function extractMaterialImportDraftFromOrderImport() {
+  if (!importPreview.value?.id || !importPreview.value.previewToken) {
+    ElMessage.warning('请先刷新订单导入预览后再提取零件库草稿');
+    return;
+  }
+  const confirmed = await openOrderConfirmDialog({
+    title: '提取零件库草稿',
+    message: '确定从当前 ERP上传净表 预览提取零件库导入草稿吗？',
+    details: [
+      '系统只会生成零件库导入草稿和预览，不会写入正式零件、BOM、订单、生产任务或库存。',
+      '提取后请到零件基础库导入预览中查看冲突、图纸和厚度问题，再人工确认写入。',
+      '如果本次订单导入文件有变化，必须先刷新预览后再提取。'
+    ],
+    confirmButtonText: '提取草稿',
+    confirmButtonType: 'warning'
+  });
+  if (!confirmed) {
+    return;
+  }
+  materialImportExtracting.value = true;
+  try {
+    const result = await erpApi.createMaterialImportSessionFromOrderImport(importPreview.value.id, importPreview.value.previewToken);
+    ElMessage.success(`已生成零件库导入草稿，待确认 ${result.summary.importableRowCount} 行`);
+    importDialogVisible.value = false;
+    await router.push({
+      path: '/inventory/materials',
+      query: {
+        materialImportSessionId: result.id,
+        returnTo: '/orders',
+        orderImportSessionId: importPreview.value.id,
+        previewBomDraft: '1'
+      }
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '提取零件库草稿失败，请确认导入预览状态');
+  } finally {
+    materialImportExtracting.value = false;
+  }
+}
+
+function routeQueryText(value: unknown) {
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : '';
+  }
+  return typeof value === 'string' ? value : '';
+}
+
+async function openOrderImportSessionFromRoute() {
+  const orderImportSessionId = routeQueryText(route.query.orderImportSessionId);
+  const previewBomDraft = routeQueryText(route.query.previewBomDraft);
+  if (!orderImportSessionId) {
+    return;
+  }
+  const nextOpenKey = `${orderImportSessionId}|${previewBomDraft}`;
+  if (routeOrderImportOpenKey.value === nextOpenKey) {
+    return;
+  }
+  if (isMobileOrderWorkspacePaused()) {
+    ElMessage.info('手机端订单导入暂不开放，请在电脑端继续核对 BOM 草稿');
+    return;
+  }
+  routeOrderImportOpenKey.value = nextOpenKey;
+
+  importDialogVisible.value = true;
+  await Promise.all([loadImportConfig(), loadImportSessionHistory()]);
+  importSessionOpeningId.value = orderImportSessionId;
+  try {
+    importPreview.value = await erpApi.orderImportSession(orderImportSessionId, importPreviewOrderPageSize, 0);
+    clearImportOrderSelection();
+    if (importPreview.value.status === 'DRAFT') {
+      await selectAllValidImportOrders();
+    }
+    if (previewBomDraft === '1') {
+      await previewModelBomDraftFromOrderImport();
+    } else {
+      ElMessage.success('已回到订单导入预览，可继续核对订单、零件库草稿和 BOM 草稿');
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '订单导入会话回流打开失败，请从导入记录中重新打开');
+  } finally {
+    importSessionOpeningId.value = '';
+  }
+}
+
+async function previewModelBomDraftFromOrderImport() {
+  if (!importPreview.value?.id || !importPreview.value.previewToken) {
+    ElMessage.warning('请先刷新订单导入预览后再预览 BOM 草稿');
+    return;
+  }
+  modelBomDraftPreviewLoading.value = true;
+  try {
+    const result = await erpApi.createModelBomDraftsFromOrderImport(importPreview.value.id, importPreview.value.previewToken);
+    result.drafts.forEach((draft) => {
+      draft.commitBomName = draft.bomName;
+    });
+    modelBomDraftPreview.value = result;
+    modelBomDraftDiffViewedKeys.value = new Set();
+    modelBomDraftDiffReviewedKeys.value = new Set();
+    modelBomDraftPreviewedAt.value = formatDateTime(new Date());
+    modelBomDraftPreviewVisible.value = true;
+    ElMessage.success(`已生成 ${result.summary.draftCount} 个 BOM 草稿预览，未写入正式 BOM`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '预览 BOM 草稿失败，请确认导入预览状态');
+  } finally {
+    modelBomDraftPreviewLoading.value = false;
+  }
+}
+
+function modelBomDraftAllIssues(draft: ModelBomDraftPreviewItem) {
+  return [...draft.issues, ...draft.lines.flatMap((line) => line.issues)];
+}
+
+function modelBomDraftExistingBoms(draft: ModelBomDraftPreviewItem) {
+  return draft.existingBoms?.length ? draft.existingBoms : draft.existingBom ? [draft.existingBom] : [];
+}
+
+function modelBomDraftExistingBomsSummary(draft: ModelBomDraftPreviewItem) {
+  return formatLimitedListPreview(
+    modelBomDraftExistingBoms(draft).map((bom) => `${bom.bomName}（${bom.lineCount} 行）`),
+    '正式 BOM'
+  );
+}
+
+function modelBomDraftDiffReviewKey(draft: ModelBomDraftPreviewItem, bom: ModelBomDraftExistingBomSummary) {
+  return `${draft.draftKey}|${bom.id}`;
+}
+
+function updateModelBomDraftDiffKeySet(source: typeof modelBomDraftDiffViewedKeys, key: string, enabled: boolean) {
+  const next = new Set(source.value);
+  if (enabled) {
+    next.add(key);
+  } else {
+    next.delete(key);
+  }
+  source.value = next;
+}
+
+function modelBomDraftDiffViewed(draft: ModelBomDraftPreviewItem, bom: ModelBomDraftExistingBomSummary) {
+  return modelBomDraftDiffViewedKeys.value.has(modelBomDraftDiffReviewKey(draft, bom));
+}
+
+function modelBomDraftDiffReviewed(draft: ModelBomDraftPreviewItem, bom: ModelBomDraftExistingBomSummary) {
+  return modelBomDraftDiffReviewedKeys.value.has(modelBomDraftDiffReviewKey(draft, bom));
+}
+
+function modelBomDraftDiffReviewComplete(draft: ModelBomDraftPreviewItem) {
+  const existingBoms = modelBomDraftExistingBoms(draft);
+  return existingBoms.length === 0 || existingBoms.every((bom) => modelBomDraftDiffReviewed(draft, bom));
+}
+
+const selectedModelBomDraftDiffLines = computed(() => selectedModelBomDraftDiffBom.value?.diffLines || []);
+
+const selectedModelBomDraftDiffSummary = computed(() => selectedModelBomDraftDiffBom.value?.diffSummary);
+
+const modelBomDraftDiffDialogTitle = computed(() => {
+  const draft = selectedModelBomDraftDiffDraft.value;
+  const bom = selectedModelBomDraftDiffBom.value;
+  if (!draft || !bom) {
+    return 'BOM 逐行比对';
+  }
+  return `${draft.customerName}${draft.projectModel ? ` / ${draft.projectModel}` : ''}：草稿 vs ${bom.bomName}`;
+});
+
+function modelBomDraftDiffHasChange(bom: ModelBomDraftExistingBomSummary) {
+  const summary = bom.diffSummary;
+  return Boolean(summary && (summary.changedLineCount > 0 || summary.newLineCount > 0 || summary.removedLineCount > 0));
+}
+
+function modelBomDraftDiffText(bom: ModelBomDraftExistingBomSummary) {
+  const summary = bom.diffSummary;
+  if (!summary) {
+    return '暂无差异摘要';
+  }
+  if (!modelBomDraftDiffHasChange(bom)) {
+    return '与草稿结构和关键字段一致';
+  }
+  return `草稿新增 ${summary.newLineCount} 行，关键字段变更 ${summary.changedLineCount} 行，正式 BOM 多出 ${summary.removedLineCount} 行`;
+}
+
+function modelBomDraftDiffChangedFieldsText(bom: ModelBomDraftExistingBomSummary) {
+  return bom.diffSummary?.changedFields?.length ? formatLimitedListPreview(bom.diffSummary.changedFields, '字段') : '';
+}
+
+function openModelBomDraftDiffDialog(draft: ModelBomDraftPreviewItem, bom: ModelBomDraftExistingBomSummary) {
+  selectedModelBomDraftDiffDraft.value = draft;
+  selectedModelBomDraftDiffBom.value = bom;
+  updateModelBomDraftDiffKeySet(modelBomDraftDiffViewedKeys, modelBomDraftDiffReviewKey(draft, bom), true);
+  modelBomDraftDiffDialogVisible.value = true;
+}
+
+function confirmSelectedModelBomDraftDiffReview() {
+  const draft = selectedModelBomDraftDiffDraft.value;
+  const bom = selectedModelBomDraftDiffBom.value;
+  if (!draft || !bom) {
+    return;
+  }
+  updateModelBomDraftDiffKeySet(modelBomDraftDiffReviewedKeys, modelBomDraftDiffReviewKey(draft, bom), true);
+  modelBomDraftDiffDialogVisible.value = false;
+  ElMessage.success(`已标记核对：${bom.bomName}`);
+}
+
+function modelBomDraftDiffLineStatusText(status: ModelBomDraftExistingBomDiffLine['status']) {
+  if (status === 'SAME') {
+    return '一致';
+  }
+  if (status === 'CHANGED') {
+    return '字段不同';
+  }
+  if (status === 'DRAFT_ONLY') {
+    return '草稿新增';
+  }
+  return '正式多出';
+}
+
+function modelBomDraftDiffLineTagType(status: ModelBomDraftExistingBomDiffLine['status']): LineStructureTagType {
+  if (status === 'SAME') {
+    return 'success';
+  }
+  if (status === 'CHANGED' || status === 'DRAFT_ONLY') {
+    return 'warning';
+  }
+  return 'info';
+}
+
+function modelBomDraftDiffChangedFields(line: ModelBomDraftExistingBomDiffLine) {
+  return line.fields.filter((field) => field.changed);
+}
+
+function modelBomDraftDiffFieldText(field: ModelBomDraftExistingBomDiffLine['fields'][number]) {
+  return `${field.label}：草稿 ${field.draftValue || '-'} / 正式 ${field.existingValue || '-'}`;
+}
+
+function normalizedModelBomDraftName(value?: string | null) {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+function modelBomDraftCommitName(draft: ModelBomDraftPreviewItem) {
+  return String(draft.commitBomName || draft.bomName || '').trim();
+}
+
+function modelBomDraftNameConflict(draft: ModelBomDraftPreviewItem) {
+  const name = normalizedModelBomDraftName(modelBomDraftCommitName(draft));
+  if (!name) {
+    return false;
+  }
+  return modelBomDraftExistingBoms(draft).some((bom) => normalizedModelBomDraftName(bom.bomName) === name);
+}
+
+function modelBomDraftCommitBlockReason(draft: ModelBomDraftPreviewItem) {
+  if (!modelBomDraftCommitName(draft)) {
+    return '请先填写正式 BOM 名称';
+  }
+  if (modelBomDraftNameConflict(draft)) {
+    return '同一客户范围和机型/项目下已有同名 BOM，请改名后再创建';
+  }
+  if (!draft.customerId) {
+    return '未匹配到有效客户，不能写入正式 BOM';
+  }
+  const errorIssue = modelBomDraftAllIssues(draft).find((issue) => issue.severity === 'ERROR');
+  if (errorIssue) {
+    return errorIssue.message;
+  }
+  const missingMaterial = draft.lines.find((line) => !line.materialId);
+  if (missingMaterial) {
+    return `零件 ${missingMaterial.partCode} 尚未写入零件基础库`;
+  }
+  const disabledMaterial = draft.lines.find((line) => line.materialStatus !== 'ENABLED');
+  if (disabledMaterial) {
+    return `零件 ${disabledMaterial.partCode} 已停用`;
+  }
+  const existingCount = modelBomDraftExistingBoms(draft).length;
+  if (existingCount > 0 && !modelBomDraftDiffReviewComplete(draft)) {
+    return `当前范围已有 ${existingCount} 个正式 BOM，请先逐个打开“逐行比对”并点击“已核对此 BOM”`;
+  }
+  return existingCount > 0
+    ? `人工确认后将新建另一个正式 BOM，不会覆盖已有 ${existingCount} 个 BOM，也不会创建订单、生产任务或库存流水`
+    : '人工确认后将创建正式 BOM 和 BOM 明细，不会创建订单、生产任务或库存流水';
+}
+
+function modelBomDraftCanCommit(draft: ModelBomDraftPreviewItem) {
+  if (!modelBomDraftCommitName(draft)) {
+    return false;
+  }
+  if (modelBomDraftNameConflict(draft)) {
+    return false;
+  }
+  if (!draft.customerId) {
+    return false;
+  }
+  if (modelBomDraftAllIssues(draft).some((issue) => issue.severity === 'ERROR')) {
+    return false;
+  }
+  if (draft.lines.some((line) => !line.materialId || line.materialStatus !== 'ENABLED')) {
+    return false;
+  }
+  return modelBomDraftExistingBoms(draft).length === 0 || modelBomDraftDiffReviewComplete(draft);
+}
+
+async function openExistingModelBomFromDraft(draft: ModelBomDraftPreviewItem, targetBom?: ModelBomDraftExistingBomSummary) {
+  const existingBom = targetBom || modelBomDraftExistingBoms(draft)[0];
+  if (!existingBom?.id) {
+    return;
+  }
+  modelBomDraftPreviewVisible.value = false;
+  importDialogVisible.value = false;
+  await router.push({
+    path: '/inventory/model-boms',
+    query: {
+      bomId: existingBom.id,
+      customerId: draft.customerId || undefined,
+      projectModel: draft.projectModel || undefined,
+      scopeMode: 'PRIVATE',
+      status: 'ALL'
+    }
+  });
+}
+
+async function commitModelBomDraftFromOrderImport(draft: ModelBomDraftPreviewItem) {
+  if (!importPreview.value?.id || !modelBomDraftPreview.value?.previewToken) {
+    ElMessage.warning('请先刷新 BOM 草稿预览后再确认');
+    return;
+  }
+  if (!modelBomDraftCanCommit(draft)) {
+    ElMessage.warning(modelBomDraftCommitBlockReason(draft));
+    return;
+  }
+  const confirmed = await openOrderConfirmDialog({
+    title: '确认创建正式 BOM',
+    message: `确定将 ${modelBomDraftCommitName(draft)} 写入正式 BOM 吗？`,
+    details: [
+      '本操作只创建 ModelBom 和 ModelBomLine，不会创建订单、生产任务、库存批次或库存流水。',
+      modelBomDraftExistingBoms(draft).length
+        ? `当前范围已有 ${modelBomDraftExistingBoms(draft).length} 个 BOM；本次会新建独立 BOM，不会覆盖已有 BOM。`
+        : '当前范围没有同名正式 BOM；后端仍会按名称和范围再次查重。',
+      `即将写入 ${draft.lineCount} 行：组件 ${draft.componentCount}，子零件 ${draft.childPartCount}，独立零件 ${draft.standalonePartCount}。`
+    ],
+    confirmButtonText: '确认创建',
+    confirmButtonType: 'success'
+  });
+  if (!confirmed) {
+    return;
+  }
+  modelBomDraftCommittingKey.value = draft.draftKey;
+  try {
+    const saved = await erpApi.commitModelBomDraftFromOrderImport(importPreview.value.id, {
+      previewToken: modelBomDraftPreview.value.previewToken,
+      draftKey: draft.draftKey,
+      bomName: modelBomDraftCommitName(draft),
+      confirmedBy: '订单导入页面',
+      reviewedExistingBomIds: modelBomDraftExistingBoms(draft)
+        .filter((bom) => modelBomDraftDiffReviewed(draft, bom))
+        .map((bom) => bom.id)
+    });
+    ElMessage.success(`已创建正式 BOM：${saved.bomName}`);
+    modelBomDraftPreviewVisible.value = false;
+    importDialogVisible.value = false;
+    await router.push({
+      path: '/inventory/model-boms',
+      query: {
+        bomId: saved.id,
+        customerId: saved.customerId || undefined,
+        projectModel: saved.projectModel || undefined,
+        scopeMode: 'PRIVATE',
+        status: 'ALL'
+      }
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '确认创建正式 BOM 失败，请刷新草稿预览后重试');
+  } finally {
+    modelBomDraftCommittingKey.value = '';
   }
 }
 
@@ -4164,10 +5437,33 @@ async function saveCancelOrder() {
 }
 
 onMounted(async () => {
+  restoreOrdersWorkTableHeights();
   window.addEventListener('focus', handleModelBomApplyWindowFocus);
   await loadOrderOptions();
   await loadOrders();
+  await openOrderImportSessionFromRoute();
 });
+
+watch(
+  () => [route.query.orderImportSessionId, route.query.previewBomDraft],
+  () => {
+    void openOrderImportSessionFromRoute();
+  }
+);
+
+watch(
+  () => [
+    ordersWorkTableHeights.orders,
+    ordersWorkTableHeights.orderFormStructure,
+    ordersWorkTableHeights.importPreview,
+    ordersWorkTableHeights.importFilePreview,
+    ordersWorkTableHeights.importFileStructure,
+    ordersWorkTableHeights.modelBomDraft,
+    ordersWorkTableHeights.modelBomRecommendationStructure,
+    ordersWorkTableHeights.modelBomApplyStructure
+  ],
+  () => saveOrdersWorkTableHeights()
+);
 
 onBeforeUnmount(() => {
   window.removeEventListener('focus', handleModelBomApplyWindowFocus);
@@ -4323,6 +5619,19 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.model-bom-recommendation-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-multi-choice-scope-alert {
+  margin: 0;
+}
+
 .model-bom-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -4354,15 +5663,33 @@ onBeforeUnmount(() => {
   line-height: 18px;
 }
 
+.model-bom-scope-tag {
+  max-width: min(260px, 100%);
+}
+
+.model-bom-scope-tag-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
 .model-bom-structure-preview {
   display: grid;
   gap: 6px;
-  max-height: 220px;
   overflow: auto;
   padding: 8px;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
   background: #f8fafc;
+}
+
+.model-bom-structure-empty {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
 }
 
 .model-bom-structure-group {
@@ -4473,7 +5800,6 @@ onBeforeUnmount(() => {
 .model-bom-apply-structure {
   display: grid;
   gap: 8px;
-  max-height: 460px;
   overflow: auto;
   padding: 10px;
   background: #f8fafc;
@@ -4566,7 +5892,6 @@ onBeforeUnmount(() => {
 .order-form-structure-list {
   display: grid;
   gap: 8px;
-  max-height: 260px;
   overflow: auto;
 }
 
@@ -4630,6 +5955,25 @@ onBeforeUnmount(() => {
 
 .orders-table-card {
   min-height: 0;
+}
+
+.orders-table-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.orders-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.orders-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .import-toolbar {
@@ -4863,6 +6207,90 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.model-bom-draft-name-field {
+  display: grid;
+  flex: 1 1 280px;
+  max-width: 420px;
+  gap: 4px;
+}
+
+.model-bom-draft-name-field label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.danger-text {
+  color: #dc2626;
+}
+
+.model-bom-draft-diff-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+
+.model-bom-draft-diff-item {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.model-bom-draft-diff-item.warning {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.model-bom-draft-diff-item > div:first-child,
+.model-bom-draft-diff-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.model-bom-draft-diff-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.model-bom-draft-diff-item span,
+.model-bom-draft-diff-item small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-draft-diff-dialog-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.model-bom-draft-diff-line-main,
+.model-bom-draft-diff-line-detail {
+  display: grid;
+  gap: 4px;
+}
+
+.model-bom-draft-diff-line-main span,
+.model-bom-draft-diff-line-detail span,
+.model-bom-draft-diff-line-detail small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.model-bom-draft-diff-field-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .import-structure-list {
   display: grid;
   gap: 8px;
@@ -4928,7 +6356,6 @@ onBeforeUnmount(() => {
 .import-file-structure-orders {
   display: grid;
   gap: 10px;
-  max-height: 360px;
   overflow: auto;
 }
 

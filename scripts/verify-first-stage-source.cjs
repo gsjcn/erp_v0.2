@@ -133,22 +133,232 @@ function verifyOrderStatusEnumContract() {
 
 function verifyNavigation() {
   const navPath = 'frontend/src/config/navigation.ts';
+  const routerPath = 'frontend/src/router.ts';
   if (!fileExists(navPath)) {
     return;
   }
 
-  const expectedLabels = ['客户', '零件管理', '订单', '生产流程', '流程记忆', '生产', '统计', '仓库', '库存'];
+  const expectedEntries = [
+    { label: '客户', path: '/customers' },
+    { label: '零件管理', path: '/materials' },
+    { label: '订单', path: '/orders' },
+    { label: '生产流程', path: '/processes' },
+    { label: '流程记忆', path: '/process-templates' },
+    { label: '生产', path: '/production' },
+    { label: '统计', path: '/statistics' },
+    { label: '仓库', path: '/warehouses' },
+    { label: '库存', path: '/inventory' }
+  ];
   const source = readFile(navPath);
   const labels = [...source.matchAll(/label:\s*['"`]([^'"`]+)['"`]/g)].map((match) => match[1]);
+  const paths = [...source.matchAll(/path:\s*['"`]([^'"`]+)['"`]/g)].map((match) => match[1]);
 
-  if (labels.length !== expectedLabels.length) {
-    addFailure(`Navigation should expose exactly ${expectedLabels.length} first-stage entries, found ${labels.length}.`);
+  if (labels.length !== expectedEntries.length) {
+    addFailure(`Navigation should expose exactly ${expectedEntries.length} first-stage entries, found ${labels.length}.`);
     return;
   }
 
-  for (let index = 0; index < expectedLabels.length; index += 1) {
-    if (labels[index] !== expectedLabels[index]) {
-      addFailure(`Navigation entry ${index + 1} should be "${expectedLabels[index]}", found "${labels[index]}".`);
+  if (paths.length !== expectedEntries.length) {
+    addFailure(`Navigation should expose exactly ${expectedEntries.length} first-stage paths, found ${paths.length}.`);
+    return;
+  }
+
+  for (let index = 0; index < expectedEntries.length; index += 1) {
+    if (labels[index] !== expectedEntries[index].label) {
+      addFailure(`Navigation entry ${index + 1} should be "${expectedEntries[index].label}", found "${labels[index]}".`);
+    }
+    if (paths[index] !== expectedEntries[index].path) {
+      addFailure(`Navigation path ${index + 1} should be "${expectedEntries[index].path}", found "${paths[index]}".`);
+    }
+  }
+
+  if (!fileExists(routerPath)) {
+    addFailure(`Missing router source file: ${routerPath}`);
+    return;
+  }
+
+  const routerSource = readFile(routerPath);
+  const customerRouteIndex = routerSource.indexOf("path: '/customers'");
+  const materialsRouteIndex = routerSource.indexOf("path: '/materials'");
+  const ordersRouteIndex = routerSource.indexOf("path: '/orders'");
+  if (customerRouteIndex < 0 || materialsRouteIndex < 0 || ordersRouteIndex < 0) {
+    addFailure('router.ts must keep customer, material management and order routes.');
+  } else if (!(customerRouteIndex < materialsRouteIndex && materialsRouteIndex < ordersRouteIndex)) {
+    addFailure('router.ts must keep 零件管理 route between 客户 and 订单.');
+  }
+  if (!routerSource.includes("path: '/materials'") || !routerSource.includes("import('./views/MaterialsManagementView.vue')")) {
+    addFailure('router.ts /materials must load MaterialsManagementView.vue for the part management control panel.');
+  }
+
+  const readmeSource = fileExists('README.md') ? readFile('README.md') : '';
+  const readmeSnippets = [
+    '客户、零件管理、订单',
+    '第一阶段页面入口固定为 9 个',
+    '- 零件管理',
+    '用于检查第一阶段 9 个页面入口'
+  ];
+  for (const snippet of readmeSnippets) {
+    if (!readmeSource.includes(snippet)) {
+      addFailure(`README.md must document the current first-stage navigation entry: ${snippet}`);
+    }
+  }
+}
+
+function verifyNoForbiddenSecondStageEntrypoints() {
+  const forbiddenModulePattern =
+    /(quality|inspection|iatf|apqp|ppap|fmea|msa|spc|capa|finance|financial|purchase|procurement|supplier|approval|invoice|cost|report-center|cockpit|permission|rbac|role-management|scanner|barcode)/i;
+  const forbiddenRouteSegmentPattern =
+    /(^|\/)(quality|inspection|iatf|apqp|ppap|fmea|msa|spc|capa|finance|financial|purchase|procurement|supplier|approval|invoice|cost|report-center|cockpit|permission|rbac|role-management|scanner|barcode)(\/|$)/i;
+  const forbiddenSchemaPattern =
+    /^\s*(model|enum)\s+(Quality|Inspection|Iatf|Apqp|Ppap|Fmea|Msa|Spc|Capa|Finance|Financial|Purchase|Procurement|Supplier|Approval|Invoice|Cost|ReportCenter|Cockpit|Permission|Rbac|RoleManagement|Scanner|Barcode)\b/m;
+  const forbiddenSqlObjectPattern =
+    /^\s*(CREATE\s+(?:TABLE|TYPE|VIEW)|ALTER\s+TABLE)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:"[^"]+"\.)?"(Quality|Inspection|Iatf|Apqp|Ppap|Fmea|Msa|Spc|Capa|Finance|Financial|Purchase|Procurement|Supplier|Approval|Invoice|Cost|ReportCenter|Cockpit|Permission|Rbac|RoleManagement|Scanner|Barcode)[^"]*"/gim;
+
+  const routerPath = 'frontend/src/router.ts';
+  if (fileExists(routerPath)) {
+    const routerSource = readFile(routerPath);
+    const routePathPattern = /path:\s*['"`]([^'"`]+)['"`]/g;
+    for (const match of routerSource.matchAll(routePathPattern)) {
+      const routePath = match[1];
+      if (forbiddenRouteSegmentPattern.test(routePath)) {
+        addFailure(`First-stage router must not expose forbidden next-stage route "${routePath}" in ${routerPath}.`);
+      }
+    }
+
+    const routeImportPattern = /import\s*\(\s*['"`]\.\/views\/([^'"`]+)['"`]\s*\)/g;
+    for (const match of routerSource.matchAll(routeImportPattern)) {
+      const viewPath = match[1];
+      if (forbiddenModulePattern.test(viewPath)) {
+        addFailure(`First-stage router must not lazy-load forbidden next-stage view "${viewPath}" in ${routerPath}.`);
+      }
+    }
+  }
+
+  const frontendViewDir = resolveProjectPath('frontend/src/views');
+  if (fs.existsSync(frontendViewDir)) {
+    for (const filePath of walkFiles(frontendViewDir)) {
+      const relativePath = toProjectPath(filePath);
+      if (forbiddenModulePattern.test(path.basename(relativePath))) {
+        addFailure(`First-stage frontend views must not add forbidden next-stage module file: ${relativePath}`);
+      }
+    }
+  }
+
+  const backendModulesDir = resolveProjectPath('backend/src/modules');
+  if (fs.existsSync(backendModulesDir)) {
+    for (const entry of fs.readdirSync(backendModulesDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && forbiddenModulePattern.test(entry.name)) {
+        addFailure(`First-stage backend modules must not add forbidden next-stage module directory: backend/src/modules/${entry.name}`);
+      }
+    }
+  }
+
+  const backendSourceDir = resolveProjectPath('backend/src');
+  if (fs.existsSync(backendSourceDir)) {
+    const controllerRoutePattern = /@(Controller|Get|Post|Put|Patch|Delete)\s*\(\s*['"`]([^'"`]*)['"`]\s*\)/g;
+    for (const filePath of walkFiles(backendSourceDir)) {
+      if (!filePath.endsWith('.controller.ts')) {
+        continue;
+      }
+      const source = fs.readFileSync(filePath, 'utf8');
+      for (const match of source.matchAll(controllerRoutePattern)) {
+        const routePath = match[2];
+        if (forbiddenRouteSegmentPattern.test(routePath)) {
+          addFailure(
+            `First-stage backend controller must not expose forbidden next-stage route "${routePath}": ${toProjectPath(filePath)}:${sourceLineForIndex(
+              source,
+              match.index || 0
+            )}`
+          );
+        }
+      }
+    }
+  }
+
+  const frontendApiDir = resolveProjectPath('frontend/src/api');
+  if (fs.existsSync(frontendApiDir)) {
+    const apiPathPattern = /['"`](?:\$\{apiBaseUrl\})?(\/[^'"`]*?)['"`]/g;
+    for (const filePath of walkFiles(frontendApiDir)) {
+      const source = fs.readFileSync(filePath, 'utf8');
+      for (const match of source.matchAll(apiPathPattern)) {
+        const apiPath = match[1];
+        if (forbiddenRouteSegmentPattern.test(apiPath)) {
+          addFailure(
+            `First-stage frontend API must not call forbidden next-stage path "${apiPath}": ${toProjectPath(filePath)}:${sourceLineForIndex(
+              source,
+              match.index || 0
+            )}`
+          );
+        }
+      }
+    }
+  }
+
+  const schemaPath = 'database/prisma/schema.prisma';
+  if (fileExists(schemaPath)) {
+    const schemaSource = readFile(schemaPath);
+    const schemaMatch = forbiddenSchemaPattern.exec(schemaSource);
+    if (schemaMatch) {
+      addFailure(`First-stage Prisma schema must not add forbidden next-stage ${schemaMatch[1]} ${schemaMatch[2]}.`);
+    }
+  }
+
+  const migrationsDir = resolveProjectPath('database/prisma/migrations');
+  if (fs.existsSync(migrationsDir)) {
+    const migrationSqlFiles = [];
+    const pendingDirs = [migrationsDir];
+    while (pendingDirs.length > 0) {
+      const currentDir = pendingDirs.pop();
+      for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          pendingDirs.push(fullPath);
+        } else if (entry.isFile() && entry.name.endsWith('.sql')) {
+          migrationSqlFiles.push(fullPath);
+        }
+      }
+    }
+
+    for (const filePath of migrationSqlFiles) {
+      const source = fs.readFileSync(filePath, 'utf8');
+      forbiddenSqlObjectPattern.lastIndex = 0;
+      for (const match of source.matchAll(forbiddenSqlObjectPattern)) {
+        addFailure(
+          `First-stage migration SQL must not add or alter forbidden next-stage ${match[1]} object "${match[2]}...": ${toProjectPath(
+            filePath
+          )}:${sourceLineForIndex(source, match.index || 0)}`
+        );
+      }
+    }
+  }
+}
+
+function verifyNoJsonFilePrimaryDatabase() {
+  const backendSourceDir = resolveProjectPath('backend/src');
+  if (!fs.existsSync(backendSourceDir)) {
+    return;
+  }
+
+  const suspiciousJsonDataPathPattern =
+    /['"`]([^'"`]*(?:data|db|database|store|storage|customer|customers|order|orders|material|materials|inventory|warehouse|production)[^'"`]*\.(?:json|jsonl))['"`]/gi;
+  const jsonFileDatabaseAdapterPattern =
+    /\b(?:JSONFile|LowSync|Low|lowdb|NeDB|nedb)\b|require\s*\(\s*['"`](?:lowdb|nedb|nedb-promises)['"`]\s*\)|from\s+['"`](?:lowdb|nedb|nedb-promises)['"`]/;
+
+  for (const filePath of walkFiles(backendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    suspiciousJsonDataPathPattern.lastIndex = 0;
+    for (const match of source.matchAll(suspiciousJsonDataPathPattern)) {
+      addFailure(
+        `Backend runtime must not use JSON/JSONL files as a primary data store; use Prisma/PostgreSQL instead: ${toProjectPath(
+          filePath
+        )}:${sourceLineForIndex(source, match.index || 0)} (${match[1]})`
+      );
+    }
+
+    if (jsonFileDatabaseAdapterPattern.test(source)) {
+      addFailure(
+        `Backend runtime must not use JSON file database adapters; use Prisma/PostgreSQL instead: ${toProjectPath(filePath)}`
+      );
     }
   }
 }
@@ -253,15 +463,114 @@ function verifyResponsiveMobileBaseline() {
   }
 }
 
+function verifyBusinessTablesHaveHorizontalScroll() {
+  const frontendRoots = ['frontend/src/views', 'frontend/src/components']
+    .map(resolveProjectPath)
+    .filter((dir) => fs.existsSync(dir));
+  const allowedTableContextSnippets = [
+    'table-card',
+    'table-section',
+    'desktop-table',
+    'import-preview-table',
+    'import-line-table',
+    'bom-scope-review-table',
+    'source-bom-review-table',
+    'batch-shipment-table'
+  ];
+
+  for (const filePath of frontendRoots.flatMap((dir) => walkFiles(dir))) {
+    if (path.extname(filePath) !== '.vue') {
+      continue;
+    }
+    const source = fs.readFileSync(filePath, 'utf8');
+    const lines = source.split(/\r?\n/);
+    for (const match of source.matchAll(/<el-table(?=[\s>]|$)/g)) {
+      const lineNumber = sourceLineForIndex(source, match.index);
+      const context = lines
+        .slice(Math.max(0, lineNumber - 13), Math.min(lines.length, lineNumber + 8))
+        .join('\n');
+      const hasKnownScrollableContext = allowedTableContextSnippets.some((snippet) => context.includes(snippet));
+      const hasExplicitTableHeight = /max-height\s*=|height\s*=/.test(context);
+      if (!hasKnownScrollableContext && !hasExplicitTableHeight) {
+        addFailure(
+          `Business el-table must keep a horizontal-scroll wrapper or explicit table height: ${toProjectPath(filePath)}:${lineNumber}`
+        );
+      }
+    }
+  }
+}
+
+function verifyNoElementPlusShowOverflowTooltip() {
+  const frontendRoots = ['frontend/src/views', 'frontend/src/components']
+    .map(resolveProjectPath)
+    .filter((dir) => fs.existsSync(dir));
+
+  for (const filePath of frontendRoots.flatMap((dir) => walkFiles(dir))) {
+    if (path.extname(filePath) !== '.vue') {
+      continue;
+    }
+    const source = fs.readFileSync(filePath, 'utf8');
+    const match = source.match(/\bshow-overflow-tooltip\b/);
+    if (match) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use explicit preview/title helpers instead of Element Plus show-overflow-tooltip.`
+      );
+    }
+  }
+}
+
+function verifyNoRawLongTextTableColumns() {
+  const frontendRoots = ['frontend/src/views', 'frontend/src/components']
+    .map(resolveProjectPath)
+    .filter((dir) => fs.existsSync(dir));
+  const rawLongTextColumnPattern =
+    /<el-table-column\b(?=[^>]*\bprop=["'](?:reason|remark|statusReason|reviewRemark|scopeLabel|issueDetail|defaultProcessRoute)["'])[^>]*\/>/g;
+
+  for (const filePath of frontendRoots.flatMap((dir) => walkFiles(dir))) {
+    if (path.extname(filePath) !== '.vue') {
+      continue;
+    }
+    const source = fs.readFileSync(filePath, 'utf8');
+    rawLongTextColumnPattern.lastIndex = 0;
+    for (const match of source.matchAll(rawLongTextColumnPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must render long text table fields through an explicit preview/title template instead of a raw prop column.`
+      );
+    }
+  }
+}
+
 function verifyNoNativeBrowserDialogs() {
   const scanRoots = ['frontend/src', 'backend/src', 'database/prisma']
     .map(resolveProjectPath)
     .filter((dir) => fs.existsSync(dir));
 
   const checks = [
-    { name: 'window.prompt', pattern: /window\s*\.\s*prompt\s*\(/ },
-    { name: 'window.confirm', pattern: /window\s*\.\s*confirm\s*\(/ },
-    { name: 'window.alert', pattern: /window\s*\.\s*alert\s*\(/ },
+    { name: 'window dialog reference', pattern: /window\s*(?:\?\.|\.)\s*(?:prompt|confirm|alert)\b/ },
+    { name: 'window dialog bracket reference', pattern: /window\s*(?:\?\.|\.)?\s*\[\s*['"`](?:prompt|confirm|alert)['"`]\s*\]/ },
+    { name: 'globalThis dialog reference', pattern: /globalThis\s*(?:\?\.|\.)\s*(?:prompt|confirm|alert)\b/ },
+    { name: 'globalThis dialog bracket reference', pattern: /globalThis\s*(?:\?\.|\.)?\s*\[\s*['"`](?:prompt|confirm|alert)['"`]\s*\]/ },
+    { name: 'self dialog reference', pattern: /self\s*(?:\?\.|\.)\s*(?:prompt|confirm|alert)\b/ },
+    { name: 'self dialog bracket reference', pattern: /self\s*(?:\?\.|\.)?\s*\[\s*['"`](?:prompt|confirm|alert)['"`]\s*\]/ },
+    { name: 'browser dialog destructuring', pattern: /\{[^}]*\b(?:prompt|confirm|alert)\b[^}]*}\s*=\s*(?:window|globalThis|self)\b/ },
+    { name: 'window.prompt', pattern: /window\s*(?:\?\.|\.)\s*prompt\s*\(/ },
+    { name: 'window.confirm', pattern: /window\s*(?:\?\.|\.)\s*confirm\s*\(/ },
+    { name: 'window.alert', pattern: /window\s*(?:\?\.|\.)\s*alert\s*\(/ },
+    { name: 'window prompt bracket', pattern: /window\s*(?:\?\.|\.)?\s*\[\s*['"`]prompt['"`]\s*\]\s*\(/ },
+    { name: 'window confirm bracket', pattern: /window\s*(?:\?\.|\.)?\s*\[\s*['"`]confirm['"`]\s*\]\s*\(/ },
+    { name: 'window alert bracket', pattern: /window\s*(?:\?\.|\.)?\s*\[\s*['"`]alert['"`]\s*\]\s*\(/ },
+    { name: 'globalThis.prompt', pattern: /globalThis\s*(?:\?\.|\.)\s*prompt\s*\(/ },
+    { name: 'globalThis.confirm', pattern: /globalThis\s*(?:\?\.|\.)\s*confirm\s*\(/ },
+    { name: 'globalThis.alert', pattern: /globalThis\s*(?:\?\.|\.)\s*alert\s*\(/ },
+    { name: 'globalThis prompt bracket', pattern: /globalThis\s*(?:\?\.|\.)?\s*\[\s*['"`]prompt['"`]\s*\]\s*\(/ },
+    { name: 'globalThis confirm bracket', pattern: /globalThis\s*(?:\?\.|\.)?\s*\[\s*['"`]confirm['"`]\s*\]\s*\(/ },
+    { name: 'globalThis alert bracket', pattern: /globalThis\s*(?:\?\.|\.)?\s*\[\s*['"`]alert['"`]\s*\]\s*\(/ },
+    { name: 'self.prompt', pattern: /self\s*(?:\?\.|\.)\s*prompt\s*\(/ },
+    { name: 'self.confirm', pattern: /self\s*(?:\?\.|\.)\s*confirm\s*\(/ },
+    { name: 'self.alert', pattern: /self\s*(?:\?\.|\.)\s*alert\s*\(/ },
+    { name: 'self prompt bracket', pattern: /self\s*(?:\?\.|\.)?\s*\[\s*['"`]prompt['"`]\s*\]\s*\(/ },
+    { name: 'self confirm bracket', pattern: /self\s*(?:\?\.|\.)?\s*\[\s*['"`]confirm['"`]\s*\]\s*\(/ },
+    { name: 'self alert bracket', pattern: /self\s*(?:\?\.|\.)?\s*\[\s*['"`]alert['"`]\s*\]\s*\(/ },
     { name: 'prompt', pattern: /(^|[^\w$.])prompt\s*\(/ },
     { name: 'confirm', pattern: /(^|[^\w$.])confirm\s*\(/ },
     { name: 'alert', pattern: /(^|[^\w$.])alert\s*\(/ }
@@ -287,11 +596,65 @@ function verifyNoElementPlusConfirmDialogs() {
     return;
   }
 
+  const forbiddenConfirmPatterns = [
+    { name: 'ElMessageBox import', pattern: /import\s+{[^}]*\bElMessageBox\b[^}]*}\s+from\s+['"`]element-plus(?:\/[^'"`]*)?['"`]/ },
+    { name: 'ElPopconfirm import', pattern: /import\s+{[^}]*\bElPopconfirm\b[^}]*}\s+from\s+['"`]element-plus(?:\/[^'"`]*)?['"`]/ },
+    { name: 'Element Plus message-box module import', pattern: /from\s+['"`]element-plus\/[^'"`]*message-box[^'"`]*['"`]/ },
+    { name: 'Element Plus popconfirm module import', pattern: /from\s+['"`]element-plus\/[^'"`]*popconfirm[^'"`]*['"`]/ },
+    { name: 'Element Plus message-box dynamic import', pattern: /import\s*\(\s*['"`]element-plus\/[^'"`]*message-box[^'"`]*['"`]\s*\)/ },
+    { name: 'Element Plus popconfirm dynamic import', pattern: /import\s*\(\s*['"`]element-plus\/[^'"`]*popconfirm[^'"`]*['"`]\s*\)/ },
+    { name: 'Element Plus message-box require', pattern: /require\s*\(\s*['"`]element-plus\/[^'"`]*message-box[^'"`]*['"`]\s*\)/ },
+    { name: 'Element Plus popconfirm require', pattern: /require\s*\(\s*['"`]element-plus\/[^'"`]*popconfirm[^'"`]*['"`]\s*\)/ },
+    { name: 'ElMessageBox dynamic import', pattern: /import\s*\(\s*['"`]element-plus(?:\/[^'"`]*)?['"`]\s*\)[\s\S]{0,200}\bElMessageBox\b/ },
+    { name: 'ElPopconfirm dynamic import', pattern: /import\s*\(\s*['"`]element-plus(?:\/[^'"`]*)?['"`]\s*\)[\s\S]{0,200}\bElPopconfirm\b/ },
+    { name: 'ElMessageBox require', pattern: /require\s*\(\s*['"`]element-plus(?:\/[^'"`]*)?['"`]\s*\)[\s\S]{0,200}\bElMessageBox\b/ },
+    { name: 'ElPopconfirm require', pattern: /require\s*\(\s*['"`]element-plus(?:\/[^'"`]*)?['"`]\s*\)[\s\S]{0,200}\bElPopconfirm\b/ },
+    { name: 'Element Plus global message box call', pattern: /(?:^|[^\w$])\$(?:confirm|alert|prompt|msgbox)\s*\(/ },
+    { name: 'Element Plus globalProperties message box', pattern: /globalProperties\s*(?:\?\.|\.)\s*\$(?:confirm|alert|prompt|msgbox)\b/ },
+    {
+      name: 'Element Plus globalProperties message box bracket',
+      pattern: /globalProperties\s*(?:\?\.|\.)?\s*\[\s*['"`]\$(?:confirm|alert|prompt|msgbox)['"`]\s*\]/
+    },
+    { name: 'ElMessageBox.confirm', pattern: /ElMessageBox\s*(?:\?\.|\.)\s*confirm\s*\(/ },
+    { name: 'ElMessageBox.alert', pattern: /ElMessageBox\s*(?:\?\.|\.)\s*alert\s*\(/ },
+    { name: 'ElMessageBox.prompt', pattern: /ElMessageBox\s*(?:\?\.|\.)\s*prompt\s*\(/ },
+    { name: 'ElMessageBox direct call', pattern: /ElMessageBox\s*\(/ },
+    { name: 'ElMessageBox confirm bracket', pattern: /ElMessageBox\s*(?:\?\.|\.)?\s*\[\s*['"`]confirm['"`]\s*\]\s*\(/ },
+    { name: 'ElMessageBox alert bracket', pattern: /ElMessageBox\s*(?:\?\.|\.)?\s*\[\s*['"`]alert['"`]\s*\]\s*\(/ },
+    { name: 'ElMessageBox prompt bracket', pattern: /ElMessageBox\s*(?:\?\.|\.)?\s*\[\s*['"`]prompt['"`]\s*\]\s*\(/ },
+    { name: 'el-popconfirm', pattern: /<\s*el-popconfirm\b/ },
+    { name: 'ElPopconfirm', pattern: /\bElPopconfirm\b/ }
+  ];
+
   for (const filePath of walkFiles(frontendDir)) {
     const source = fs.readFileSync(filePath, 'utf8');
-    if (source.includes('ElMessageBox.confirm')) {
+    for (const check of forbiddenConfirmPatterns) {
+      const match = check.pattern.exec(source);
+      if (match) {
+        addFailure(
+          `Element Plus inline confirmation "${check.name}" is not allowed for first-stage key operations; use el-dialog instead: ${toProjectPath(
+            filePath
+          )}:${sourceLineForIndex(source, match.index || 0)}`
+        );
+      }
+    }
+  }
+}
+
+function verifyNoDefaultFirstOption() {
+  const frontendDir = resolveProjectPath('frontend/src');
+  if (!fs.existsSync(frontendDir)) {
+    return;
+  }
+
+  for (const filePath of walkFiles(frontendDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const match = source.match(/\bdefault-first-option\b|\bdefaultFirstOption\b/);
+    if (match) {
       addFailure(
-        `Element Plus confirm is not allowed for key operations; use el-dialog instead: ${toProjectPath(filePath)}`
+        `Element Plus selects/autocomplete must not enable default-first-option; operators must explicitly choose matches: ${toProjectPath(
+          filePath
+        )}:${sourceLineForIndex(source, match.index || 0)}`
       );
     }
   }
@@ -352,9 +715,12 @@ function verifyCustomerSelectOnlyShowsName() {
   const customersViewPath = 'frontend/src/views/CustomersView.vue';
   const ordersListViewPath = 'frontend/src/views/OrdersListView.vue';
   const productionViewPath = 'frontend/src/views/ProductionView.vue';
+  const controllerPath = 'backend/src/modules/customers/customers.controller.ts';
   const servicePath = 'backend/src/modules/customers/customers.service.ts';
+  const dtoPath = 'backend/src/modules/customers/dto.ts';
   const apiPath = 'frontend/src/api/erp.ts';
   const typesPath = 'frontend/src/types/erp.ts';
+  const customersExportRegressionPath = 'scripts/verify-customers-export-api.cjs';
   if (!fileExists(componentPath)) {
     return;
   }
@@ -363,9 +729,12 @@ function verifyCustomerSelectOnlyShowsName() {
   const customersViewSource = fileExists(customersViewPath) ? readFile(customersViewPath) : '';
   const ordersListViewSource = fileExists(ordersListViewPath) ? readFile(ordersListViewPath) : '';
   const productionViewSource = fileExists(productionViewPath) ? readFile(productionViewPath) : '';
+  const controllerSource = readFile(controllerPath);
   const serviceSource = readFile(servicePath);
+  const dtoSource = readFile(dtoPath);
   const apiSource = readFile(apiPath);
   const typesSource = readFile(typesPath);
+  const customersExportRegressionSource = readFile(customersExportRegressionPath);
   const forbiddenDetails = ['customerCode', 'contactName', 'phone', 'mobile', 'province', 'city', 'address'];
 
   if (!/function\s+customerLabel\s*\([^)]*\)\s*{[\s\S]*return\s+customer\.customerName\s*;[\s\S]*}/.test(source)) {
@@ -400,8 +769,9 @@ function verifyCustomerSelectOnlyShowsName() {
     'loadMoreCustomers',
     'customerTotalCount',
     'customerHasMore',
+    "props.status || 'ENABLED'",
     '加载更多客户',
-    '暂无客户，请先在客户模块维护或执行 seed 测试数据'
+    '暂无可用客户，请先在客户模块维护启用客户'
   ];
   for (const snippet of mobileTouchSnippets) {
     if (!source.includes(snippet)) {
@@ -433,14 +803,24 @@ function verifyCustomerSelectOnlyShowsName() {
     "query.withPage === 'true'",
     'const totalCount = matchedCustomers.length;',
     'hasMore: offset + items.length < totalCount',
+    "return this.customersService.findAll({ ...query, withPage: 'true' });",
+    'customers-public-list-pagination',
     '客户搜索分页必须把总数和是否还有更多返回给前端',
     'customersPage(',
     'CustomerListResponse',
+    'includeTestFixtures?: string',
+    "const includeTestFixtures = query.includeTestFixtures === 'true';",
+    'isTestFixtureCustomer',
+    'testFixtureCustomerPrefixes',
+    "includeTestFixtures: includeTestFixtures ? 'true' : undefined",
+    "const customerFixturePrefix = 'COD-CUSTOMERS-STABLE';",
+    'customers-test-fixture-filter',
+    'customers-export-test-fixture-filter',
     'customerPagination',
     'handleCustomerPageChange',
     '个客户'
   ];
-  const customerPaginationSources = [serviceSource, apiSource, typesSource, customersViewSource].join('\n');
+  const customerPaginationSources = [controllerSource, serviceSource, dtoSource, apiSource, typesSource, customersViewSource, customersExportRegressionSource].join('\n');
   for (const snippet of customerPaginationSnippets) {
     if (!customerPaginationSources.includes(snippet)) {
       addFailure(`Customer search pagination must keep visible count/load-more contract snippet: ${snippet}`);
@@ -457,6 +837,15 @@ function verifyCustomerSelectOnlyShowsName() {
   }
   if (customersViewSource.includes('default-first-option')) {
     addFailure('CustomersView.vue customer region selects must not enable default-first-option; city/country require explicit confirmation or typed value.');
+  }
+  const customersViewDefaultStatusSnippets = [
+    "const statusFilter = ref<CommonStatus>('ENABLED');",
+    "statusFilter.value = 'ENABLED';"
+  ];
+  for (const snippet of customersViewDefaultStatusSnippets) {
+    if (!customersViewSource.includes(snippet)) {
+      addFailure(`CustomersView.vue must default customer maintenance list to enabled customers while keeping the disabled-status filter available: ${snippet}`);
+    }
   }
   const customerSuggestionPaginationSnippets = [
     'customerSuggestionLimit',
@@ -570,6 +959,49 @@ function verifyCustomerContactSoftDisableWorkflow() {
   }
 }
 
+function verifyCustomerTableHeightControls() {
+  const viewPath = 'frontend/src/views/CustomersView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing customer table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    "type CustomerWorkTableKey = 'customers' | 'commonBoms'",
+    'customerWorkTableHeightLimits',
+    'customerWorkTableDefaultHeights',
+    'baisheng.erp.customerWorkTableHeights.v1',
+    '客户页面表格高度只保存为本机 UI 偏好，不写入客户、多联系人、BOM、订单、生产或库存业务数据。',
+    'customerWorkTableHeights = reactive<Record<CustomerWorkTableKey, number>>',
+    'function adjustCustomerWorkTableHeight',
+    'function resetCustomerWorkTableHeight',
+    'function restoreCustomerWorkTableHeights',
+    'function saveCustomerWorkTableHeights',
+    'window.localStorage.getItem(customerWorkTableHeightStorageKey)',
+    'window.localStorage.setItem(customerWorkTableHeightStorageKey',
+    'aria-label="客户资料表格高度"',
+    'aria-label="降低客户资料表格高度"',
+    'aria-label="提高客户资料表格高度"',
+    'aria-label="恢复客户资料表格默认高度"',
+    'aria-label="客户常用 BOM 表格高度"',
+    'aria-label="降低客户常用 BOM 表格高度"',
+    'aria-label="提高客户常用 BOM 表格高度"',
+    'aria-label="恢复客户常用 BOM 表格默认高度"',
+    ':max-height="customerWorkTableHeights.customers"',
+    ':max-height="customerWorkTableHeights.commonBoms"',
+    'restoreCustomerWorkTableHeights();',
+    'customer-table-height-actions',
+    'customer-table-height-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`CustomersView.vue must keep adjustable customer table height control snippet: ${snippet}`);
+    }
+  }
+}
+
 function verifyOrderSelectDisplayContract() {
   const componentPath = 'frontend/src/components/OrderSelect.vue';
   if (!fileExists(componentPath)) {
@@ -649,6 +1081,31 @@ function verifyOrderFilterOrder() {
 
     if (!(dateIndex < customerIndex && customerIndex < orderIndex)) {
       addFailure(`${viewPath} filter order should be: 订单日期 -> 客户 -> 订单.`);
+    }
+  }
+}
+
+function verifyOrderTestFixtureFilter() {
+  const dtoSource = readFile('backend/src/modules/orders/dto.ts');
+  const serviceSource = readFile('backend/src/modules/orders/orders.service.ts');
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  const regressionSource = readFile('scripts/verify-orders-export-api.cjs');
+  const snippets = [
+    [dtoSource, 'includeTestFixtures?: string;'],
+    [serviceSource, 'ORDER_TEST_FIXTURE_PREFIXES'],
+    [serviceSource, 'isOrderTestFixture'],
+    [serviceSource, 'const visibleOrders = includeTestFixtures ? orders : orders.filter'],
+    [frontendApiSource, 'includeTestFixtures?: boolean;'],
+    [frontendApiSource, "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined"],
+    [regressionSource, "const orderFixturePrefix = 'COD-ORDERS-STABLE';"],
+    [regressionSource, 'orders default list must hide reusable test fixture orders'],
+    [regressionSource, 'orders default export must hide reusable test fixture orders'],
+    [regressionSource, 'orders-list-test-fixture-filter'],
+    [regressionSource, 'orders-export-test-fixture-filter']
+  ];
+  for (const [source, snippet] of snippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`Order list/export must keep reusable test-fixture filter contract snippet: ${snippet}`);
     }
   }
 }
@@ -830,8 +1287,17 @@ function verifyProductionOrderSummaryWorkflow() {
   }
 
   const controllerSource = readFile(controllerPath);
-  if (!controllerSource.includes("@Get('order-summary')") || !controllerSource.includes('return this.productionService.orderSummary(query);')) {
-    addFailure('ProductionController must expose GET /production/tasks/order-summary backed by ProductionService.orderSummary(query).');
+  if (
+    !controllerSource.includes("@Get('order-summary')") ||
+    !controllerSource.includes("return this.productionService.orderSummary({ ...query, withPage: 'true' });")
+  ) {
+    addFailure('ProductionController must expose GET /production/tasks/order-summary as an explicit paginated response.');
+  }
+  if (
+    !controllerSource.includes('@Get()') ||
+    !controllerSource.includes("return this.productionService.findTasks({ ...query, withPage: 'true' });")
+  ) {
+    addFailure('ProductionController must expose GET /production/tasks as an explicit paginated response.');
   }
   if (!controllerSource.includes("@Post('batch-start')") || !controllerSource.includes('return this.productionService.batchStart(dto);')) {
     addFailure('ProductionController must expose POST /production/tasks/batch-start backed by ProductionService.batchStart(dto).');
@@ -849,6 +1315,18 @@ function verifyProductionOrderSummaryWorkflow() {
       addFailure(`BatchStartProductionDto must keep batch start validation snippet: ${snippet}`);
     }
   }
+  const productionTaskPaginationDtoSnippets = [
+    'export class ProductionTaskQueryDto',
+    'displayStatus?: (typeof productionExportStatuses)[number]',
+    '@Max(200)',
+    '@Max(100000)',
+    'withPage?: string'
+  ];
+  for (const snippet of productionTaskPaginationDtoSnippets) {
+    if (!dtoSource.includes(snippet)) {
+      addFailure(`ProductionTaskQueryDto must keep production task public list pagination snippet: ${snippet}`);
+    }
+  }
 
   const serviceSource = readFile(servicePath);
   const orderSummarySnippets = [
@@ -859,6 +1337,10 @@ function verifyProductionOrderSummaryWorkflow() {
     'progressItems: Array.from',
     'pendingTaskIds: summary.pendingTaskIds',
     'pendingTasks: summary.pendingTasks',
+    'const summaryRows = Array.from(summaries.values()).map',
+    'const visibleSummaryRows = this.filterProductionExportSummaries(summaryRows, query.displayStatus)',
+    'totalCount: visibleSummaryRows.length',
+    'const visibleTasks = this.filterProductionExportTasks(mappedTasks, query.displayStatus)',
     'this.resolveOrderSummaryStatus(summary)',
     'private productionDisplayStatus',
     'private orderSummaryProgressLabel'
@@ -911,8 +1393,27 @@ function verifyProductionOrderSummaryWorkflow() {
   }
 
   const apiSource = readFile(apiPath);
-  if (!apiSource.includes('productionOrderSummaries(filters: ProductionTaskFilters = {})') || !apiSource.includes('/production/tasks/order-summary')) {
-    addFailure('frontend api must expose productionOrderSummaries() for the order summary homepage.');
+  if (!apiSource.includes('productionOrderSummariesPage(filters: ProductionTaskFilters = {})') || !apiSource.includes('/production/tasks/order-summary')) {
+    addFailure('frontend api must expose productionOrderSummariesPage() for the order summary homepage.');
+  }
+  if (apiSource.includes('productionOrderSummaries(filters: ProductionTaskFilters = {})')) {
+    addFailure('frontend api must not expose legacy productionOrderSummaries() full-list helper; use productionOrderSummariesPage().');
+  }
+  if (apiSource.includes('productionTasks(filters: ProductionTaskFilters = {})')) {
+    addFailure('frontend api must not expose legacy productionTasks() full-list helper; use productionTasksPage().');
+  }
+  const productionListApiSnippets = [
+    'productionTasksPage(filters: ProductionTaskFilters = {})',
+    'productionOrderSummariesPage(filters: ProductionTaskFilters = {})',
+    'return request<ProductionTaskListResponse>',
+    'return request<ProductionOrderSummaryListResponse>',
+    'displayStatus: filters.displayStatus',
+    "withPage: 'true'"
+  ];
+  for (const snippet of productionListApiSnippets) {
+    if (!apiSource.includes(snippet)) {
+      addFailure(`frontend api must keep production public list pagination snippet: ${snippet}`);
+    }
   }
   if (!apiSource.includes('batchStartProduction(payload: BatchStartProductionPayload)') || !apiSource.includes('/production/tasks/batch-start')) {
     addFailure('frontend api must expose batchStartProduction() for batch starting order tasks.');
@@ -921,6 +1422,8 @@ function verifyProductionOrderSummaryWorkflow() {
   const typesSource = readFile(typesPath);
   const typeSnippets = [
     'export interface ProductionOrderSummary',
+    'export interface ProductionTaskListResponse',
+    'export interface ProductionOrderSummaryListResponse',
     'pendingTaskIds: string[]',
     'pendingTasks: ProductionOrderSummaryTask[]',
     'progressItems?: ProductionOrderSummaryProgressItem[]',
@@ -937,7 +1440,12 @@ function verifyProductionOrderSummaryWorkflow() {
     "const viewMode = ref<ProductionViewMode>('ORDER_SUMMARY')",
     '<el-radio-button value="ORDER_SUMMARY">订单汇总</el-radio-button>',
     '<el-radio-button value="TASK_DETAIL">零件任务明细</el-radio-button>',
-    'orderSummaries.value = await erpApi.productionOrderSummaries(taskQueryParams())',
+    'erpApi.productionOrderSummariesPage({',
+    'findProductionTaskForReplenishmentRequest',
+    'orderSummaryPagination.totalCount = result.totalCount',
+    'taskPagination.totalCount = result.totalCount',
+    '@current-change="handleOrderSummaryPageChange"',
+    '@current-change="handleTaskPageChange"',
     'v-model="batchStartVisible"',
     'v-model="batchStartSupervisorCode"',
     'v-model="batchStartSelectedTaskIds"',
@@ -956,6 +1464,382 @@ function verifyProductionOrderSummaryWorkflow() {
   for (const snippet of viewSnippets) {
     if (!viewSource.includes(snippet)) {
       addFailure(`ProductionView.vue must keep order summary and batch start UI snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyProductionTableHeightControls() {
+  const viewPath = 'frontend/src/views/ProductionView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing production table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Bell, Camera, Document, Download, Minus, Plus, Printer, Refresh, RefreshLeft } from '@element-plus/icons-vue';",
+    'type ProductionWorkTableKey =',
+    "| 'productionNotices'",
+    "| 'replenishmentRequests'",
+    'productionWorkTableHeightLimits',
+    'productionWorkTableDefaultHeights',
+    'baisheng.erp.productionWorkTableHeights.v1',
+    '生产页面表格、通知和现场任务列表高度只保存为本机 UI 偏好，不写入订单、生产任务、通知状态或库存业务数据。',
+    'productionWorkTableHeights = reactive<Record<ProductionWorkTableKey, number>>',
+    'activeProductionWorkTableHeight',
+    'productionWorkTableHeightLabel',
+    'productionWorkTableResetLabel',
+    'function adjustProductionWorkTableHeight',
+    'function adjustActiveProductionWorkTableHeight',
+    'function resetProductionWorkTableHeight',
+    'function resetActiveProductionWorkTableHeight',
+    'function productionWorkTableHeightStyle',
+    'function restoreProductionWorkTableHeights',
+    'function saveProductionWorkTableHeights',
+    'window.localStorage.getItem(productionWorkTableHeightStorageKey)',
+    'window.localStorage.setItem(productionWorkTableHeightStorageKey',
+    ':aria-label="productionWorkTableHeightLabel"',
+    ':aria-label="`降低${productionWorkTableHeightLabel}`"',
+    ':aria-label="`提高${productionWorkTableHeightLabel}`"',
+    ':aria-label="productionWorkTableResetLabel"',
+    'aria-label="生产报废统计表格高度"',
+    'aria-label="降低生产报废统计表格高度"',
+    'aria-label="提高生产报废统计表格高度"',
+    'aria-label="恢复生产报废统计表格默认高度"',
+    'aria-label="批量开始生产任务列表高度"',
+    'aria-label="降低批量开始生产任务列表高度"',
+    'aria-label="提高批量开始生产任务列表高度"',
+    'aria-label="恢复批量开始生产任务列表默认高度"',
+    'aria-label="生产通知列表高度"',
+    'aria-label="降低生产通知列表高度"',
+    'aria-label="提高生产通知列表高度"',
+    'aria-label="恢复生产通知列表默认高度"',
+    'aria-label="生产报废补单申请列表高度"',
+    'aria-label="降低生产报废补单申请列表高度"',
+    'aria-label="提高生产报废补单申请列表高度"',
+    'aria-label="恢复生产报废补单申请列表默认高度"',
+    ':max-height="productionWorkTableHeights.orderSummary"',
+    ':max-height="productionWorkTableHeights.taskDetail"',
+    ':max-height="productionWorkTableHeights.scrapRecords"',
+    ":style=\"{ maxHeight: productionWorkTableHeightStyle('batchStartTasks') }\"",
+    ":style=\"{ maxHeight: productionWorkTableHeightStyle('productionNotices') }\"",
+    ":style=\"{ maxHeight: productionWorkTableHeightStyle('replenishmentRequests') }\"",
+    'restoreProductionWorkTableHeights();',
+    'batch-start-height-toolbar',
+    'production-dialog-list-toolbar',
+    'notice-scroll-list',
+    'production-table-height-actions',
+    'production-dialog-table-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`ProductionView.vue must keep adjustable production table height control snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyProductionExcelExportWorkflow() {
+  const controllerPath = 'backend/src/modules/production/production.controller.ts';
+  const servicePath = 'backend/src/modules/production/production.service.ts';
+  const dtoPath = 'backend/src/modules/production/dto.ts';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const viewPath = 'frontend/src/views/ProductionView.vue';
+  const apiVerifierPath = 'scripts/verify-production-export-api.cjs';
+
+  for (const projectPath of [controllerPath, servicePath, dtoPath, apiPath, viewPath, apiVerifierPath]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing production Excel export workflow file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const controllerSource = readFile(controllerPath);
+  const dtoSource = readFile(dtoPath);
+  const serviceSource = readFile(servicePath);
+  const apiSource = readFile(apiPath);
+  const viewSource = readFile(viewPath);
+  const apiVerifierSource = readFile(apiVerifierPath);
+
+  const requiredContracts = [
+    {
+      label: 'ProductionController',
+      source: controllerSource,
+      snippets: [
+        "@Get('export')",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        'new StreamableFile(await this.productionService.buildProductionExport(query))'
+      ]
+    },
+    {
+      label: 'ProductionExportQueryDto',
+      source: dtoSource,
+      snippets: ['productionExportViewModes', 'productionExportStatuses', 'export class ProductionExportQueryDto']
+    },
+    {
+      label: 'ProductionService',
+      source: serviceSource,
+      snippets: [
+        'async buildProductionExport(query: ProductionExportQueryDto): Promise<Uint8Array>',
+        'new ExcelJS.Workbook()',
+        'await workbook.xlsx.writeBuffer()',
+        'filterProductionExportTasks',
+        'filterProductionExportSummaries',
+        'return this.formatQuantity(Number(task.completedQuantity ?? 0), task.unit);'
+      ]
+    },
+    {
+      label: 'frontend production export API',
+      source: apiSource,
+      snippets: [
+        'downloadProductionExport',
+        '/production/tasks/export',
+        "filename.toLowerCase().endsWith('.xlsx')"
+      ]
+    },
+    {
+      label: 'ProductionView.vue',
+      source: viewSource,
+      snippets: [
+        'await erpApi.downloadProductionExport',
+        "viewMode.value === 'ORDER_SUMMARY' ? activeOrderStatus.value : activeStatus.value",
+        '`${printDocumentTitle.value}_${formatFileDateTime()}.xlsx`',
+        "ElMessage.error(error instanceof Error ? error.message : '生产 Excel 导出失败，请稍后重试')"
+      ]
+    },
+    {
+      label: 'verify-production-export-api.cjs',
+      source: apiVerifierSource,
+      snippets: [
+        'assertPaginatedList',
+        'production-tasks-public-list-pagination',
+        'production-order-summary-public-list-pagination',
+        'production-tasks-display-status-pagination',
+        'production-order-summary-display-status-pagination',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'production-export.xlsx',
+        '状态：待处理',
+        '完成/生产计划'
+      ]
+    }
+  ];
+
+  for (const contract of requiredContracts) {
+    for (const snippet of contract.snippets) {
+      if (!contract.source.includes(snippet)) {
+        addFailure(`${contract.label} must keep production Excel export contract snippet: ${snippet}`);
+      }
+    }
+  }
+
+  if (/Number\(task\.completedQuantity\)\s*===\s*0/.test(serviceSource)) {
+    addFailure('ProductionService production Excel export must display zero completed quantity as 0 + unit, not only the unit text.');
+  }
+  if (viewSource.includes('downloadHtmlAsExcel') || viewSource.includes('application/vnd.ms-excel')) {
+    addFailure('ProductionView.vue must export production Excel through backend real .xlsx API, not HTML disguised as Excel.');
+  }
+}
+
+function verifyRealXlsxExportFormatContract() {
+  const scanFiles = [
+    ...walkFiles(resolveProjectPath('backend/src')),
+    ...walkFiles(resolveProjectPath('frontend/src'))
+  ];
+  const bannedPatterns = [
+    {
+      pattern: /application\/vnd\.ms-excel/i,
+      message: 'must not use application/vnd.ms-excel for ERP Excel exports.'
+    },
+    {
+      pattern: /\bdownloadHtmlAsExcel\b/,
+      message: 'must not use HTML-as-Excel download helpers.'
+    },
+    {
+      pattern: /new\s+Blob\s*\(\s*\[[\s\S]{0,180}(?:<!doctype\s+html|<html|\\ufeff)/i,
+      message: 'must not wrap HTML/text blobs as Excel files.'
+    },
+    {
+      pattern: /download\s*=\s*['"`][^'"`]*\.xls(?!x)\b/i,
+      message: 'must not assign .xls download filenames.'
+    },
+    {
+      pattern: /[`'"][^`'"]*\.xls(?!x)\b[^`'"]*[`'"]/i,
+      message: 'must not generate .xls export filenames.'
+    }
+  ];
+
+  for (const filePath of scanFiles) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    for (const banned of bannedPatterns) {
+      const match = banned.pattern.exec(source);
+      if (match) {
+        addFailure(`${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} ${banned.message}`);
+      }
+    }
+  }
+
+  verifyBackendXlsxExportHeaders();
+  verifyFrontendXlsxDownloadHelper();
+}
+
+function verifyBackendXlsxExportHeaders() {
+  const controllerFiles = walkFiles(resolveProjectPath('backend/src')).filter((filePath) => filePath.endsWith('.controller.ts'));
+  const excelRoutePattern = /(^|\/|-)export($|\/|-)|(^|\/|-)template($|\/|-)|(^|\/|-)error-report($|\/|-)/;
+
+  for (const filePath of controllerFiles) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const lines = source.split(/\r?\n/);
+    lines.forEach((line, index) => {
+      const routeMatch = line.match(/@Get\s*\(\s*['"`]([^'"`]*)['"`]\s*\)/);
+      if (!routeMatch || !excelRoutePattern.test(routeMatch[1])) {
+        return;
+      }
+
+      const headerWindow = lines.slice(index, index + 9).join('\n');
+      if (!headerWindow.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')) {
+        addFailure(`${toProjectPath(filePath)}:${index + 1} Excel endpoint "${routeMatch[1]}" must declare real .xlsx Content-Type.`);
+      }
+      if (!/@Header\s*\(\s*['"`]Content-Disposition['"`][\s\S]*?\.xlsx/.test(headerWindow)) {
+        addFailure(`${toProjectPath(filePath)}:${index + 1} Excel endpoint "${routeMatch[1]}" must declare a .xlsx Content-Disposition filename.`);
+      }
+    });
+  }
+}
+
+function verifyFrontendXlsxDownloadHelper() {
+  const apiPath = 'frontend/src/api/erp.ts';
+  if (!fileExists(apiPath)) {
+    addFailure('frontend/src/api/erp.ts must exist for Excel download helper verification.');
+    return;
+  }
+
+  const source = readFile(apiPath);
+  const helperDefinitions = [...source.matchAll(/\basync\s+function\s+downloadXlsxResponse\s*\(/g)];
+  const helperCalls = [...source.matchAll(/\bdownloadXlsxResponse\s*\(/g)];
+  if (helperDefinitions.length !== 1) {
+    addFailure('frontend/src/api/erp.ts must keep exactly one downloadXlsxResponse helper for ERP Excel downloads.');
+  }
+  if (helperCalls.length - helperDefinitions.length <= 0) {
+    addFailure('frontend/src/api/erp.ts export APIs must use downloadXlsxResponse.');
+  }
+  if (!/function\s+xlsxFilename\s*\(\s*filename\s*:\s*string\s*\)/.test(source)) {
+    addFailure('frontend/src/api/erp.ts must keep xlsxFilename to normalize exported filenames.');
+  }
+  if ((source.match(/\bURL\.createObjectURL\s*\(/g) || []).length !== 1) {
+    addFailure('frontend/src/api/erp.ts must create object URLs only inside downloadXlsxResponse.');
+  }
+  if ((source.match(/document\.createElement\s*\(\s*['"`]a['"`]\s*\)/g) || []).length !== 1) {
+    addFailure('frontend/src/api/erp.ts must create download anchors only inside downloadXlsxResponse.');
+  }
+  if (!/link\.download\s*=\s*xlsxFilename\(filename\);/.test(source)) {
+    addFailure('frontend/src/api/erp.ts must assign link.download through xlsxFilename(filename).');
+  }
+}
+
+function verifyExportConcurrencyGuards() {
+  const contracts = [
+    {
+      path: 'frontend/src/views/ProductionView.vue',
+      label: 'ProductionView.vue',
+      snippets: [
+        ':loading="productionExporting"',
+        'const productionExporting = ref(false);',
+        'if (productionExporting.value) {',
+        'if (productionNoticeExporting.value) {',
+        'if (replenishmentRequestExporting.value) {',
+        'if (scrapExporting.value) {',
+        'productionExporting.value = true;',
+        'productionExporting.value = false;'
+      ]
+    },
+    {
+      path: 'frontend/src/views/WarehouseView.vue',
+      label: 'WarehouseView.vue',
+      snippets: [
+        'if (warehouseWorkExporting.value) {',
+        'if (warehouseConfigExporting.value) {',
+        'if (transactionExporting.value) {',
+        'if (warehouseNoticeExporting.value) {'
+      ]
+    },
+    {
+      path: 'frontend/src/views/StatisticsView.vue',
+      label: 'StatisticsView.vue',
+      snippets: ['if (statisticsExporting.value) {']
+    },
+    {
+      path: 'frontend/src/views/AdminNoticesView.vue',
+      label: 'AdminNoticesView.vue',
+      snippets: ['if (adminNoticeExporting.value) {']
+    },
+    {
+      path: 'frontend/src/views/MaterialsManagementView.vue',
+      label: 'MaterialsManagementView.vue',
+      snippets: ['if (dashboardExporting.value) {']
+    },
+    {
+      path: 'frontend/src/views/CustomersView.vue',
+      label: 'CustomersView.vue',
+      snippets: ['if (customerExporting.value) {']
+    },
+    {
+      path: 'frontend/src/views/InventoryView.vue',
+      label: 'InventoryView.vue',
+      snippets: ['if (inventoryExporting.value) {']
+    },
+    {
+      path: 'frontend/src/views/OrderDetailView.vue',
+      label: 'OrderDetailView.vue',
+      snippets: ['if (!order.value || orderExporting.value) {']
+    },
+    {
+      path: 'frontend/src/views/OrdersListView.vue',
+      label: 'OrdersListView.vue',
+      snippets: ['if (orderExporting.value) {', 'if (importTemplateDownloading.value) {', 'if (importIssueReportDownloading.value) {']
+    },
+    {
+      path: 'frontend/src/views/ModelBomsView.vue',
+      label: 'ModelBomsView.vue',
+      snippets: ['if (modelBomExporting.value) {', 'if (sourceBomDiffReviewExporting.value || !bom?.id || !sourceBomId) {']
+    },
+    {
+      path: 'frontend/src/views/MaterialsView.vue',
+      label: 'MaterialsView.vue',
+      snippets: [
+        'if (materialExporting.value) {',
+        'if (applicabilityExporting.value || !activeMaterial.value) {',
+        'if (drawingExporting.value || !activeMaterial.value) {',
+        "guardDesktopOperation('下载零件库导入问题明细')",
+        'if (materialImportTemplateDownloading.value) {',
+        'if (importIssueReportDownloading.value) {'
+      ]
+    },
+    {
+      path: 'frontend/src/views/MaterialTransformsView.vue',
+      label: 'MaterialTransformsView.vue',
+      snippets: ['if (exporting.value) {']
+    },
+    {
+      path: 'frontend/src/components/ProcessDefinitionManager.vue',
+      label: 'ProcessDefinitionManager.vue',
+      snippets: ['if (exporting.value) {']
+    },
+    {
+      path: 'frontend/src/components/ProcessTemplateManager.vue',
+      label: 'ProcessTemplateManager.vue',
+      snippets: ['if (exporting.value) {']
+    }
+  ];
+
+  for (const contract of contracts) {
+    if (!fileExists(contract.path)) {
+      addFailure(`Missing first-stage export concurrency guard file: ${contract.path}`);
+      continue;
+    }
+    const source = readFile(contract.path);
+    for (const snippet of contract.snippets) {
+      if (!source.includes(snippet)) {
+        addFailure(`${contract.label} must keep Excel export concurrency guard snippet: ${snippet}`);
+      }
     }
   }
 }
@@ -1196,6 +2080,11 @@ function verifyPlannerProcessAndSubmitGuard() {
     '订单正在提交生产，请等待提交完成',
     'processEditorOperators.value = operators.filter(isProcessEditorOperator)',
     'submitPlanOperators.value = operators.filter(isSubmitPlanOperator)',
+    'formatProcessLineNamePreview',
+    '等 ${filtered.length} 个零件',
+    'formatProcessNamePreview',
+    '等 ${filtered.length} 个工序',
+    'formatProcessNamePreview(line.processSteps)',
     'function isSubmitPlanOperator(operator: ProductionOperator)',
     'return /计划|下单|订单/.test(role) && !/车间|主任|技术|工艺/.test(role);',
     'function isProcessEditorOperator(operator: ProductionOperator)',
@@ -1205,6 +2094,16 @@ function verifyPlannerProcessAndSubmitGuard() {
     if (!processViewSource.includes(snippet)) {
       addFailure(`ProcessSelectionView.vue must keep planner-only process/submit UI guard snippet: ${snippet}`);
     }
+  }
+  if (
+    processViewSource.includes("missingLineNames.value.join('、')") ||
+    processViewSource.includes("missingStockSourceLineNames.value.join('、')") ||
+    processViewSource.includes("insufficientReworkSourceLineNames.value.join('、')")
+  ) {
+    addFailure('ProcessSelectionView.vue must summarize missing process/stock-source line names instead of listing every line in warnings.');
+  }
+  if (processViewSource.includes("duplicates.join('、')") || processViewSource.includes("line.processSteps.join('、')")) {
+    addFailure('ProcessSelectionView.vue must summarize duplicate/process step names instead of listing every item in warnings or rows.');
   }
 
   const orderDetailSource = readFile(orderDetailPath);
@@ -1261,6 +2160,114 @@ function verifyPlannerProcessAndSubmitGuard() {
   for (const snippet of seedSnippets) {
     if (!seedSource.includes(snippet)) {
       addFailure(`seed.ts must keep planner/workshop operator seed role snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyProcessSelectionTableHeightControls() {
+  const viewPath = 'frontend/src/views/ProcessSelectionView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing process selection table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    'processOrderTableHeightLimits',
+    'processOrderTableDefaultHeight',
+    'baisheng.erp.processSelectionOrderTableHeight.v1',
+    '生产流程选择页订单列表高度只保存为本机 UI 偏好，不写入订单、流程、生产或库存业务数据。',
+    'processOrderTableHeight = ref(processOrderTableDefaultHeight)',
+    'processWorkListHeightLimits',
+    'processWorkListDefaultHeights',
+    'baisheng.erp.processSelectionWorkListHeights.v1',
+    '生产流程结构和提交明细列表高度只保存为本机 UI 偏好，不写入订单流程、生产任务或库存业务数据。',
+    'processWorkListHeights = reactive<Record<ProcessWorkListHeightKey, number>>',
+    'function adjustProcessOrderTableHeight',
+    'function resetProcessOrderTableHeight',
+    'function restoreProcessOrderTableHeight',
+    'function saveProcessOrderTableHeight',
+    'function adjustProcessWorkListHeight',
+    'function resetProcessWorkListHeight',
+    'function processWorkListHeightStyle',
+    'function restoreProcessWorkListHeights',
+    'function saveProcessWorkListHeights',
+    'window.localStorage.getItem(processOrderTableHeightStorageKey)',
+    'window.localStorage.setItem(processOrderTableHeightStorageKey',
+    'window.localStorage.getItem(processWorkListHeightStorageKey)',
+    'window.localStorage.setItem(processWorkListHeightStorageKey',
+    'aria-label="生产流程订单列表表格高度"',
+    'aria-label="降低生产流程订单列表表格高度"',
+    'aria-label="提高生产流程订单列表表格高度"',
+    'aria-label="恢复生产流程订单列表表格默认高度"',
+    'aria-label="流程固定格式清单高度"',
+    'aria-label="降低流程固定格式清单高度"',
+    'aria-label="提高流程固定格式清单高度"',
+    'aria-label="恢复流程固定格式清单默认高度"',
+    'aria-label="提交生产零件明细高度"',
+    'aria-label="降低提交生产零件明细高度"',
+    'aria-label="提高提交生产零件明细高度"',
+    'aria-label="恢复提交生产零件明细默认高度"',
+    ':max-height="processOrderTableHeight"',
+    ":style=\"{ maxHeight: processWorkListHeightStyle('structure') }\"",
+    ":style=\"{ maxHeight: processWorkListHeightStyle('submitLines') }\"",
+    'restoreProcessOrderTableHeight();',
+    'restoreProcessWorkListHeights();',
+    'process-table-height-actions',
+    'process-table-height-toolbar',
+    'process-list-height-actions',
+    'process-list-height-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`ProcessSelectionView.vue must keep adjustable process selection table height control snippet: ${snippet}`);
+    }
+  }
+  const forbiddenFixedListHeightSnippets = [
+    '.process-structure-list {\n  display: grid;\n  gap: 8px;\n  max-height:',
+    '.submit-production-lines {\n  display: grid;\n  gap: 8px;\n  max-height:'
+  ];
+  for (const snippet of forbiddenFixedListHeightSnippets) {
+    if (viewSource.includes(snippet)) {
+      addFailure('ProcessSelectionView.vue must not keep fixed CSS max-height on process structure or submit production lists; use processWorkListHeights only.');
+    }
+  }
+}
+
+function verifyMaterialTransformTableHeightControls() {
+  const viewPath = 'frontend/src/views/MaterialTransformsView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing material transform table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    'transformRuleTableHeightLimits',
+    'transformRuleTableDefaultHeight',
+    'baisheng.erp.materialTransformRuleTableHeight.v1',
+    '来源加工关系表格高度只保存为本机 UI 偏好，不写入来源规则、订单、生产或库存业务数据。',
+    'transformRuleTableHeight = ref(transformRuleTableDefaultHeight)',
+    'function adjustTransformRuleTableHeight',
+    'function resetTransformRuleTableHeight',
+    'function restoreTransformRuleTableHeight',
+    'function saveTransformRuleTableHeight',
+    'window.localStorage.getItem(transformRuleTableHeightStorageKey)',
+    'window.localStorage.setItem(transformRuleTableHeightStorageKey',
+    'aria-label="来源加工关系表格高度"',
+    'aria-label="降低来源加工关系表格高度"',
+    'aria-label="提高来源加工关系表格高度"',
+    'aria-label="恢复来源加工关系表格默认高度"',
+    ':max-height="transformRuleTableHeight"',
+    'restoreTransformRuleTableHeight();',
+    'transform-table-height-actions',
+    'transform-table-height-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`MaterialTransformsView.vue must keep adjustable source transform table height control snippet: ${snippet}`);
     }
   }
 }
@@ -1328,7 +2335,7 @@ function verifyProcessPinyinSearchWorkflow() {
     'const filteredNewStepOptions = computed(() => filterPinyinSearchOptions(availableNewStepOptions.value, newStepProcessFilterKeyword.value))',
     ':filter-method="handleTemplateProcessFilter"',
     ':filter-method="handleNewStepProcessFilter"',
-    'erpApi.processTemplates(keyword.value.trim() || undefined, props.showStatusFilter ? statusFilter.value : \'ENABLED\')'
+    'erpApi.processTemplatesPage({'
   ];
   for (const snippet of templateManagerSnippets) {
     if (!templateManagerSource.includes(snippet)) {
@@ -1339,8 +2346,9 @@ function verifyProcessPinyinSearchWorkflow() {
   const processDefinitionsSource = readFile(processDefinitionsServicePath);
   const processDefinitionsSnippets = [
     'import { buildPinyinSearchText, normalizeSearchKeyword, pinyinSearchMatches }',
-    'rows.filter((row) => pinyinSearchMatches([row.processName, row.remark], keyword))',
+    'visibleRows.filter((row) => pinyinSearchMatches([row.processName, row.remark], keyword))',
     'searchText: this.buildSearchText(processName, remark)',
+    'searchText: this.buildSearchText(existing.processName, existing.remark)',
     'return buildPinyinSearchText([processName, remark]);'
   ];
   for (const snippet of processDefinitionsSnippets) {
@@ -1354,7 +2362,7 @@ function verifyProcessPinyinSearchWorkflow() {
     'import { buildPinyinSearchText, normalizeSearchKeyword, pinyinSearchMatches }',
     "const status = query.status === 'ALL' ? undefined : query.status || CommonStatus.ENABLED;",
     'where: status ? { status } : undefined',
-    'templates.filter((template) => this.templateMatchesKeyword(template, keyword))',
+    'visibleTemplates.filter((template) => this.templateMatchesKeyword(template, keyword))',
     'searchText: this.buildSearchText(templateName, steps, remark)',
     '...steps.flatMap((step) => [step.processName, step.processRemark])',
     'return pinyinSearchMatches(',
@@ -1387,6 +2395,8 @@ function verifyProcessMemoryCoreDataGuards() {
     'PROCESS_DEFINITION_OPTIONAL_TEXT_BLANK',
     'PROCESS_DEFINITION_SEARCH_TEXT_EMPTY',
     'PROCESS_DEFINITION_SEARCH_TEXT_HAS_SPACES',
+    'definition.status === CommonStatus.ENABLED && !definition.searchText.trim()',
+    'definition.status === CommonStatus.ENABLED && definition.searchText !== expectedSearchText',
     'PROCESS_TEMPLATE_OPTIONAL_TEXT_BLANK',
     'PROCESS_TEMPLATE_STATUS_SEARCH_MISMATCH',
     'PROCESS_TEMPLATE_DISABLED_KEY_INVALID',
@@ -1503,6 +2513,34 @@ function verifyNoBusinessTextHardMaxLength() {
   }
 }
 
+function verifyNoPrismaBusinessTextNativeLengthLimits() {
+  const schemaPath = 'database/prisma/schema.prisma';
+  if (!fileExists(schemaPath)) {
+    addFailure(`Missing Prisma schema for business text length guard: ${schemaPath}`);
+    return;
+  }
+
+  const businessTextFieldPattern =
+    /(?:Name|Code|No|Remark|Address|Country|Province|State|District|City|Specification|ProjectModel|Drawing|Version|Status|FileName|FileUrl|Process|Route|Snapshot|Description|Reason|Operator|CreatedBy|ChangedBy|HandledBy|AcknowledgedBy|Source|Target)/i;
+  const schemaSource = readFile(schemaPath);
+  const lines = schemaSource.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fieldName = line.trim().split(/\s+/)[0] || '';
+    if (
+      /^\w+$/.test(fieldName) &&
+      businessTextFieldPattern.test(fieldName) &&
+      /@db\.(?:VarChar|Char)\s*\(/.test(line)
+    ) {
+      addFailure(
+        `Prisma business text field must not use fixed native string length; Excel remarks, specs and process text must not be truncated: ${schemaPath}:${
+          index + 1
+        } (${fieldName})`
+      );
+    }
+  }
+}
+
 function verifyMaterialSuggestionSearchWorkflow() {
   const dtoPath = 'backend/src/modules/inventory/dto.ts';
   const orderDtoPath = 'backend/src/modules/orders/dto.ts';
@@ -1519,6 +2557,7 @@ function verifyMaterialSuggestionSearchWorkflow() {
   const orderServicePath = 'backend/src/modules/orders/orders.service.ts';
   const agentsPath = 'AGENTS.md';
   const orderImportApiVerifyPath = 'scripts/verify-order-import-api.cjs';
+  const materialSuggestionsApiVerifyPath = 'scripts/verify-material-suggestions-api.cjs';
 
   for (const projectPath of [
     dtoPath,
@@ -1535,7 +2574,8 @@ function verifyMaterialSuggestionSearchWorkflow() {
     orderDetailPath,
     orderServicePath,
     agentsPath,
-    orderImportApiVerifyPath
+    orderImportApiVerifyPath,
+    materialSuggestionsApiVerifyPath
   ]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing material suggestion search workflow file: ${projectPath}`);
@@ -1558,6 +2598,7 @@ function verifyMaterialSuggestionSearchWorkflow() {
   const orderServiceSource = readFile(orderServicePath);
   const agentsSource = readFile(agentsPath);
   const orderImportApiVerifySource = readFile(orderImportApiVerifyPath);
+  const materialSuggestionsApiVerifySource = readFile(materialSuggestionsApiVerifyPath);
 
   const requiredSnippets = [
     { source: dtoSource, file: dtoPath, snippet: 'customerId?: string;' },
@@ -1619,11 +2660,19 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: serviceSource, file: servicePath, snippet: 'matchedCustomerName' },
     { source: serviceSource, file: servicePath, snippet: 'matchedHistoryOrderNo' },
     { source: serviceSource, file: servicePath, snippet: 'historyCustomerNames' },
+    { source: serviceSource, file: servicePath, snippet: 'MATERIAL_SUGGESTION_HISTORY_CUSTOMER_PREVIEW_LIMIT' },
+    { source: serviceSource, file: servicePath, snippet: 'historyCustomerNames: historyCustomerNames.slice(0, MATERIAL_SUGGESTION_HISTORY_CUSTOMER_PREVIEW_LIMIT)' },
+    { source: serviceSource, file: servicePath, snippet: 'historyCustomerCount: historyCustomerNames.length' },
     { source: serviceSource, file: servicePath, snippet: 'hasCurrentCustomerHistory: Boolean(history?.hasQueryCustomerHistory)' },
     { source: serviceSource, file: servicePath, snippet: 'line.drawingNo' },
+    { source: serviceSource, file: servicePath, snippet: 'line.drawingFileName' },
     { source: serviceSource, file: servicePath, snippet: 'line.projectModel' },
     { source: serviceSource, file: servicePath, snippet: 'line.order.orderNo' },
     { source: serviceSource, file: servicePath, snippet: 'material.drawingNo' },
+    { source: serviceSource, file: servicePath, snippet: 'drawingFileName: drawingRevision?.drawingFileName ?? null' },
+    { source: serviceSource, file: servicePath, snippet: 'drawingFileUrl: drawingRevision?.drawingFileUrl ?? null' },
+    { source: serviceSource, file: servicePath, snippet: 'const drawingFileName = useQueryCustomerSnapshot' },
+    { source: serviceSource, file: servicePath, snippet: 'const drawingFileUrl = useQueryCustomerSnapshot' },
     { source: serviceSource, file: servicePath, snippet: 'private materialDateSearchValues' },
     { source: serviceSource, file: servicePath, snippet: '...this.materialDateSearchValues(line.drawingDate)' },
     { source: serviceSource, file: servicePath, snippet: '...this.materialDateSearchValues(material.drawingDate)' },
@@ -1669,6 +2718,19 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: editorSource, file: editorPath, snippet: 'function materialIdentityConflictFieldsText' },
     { source: editorSource, file: editorPath, snippet: 'function setMaterialIdentityWarning' },
     { source: editorSource, file: editorPath, snippet: 'function clearMaterialIdentityWarningWhenMaterialIdentityChanges' },
+    { source: editorSource, file: editorPath, snippet: 'autoFields.drawingFileName = item.drawingFileName' },
+    { source: editorSource, file: editorPath, snippet: 'autoFields.drawingFileUrl = item.drawingFileUrl' },
+    { source: editorSource, file: editorPath, snippet: 'function ensureDrawingRevisionsLoaded' },
+    { source: editorSource, file: editorPath, snippet: 'function applyDrawingRevisionToLine' },
+    { source: editorSource, file: editorPath, snippet: 'function selectLineDrawingRevision' },
+    { source: editorSource, file: editorPath, snippet: 'await erpApi.materialDrawingRevisions(materialId)' },
+    { source: editorSource, file: editorPath, snippet: 'line.selectedMaterialId = item.materialId ||' },
+    { source: editorSource, file: editorPath, snippet: 'line.selectedDrawingRevisionId = revision.id' },
+    { source: editorSource, file: editorPath, snippet: 'clearSelectedMaterialDrawingRevisions(line)' },
+    { source: editorSource, file: editorPath, snippet: '@visible-change="(visible: boolean) => handleDrawingRevisionVisibleChange(row, visible)"' },
+    { source: editorSource, file: editorPath, snippet: '@change="(revisionId: string) => selectLineDrawingRevision(row, revisionId)"' },
+    { source: editorSource, file: editorPath, snippet: "clearTextField('drawingFileName')" },
+    { source: editorSource, file: editorPath, snippet: "clearTextField('drawingFileUrl')" },
     { source: editorSource, file: editorPath, snippet: 'class="material-identity-warning"' },
     { source: editorSource, file: editorPath, snippet: '同编码 ${item.identityVariantCount || \'多\'} 套历史资料，核对${materialIdentityConflictFieldsText(item, \'/\')}' },
     { source: editorSource, file: editorPath, snippet: '请核对${materialIdentityConflictFieldsText(item)}，并从下拉候选中人工确认后再套用' },
@@ -1767,6 +2829,25 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '无库存记录' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '平均使用率' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'const averageInventoryUsageRateText = computed' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '累计数量' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '已出库 / 已使用' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "const totalQuantityText = computed(() => formatInventoryTotalByUnit('totalQuantity'))" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "const usedQuantityText = computed(() => formatInventoryTotalByUnit('usedQuantity'))" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '已预占数量' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "const reservedQuantityText = computed(() => formatInventoryTotalByUnit('reservedQuantity'))" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '订单库存数量' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '备货库存数量' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: '备货来源构成' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "const orderInventoryQuantityText = computed(() => formatInventoryTotalByUnit('orderInventoryQuantity'))" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "const stockInventoryQuantityText = computed(() => formatInventoryTotalByUnit('stockInventoryQuantity'))" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'const stockSourceBreakdownTotalText = computed' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "formatInventoryTotalByUnit('normalOrderStockQuantity')" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "formatInventoryTotalByUnit('cancelledOrderStockQuantity')" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "formatInventoryTotalByUnit('customerChangeStockQuantity')" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'inventory-stat-value-compact' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "| 'normalOrderStockQuantity'" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "| 'cancelledOrderStockQuantity'" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: "| 'customerChangeStockQuantity'" },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存溯源' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '逐批查看库存来源、占用记录、仓库库位，并进行盘点调整' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '库存来源/图纸' },
@@ -1775,7 +2856,8 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'formatDate(row.productionDate)' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'formatDate(batch.productionDate)' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'label="盘点备注"' },
-    { source: inventoryViewSource, file: inventoryViewPath, snippet: "{{ row.remark || '-' }}" },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'formatLongTextPreview(row.remark)' },
+    { source: inventoryViewSource, file: inventoryViewPath, snippet: 'longTextTooltipText(row.remark)' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: '编码 / 名称 / 拼音 / 规格 / 客户 / 订单 / 图号' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: 'function disableMaterialMemory' },
     { source: inventoryViewSource, file: inventoryViewPath, snippet: "import MaterialSuggestionOption from '../components/MaterialSuggestionOption.vue';" },
@@ -1828,19 +2910,23 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '最近订单 ${props.item.lastCustomerOrderNo}' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'const historyCustomerText = computed' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'const historyCustomerTitle = computed' },
-    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '全部历史客户：${names.join' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'const count = props.item.historyCustomerCount ?? names.length' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: "formatCustomerNamePreview(names, '-', count)" },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: ':title="historyTooltipText"' },
-    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'if (visibleNames.length >= 3)' },
-    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '历史客户 ${visibleNames.join' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'totalCount?: number' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '等 ${count} 个客户' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '图号 ${props.item.drawingNo}' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '型号 ${props.item.projectModel}' },
     { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: '日期 ${props.item.drawingDate}' },
+    { source: materialSuggestionOptionSource, file: materialSuggestionOptionPath, snippet: 'props.item.drawingFileName ? `文件 ${props.item.drawingFileName}`' },
     { source: editorSource, file: editorPath, snippet: 'props.customerId' },
     { source: apiSource, file: apiPath, snippet: 'customerId?: string' },
     { source: apiSource, file: apiPath, snippet: 'projectModel?: string' },
     { source: apiSource, file: apiPath, snippet: 'materialIdentityConfirmed?: boolean;' },
-    { source: apiSource, file: apiPath, snippet: 'inventoryMaterials(filters: MaterialMemoryFilters = {})' },
     { source: apiSource, file: apiPath, snippet: 'inventoryMaterialsPage(filters: MaterialMemoryFilters = {})' },
+    { source: apiSource, file: apiPath, snippet: 'inventoryMaterialsAllPages(filters: MaterialMemoryFilters = {})' },
+    { source: apiSource, file: apiPath, snippet: 'inventoryMaterialByPartCode(partCode: string' },
+    { source: apiSource, file: apiPath, snippet: 'materialPartCodeKey(row.partCode) === exactKey' },
     { source: serviceSource, file: servicePath, snippet: "query.withPage === 'true'" },
     { source: serviceSource, file: servicePath, snippet: 'serializeMaterialMemoryRow' },
     { source: apiSource, file: apiPath, snippet: 'disableInventoryMaterial(materialId: string)' },
@@ -1853,8 +2939,13 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: typesSource, file: typesPath, snippet: 'export interface MaterialMemory' },
     { source: typesSource, file: typesPath, snippet: 'export interface MaterialMemoryListResponse' },
     { source: typesSource, file: typesPath, snippet: 'partThickness?: number | null;' },
+    { source: typesSource, file: typesPath, snippet: 'drawingFileName?: string;' },
+    { source: typesSource, file: typesPath, snippet: 'drawingFileUrl?: string;' },
+    { source: apiSource, file: apiPath, snippet: 'selectedMaterialId?: string;' },
+    { source: apiSource, file: apiPath, snippet: 'selectedDrawingRevisionId?: string;' },
     { source: typesSource, file: typesPath, snippet: 'identityConflictFields?: string[];' },
     { source: typesSource, file: typesPath, snippet: 'historyCustomerNames?: string[];' },
+    { source: typesSource, file: typesPath, snippet: 'historyCustomerCount?: number;' },
     { source: typesSource, file: typesPath, snippet: 'hasCurrentCustomerHistory?: boolean;' },
     { source: typesSource, file: typesPath, snippet: 'identityVariantCount?: number;' },
     { source: typesSource, file: typesPath, snippet: 'hasIdentityConflict?: boolean;' },
@@ -1864,7 +2955,7 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: ordersViewSource, file: ordersViewPath, snippet: ':customer-id="orderForm.customerId"' },
     { source: orderDetailSource, file: orderDetailPath, snippet: ':customer-id="order?.customerId || \'\'"' },
     { source: orderDetailSource, file: orderDetailPath, snippet: 'function materialIdentityConflictText' },
-    { source: orderDetailSource, file: orderDetailPath, snippet: 'detailLine.materialIdentityConflictFields.join' },
+    { source: orderDetailSource, file: orderDetailPath, snippet: "formatOrderDetailListPreview(detailLine.materialIdentityConflictFields, '字段')" },
     { source: orderDetailSource, file: orderDetailPath, snippet: 'class="material-identity-warning"' },
     { source: orderDetailSource, file: orderDetailPath, snippet: 'const submitOrderMaterialIdentityWarnings = computed' },
     { source: orderDetailSource, file: orderDetailPath, snippet: 'const submitOrderMaterialIdentityConfirmRequired = computed' },
@@ -1908,10 +2999,29 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: agentsSource, file: agentsPath, snippet: '优先按当前输入字段判断唯一命中' },
     { source: agentsSource, file: agentsPath, snippet: '当前输入值仍等于发起查询时的值' },
     { source: agentsSource, file: agentsPath, snippet: '订单行尚未填写图纸资料' },
+    { source: agentsSource, file: agentsPath, snippet: '订单行图纸快照' },
+    { source: agentsSource, file: agentsPath, snippet: '从该零件当前启用的图纸版本中选择 A、B、C、D 或更多版本' },
     { source: agentsSource, file: agentsPath, snippet: '选中历史物料后若操作员又手工修改 `partCode` 或 `partName`' },
     { source: agentsSource, file: agentsPath, snippet: '删除只能软停用 `Material`' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertMaterialSuggestionCustomerCodeSearch' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: "const customerPrefix = 'VERIFY-SUG-CUST-STABLE';" },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: "const partCode = 'VERIFY-SUG-PART-STABLE';" },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'prisma.material.upsert' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'prisma.customer.findFirst' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'prisma.customer.update' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'prisma.customer.create' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'prisma.customerContact.updateMany' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'customerCode: `${code}${archiveSuffix}`' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'customerName: `${name}${archiveSuffix}`' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'historyCustomerNames.length <= 20' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'matched.historyCustomerCount === 25' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'await cleanup();' },
+    { source: materialSuggestionsApiVerifySource, file: materialSuggestionsApiVerifyPath, snippet: 'verify-material-suggestions-api' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertCustomerSearchRanking' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "createOrderImportRegressionCustomer('RANK-PREFIX'" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: "createOrderImportRegressionCustomer('RANK-EXACT'" },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'createdRegressionCustomerIds.push(customer.id)' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'isPrimary: true' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'Customer search must rank exact customerName first' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'Customer search must rank exact customerCode first' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertCustomerSearchRanking' },
@@ -1958,13 +3068,50 @@ function verifyMaterialSuggestionSearchWorkflow() {
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'matched.matchedHistoryOrderNo === keyword' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function assertDisabledMaterialMemoryExcludedFromSuggestions' },
     { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'status=DISABLED' },
-    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertDisabledMaterialMemoryExcludedFromSuggestions' }
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await assertDisabledMaterialMemoryExcludedFromSuggestions' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function softDisableRegressionWarehouse' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function upsertOrderImportWarehouseWithLocation' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await softDisableRegressionWarehouse(prisma, warehouseCode, locationCode)' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await upsertOrderImportWarehouseWithLocation(prisma, {' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'async function activateOrderImportMaterialFixtures' },
+    { source: orderImportApiVerifySource, file: orderImportApiVerifyPath, snippet: 'await activateOrderImportMaterialFixtures();' }
   ];
 
   for (const item of requiredSnippets) {
     if (!item.source.includes(item.snippet)) {
       addFailure(`${item.file} must keep material suggestion search snippet: ${item.snippet}`);
     }
+  }
+  if (materialSuggestionOptionSource.includes('全部历史客户：${names.join')) {
+    addFailure('MaterialSuggestionOption.vue history customer tooltip must summarize customer names instead of listing every historical customer.');
+  }
+  if (
+    materialSuggestionsApiVerifySource.includes('new Date().toISOString().replace') ||
+    materialSuggestionsApiVerifySource.includes('prisma.customer.deleteMany') ||
+    materialSuggestionsApiVerifySource.includes('prisma.material.deleteMany')
+  ) {
+    addFailure('scripts/verify-material-suggestions-api.cjs must reuse stable customer/material records and must not delete master data.');
+  }
+  if (
+    orderImportApiVerifySource.includes('prisma.warehouse.deleteMany') ||
+    orderImportApiVerifySource.includes('prisma.warehouseLocation.deleteMany') ||
+    orderImportApiVerifySource.includes('prisma.warehouse.create({')
+  ) {
+    addFailure('scripts/verify-order-import-api.cjs must reuse and soft-disable stable warehouse fixtures instead of creating/deleting warehouse master data.');
+  }
+  const materialSuggestionProcessRouteSnippets = [
+    'baseInfoTooltipText',
+    'formatProcessRoutePreview(props.item.defaultProcessRoute)',
+    'function formatProcessRoutePreview',
+    '等 ${steps.length} 个工序'
+  ];
+  for (const snippet of materialSuggestionProcessRouteSnippets) {
+    if (!materialSuggestionOptionSource.includes(snippet)) {
+      addFailure(`MaterialSuggestionOption.vue must summarize default process routes in suggestion options: ${snippet}`);
+    }
+  }
+  if (materialSuggestionOptionSource.includes('默认工艺 ${props.item.defaultProcessRoute}')) {
+    addFailure('MaterialSuggestionOption.vue must not render full defaultProcessRoute text directly in compact suggestion rows.');
   }
   const materialSuggestionZeroThicknessSnippets = [
     'partThickness: line.partThickness ? decimalToNumber(line.partThickness) : null',
@@ -2138,7 +3285,7 @@ function verifyProcessStepDragSortWorkflow() {
     ':key="draftStepKey(step)"',
     'const draftStepKeys = new WeakMap<ProcessStepDetail, string>()',
     'function draftStepKey(step: ProcessStepDetail)',
-    "import { Rank } from '@element-plus/icons-vue'",
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
     'class="step-drag-handle"',
     'aria-label="拖拽调整顺序"',
     '<el-icon><Rank /></el-icon>',
@@ -2153,6 +3300,7 @@ function verifyProcessStepDragSortWorkflow() {
     'function dropStepAtEnd',
     'function handleStepListDragLeave',
     'isDragAfterRowMiddle(event)',
+    'formatProcessNamePreview',
     'selected-steps-title',
     '拖动“拖拽”手柄调整顺序；上移 / 下移可作为备用操作。'
   ];
@@ -2175,7 +3323,7 @@ function verifyProcessStepDragSortWorkflow() {
     ':key="templateStepKey(step)"',
     'const templateStepKeys = new WeakMap<ProcessStepDetail, string>()',
     'function templateStepKey(step: ProcessStepDetail)',
-    "import { Rank } from '@element-plus/icons-vue'",
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue'",
     'class="template-step-drag-handle"',
     'aria-label="拖拽调整顺序"',
     '<el-icon><Rank /></el-icon>',
@@ -2189,6 +3337,7 @@ function verifyProcessStepDragSortWorkflow() {
     'function dropTemplateStepAtEnd',
     'function handleTemplateStepListDragLeave',
     'isTemplateStepDragAfterRowMiddle(event)',
+    'formatProcessNamePreview',
     'template-step-help',
     '拖动“拖拽”手柄调整顺序；上移 / 下移可作为备用操作。'
   ];
@@ -2209,12 +3358,15 @@ function verifyProcessStepDragSortWorkflow() {
   if (!endTemplateStepDragSource.includes("templateProcessFilterKeyword.value = '';")) {
     addFailure('ProcessTemplateManager.vue must clear template process select filter keyword when drag sorting ends.');
   }
+  if (templateManagerSource.includes("duplicates.join('、')")) {
+    addFailure('ProcessTemplateManager.vue must summarize duplicate process names instead of listing every duplicate in warnings.');
+  }
 
   const orderDetailSnippets = [
     ':key="additionalMaterialProcessStepKey(step)"',
     'const additionalMaterialProcessStepKeys = new WeakMap<ProcessStepDetail, string>()',
     'function additionalMaterialProcessStepKey(step: ProcessStepDetail)',
-    "import { Rank, WarningFilled } from '@element-plus/icons-vue'",
+    "import { Minus, Plus, Rank, RefreshLeft, WarningFilled } from '@element-plus/icons-vue';",
     'class="additional-process-drag-handle"',
     'aria-label="拖拽调整顺序"',
     '<el-icon><Rank /></el-icon>',
@@ -2227,7 +3379,9 @@ function verifyProcessStepDragSortWorkflow() {
     'function handleAdditionalProcessListDragOverEnd',
     'function dropAdditionalMaterialProcessAtEnd',
     'function handleAdditionalProcessListDragLeave',
-    'isAdditionalProcessDragAfterRowMiddle(event)'
+    'isAdditionalProcessDragAfterRowMiddle(event)',
+    "formatOrderDetailListPreview(duplicates, '工序')",
+    "formatOrderDetailListPreview(duplicateProcesses, '工序')"
   ];
   for (const snippet of orderDetailSnippets) {
     if (!orderDetailSource.includes(snippet)) {
@@ -2246,6 +3400,9 @@ function verifyProcessStepDragSortWorkflow() {
   if (!endAdditionalProcessDragSource.includes("additionalProcessFilterKeyword.value = '';")) {
     addFailure('OrderDetailView.vue must clear additional material process select filter keyword when drag sorting ends.');
   }
+  if (orderDetailSource.includes("duplicates.join('、')") || orderDetailSource.includes("duplicateProcesses.join('、')")) {
+    addFailure('OrderDetailView.vue must summarize duplicate additional-material process names instead of listing every duplicate in warnings.');
+  }
 
   if (!agentsSource.includes('生产流程选择页、流程记忆编辑页和订单补单物料流程编辑页的工序排序必须支持拖拽调整')) {
     addFailure('AGENTS.md must document process step drag sorting requirement.');
@@ -2255,6 +3412,168 @@ function verifyProcessStepDragSortWorkflow() {
   }
   if (!agentsSource.includes('拖拽排序结束后必须清理工序下拉筛选关键字')) {
     addFailure('AGENTS.md must document process step drag filter cleanup requirement.');
+  }
+}
+
+function verifyMaterialLibraryTableHeightControls() {
+  const viewPath = 'frontend/src/views/MaterialsView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing material library table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';",
+    "type MaterialLibraryWorkTableKey = 'materials' | 'importPreview' | 'applicability' | 'drawing'",
+    'materialLibraryWorkTableHeightLimits',
+    'materialLibraryWorkTableDefaultHeights',
+    'baisheng.erp.materialLibraryWorkTableHeights.v1',
+    '零件基础库表格高度只保存为本机 UI 偏好，不写入 Material、适用范围、图纸版本、导入或库存业务数据。',
+    'materialLibraryWorkTableHeights = reactive<Record<MaterialLibraryWorkTableKey, number>>',
+    'function adjustMaterialLibraryWorkTableHeight',
+    'function resetMaterialLibraryWorkTableHeight',
+    'function restoreMaterialLibraryWorkTableHeights',
+    'function saveMaterialLibraryWorkTableHeights',
+    'window.localStorage.getItem(materialLibraryWorkTableHeightStorageKey)',
+    'window.localStorage.setItem(',
+    'materialLibraryWorkTableHeightStorageKey',
+    'aria-label="零件基础资料表格高度"',
+    'aria-label="降低零件基础资料表格高度"',
+    'aria-label="提高零件基础资料表格高度"',
+    'aria-label="恢复零件基础资料表格默认高度"',
+    'aria-label="零件库导入预览表格高度"',
+    'aria-label="降低零件库导入预览表格高度"',
+    'aria-label="提高零件库导入预览表格高度"',
+    'aria-label="恢复零件库导入预览表格默认高度"',
+    'aria-label="适用范围维护表格高度"',
+    'aria-label="降低适用范围维护表格高度"',
+    'aria-label="提高适用范围维护表格高度"',
+    'aria-label="恢复适用范围维护表格默认高度"',
+    'aria-label="图纸版本维护表格高度"',
+    'aria-label="降低图纸版本维护表格高度"',
+    'aria-label="提高图纸版本维护表格高度"',
+    'aria-label="恢复图纸版本维护表格默认高度"',
+    ':max-height="materialLibraryWorkTableHeights.materials"',
+    ':max-height="materialLibraryWorkTableHeights.importPreview"',
+    ':max-height="materialLibraryWorkTableHeights.applicability"',
+    ':max-height="materialLibraryWorkTableHeights.drawing"',
+    'restoreMaterialLibraryWorkTableHeights();',
+    'material-library-table-height-actions',
+    'material-library-import-height-toolbar',
+    'material-library-dialog-table-header'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`MaterialsView.vue must keep adjustable material library table height control snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyInventorySourceDialogTableHeightControls() {
+  const componentPath = 'frontend/src/components/InventorySourceDetailsDialog.vue';
+  if (!fileExists(componentPath)) {
+    addFailure(`Missing inventory source dialog table height control file: ${componentPath}`);
+    return;
+  }
+
+  const source = readFile(componentPath);
+  const requiredSnippets = [
+    "import { computed, reactive, ref, watch } from 'vue';",
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    "type InventorySourceDialogTableKey = 'sources' | 'searchResults' | 'orderPreview'",
+    'inventorySourceDialogTableHeightLimits',
+    'inventorySourceDialogTableDefaultHeights',
+    'baisheng.erp.inventorySourceDialogTableHeights.v1',
+    '库存来源弹窗表格和搜索结果高度只保存为本机 UI 偏好，不写入库存批次、预占、订单、生产或库存流水业务数据。',
+    'inventorySourceDialogTableHeights = reactive<Record<InventorySourceDialogTableKey, number>>',
+    'function adjustInventorySourceDialogTableHeight',
+    'function resetInventorySourceDialogTableHeight',
+    'function restoreInventorySourceDialogTableHeights',
+    'function saveInventorySourceDialogTableHeights',
+    'window.localStorage.getItem(inventorySourceDialogTableHeightStorageKey)',
+    'window.localStorage.setItem(',
+    'inventorySourceDialogTableHeightStorageKey',
+    'aria-label="库存来源批次表格高度"',
+    'aria-label="降低库存来源批次表格高度"',
+    'aria-label="提高库存来源批次表格高度"',
+    'aria-label="恢复库存来源批次表格默认高度"',
+    'aria-label="替代物料搜索结果高度"',
+    'aria-label="降低替代物料搜索结果高度"',
+    'aria-label="提高替代物料搜索结果高度"',
+    'aria-label="恢复替代物料搜索结果默认高度"',
+    'aria-label="订单信息预览表格高度"',
+    'aria-label="降低订单信息预览表格高度"',
+    'aria-label="提高订单信息预览表格高度"',
+    'aria-label="恢复订单信息预览表格默认高度"',
+    ':max-height="inventorySourceDialogTableHeights.sources"',
+    ':style="{ maxHeight: `${inventorySourceDialogTableHeights.searchResults}px` }"',
+    ':max-height="inventorySourceDialogTableHeights.orderPreview"',
+    'restoreInventorySourceDialogTableHeights();',
+    'inventory-source-table-height-toolbar',
+    'inventory-source-table-height-actions',
+    'order-preview-table-height-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`InventorySourceDetailsDialog.vue must keep adjustable table height control snippet: ${snippet}`);
+    }
+  }
+  const transformSuggestionProcessSnippets = [
+    'formatProcessRoutePreview(rule.defaultProcessRoute)',
+    ':title="rule.defaultProcessRoute"',
+    'function formatProcessRoutePreview',
+    '等 ${steps.length} 个工序',
+    'transformRuleScopePreview(rule)',
+    'transformRuleScopeTitle(rule)',
+    'transformRuleDescriptionPreview(rule)',
+    'function transformRuleScopeTitle(rule: MaterialTransformRule)',
+    'function formatLongTextPreview',
+    '完整范围请进入来源加工关系详情核对',
+    'class="transform-suggestion-meta"'
+  ];
+  for (const snippet of transformSuggestionProcessSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`InventorySourceDetailsDialog.vue must summarize transform suggestion process routes: ${snippet}`);
+    }
+  }
+  if (source.includes('建议工艺：{{ rule.defaultProcessRoute }}')) {
+    addFailure('InventorySourceDetailsDialog.vue must not render full transform suggestion defaultProcessRoute directly.');
+  }
+  if (source.includes('{{ rule.scopeLabel }} / 倍率 {{ rule.multiplier }} / 损耗 {{ rule.lossRate ?? \'-\' }}')) {
+    addFailure('InventorySourceDetailsDialog.vue must summarize transform suggestion scope labels with tooltip instead of rendering raw scopeLabel in the card.');
+  }
+  if (source.includes("`适用范围：${rule.scopeLabel || '未设置范围'}`")) {
+    addFailure('InventorySourceDetailsDialog.vue transform suggestion tooltip must summarize scopeLabel instead of showing long selected-customer ranges.');
+  }
+  if (source.includes('<small v-if="rule.conversionDescription">{{ rule.conversionDescription }}</small>')) {
+    addFailure('InventorySourceDetailsDialog.vue must summarize transform suggestion conversion descriptions with tooltip instead of rendering full text directly.');
+  }
+  const manualConfirmationSummarySnippets = [
+    'manualConfirmationRemarkPreview(source)',
+    'manualConfirmationRemarkTitle(source)',
+    'manualConfirmationReasonPreview(source)',
+    'manualConfirmationReasonTitle(source)',
+    'manualConfirmationReasonPreview(item.source, 42)',
+    'compatibilityReasonPreview(row)',
+    'compatibilityReasonTitle(row)',
+    'function manualConfirmationReasonPreview(source: StockSourceSelectionPayload',
+    'function manualConfirmationRemarkPreview(source: Pick<StockSourceSelectionPayload',
+    'function compatibilityReasonPreview(row: SourceRow'
+  ];
+  for (const snippet of manualConfirmationSummarySnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`InventorySourceDetailsDialog.vue must summarize manual confirmation and compatibility reasons: ${snippet}`);
+    }
+  }
+  if (source.includes('<template v-if="source.manualConfirmRemark"> / {{ source.manualConfirmRemark }}</template>')) {
+    addFailure('InventorySourceDetailsDialog.vue must not render full selected source manual confirmation remark directly.');
+  }
+  if (source.includes('<span>{{ manualConfirmationReason(item.source) }}</span>')) {
+    addFailure('InventorySourceDetailsDialog.vue must summarize manual confirmation reasons in list rows.');
+  }
+  if (source.includes('{{ compatibilityResult(row).reason }}')) {
+    addFailure('InventorySourceDetailsDialog.vue must summarize compatibility reasons in table and mobile list rows.');
   }
 }
 
@@ -2273,6 +3592,7 @@ function verifyPartComponentStructureWorkflow() {
     'frontend/src/views/InventoryView.vue',
     'frontend/src/components/InventorySourceDetailsDialog.vue',
     'frontend/src/api/erp.ts',
+    'frontend/src/types/erp.ts',
     'backend/src/modules/materials/materials.service.ts',
     'backend/src/modules/inventory/dto.ts',
     'backend/src/modules/inventory/inventory.controller.ts',
@@ -2280,7 +3600,10 @@ function verifyPartComponentStructureWorkflow() {
     'backend/src/modules/inventory/inventory.service.ts',
     'database/prisma/verify-first-stage.ts',
     'database/prisma/schema.prisma',
-    'database/prisma/seed.ts'
+    'database/prisma/seed.ts',
+    'scripts/verify-model-bom-scope-approval-api.cjs',
+    'scripts/verify-first-stage-api.cjs',
+    'package.json'
   ];
   for (const projectPath of requiredFiles) {
     if (!fileExists(projectPath)) {
@@ -2310,6 +3633,9 @@ function verifyPartComponentStructureWorkflow() {
   const dataVerifierSource = readFile('database/prisma/verify-first-stage.ts');
   const prismaSchemaSource = readFile('database/prisma/schema.prisma');
   const seedSource = readFile('database/prisma/seed.ts');
+  const modelBomScopeApprovalRegressionSource = readFile('scripts/verify-model-bom-scope-approval-api.cjs');
+  const firstStageApiRegressionSource = readFile('scripts/verify-first-stage-api.cjs');
+  const packageSource = readFile('package.json');
   const migrationSqlSource = readMigrationSqlSource();
 
   const orderLineSnippets = [
@@ -2456,6 +3782,9 @@ function verifyPartComponentStructureWorkflow() {
     'BOM 差异核对已撤销',
     'openSourceBomDiffReviewDialog',
     'sourceBomReviewLineText',
+    'sourceBomReviewLinePreview',
+    'sourceBomReviewLineTitle',
+    'formatModelBomLongTextPreview(sourceBomReviewLineText(line), 44, \'无对应行\')',
     'source-bom-review-table',
     'bom-source-diff-action-hint',
     '{{ issue.suggestedAction }}',
@@ -2626,8 +3955,8 @@ function verifyPartComponentStructureWorkflow() {
     '停用统计',
     '只统计启用且基础零件未停用的 BOM 明细；停用内容不参与后续下单推荐。',
     '基础零件停用 {{ modelBomLineSummary(row).materialDisabledCount }}',
-    'const effectiveCount = (row.lines || []).filter(lineCountsAsActiveBomContent).length;',
-    '厚度已确认 ${confirmedThicknessCount} / 历史参考 ${historyThicknessCount} / 无厚度 ${noThicknessCount} / 需核对 ${summary.missingThicknessCount}',
+    'effectiveCount: summary.effectiveCount',
+    '厚度已确认 ${summary.confirmedThicknessCount} / 历史参考 ${summary.historyThicknessCount} / 无厚度 ${summary.noThicknessCount} / 需核对 ${summary.missingThicknessCount}',
     '厚度说明：固定格式中只有“来源 当前BOM明细”表示该厚度已经保存到当前 BOM',
     '停用 ${summary.disabledCount} / 基础零件停用 ${summary.materialDisabledCount}',
     'openModelBomListTextDialog',
@@ -2687,6 +4016,8 @@ function verifyPartComponentStructureWorkflow() {
     'function formatLineThicknessSourceLabel(row: ModelBomLine)',
     'function lineThicknessSourceTagType(row: ModelBomLine)',
     'function formatLineThicknessReviewReason(row: ModelBomLine)',
+    'formatLineThicknessReviewReasonPreview(row)',
+    'function formatLineThicknessReviewReasonPreview(row: ModelBomLine)',
     'function lineThicknessReviewTitle(row: ModelBomLine)',
     'const thicknessReviewSummary = computed(() => summarizeThicknessReviewLines(thicknessReviewBom.value?.lines || []));',
     'const thicknessReviewText = computed(() => {',
@@ -2720,6 +4051,7 @@ function verifyPartComponentStructureWorkflow() {
     '@click.stop="openBomThicknessReview(activeBom)"',
     '<el-button :disabled="!thicknessReviewText" @click="copyThicknessReviewText">复制核对清单</el-button>',
     '@row-click="handleThicknessReviewLineAction"',
+    'table-card bom-thickness-review-table-card',
     ':row-class-name="thicknessReviewRowClassName"',
     'async function handleThicknessReviewLineAction(row: ModelBomLine)',
     "guardDesktopOperation('核对并保存 BOM 明细厚度')",
@@ -2727,7 +4059,7 @@ function verifyPartComponentStructureWorkflow() {
     'function thicknessReviewRowClassName({ row }: { row: ModelBomLine })',
     '!isMobileLayout.value && lineNeedsThicknessReview(row)',
     'bom-thickness-review-table__row',
-    ':title="formatThicknessReviewBreakdown(row.lines || [])"',
+    ':title="modelBomListThicknessReviewTitle(row)"',
     ':title="formatThicknessReviewBreakdown(activeBomDisplayLines)"',
     '@keydown.enter.prevent.stop="openBomThicknessReview(row)"',
     '@keydown.space.prevent.stop="openBomThicknessReview(activeBom)"',
@@ -2825,8 +4157,12 @@ function verifyPartComponentStructureWorkflow() {
     '@click="saveBom(true)"',
     'saveBom(addFirstLineAfterSave = false)',
     "routeTargetAction.value === 'createLine' && Boolean(routeTargetMaterialId.value)",
+    'routeTargetBomManuallySelected',
+    'routeTargetMultipleBomChoiceWarned',
     'selectRouteCreateLineTargetBom',
     'isExactRouteCreateLineBom',
+    'routeCreateLineExactBoms',
+    'routeCreateLineNeedsManualBomChoice',
     'routeCreateLineNeedsNewScopedBom',
     'routeCreateLineNewBomMessage',
     '当前是客户范围，需先保存客户独立 BOM，避免把客户零件写入百胜通用 BOM',
@@ -2837,13 +4173,13 @@ function verifyPartComponentStructureWorkflow() {
     'openCurrentCustomerBom',
     'findExistingCustomerBomForCopy',
     'findExistingModelBomForScope',
-    "erpApi.modelBoms({ customerId: customerId || undefined, projectModel, status: 'ALL' })",
+    "loadModelBomScopePages({ customerId: customerId || undefined, projectModel, status: 'ALL' })",
     'guardDuplicateCustomerBomCopy',
     'guardExistingBomBeforeRouteCreateLine',
     'guardDuplicateBomScopeBeforeSave',
-    'existing.id === currentBomId',
-    '当前客户/机型范围已存在 BOM，已定位到现有 BOM，请直接维护现有零件包',
-    '当前客户和机型已存在客户 BOM，已定位到现有 BOM，请继续维护，避免重复复制',
+    '同一客户同一机型允许保留多个不同用途 BOM',
+    '同一客户同一机型可以保存多个 BOM',
+    '后端仍按同名 + 范围查重',
     '当前范围已有停用 BOM，已定位到现有 BOM；请先启用后再添加明细，避免重复新建',
     '当前范围已存在 BOM，已定位并继续添加当前零件明细',
     '当前 BOM 已停用，请先启用后再添加明细',
@@ -2858,7 +4194,9 @@ function verifyPartComponentStructureWorkflow() {
     "客户零件包已复制生成${copyForm.isCommon ? '，并已设为常用' : ''}，可继续维护包内明细",
     '包内零件保存失败，请检查组件关系、默认数量和后端服务',
     '包内零件启用失败，请确认所属组件和零件基础资料状态',
-    '机型零件包启用失败，请确认客户和机型范围没有冲突',
+    '当前客户/机型范围存在多个 BOM',
+    '系统不会自动选择，避免加错 BOM',
+    '机型零件包启用失败，请确认后端服务、BOM 状态或同名范围重复',
     'buildSourceBomDiffIssues',
     'sourceActiveLines',
     'targetActiveLines',
@@ -2896,8 +4234,10 @@ function verifyPartComponentStructureWorkflow() {
     'bomScopeChangeBroadens',
     'bomProjectScopeBroadens',
     'normalizedBomCustomerIds',
-    'bomSelectedCustomerScopeAdds',
+    'bomVisibleCustomerIds',
+    'bomCustomerScopeExposesNewCustomers',
     'bomCustomerScopeExpansionNeedsConfirmation',
+    'bomCustomerScopeTypeImpactText',
     'addedBomScopeCustomerNames',
     'removedBomScopeCustomerNames',
     'bomScopeVisibilityText',
@@ -2914,6 +4254,25 @@ function verifyPartComponentStructureWorkflow() {
     'customerOptionsTotal',
     'bomScopeCustomerOptionLoadText',
     '客户选项已加载',
+    'modelBomScopeText(row)',
+    'modelBomScopeTitle(row)',
+    'class="model-bom-scope-cell"',
+    'function modelBomScopeTitle(row: ModelBom)',
+    '完整客户范围请进入 BOM 详情核对',
+    'formatCustomerNamePreview',
+    'row.scopeCustomerCount',
+    'displayTotal',
+    '等 ${displayTotal} 个客户',
+    'activeBomDetail',
+    'loadActiveBomDetail',
+    'activeBomDetailLoading',
+    '列表只显示摘要；需核对',
+    'row.lineSummary || summarizeModelBomLines(row.lines || [])',
+    'await erpApi.modelBom(row.id)',
+    '列表只展示客户范围摘要；编辑前重新读取完整 BOM',
+    'formatCustomerNamePreview(selectedNames)',
+    "formatCustomerNamePreview(scopeCustomerNames, '指定客户', row.scopeCustomerCount)",
+    "formatCustomerNamePreview(customerNames, '指定客户')",
     'BOM 指定客户范围需要支持全选客户',
     "erpApi.customersPage(undefined, 'ENABLED', customerOptionBatchLimit, offset)",
     'bomScopeFilteredCustomerOptions',
@@ -2934,6 +4293,52 @@ function verifyPartComponentStructureWorkflow() {
     'class="model-bom-scope-guide"',
     'BOM 范围筛选或上方统计可直接区分通用 BOM、指定客户可用 BOM 和客户私有 BOM',
     'modelBomScopeGuideItems',
+    'modelBomScopeGuideDescriptionPreview(item.description)',
+    'function modelBomScopeGuideDescriptionPreview(description: string)',
+    'modelBomRevisionChangeRemarkPreview(row)',
+    'modelBomRevisionChangeRemarkTitle(row)',
+    'modelBomRevisionChangedByPreview(row)',
+    'modelBomRevisionChangedByTitle(row)',
+    'modelBomRevisionChangeRemarkPreview(selectedBomRevision)',
+    'sourceBomDiffReviewRemarkPreview(row)',
+    'sourceBomDiffReviewRemarkTitle(row)',
+    'sourceBomDiffReviewIssuePreview(row)',
+    'sourceBomDiffReviewIssueTitle(row)',
+    'sourceBomDiffReviewLoading',
+    'sourceBomDiffReviewPagination',
+    'sourceBomDiffReviewHasMore',
+    ':loading="sourceBomDiffReviewLoading"',
+    'v-loading="sourceBomDiffReviewLoading"',
+    '@click="loadSourceBomDiffReviews()"',
+    'loadMoreSourceBomDiffReviews',
+    '已显示 {{ sourceBomDiffReviews.length }} / {{ sourceBomDiffReviewPagination.total }} 条核对记录',
+    'const result = await erpApi.modelBomDiffReviewsPage',
+    'sourceBomReviewedDiffKeys.value = new Set(result.reviewKeys)',
+    'await loadSourceBomDiffReviews();',
+    '查看核对记录 {{ sourceBomDiffReviews.length }} 条',
+    'formatBomScopeReviewCellPreview(row.before)',
+    'formatBomScopeReviewCellTitle(row.before)',
+    'formatBomScopeApprovalRequestedScopePreview(row)',
+    'formatBomScopeApprovalRequestedScopeTitle(row)',
+    'formatBomScopeApprovalReasonPreview(row)',
+    'formatBomScopeApprovalReasonTitle(row)',
+    'formatBomScopeApprovalReviewPreview(row)',
+    'formatBomScopeApprovalReviewTitle(row)',
+    'bomScopeApprovalHasMore',
+    'refreshBomScopeApprovalRequests',
+    '@change="refreshBomScopeApprovalRequests()"',
+    '@click="refreshBomScopeApprovalRequests()"',
+    'loadMoreBomScopeApprovalRequests',
+    'loadBomScopeApprovalRequests(options: { append?: boolean } = {})',
+    'const offset = options.append ? bomScopeApprovalRequests.value.length : 0;',
+    'options.append ? [...bomScopeApprovalRequests.value, ...result.items] : result.items',
+    '加载更多',
+    'scope-approval-actions',
+    'function modelBomRevisionChangeRemarkPreview(revision?: ModelBomRevision | null)',
+    'function modelBomRevisionChangedByPreview(revision?: ModelBomRevision | null)',
+    'function sourceBomDiffReviewRemarkPreview(review: ModelBomDiffReview)',
+    'function sourceBomDiffReviewIssuePreview(review: ModelBomDiffReview)',
+    'function formatBomScopeApprovalReasonPreview(row: ModelBomScopeApprovalRequest)',
     '任意客户下单时都可见，只适合真正标准的百胜通用 BOM。',
     '只对勾选客户可见，可在编辑表头里单选、多选或一次性全选客户。',
     '只属于所属客户，不会显示在其他客户界面。',
@@ -2970,6 +4375,23 @@ function verifyPartComponentStructureWorkflow() {
     'Number(matched[1]) < 1 || Number(matched[1]) > 9999',
     '客户 BOM 缺少',
     '后续来源更新只提示差异，不自动覆盖客户 BOM',
+    'explicitBomLineDefaultProcessRoute',
+    "row.defaultProcessRouteSource === 'BOM_LINE'",
+    'row.bomLineDefaultProcessRoute',
+    'formatLineDefaultProcessRoute',
+    'formatLineDefaultProcessRouteFull',
+    'function formatProcessRoutePreview',
+    'formatProcessRoutePreview(row.defaultProcessRoute)',
+    'formatBomRevisionLineDefaultProcessRoute',
+    'formatBomRevisionLineDefaultProcessRouteTitle',
+    'function formatBomRevisionLineDefaultProcessRouteTitle(row: ModelBomRevisionSnapshotLine)',
+    'formatBomRevisionLinePartCode(row)',
+    'formatBomRevisionLinePartName(row)',
+    'formatBomRevisionLineDrawingTitle(row)',
+    'formatBomRevisionLineSpecification(row)',
+    'function formatBomRevisionLinePartCode(row: ModelBomRevisionSnapshotLine)',
+    'function formatBomRevisionLineDrawingText(row: ModelBomRevisionSnapshotLine)',
+    '等 ${steps.length} 个工序',
     'erpApi.reorderModelBomLines(activeBom.value.id, { items })',
     'return activeBomLineDisplayOrderMap.value.get(row.id) ?? row.displayOrder ?? 0;',
     'formatLineOrderTitle(row)',
@@ -2980,6 +4402,46 @@ function verifyPartComponentStructureWorkflow() {
     'overflow-wrap: anywhere',
     'resize: vertical',
     'scrollbar-gutter: stable both-edges',
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    "type ModelBomWorkTableKey = 'list' | 'lines' | 'scopeReview' | 'thicknessReview' | 'sourceDiffFields' | 'sourceDiffReviews';",
+    'const modelBomWorkTableKeys: ModelBomWorkTableKey[]',
+    'modelBomWorkTableHeightLimits',
+    'modelBomWorkTableDefaultHeights',
+    'modelBomWorkTableHeightStorageKey',
+    '机型零件包维护和核对弹窗表格高度只作为本机 UI 偏好，不写入 BOM、订单、生产或库存业务资料。',
+    'const modelBomWorkTableHeights = reactive<Record<ModelBomWorkTableKey, number>>',
+    'function adjustModelBomWorkTableHeight',
+    'function resetModelBomWorkTableHeight',
+    'function restoreModelBomWorkTableHeights',
+    'function saveModelBomWorkTableHeights',
+    'localStorage.getItem(modelBomWorkTableHeightStorageKey)',
+    ':max-height="modelBomWorkTableHeights.list"',
+    'modelBomWorkTableHeights.lines',
+    ':max-height="modelBomWorkTableHeights.scopeReview"',
+    ':max-height="modelBomWorkTableHeights.thicknessReview"',
+    ':max-height="modelBomWorkTableHeights.sourceDiffFields"',
+    ':max-height="modelBomWorkTableHeights.sourceDiffReviews"',
+    'scopeReview: modelBomWorkTableHeights.scopeReview',
+    'thicknessReview: modelBomWorkTableHeights.thicknessReview',
+    'sourceDiffFields: modelBomWorkTableHeights.sourceDiffFields',
+    'sourceDiffReviews: modelBomWorkTableHeights.sourceDiffReviews',
+    'aria-label="降低零件包列表表格高度"',
+    'aria-label="提高 BOM 明细表格高度"',
+    'aria-label="恢复 BOM 明细表格默认高度"',
+    'aria-label="BOM 适用范围核对表格高度"',
+    'aria-label="降低 BOM 适用范围核对表格高度"',
+    'aria-label="提高 BOM 适用范围核对表格高度"',
+    'aria-label="BOM 厚度核对表格高度"',
+    'aria-label="降低 BOM 厚度核对表格高度"',
+    'aria-label="提高 BOM 厚度核对表格高度"',
+    'aria-label="来源 BOM 差异字段表格高度"',
+    'aria-label="降低来源 BOM 差异字段表格高度"',
+    'aria-label="提高来源 BOM 差异字段表格高度"',
+    'aria-label="来源 BOM 差异核对记录表格高度"',
+    'aria-label="降低来源 BOM 差异核对记录表格高度"',
+    'aria-label="提高来源 BOM 差异核对记录表格高度"',
+    'model-bom-table-height-actions',
+    'model-bom-dialog-table-toolbar',
     'confirmSetBomCommon',
     '常用 BOM 只影响当前范围内的显示顺序和下单推荐优先级',
     'result.customerScopeCount',
@@ -3011,8 +4473,95 @@ function verifyPartComponentStructureWorkflow() {
   if (modelBomSource.includes('ElMessageBox.confirm')) {
     addFailure('ModelBomsView.vue BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
   }
+  if (modelBomSource.includes("{{ row.defaultProcessRoute || '-' }}") || modelBomSource.includes("row.defaultProcessRoute || '-',")) {
+    addFailure('ModelBomsView.vue must summarize default process routes instead of rendering full process route text in BOM tables or snapshots.');
+  }
+  if (/<el-table-column\s+prop="defaultProcessRoute"\s+label="[^"]*"\s+min-width="180"\s+show-overflow-tooltip\s*>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must use explicit defaultProcessRoute preview/title in BOM revision snapshots instead of raw show-overflow-tooltip.');
+  }
+  if (/<el-table-column\s+prop="part(?:Code|Name|Specification)Snapshot"\s+label="[^"]*"\s+min-width="(?:150|160|180)"\s+show-overflow-tooltip\s*\/>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must summarize BOM revision snapshot part fields with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (/<el-table-column\s+label="默认图纸"\s+min-width="180"\s+show-overflow-tooltip\s*>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must summarize BOM revision snapshot drawing text with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (/<el-table-column\s+prop="(before|after|impact)"\s+label="[^"]*"\s+min-width="(?:170|220)"\s+show-overflow-tooltip\s*\/>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must summarize BOM scope review before/after/impact cells with explicit title text.');
+  }
+  if (/<el-table-column\s+prop="issueTitle"\s+label="[^"]*"\s+min-width="260"\s+show-overflow-tooltip\s*\/>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must summarize source BOM diff review issue titles instead of raw show-overflow-tooltip.');
+  }
+  if (/<el-table-column\s+prop="(requestNo|bomName|reason)"\s+label="[^"]*"\s+min-width="(?:180|210|220)"\s+show-overflow-tooltip\s*\/>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must summarize BOM scope approval request text columns instead of raw show-overflow-tooltip.');
+  }
+  if (modelBomSource.includes('<el-table-column prop="scopeLabel" label="适用范围"')) {
+    addFailure('ModelBomsView.vue must render BOM scope through summarized text plus tooltip instead of raw scopeLabel column.');
+  }
+  if (modelBomSource.includes('return row.scopeLabel || `${modelBomScopeTypeLabel(row)}')) {
+    addFailure('ModelBomsView.vue modelBomScopeText must build a compact scope summary instead of returning raw scopeLabel.');
+  }
+  if (/row\.bomName,\s*row\.scopeLabel,\s*modelBomCustomerText/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue fixed-format BOM copy must use modelBomScopeText(row) instead of raw scopeLabel.');
+  }
+  if (modelBomSource.includes("formatCustomerNameDetail(scopeCustomerNames, '指定客户')")) {
+    addFailure('ModelBomsView.vue selected-customer scope tooltip must use the compact customer preview, not the longer detail list.');
+  }
+  if (/modelBomScope(?:Text|Title|CustomerText)[\s\S]{0,600}formatCustomerNameDetail/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue BOM list scope text and tooltip must not call formatCustomerNameDetail because selected-customer ranges can become very long.');
+  }
+  if (modelBomSource.includes('scopeRank[nextScope] > scopeRank[previousScope]')) {
+    addFailure('ModelBomsView.vue must not treat every PRIVATE -> SELECTED change as visibility expansion; expansion depends on newly visible customers.');
+  }
+  if (/\/\/[^\n]*return nextVisibleCustomerIds\.some/.test(inventoryServiceSource)) {
+    addFailure('inventory.service.ts must not leave modelBomCustomerScopeExposesNewCustomers return inside a line comment.');
+  }
+  if (!inventoryServiceSource.includes('return nextVisibleCustomerIds.some((customerId) => !previousCustomerIds.has(customerId));')) {
+    addFailure('inventory.service.ts must actively return whether BOM scope exposes any newly visible customer.');
+  }
+  if (!modelBomSource.includes('impact: bomCustomerScopeTypeImpactText()')) {
+    addFailure('ModelBomsView.vue BOM scope review rows must use bomCustomerScopeTypeImpactText for customer scope type impact.');
+  }
+  if (!modelBomSource.includes("return removedCustomerNames.length ? '可见客户减少' : '可见客户不变';")) {
+    addFailure('ModelBomsView.vue BOM scope type impact must distinguish same-customer scope changes from customer removals.');
+  }
+  if (!modelBomSource.includes('sourceBomDiffIssueDetailPreview(issue)') || !modelBomSource.includes('function sourceBomDiffIssueDetailPreview(issue: BomDiffIssue')) {
+    addFailure('ModelBomsView.vue must summarize source BOM diff issue details in the list and review dialog.');
+  }
+  if (modelBomSource.includes('<span>{{ issue.detail }}</span>') || modelBomSource.includes('<span>{{ selectedSourceBomDiffIssue.detail }}</span>')) {
+    addFailure('ModelBomsView.vue must not render full source BOM diff issue details directly.');
+  }
+  if (modelBomSource.includes('${sourceBomDiffStatusLabel(issue)} | ${issue.title} | ${issue.detail} |')) {
+    addFailure('ModelBomsView.vue fixed-format source BOM diff copy must use sourceBomDiffIssueDetailPreview instead of raw issue.detail.');
+  }
+  if (modelBomSource.includes('<span>{{ item.description }}</span>')) {
+    addFailure('ModelBomsView.vue must summarize BOM scope guide descriptions with tooltip.');
+  }
+  if (modelBomSource.includes('<span class="thickness-review-reason">{{ formatLineThicknessReviewReason(row) }}</span>')) {
+    addFailure('ModelBomsView.vue must summarize BOM thickness review reasons in the review list.');
+  }
+  if (modelBomSource.includes('<el-descriptions-item label="备注">{{ selectedBomRevision.changeRemark || \'-\' }}</el-descriptions-item>')) {
+    addFailure('ModelBomsView.vue must summarize BOM revision change remarks instead of rendering full text directly.');
+  }
+  if (/<el-table-column\s+prop="changedBy"\s+label="[^"]*"\s+min-width="130"\s+show-overflow-tooltip\s*\/>/.test(modelBomSource)) {
+    addFailure('ModelBomsView.vue must summarize BOM revision changedBy text with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (modelBomSource.includes("<template #default=\"{ row }\">{{ row.reviewRemark || '保留为客户 BOM 差异' }}</template>")) {
+    addFailure('ModelBomsView.vue must summarize source BOM diff review remarks instead of rendering full text directly.');
+  }
+  if (
+    modelBomSource.includes('<p>{{ sourceBomReviewLineText(selectedSourceBomDiffIssue.sourceLine) }}</p>') ||
+    modelBomSource.includes('<p>{{ sourceBomReviewLineText(selectedSourceBomDiffIssue.targetLine) }}</p>')
+  ) {
+    addFailure('ModelBomsView.vue must summarize source BOM review line text in the comparison dialog.');
+  }
   if (modelBomSource.includes("reviewedBy: '系统操作员'") || modelBomSource.includes("|| '系统操作员'")) {
     addFailure('ModelBomsView.vue BOM diff review must require an explicit reviewer instead of falling back to 系统操作员.');
+  }
+  if (
+    modelBomSource.includes('sourceBomDiffReviewPagination.total + 1') ||
+    modelBomSource.includes('sourceBomDiffReviewPagination.total - 1')
+  ) {
+    addFailure('ModelBomsView.vue must reload BOM diff review pagination after confirm/revoke instead of locally shifting totalCount.');
   }
   if (modelBomSource.includes('<el-button link type="primary" @click="openThicknessReviewLineEdit(row)">填写厚度</el-button>')) {
     addFailure('ModelBomsView.vue thickness review should open by clicking the 厚度核对 tag, not by adding a separate 填写厚度 button.');
@@ -3036,7 +4585,7 @@ function verifyPartComponentStructureWorkflow() {
       addFailure(`${file} must keep safe physical delete boundary for invalid empty BOM: ${snippet}`);
     }
   }
-  const deleteModelBomBlock = inventoryServiceSource.match(/async deleteModelBom\(bomId: string\) \{[\s\S]*?\n  private handleModelBomScopeUniqueError/);
+  const deleteModelBomBlock = inventoryServiceSource.match(/async deleteModelBom\(bomId: string\) \{[\s\S]*?\n  private handleModelBomNameUniqueError/);
   if (!deleteModelBomBlock) {
     addFailure('InventoryService.deleteModelBom must keep a dedicated permanent-delete boundary.');
   } else {
@@ -3100,9 +4649,16 @@ function verifyPartComponentStructureWorkflow() {
     '客户私有 {{ contextBomPrivateCount }}',
     'scopeMode: contextBomScopeMode(bom)',
     'loadContextBoms',
-    'erpApi.modelBoms({',
+    'loadModelBomPages({',
     'contextBomSummary',
+    'bom.lineSummary.effectiveCount',
+    '列表仅显示摘要；查看/编辑时读取完整 BOM 明细。',
     'contextBomPreviewLines',
+    'contextBomScopePreview(bom)',
+    'contextBomScopeTitle(bom)',
+    'function contextBomScopeTitle(bom: ModelBom)',
+    '完整范围请进入 BOM 详情核对；常用只影响当前范围的显示顺序和下单推荐优先级',
+    'class="context-bom-scope-text"',
     'compareContextBomLinesByStoredOrder',
     'normalizeContextBomComponentNo',
     'childrenByParent',
@@ -3115,6 +4671,10 @@ function verifyPartComponentStructureWorkflow() {
     'openContextBomMaintain',
     'openContextBomCreate',
     'openContextCommonBomCreate',
+    '复制范围链接',
+    'copyContextBomFilterLink',
+    '范围链接：${dashboardFilterLink()}',
+    '当前适用零件包范围链接只用于复现 BOM 范围视图，不新增、覆盖或停用任何 BOM 明细。',
     'pushContextBomCreate',
     ':disabled="Boolean(bomOperationSavingKey)" @click="openContextBomCreate"',
     ':disabled="Boolean(bomOperationSavingKey)" @click="openContextCommonBomCreate"',
@@ -3122,8 +4682,8 @@ function verifyPartComponentStructureWorkflow() {
     'contextCustomerBomForSource',
     'canCopyContextBomToCustomer',
     'openContextCustomerBomDetail',
-    '已有客户 BOM',
-    '当前客户和机型已存在客户 BOM，请打开客户 BOM 继续维护，避免重复复制',
+    '已有客户 BOM，可新建副本',
+    '请选择客户，并从百胜通用 BOM 复制生成客户 BOM',
     "status: 'ALL'",
     "status: bom.status === 'DISABLED' ? 'ALL' : 'ENABLED'",
     "action: shouldCreateLine ? 'createLine' : undefined",
@@ -3138,11 +4698,74 @@ function verifyPartComponentStructureWorkflow() {
     'canCreateBomLineForCurrentScope',
     'bomMaintainActionLabel',
     'bomCurrentScopeEmptyText',
-    '加入当前范围 BOM',
+    'materialBomNameValues(row)',
+    'materialBomCount(row)',
+    'materialBomStructureCount(row)',
+    'materialRowHasBomUsage(row)',
+    'materialBomUsageText(row)',
+    'materialBomUsageTitle(row)',
+    'materialTypeText(row)',
+    'materialScopeText(row)',
+    'function materialScopeText(row: MaterialDashboardRow)',
+    'materialTypeTitle(row)',
+    'function materialTypeTitle(row: MaterialDashboardRow)',
+    'materialRelationText(row)',
+    'materialRelationDescriptionTitle(row)',
+    'function materialRelationText(row: MaterialDashboardRow)',
+    'function materialRelationDescriptionTitle(row: MaterialDashboardRow)',
+    'function formatLongTextPreview',
+    'materialBomStructurePreviewText',
+    'formatBomNamePreview',
+    "function joinPreview(values: string[], emptyText = '-', totalCount?: number)",
+    'const displayCount = Math.max(totalCount || 0, filtered.length);',
+    'BOM：${materialBomUsageText(row)}',
+    "formatBomNamePreview(bomNames, '-', bomCount)",
+    "function formatBomNamePreview(names: Array<string | null | undefined>, emptyText = '-', totalCount?: number)",
+    '等 ${displayCount} 个 BOM',
+    '等 ${totalCount} 条',
+    'formatProcessRoutePreview(row.defaultProcessRoute)',
+    'function formatProcessRoutePreview',
+    '等 ${steps.length} 个工序',
+    "formatCustomerNamePreview(scopeNames, '-', scopeTotal)",
+    "formatCustomerNamePreview(historyNames, '-', historyTotal)",
+    "formatCustomerNamePreview(names, '指定客户', bom.scopeCustomerCount)",
+    "function formatCustomerNamePreview(names: Array<string | null | undefined>, emptyText = '-', totalCount?: number)",
+    'const displayCount = Math.max(totalCount || 0, filtered.length);',
+    'RELATION_DETAIL_TAG_PREVIEW_LIMIT',
+    'relationDetailVisibleCustomerNames',
+    'relationDetailCustomerTotalCount',
+    'relationDetailHiddenCustomerNameCount',
+    'relationDetailVisibleHistoryCustomerNames',
+    'relationDetailHiddenHistoryCustomerNameCount',
+    'relationDetailVisibleBomNames',
+    'relationDetailBomTotalCount',
+    'relationDetailHiddenBomNameCount',
+    'relationDetailBomTotalCount.value - relationDetailVisibleBomNames.value.length',
+    '还有 {{ relationDetailHiddenBomNameCount }} 个 BOM 名称未在弹窗中展开',
+    '等 ${displayCount} 个客户',
+    'materialDashboardStringValues',
+    'materialDashboardBomStructureDetails',
+    'materialDashboardBomStructureLabels',
+    'relationDetailRow.value ? materialBomNameValues(relationDetailRow.value) : []',
+    '...materialDashboardBomStructureDetails(row).map((detail) => detail.bomName)',
+    ':content="materialBomUsageTitle(row)"',
+    'openRelationDetail(row, \'customer\')',
+    'openRelationDetail(row, \'bom\')',
+    'relationDetailDialogVisible',
+    'relationDetailCustomerNames',
+    'relationDetailBomStructures',
+    'relationDetailVisibleBomStructures',
+    'relationDetailHiddenBomStructureCount',
+    'relationDetailRow.value?.bomStructureDetailCount',
+    '还有 {{ relationDetailHiddenBomStructureCount }} 条 BOM 结构明细未在弹窗中展开',
+    'relation-detail-scroll',
+    'max-height: min(42vh, 360px);',
+    'inline-detail-button',
     '先选择机型/项目后加入 BOM',
     '当前客户/机型 BOM 未包含',
     '当前范围未进 BOM',
     '选择客户或机型后可加入 BOM',
+    'row.currentScopeBomLineCount !== undefined',
     'dashboard-bom-empty',
     'materialRouteKeyword',
     'keyword: shouldCreateLine ? undefined : row.partCode',
@@ -3185,7 +4808,16 @@ function verifyPartComponentStructureWorkflow() {
     'selectedCustomerName',
     'selectedCustomerFilterLabel',
     'materialProjectScopeValues(row)',
+    'materialProjectScopeText(row)',
+    'materialProjectScopeTitle(row)',
+    'function materialProjectScopeTitle(row: MaterialDashboardRow)',
+    "joinPreview(values, '全部机型/项目')",
+    'row.historyProjectModelCount',
+    '仅订单历史 ${historyCount} 个机型',
+    '仅有订单历史机型 / 项目：${joinPreview(historyModels',
+    '适用机型 / 项目：${totalCount} 个，列表未展开预览',
     '查看固定格式',
+    '复制筛选链接',
     '零件管理固定格式清单',
     'class="fixed-format-textarea"',
     'row.drawingSourceLabel',
@@ -3195,6 +4827,10 @@ function verifyPartComponentStructureWorkflow() {
     'row.bomStructureDetails',
     'dashboardBomStructureSummary',
     'dashboardBomStructureDetailText',
+    'materialBomStructurePreviewText(details, totalCount, dashboardBomStructureDetailText)',
+    'detailText = relationBomStructureDetailText',
+    'map(detailText)',
+    'BOM 名称预览未展开',
     'dashboardBomStructureTagType',
     'openBomStructureDetail',
     'lineId: detail.lineId',
@@ -3217,6 +4853,31 @@ function verifyPartComponentStructureWorkflow() {
     'applyBomStructureFilter',
     'activeFilterItems',
     'clearActiveFilter',
+    "'contextBomScope'",
+    "'contextBomCommonOnly'",
+    'BOM 范围：${contextBomScopeFilterLabel(contextBomScopeFilter.value)}',
+    '状态：${statusFilterLabel(filters.status)}',
+    "label: 'BOM：只看常用'",
+    'routeEnumFilter',
+    'routeDateRange',
+    'routeBooleanFilter',
+    'route.query.drawingNo',
+    'route.query.drawingDateFrom',
+    'route.query.bomStructureType',
+    'route.query.recentOrderPresence',
+    'route.query.lastOrderDateTo',
+    'route.query.sortBy',
+    'route.query.contextBomScope',
+    'route.query.contextBomCommonOnly',
+    'contextBomScope: contextBomScopeFilter.value || undefined',
+    "contextBomCommonOnly: contextBomCommonOnly.value ? 'true' : undefined",
+    'filters.keyword = keyword;',
+    "filters.scopeType = scopeType || '';",
+    "filters.status = status ?? 'ENABLED';",
+    'drawingDateRange.value = routeDateRange(route.query.drawingDateFrom, route.query.drawingDateTo);',
+    "contextBomScopeFilter.value = contextBomScope || '';",
+    'contextBomCommonOnly.value = contextBomCommon ?? false;',
+    'normalizeBomPresenceFilters();',
     'active-filter-bar',
     'active-filter-chip',
     '清除全部',
@@ -3225,6 +4886,11 @@ function verifyPartComponentStructureWorkflow() {
     'relation-boundary-alert',
     '订单历史不等于正式适用范围',
     '不会自动变成全部客户通用、客户私有 BOM 或正式适用范围',
+    'relationBomStructureDetailText(detail)',
+    'relationDetailCustomerTotalCount === 0',
+    'relationDetailHistoryCustomerTotalCount === 0',
+    'relationDetailBomTotalCount === 0',
+    'relationDetailBomStructureTotalCount > 0',
     "drawingSource: filters.drawingSource || undefined",
     "bomStructureType: filters.bomStructureType || undefined",
     "bomPresence: filters.bomPresence || undefined",
@@ -3234,21 +4900,58 @@ function verifyPartComponentStructureWorkflow() {
     '零件控制面板加载失败，请确认后端服务',
     '机型 / 项目选项加载失败，请确认客户筛选和后端服务',
     '当前适用零件包加载失败，请确认客户、机型和后端服务',
+    'scopeTypeFilterLabel',
     'drawingSourceFilterLabel',
     'bomStructureFilterLabel',
     'bomPresenceFilterLabel',
     'recentOrderPresenceFilterLabel',
+    'statusFilterLabel',
     'dashboardSortByLabel',
     'dashboardSortOrderLabel',
+    'dashboardFilterRouteQuery',
+    'dashboardFilterLink',
+    'copyDashboardFilterLink',
+    '筛选链接：${dashboardFilterLink()}',
+    '筛选链接只用于复现控制面板视图，不写入零件、BOM、订单、生产任务或库存流水。',
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    'materialDashboardTableHeightLimits',
+    'materialDashboardTableDefaultHeight',
+    'materialDashboardTableHeightStorageKey',
+    'materialDashboardTableHeight',
+    'function adjustMaterialDashboardTableHeight',
+    'function resetMaterialDashboardTableHeight',
+    'function restoreMaterialDashboardTableHeight',
+    'function saveMaterialDashboardTableHeight',
+    'localStorage.getItem(materialDashboardTableHeightStorageKey)',
+    ':max-height="materialDashboardTableHeight"',
+    'aria-label="降低零件控制面板表格高度"',
+    'aria-label="提高零件控制面板表格高度"',
+    'aria-label="恢复零件控制面板表格默认高度"',
+    'material-dashboard-table-height-actions',
+    "status: filters.status || 'ALL'",
+    "sortBy: filters.sortBy !== 'LAST_ORDER_DATE' ? filters.sortBy : undefined",
+    "sortOrder: filters.sortOrder !== 'DESC' ? filters.sortOrder : undefined",
     'BOM 结构',
     'BOM 状态',
     'withoutBomCount',
     '下单记录',
     'withoutRecentOrderCount',
     '排序字段',
+    '通用 / 定制 ${scopeTypeFilterLabel(filters.scopeType)}',
+    '类型：${materialTypeText(row)}；状态：${statusFilterLabel(row.status)}',
     '来源：${row.drawingSourceLabel',
     '结构：${dashboardBomStructureSummary(row)}',
-    'detail.structureLabel} @ ${detail.bomName}',
+    '状态 ${statusFilterLabel(filters.status)}',
+    '核对说明：固定格式清单只用于人工复核，不会写入零件、BOM、订单、生产任务或库存流水。',
+    '核对：图纸 ${dashboardDrawingReviewText(row)}；BOM ${dashboardBomReviewText(row)}；库存 ${dashboardInventoryReviewText(row)}',
+    'dashboardDrawingReviewText',
+    'dashboardBomReviewText',
+    'dashboardInventoryReviewText',
+    '固定格式库存核对只提示人工复核，不自动补单、提交生产、扣库存或写入 InventoryTransaction。',
+    "return joinPreview(materialDashboardBomStructureLabels(row), row.bomStructureLabel || '-')",
+    'materialBomStructurePreviewText(details, totalCount, dashboardBomStructureDetailText)',
+    'detailText = relationBomStructureDetailText',
+    'map(detailText)',
     "openMaterialMaintain(row, 'drawing')",
     "openMaterialMaintain(row, 'applicability')",
     'openMaterialDrawingMaintain(row)',
@@ -3385,6 +5088,105 @@ function verifyPartComponentStructureWorkflow() {
   if (materialDashboardSource.includes('ElMessageBox.confirm')) {
     addFailure('MaterialsManagementView.vue material and BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
   }
+  if (materialDashboardSource.includes("names.join('、')")) {
+    addFailure('MaterialsManagementView.vue customer scope text must summarize customer names instead of listing every selected customer.');
+  }
+  if (/function materialCustomerScopeText[\s\S]*?return row\.customerScopeLabel/.test(materialDashboardSource)) {
+    addFailure('MaterialsManagementView.vue customer scope list cell must derive a compact summary from scope kind/count instead of rendering raw customerScopeLabel.');
+  }
+  if (materialDashboardSource.includes("row.defaultProcessRoute || '-'")) {
+    addFailure('MaterialsManagementView.vue must summarize default process routes instead of rendering the full route in table/fixed text.');
+  }
+  if (materialDashboardSource.includes("row.bomStructureDetails.map((detail) => `${detail.structureLabel} @ ${detail.bomName}`).join('；')")) {
+    addFailure('MaterialsManagementView.vue BOM structure summary must use joinPreview instead of listing every BOM structure detail.');
+  }
+  if (materialDashboardSource.includes('`${detail.structureLabel} @ ${detail.bomName}`')) {
+    addFailure('MaterialsManagementView.vue BOM structure summaries must use relationBomStructureDetailText instead of short structure @ bomName strings.');
+  }
+  if (materialDashboardSource.includes('dashboardBomStructureTextLines(row)') || materialDashboardSource.includes('function dashboardBomStructureTextLines')) {
+    addFailure('MaterialsManagementView.vue fixed-format dashboard text must keep BOM usage summarized; full BOM details belong in the BOM usage dialog or export.');
+  }
+  if (materialDashboardSource.includes('<span>{{ dashboardBomStructureDetailText(detail) }}</span>')) {
+    addFailure('MaterialsManagementView.vue BOM usage detail dialog must use relationBomStructureDetailText so bomName is not repeated in the same row.');
+  }
+  if (!/function materialBomStructurePreviewText[\s\S]*?detailText = relationBomStructureDetailText[\s\S]*?map\(detailText\)/.test(materialDashboardSource)) {
+    addFailure('MaterialsManagementView.vue BOM usage tooltip must use relationBomStructureDetailText to keep structure previews compact.');
+  }
+  if (
+    materialDashboardSource.includes('!relationDetailCustomerNames.length') ||
+    materialDashboardSource.includes('!relationDetailHistoryCustomerNames.length') ||
+    materialDashboardSource.includes('!relationDetailBomNames.length')
+  ) {
+    addFailure('MaterialsManagementView.vue relation detail empty states must use total counts instead of preview array length.');
+  }
+  if (materialDashboardSource.includes('if (!row.bomNames.length)')) {
+    addFailure('MaterialsManagementView.vue BOM checks must use materialBomCount(row), because bomNames can be only a truncated preview.');
+  }
+  if (materialDashboardSource.includes('<span>{{ bom.scopeLabel }}</span>')) {
+    addFailure('MaterialsManagementView.vue context BOM cards must summarize scopeLabel with tooltip instead of rendering raw scope text.');
+  }
+  if (/function contextBomScopeTitle[\s\S]*bom\.scopeLabel \|\| contextBomScopePreview/.test(materialDashboardSource)) {
+    addFailure('MaterialsManagementView.vue context BOM tooltip must use the compact scope preview instead of raw scopeLabel.');
+  }
+  if (materialDashboardSource.includes('{{ row.partType || row.scopeLabel }}')) {
+    addFailure('MaterialsManagementView.vue material type chips must not fall back to raw scopeLabel in list cells.');
+  }
+  if (materialDashboardSource.includes("`范围摘要：${row.scopeLabel || '-'}`")) {
+    addFailure('MaterialsManagementView.vue material type tooltip must use compact customer/project scope text instead of raw scopeLabel.');
+  }
+  if (materialDashboardSource.includes("<span>{{ row.currentRelationLabel || '-' }}</span>")) {
+    addFailure('MaterialsManagementView.vue mobile relation cells must use materialRelationText and materialRelationDescriptionTitle instead of raw relation text.');
+  }
+  if (materialDashboardSource.includes("return `适用机型 / 项目：${values.join('、')}`")) {
+    addFailure('MaterialsManagementView.vue material project scope title must use joinPreview instead of listing every project/model.');
+  }
+  if (materialDashboardSource.includes("return values[0] || '全部机型';")) {
+    addFailure('MaterialsManagementView.vue material project scope text must not treat missing preview values as 全部机型 when total count is positive.');
+  }
+  if (/function materialProjectScopeTitle[\s\S]*if \(values\.length === 0\)\s*{\s*return '全部机型\/项目';/.test(materialDashboardSource)) {
+    addFailure('MaterialsManagementView.vue material project scope title must use total count before preview array length.');
+  }
+  if (materialDashboardSource.includes("row.bomStructureDetails?.length ? '当前客户/机型 BOM 未包含' : '当前范围未进 BOM'")) {
+    addFailure('MaterialsManagementView.vue BOM empty text must use bomStructureDetailCount instead of preview array length.');
+  }
+  if (materialDashboardSource.includes('bomCount || structureCount')) {
+    addFailure('MaterialsManagementView.vue BOM usage summary must not report structure line count as BOM count.');
+  }
+  if (/function dashboardBomReviewText[\s\S]*?if \(materialBomCount\(row\) <= 0\)/.test(materialDashboardSource)) {
+    addFailure('MaterialsManagementView.vue fixed-format BOM review must use materialRowHasBomUsage so structure-only rows are not marked as 未进 BOM.');
+  }
+  if (materialDashboardSource.includes("BOM：${joinPreview(materialBomNameValues(row), '-', materialBomCount(row))}")) {
+    addFailure('MaterialsManagementView.vue fixed-format BOM line must use materialBomUsageText so structure-only rows are summarized correctly.');
+  }
+  if (materialDashboardSource.includes('另有 ${totalCount - visibleCount} 条未展开')) {
+    addFailure('MaterialsManagementView.vue fixed BOM structure summary must not double-count hidden rows after materialBomStructurePreviewText already includes the total.');
+  }
+  const materialDashboardServiceDefaultSort = materialsServiceSource.match(
+    /private compareDashboardDefault[\s\S]*?\n  private compareDashboardNullableTime/
+  )?.[0] || '';
+  if (materialDashboardServiceDefaultSort.includes('updatedAt')) {
+    addFailure('materials.service.ts compareDashboardDefault must not use updatedAt; first stage does not use material maintenance time as business ranking.');
+  }
+  if (materialsServiceSource.includes("orderBy: [{ updatedAt: 'desc' }, { partCode: 'asc' }]")) {
+    addFailure('materials.service.ts material dashboard query must not use updatedAt as the default material ranking.');
+  }
+  if (!materialsServiceSource.includes("orderBy: [{ partCode: 'asc' }, { id: 'asc' }]")) {
+    addFailure('materials.service.ts material dashboard query must keep stable partCode/id ordering before in-memory business sorting.');
+  }
+  if (materialsServiceSource.includes('updatedAt: material.updatedAt') || materialsServiceSource.includes('createdAt: material.createdAt')) {
+    addFailure('materials.service.ts material dashboard response must not expose Material maintenance timestamps.');
+  }
+  if (materialsServiceSource.includes("row.customerScopeLabel || this.joinDashboardExportValues(row.customerNames, '未设置适用客户'")) {
+    addFailure('materials.service.ts dashboard export must use dashboardExportCustomerScopeText so formal customer scope and order history stay separated.');
+  }
+  if (/const projectModels = this\.uniqueList\(\[\.\.\.formalProjectModels,\s*\.\.\.historyProjectModels\]\)/.test(materialsServiceSource)) {
+    addFailure('materials.service.ts must not merge historyProjectModels into projectModels; formal project scope and order history must stay separate.');
+  }
+  const materialDashboardTypesSource = readFile('frontend/src/types/erp.ts');
+  const materialDashboardRowType = materialDashboardTypesSource.match(/export interface MaterialDashboardRow[\s\S]*?\n}/)?.[0] || '';
+  if (materialDashboardRowType.includes('updatedAt') || materialDashboardRowType.includes('createdAt')) {
+    addFailure('frontend/src/types/erp.ts MaterialDashboardRow must not expose maintenance timestamps.');
+  }
 
   const materialProjectModelSnippets = [
     'scoreByProject',
@@ -3398,7 +5200,6 @@ function verifyPartComponentStructureWorkflow() {
     '仅存在于零件搜索记忆，尚未确认客户适用范围或 BOM，不代表库存可用。',
     'score.orderCount += 1',
     'latestOrderTime',
-    'latestMasterTime',
     'return b.orderCount - a.orderCount'
   ];
   for (const snippet of materialProjectModelSnippets) {
@@ -3446,6 +5247,47 @@ function verifyPartComponentStructureWorkflow() {
     'bomStructureTypes',
     'bomStructureLabels',
     'bomStructureDetails',
+    'bomStructureDetailCount',
+    'currentScopeBomLineCount',
+    'MATERIAL_DASHBOARD_CUSTOMER_PREVIEW_LIMIT',
+    'const publicScopeCustomerNames = hasGlobalCustomerScope ? [] : scopeCustomerNames;',
+    'const publicScopeCustomerNameCount = hasGlobalCustomerScope ? 0 : scopeCustomerNames.length;',
+    'const hasFormalScope = displayApplicabilities.length > 0 || displayBomLines.length > 0;',
+    'const hasCustomerSpecificScope =',
+    '!hasGlobalCustomerScope &&',
+    "line.bom.customerId || line.bom.customerScopeMode === 'SELECTED'",
+    'const hasHistoryCustomScope = !hasFormalScope',
+    'const displayPartType = hasFormalScope',
+    'partType: displayPartType',
+    'customerNames: publicScopeCustomerNames',
+    'customerNameCount: publicScopeCustomerNameCount',
+    'MATERIAL_DASHBOARD_PROJECT_MODEL_PREVIEW_LIMIT',
+    'dashboardExportCustomerScopeText',
+    'const formalProjectModels = this.uniqueList',
+    'const historyProjectModels = this.uniqueList',
+    "const targetBomProjectModel = query.projectModel?.trim() || (formalProjectModels.length === 1 ? formalProjectModels[0] : '');",
+    'const hasGlobalProjectScope = projectScopeEntries.some',
+    'const publicProjectModels = hasGlobalProjectScope ? [] : formalProjectModels;',
+    'const publicProjectModelCount = hasGlobalProjectScope ? 0 : formalProjectModels.length;',
+    'projectModels: publicProjectModels',
+    'projectModelCount: publicProjectModelCount',
+    'historyProjectModels',
+    'historyProjectModelCount: historyProjectModels.length',
+    'projectModel: hasGlobalProjectScope ? null : formalProjectModels[0] || null',
+    'Number(row.projectModelCount || 0)',
+    'MATERIAL_DASHBOARD_BOM_NAME_PREVIEW_LIMIT',
+    'bomNameCount: bomNames.length',
+    '? displayBomLines.filter((line) => {',
+    'this.bomLineMatchesCustomerScope(line, selectedCustomerId)',
+    'this.bomLineHasGlobalCustomerScope(line)',
+    "line.bom.projectModelScopeKey === 'ALL'",
+    'MATERIAL_DASHBOARD_BOM_STRUCTURE_PREVIEW_LIMIT',
+    'customerNames: customerNames.slice(0, MATERIAL_DASHBOARD_CUSTOMER_PREVIEW_LIMIT)',
+    'historyCustomerNames: historyCustomerNames.slice(0, MATERIAL_DASHBOARD_CUSTOMER_PREVIEW_LIMIT)',
+    'projectModels: projectModels.slice(0, MATERIAL_DASHBOARD_PROJECT_MODEL_PREVIEW_LIMIT)',
+    'historyProjectModels: historyProjectModels.slice(0, MATERIAL_DASHBOARD_PROJECT_MODEL_PREVIEW_LIMIT)',
+    'bomNames: bomNames.slice(0, MATERIAL_DASHBOARD_BOM_NAME_PREVIEW_LIMIT)',
+    'bomStructureDetails.slice(0, MATERIAL_DASHBOARD_BOM_STRUCTURE_PREVIEW_LIMIT)',
     'drawingSourceCounts',
     'bomStructureCounts',
     'withoutBomCount',
@@ -3494,7 +5336,7 @@ function verifyPartComponentStructureWorkflow() {
     "bomStructureType?: 'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART' | 'NONE'",
     "bomPresence?: 'WITH_BOM' | 'WITHOUT_BOM'",
     "recentOrderPresence?: 'WITH_RECENT_ORDER' | 'WITHOUT_RECENT_ORDER'",
-    "sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE' | 'UPDATED_AT'",
+    "sortBy?: 'LAST_ORDER_DATE' | 'DRAWING_DATE' | 'BOM_STATUS' | 'PART_CODE'",
     "sortOrder?: 'ASC' | 'DESC'"
   ];
   const materialsDtoSource = readFile('backend/src/modules/materials/dto.ts');
@@ -3510,6 +5352,9 @@ function verifyPartComponentStructureWorkflow() {
   }
   if (!frontendTypesSource.includes('hasGlobalProjectScope?: boolean')) {
     addFailure('MaterialDashboardRow must expose global project scope for dashboard display.');
+  }
+  if (!frontendTypesSource.includes('hasGlobalCustomerScope?: boolean')) {
+    addFailure('MaterialDashboardRow must expose global customer scope for dashboard relation detail display.');
   }
   if (!frontendTypesSource.includes("drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST'")) {
     addFailure('ModelBomLine must distinguish BOM line, material default, and material latest drawing sources.');
@@ -3534,6 +5379,21 @@ function verifyPartComponentStructureWorkflow() {
   }
   if (!frontendTypesSource.includes('bomStructureDetails?: MaterialDashboardBomStructureDetail[]')) {
     addFailure('MaterialDashboardRow must keep bomStructureDetails response field.');
+  }
+  if (!frontendTypesSource.includes('bomStructureDetailCount?: number')) {
+    addFailure('MaterialDashboardRow must expose full BOM structure detail count for truncated dashboard previews.');
+  }
+  if (!frontendTypesSource.includes('currentScopeBomLineCount?: number')) {
+    addFailure('MaterialDashboardRow must expose current scope BOM line count for safe add-to-BOM decisions.');
+  }
+  if (!frontendTypesSource.includes('projectModelCount?: number')) {
+    addFailure('MaterialDashboardRow must expose full project model count for truncated dashboard previews.');
+  }
+  if (!frontendTypesSource.includes('historyProjectModels?: string[]')) {
+    addFailure('MaterialDashboardRow must separate order-history project models from formal project scope.');
+  }
+  if (!frontendTypesSource.includes('historyProjectModelCount?: number')) {
+    addFailure('MaterialDashboardRow must expose full history project model count for truncated dashboard previews.');
   }
   if (!materialsServiceSource.includes('customerId: line.bom.customerId')) {
     addFailure('materials.service.ts must include BOM customerId in dashboard BOM structure details.');
@@ -3615,6 +5475,27 @@ function verifyPartComponentStructureWorkflow() {
     '维护下单可搜索的零件搜索记忆',
     '库存数量从 InventoryBatch 实时汇总；停用只影响后续搜索和推荐，不删除历史订单、库存批次、库存数量或生产记录。',
     '这里只维护 `Material` 搜索记忆。编辑已有零件时状态请使用列表里的启用/停用动作；保存不会改写历史订单、库存批次、BOM、默认图纸或来源加工关系。',
+    'formatProcessRoutePreview(row.defaultProcessRoute)',
+    'function formatProcessRoutePreview',
+    'processRouteTooltipText(row.defaultProcessRoute)',
+    '等 ${steps.length} 个工序',
+    'formatLongTextPreview(row.remark)',
+    'longTextTooltipText(row.remark)',
+    'function formatLongTextPreview',
+    'materialImportSourceFilePreview(row)',
+    'materialImportSourceSheetPreview(row)',
+    'materialImportSourceFileTitle(row)',
+    'function materialImportSourceFilePreview(row: { sourceFileName?: string | null })',
+    'materialApplicabilityScopePreview(row)',
+    'materialApplicabilityScopeTitle(row)',
+    'class="material-scope-cell"',
+    'function materialApplicabilityScopeTitle(row: MaterialApplicability)',
+    'formatMaterialImportIssuePreview(issues)',
+    'formatMaterialImportIssueTitle(issues)',
+    'function formatMaterialImportIssuePreview',
+    'materialImportTraceRemarkPreview(activeMaterialImportTraceRow)',
+    'materialImportTraceRemarkTitle(activeMaterialImportTraceRow)',
+    'function materialImportTraceRemarkPreview(row: MaterialImportTraceRow)',
     '系统只会停用 `Material` 搜索记忆',
     '不会删除历史订单、库存批次、库存数量、生产记录或导入追溯。'
   ];
@@ -3625,6 +5506,33 @@ function verifyPartComponentStructureWorkflow() {
   }
   if (materialsViewSource.includes('ElMessageBox.confirm')) {
     addFailure('MaterialsView.vue material library key operations must use el-dialog instead of ElMessageBox.confirm');
+  }
+  if (materialsViewSource.includes("{{ row.defaultProcessRoute || '-' }}")) {
+    addFailure('MaterialsView.vue must summarize default process routes instead of rendering full route text in tables.');
+  }
+  if (materialsViewSource.includes("{{ row.remark || '-' }}")) {
+    addFailure('MaterialsView.vue must summarize long remarks instead of rendering full remark text in tables.');
+  }
+  if (/<el-table-column\s+label="来源文件"\s+min-width="180"\s+show-overflow-tooltip\s*>/.test(materialsViewSource)) {
+    addFailure('MaterialsView.vue must summarize material import source file cells with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (/<el-table-column\s+prop="remark"\s+label="备注"\s+min-width="220"\s+show-overflow-tooltip\s*>/.test(materialsViewSource)) {
+    addFailure('MaterialsView.vue must summarize material import remark cells with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (materialsViewSource.includes('<p>{{ activeMaterialImportTraceRow.remark }}</p>')) {
+    addFailure('MaterialsView.vue must summarize material import trace remarks instead of rendering full trace remark text directly.');
+  }
+  if (materialsViewSource.includes('<el-table-column prop="scopeLabel" label="适用范围"')) {
+    addFailure('MaterialsView.vue must summarize material applicability scope labels with tooltip instead of rendering raw scopeLabel in table cells.');
+  }
+  if (/function materialApplicabilityScopeTitle[\s\S]*row\.scopeLabel \|\|/.test(materialsViewSource)) {
+    addFailure('MaterialsView.vue material applicability tooltip must use the compact scope preview instead of raw scopeLabel.');
+  }
+  if (materialsViewSource.includes('name: row.scopeLabel,')) {
+    addFailure('MaterialsView.vue material applicability status dialogs must use materialApplicabilityScopePreview(row) instead of raw scopeLabel.');
+  }
+  if (materialsViewSource.includes('props.issues.map((issue) =>')) {
+    addFailure('MaterialsView.vue must summarize import issues instead of rendering every issue tag in table cells.');
   }
 
   const materialTransformMobileSnippets = [
@@ -3648,7 +5556,7 @@ function verifyPartComponentStructureWorkflow() {
 
   const materialTransformProcessSnippets = [
     'defaultProcessRouteSteps',
-    "import { Rank } from '@element-plus/icons-vue'",
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
     '<el-icon><Rank /></el-icon>',
     "erpApi.processDefinitions(undefined, 'ENABLED')",
     'handleDefaultProcessRouteChange',
@@ -3660,12 +5568,47 @@ function verifyPartComponentStructureWorkflow() {
     '建议工艺只作为下单和库存来源核对的初始建议',
     '.split(/(?:->|→|[、,，;；\\n\\r]+)/)',
     "splitDefaultProcessRoute(row.defaultProcessRoute || '')",
-    "defaultProcessRoute: form.defaultProcessRouteSteps.join('、') || undefined"
+    "defaultProcessRoute: form.defaultProcessRouteSteps.join('、') || undefined",
+    'formatProcessRoutePreview(row.defaultProcessRoute)',
+    'processRouteTooltipText(row.defaultProcessRoute)',
+    'function formatProcessRoutePreview',
+    '等 ${steps.length} 个工序',
+    'formatLongTextPreview(row.conversionDescription)',
+    'longTextTooltipText(row.conversionDescription)',
+    'function formatLongTextPreview',
+    'transformScopePreview(row)',
+    'transformScopeTitle(row)',
+    'class="transform-scope-cell"',
+    'function transformScopeTitle(row: MaterialTransformRule)',
+    'transformInventoryDecisionReasonPreview(row)',
+    'transformInventoryDecisionReasonTitle(row)',
+    'function transformInventoryDecisionReasonPreview(row: MaterialTransformRule'
   ];
   for (const snippet of materialTransformProcessSnippets) {
     if (!materialTransformsSource.includes(snippet)) {
       addFailure(`MaterialTransformsView.vue must keep standard process selection for transform default route snippet: ${snippet}`);
     }
+  }
+  if (materialTransformsSource.includes("{{ row.defaultProcessRoute || '-' }}")) {
+    addFailure('MaterialTransformsView.vue must summarize transform default process routes instead of rendering full text in the table.');
+  }
+  if (materialTransformsSource.includes("{{ row.conversionDescription || '-' }}")) {
+    addFailure('MaterialTransformsView.vue must summarize conversion descriptions instead of rendering full text in the table.');
+  }
+  if (materialTransformsSource.includes('<el-table-column prop="scopeLabel" label="适用范围"')) {
+    addFailure('MaterialTransformsView.vue must summarize transform scope labels with tooltip instead of rendering raw scopeLabel in table cells.');
+  }
+  if (/function transformScopeTitle[\s\S]*row\.scopeLabel \|\|/.test(materialTransformsSource)) {
+    addFailure('MaterialTransformsView.vue transform scope tooltip must use the compact scope preview instead of raw scopeLabel.');
+  }
+  if (/row\.targetPartName,\s*`\$\{formatQuantity\(row\.targetAvailableQuantity[\s\S]*?row\.scopeLabel,\s*row\.multiplier/.test(materialTransformsSource)) {
+    addFailure('MaterialTransformsView.vue fixed-format transform copy must use transformScopePreview(row) instead of raw scopeLabel.');
+  }
+  if (materialTransformsSource.includes('<div class="inventory-decision-reason">{{ transformInventoryDecisionReason(row) }}</div>')) {
+    addFailure('MaterialTransformsView.vue must summarize source-transform inventory decision reasons in table rows.');
+  }
+  if (materialTransformsSource.includes('<p>{{ transformInventoryDecisionReason(row) }}</p>')) {
+    addFailure('MaterialTransformsView.vue must summarize source-transform inventory decision reasons in mobile rows.');
   }
 
   const materialTransformUsageSnippets = [
@@ -3681,8 +5624,9 @@ function verifyPartComponentStructureWorkflow() {
     'applyRouteFilters',
     'route.query.targetPartCode',
     'prefillTargetMaterialFromFilter',
-    "erpApi.inventoryMaterials({ keyword: targetPartCode, status: 'ENABLED' })",
-    'normalizeMaterialCode(item.partCode) === normalizeMaterialCode(targetPartCode)',
+    "erpApi.inventoryMaterialByPartCode(targetPartCode, 'ENABLED')",
+    "erpApi.inventoryMaterialsAllPages({ keyword: normalizedKeyword, status: 'ENABLED' })",
+    'normalizeMaterialCode(value: string)',
     'handleSourceMaterialKeywordInput',
     'handleTargetMaterialKeywordInput',
     'sourceMaterialSelectedLabel',
@@ -3818,6 +5762,69 @@ function verifyPartComponentStructureWorkflow() {
   if (!updateMaterialMemoryPayloadMatch || updateMaterialMemoryPayloadMatch[1].includes('status?:')) {
     addFailure('frontend/src/api/erp.ts UpdateMaterialMemoryPayload must not include status; material memory status changes must use dedicated restore/disable APIs');
   }
+  const materialMemoryListBlock = inventoryServiceSource.match(/async materials\(query: MaterialQueryDto\) \{[\s\S]*?\n  private serializeMaterialMemoryRow/)?.[0] || '';
+  const serializeMaterialMemoryBlock = inventoryServiceSource.match(/private serializeMaterialMemoryRow\([\s\S]*?\n  async buildMaterialMemoryExport/)?.[0] || '';
+  const materialMemoryTypeBlock = frontendTypesSource.match(/export interface MaterialMemory[\s\S]*?\n}/)?.[0] || '';
+  if (!materialMemoryListBlock.includes("orderBy: [{ partCode: 'asc' }, { id: 'asc' }]")) {
+    addFailure('inventory.service.ts material memory list must use stable partCode/id ordering instead of Material maintenance time.');
+  }
+  if (materialMemoryListBlock.includes("orderBy: [{ updatedAt: 'desc' }, { partCode: 'asc' }]")) {
+    addFailure('inventory.service.ts material memory list must not sort by updatedAt; current stage does not use material maintenance time as business ranking.');
+  }
+  if (serializeMaterialMemoryBlock.includes('updatedAt: material.updatedAt') || serializeMaterialMemoryBlock.includes('createdAt: material.createdAt')) {
+    addFailure('inventory.service.ts material memory API response must not expose Material maintenance timestamps for the main material library list.');
+  }
+  if (materialMemoryTypeBlock.includes('updatedAt') || materialMemoryTypeBlock.includes('createdAt')) {
+    addFailure('frontend/src/types/erp.ts MaterialMemory must not expose maintenance timestamps for the main material library list.');
+  }
+  const materialApplicabilityExportBlock =
+    inventoryServiceSource.match(/async buildMaterialApplicabilitiesExport\(materialId: string\)[\s\S]*?\n  async saveMaterialApplicability/)?.[0] || '';
+  const materialApplicabilitySerializeBlock =
+    inventoryServiceSource.match(/private serializeMaterialApplicability\([\s\S]*?\n  private resolveModelBomScope/)?.[0] || '';
+  const materialApplicabilityTypeBlock = frontendTypesSource.match(/export interface MaterialApplicability[\s\S]*?\n}/)?.[0] || '';
+  if (
+    materialApplicabilityExportBlock.includes("'创建时间'") ||
+    materialApplicabilityExportBlock.includes("'更新时间'") ||
+    materialApplicabilityExportBlock.includes('item.createdAt') ||
+    materialApplicabilityExportBlock.includes('item.updatedAt')
+  ) {
+    addFailure('inventory.service.ts material applicability export must not include maintenance timestamps; applicability is a business scope rule, not an audit report.');
+  }
+  if (
+    materialApplicabilitySerializeBlock.includes('createdAt: item.createdAt') ||
+    materialApplicabilitySerializeBlock.includes('updatedAt: item.updatedAt') ||
+    materialApplicabilitySerializeBlock.includes('createdAt: Date') ||
+    materialApplicabilitySerializeBlock.includes('updatedAt: Date')
+  ) {
+    addFailure('inventory.service.ts material applicability API response must not expose maintenance timestamps in the scope rule list.');
+  }
+  if (materialApplicabilityTypeBlock.includes('createdAt') || materialApplicabilityTypeBlock.includes('updatedAt')) {
+    addFailure('frontend/src/types/erp.ts MaterialApplicability must not expose maintenance timestamps for the scope rule list.');
+  }
+  const materialDrawingRevisionExportBlock =
+    inventoryServiceSource.match(/async buildMaterialDrawingRevisionsExport\(materialId: string\)[\s\S]*?\n  async saveMaterialDrawingRevision/)?.[0] || '';
+  const materialDrawingRevisionSerializeBlock =
+    inventoryServiceSource.match(/private serializeMaterialDrawingRevision\([\s\S]*?\n  async buildMaterialImportTemplate/)?.[0] || '';
+  const materialDrawingRevisionTypeBlock = frontendTypesSource.match(/export interface MaterialDrawingRevision[\s\S]*?\n}/)?.[0] || '';
+  if (
+    materialDrawingRevisionExportBlock.includes("'创建时间'") ||
+    materialDrawingRevisionExportBlock.includes("'更新时间'") ||
+    materialDrawingRevisionExportBlock.includes('row.createdAt') ||
+    materialDrawingRevisionExportBlock.includes('row.updatedAt')
+  ) {
+    addFailure('inventory.service.ts material drawing revision export must keep defaultChangedAt audit fields but omit generic maintenance timestamps.');
+  }
+  if (
+    materialDrawingRevisionSerializeBlock.includes('createdAt: row.createdAt') ||
+    materialDrawingRevisionSerializeBlock.includes('updatedAt: row.updatedAt') ||
+    materialDrawingRevisionSerializeBlock.includes('createdAt: Date') ||
+    materialDrawingRevisionSerializeBlock.includes('updatedAt: Date')
+  ) {
+    addFailure('inventory.service.ts material drawing revision API response must not expose generic maintenance timestamps.');
+  }
+  if (materialDrawingRevisionTypeBlock.includes('createdAt') || materialDrawingRevisionTypeBlock.includes('updatedAt')) {
+    addFailure('frontend/src/types/erp.ts MaterialDrawingRevision must not expose generic maintenance timestamps.');
+  }
 
   const materialScopeAndDrawingRestoreSnippets = [
     ['MaterialsView.vue', materialsViewSource, 'materialMaintenanceStatusDialogVisible'],
@@ -3833,6 +5840,12 @@ function verifyPartComponentStructureWorkflow() {
     ['MaterialsView.vue', materialsViewSource, '默认变更人'],
     ['MaterialsView.vue', materialsViewSource, 'confirmDefaultDrawingRevision'],
     ['MaterialsView.vue', materialsViewSource, '设置默认图纸必须填写操作人员'],
+    ['MaterialsView.vue', materialsViewSource, 'uploadMaterialDrawingFile'],
+    ['MaterialsView.vue', materialsViewSource, 'await erpApi.uploadMaterialDrawing(file)'],
+    ['MaterialsView.vue', materialsViewSource, 'drawingForm.drawingFileName = result.fileName'],
+    ['MaterialsView.vue', materialsViewSource, 'drawingForm.drawingFileUrl = result.fileUrl'],
+    ['MaterialsView.vue', materialsViewSource, '图纸文件正在上传，请等待上传完成'],
+    ['MaterialsView.vue', materialsViewSource, 'DrawingPreviewLink'],
     ['MaterialsView.vue', materialsViewSource, '<el-select v-model="drawingForm.status" :disabled="Boolean(drawingForm.id)"'],
     ['MaterialsView.vue', materialsViewSource, 'await erpApi.saveMaterialDrawingRevision(activeMaterial.value.id, { ...payload, status: drawingForm.status })'],
     ['frontend/src/api/erp.ts', frontendApiSource, 'restoreMaterialApplicability(applicabilityId: string)'],
@@ -3840,6 +5853,8 @@ function verifyPartComponentStructureWorkflow() {
     ['frontend/src/api/erp.ts', frontendApiSource, 'updateMaterialApplicability(applicabilityId: string, payload: UpdateMaterialApplicabilityPayload)'],
     ['frontend/src/api/erp.ts', frontendApiSource, "`/inventory/material-applicabilities/${applicabilityId}/restore`"],
     ['frontend/src/api/erp.ts', frontendApiSource, 'restoreMaterialDrawingRevision(revisionId: string)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, 'uploadMaterialDrawing(file: File)'],
+    ['frontend/src/api/erp.ts', frontendApiSource, '/inventory/material-drawings/upload'],
     ['frontend/src/api/erp.ts', frontendApiSource, "export type UpdateMaterialDrawingRevisionPayload = Omit<SaveMaterialDrawingRevisionPayload, 'status'>"],
     ['frontend/src/api/erp.ts', frontendApiSource, 'updateMaterialDrawingRevision(revisionId: string, payload: UpdateMaterialDrawingRevisionPayload)'],
     ['MaterialsView.vue', materialsViewSource, 'type UpdateMaterialDrawingRevisionPayload'],
@@ -3849,6 +5864,11 @@ function verifyPartComponentStructureWorkflow() {
     ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'return this.inventoryService.restoreMaterialApplicability(applicabilityId);'],
     ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "@Patch('material-drawing-revisions/:revisionId/restore')"],
     ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'return this.inventoryService.restoreMaterialDrawingRevision(revisionId);'],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "@Post('material-drawings/upload')"],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'allowedMaterialDrawingExtensions'],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'safeMaterialDrawingFileName'],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, 'destination: drawingUploadPath()'],
+    ['backend/src/modules/inventory/inventory.controller.ts', inventoryControllerSource, "fileUrl: `/uploads/drawings/${file.filename}`"],
     ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, 'async restoreMaterialApplicability(applicabilityId: string)'],
     ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '零件适用范围状态变更必须走 disableMaterialApplicability / restoreMaterialApplicability'],
     ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, '零件适用范围状态请使用专用启用/停用接口'],
@@ -3921,8 +5941,10 @@ function verifyPartComponentStructureWorkflow() {
     ['MaterialTransformsView.vue', materialTransformsSource, 'erpApi.materialTransformRulesPage'],
     ['frontend/src/api/erp.ts', frontendApiSource, 'materialTransformRulesPage(filters: MaterialTransformRuleFilters = {})'],
     ['frontend/src/api/erp.ts', frontendApiSource, "withPage: 'true'"],
+    ['frontend/src/api/erp.ts', frontendApiSource, "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined"],
     ['frontend/src/types/erp.ts', frontendTypesSource, 'export interface MaterialTransformRuleListResponse'],
     ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'withPage?: string'],
+    ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'includeTestFixtures?: string'],
     ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'limit?: number'],
     ['backend/src/modules/inventory/dto.ts', inventoryDtoSource, 'offset?: number'],
     ['backend/src/modules/inventory/inventory.service.ts', inventoryServiceSource, "const withPage = query.withPage === 'true'"],
@@ -3933,6 +5955,46 @@ function verifyPartComponentStructureWorkflow() {
     if (!source.includes(snippet)) {
       addFailure(`${file} must keep paginated source-transform rule loading snippet: ${snippet}`);
     }
+  }
+  const materialTransformListBlock = inventoryServiceSource.match(/async materialTransformRules\(query: MaterialTransformRuleQueryDto\) \{[\s\S]*?\n  async buildMaterialTransformRulesExport/)?.[0] || '';
+  const materialTransformSerializeBlock = inventoryServiceSource.match(/private serializeMaterialTransformRule\([\s\S]*?\n  private modelBomDiffReviewLineSelect/)?.[0] || '';
+  const materialTransformTypeBlock = frontendTypesSource.match(/export interface MaterialTransformRule[\s\S]*?\n}/)?.[0] || '';
+  const materialTransformExportBlock = inventoryServiceSource.match(/async buildMaterialTransformRulesExport\(query: MaterialTransformRuleQueryDto\)[\s\S]*?\n  async createMaterialTransformRule/)?.[0] || '';
+  const materialTransformRulesRegressionSource = readFile('scripts/verify-material-transform-rules-export-api.cjs');
+  const materialTransformFixtureFilterSources = [inventoryServiceSource, inventoryDtoSource, frontendApiSource, materialTransformRulesRegressionSource].join('\n');
+  for (const snippet of [
+    'isTestFixtureMaterialTransformRule',
+    "const includeTestFixtures = query.includeTestFixtures === 'true';",
+    'const businessRows = includeTestFixtures ? rows : rows.filter',
+    'includeTestFixtures?: boolean',
+    'material-transform-rules-test-fixture-filter',
+    'material-transform-rules-export-test-fixture-filter',
+    'includeTestFixtures=true'
+  ]) {
+    if (!materialTransformFixtureFilterSources.includes(snippet)) {
+      addFailure(`Source-transform list/export must keep reusable test-fixture opt-in filter snippet: ${snippet}`);
+    }
+  }
+  if (!materialTransformListBlock.includes("orderBy: [{ sourceMaterialId: 'asc' }, { targetMaterialId: 'asc' }, { customerScopeKey: 'asc' }, { projectModelScopeKey: 'asc' }, { id: 'asc' }]")) {
+    addFailure('inventory.service.ts source-transform list must use stable scope/source/target ordering instead of updatedAt maintenance time.');
+  }
+  if (materialTransformsSource.includes('label="更新时间"') || materialTransformsSource.includes('formatDateTime(row.updatedAt)')) {
+    addFailure('MaterialTransformsView.vue must hide source-transform updatedAt from the main list; current stage does not use maintenance timestamps as business criteria.');
+  }
+  if (materialTransformsSource.includes("'更新时间'") || materialTransformsSource.includes('formatDateTime(row.updatedAt)')) {
+    addFailure('MaterialTransformsView.vue fixed-format source-transform copy must not include updatedAt maintenance time.');
+  }
+  if (materialTransformExportBlock.includes("'更新时间'") || materialTransformExportBlock.includes('row.updatedAt')) {
+    addFailure('inventory.service.ts source-transform export must not include updatedAt maintenance time.');
+  }
+  if (materialTransformListBlock.includes("orderBy: [{ updatedAt: 'desc' }, { createdAt: 'desc' }]")) {
+    addFailure('inventory.service.ts source-transform list must not sort by updatedAt maintenance time.');
+  }
+  if (materialTransformSerializeBlock.includes('updatedAt: row.updatedAt') || materialTransformSerializeBlock.includes('createdAt: row.createdAt')) {
+    addFailure('inventory.service.ts source-transform API response must not expose maintenance timestamps in the main rule list.');
+  }
+  if (materialTransformTypeBlock.includes('updatedAt') || materialTransformTypeBlock.includes('createdAt')) {
+    addFailure('frontend/src/types/erp.ts MaterialTransformRule must not expose maintenance timestamps in the main rule list.');
   }
   if (materialTransformsSource.includes('form.multiplier = row.multiplier || 1')) {
     addFailure('MaterialTransformsView.vue must preserve an invalid persisted multiplier while editing so validation can block it instead of silently replacing it with 1.');
@@ -4005,6 +6067,10 @@ function verifyPartComponentStructureWorkflow() {
     '零件包推荐',
     'modelBomRecommendationVisible',
     'loadModelBomRecommendations',
+    'modelBomRecommendationDetailLoadingId',
+    'loadModelBomRecommendationDetail',
+    'modelBomHasLoadedLines',
+    'const detail = await erpApi.modelBom(bom.id)',
     'modelBomStructureGroups',
     'createLineFromModelBomLine',
     'buildBomComponentNoMap',
@@ -4012,6 +6078,13 @@ function verifyPartComponentStructureWorkflow() {
     'orderImportableModelBomLines',
     'modelBomProjectScopeText',
     'modelBomImportProjectModel',
+    'modelBomScopePreview(bom)',
+    'modelBomRecommendationMultiChoiceScopeCount',
+    '可选 BOM {{ bom.sameScopeBomCount }} 个',
+    '所在范围存在多套可选 BOM',
+    'modelBomScopeTitle(bom)',
+    'class="model-bom-scope-tag"',
+    'function modelBomScopeTitle(bom: ModelBom)',
     '全部机型/项目（带入 ${importProjectModel}）',
     'targetProjectModel = modelBomImportProjectModel(bom)',
     'line.projectModel = targetProjectModel',
@@ -4046,6 +6119,34 @@ function verifyPartComponentStructureWorkflow() {
     'modelBomApplyMissingThicknessSourceLines',
     'modelBomApplySourceBomActionText',
     'modelBomApplyRequiresRefresh',
+    'formatLimitedListPreview',
+    'totalCount?: number',
+    "formatLimitedListPreview(orderNos, '订单', 5, totalCount)",
+    "formatLimitedListPreview(fileNames.map((fileName) => displayImportFileName(fileName)), '文件', 5, totalCount)",
+    'filter((_, index) => index < maxCount)',
+    'modelBomDuplicatePartCodesTitle',
+    'modelBomDraftExistingBomsSummary',
+    "formatLimitedListPreview(preview || [], '零件编码')",
+    'function formatProcessRoutePreview',
+    "formatLimitedListPreview(steps, '工序', 3)",
+    'formatProcessRoutePreview(line.processRoute)',
+    'formatProcessRoutePreview(line.defaultProcessRoute)',
+    'formatProcessRoutePreview(row.defaultProcessRoute)',
+    'formatFullText(row.defaultProcessRoute)',
+    '<el-table-column label="默认工艺" min-width="160">',
+    'formatProcessRoutePreview(row.draftLine.defaultProcessRoute, \'未维护默认工艺\')',
+    'formatProcessRoutePreview(row.existingLine.defaultProcessRoute, \'未维护默认工艺\')',
+    'formatImportIssuePreview(line.issues)',
+    'formatImportIssuePreview(draft.issues)',
+    'formatImportIssuePreview(row.issues)',
+    'formatLongTextPreview(row.processRemark)',
+    'modelBomRemarkPreview(bom)',
+    'modelBomRemarkTitle(bom)',
+    'function modelBomRemarkPreview(bom: ModelBom)',
+    'formatFullText(row.processRoute)',
+    'function formatImportIssuePreview',
+    'function formatLongTextPreview',
+    "formatLimitedListPreview(bom.diffSummary.changedFields, '字段')",
     "line.lineType === 'COMPONENT' ? '不适用（父级组件由子零件维护）'",
     'buildModelBomApplyPreview',
     'refreshModelBomApplyPreview',
@@ -4073,6 +6174,7 @@ function verifyPartComponentStructureWorkflow() {
     '零件包推荐只写入当前未保存的草稿明细',
     '确认带入草稿',
     'BOM 默认工艺只作为下单初始建议',
+    "line.defaultProcessRouteSource === 'BOM_LINE' ? 'BOM指定'",
     '已带入 ${importedLines.length} 行零件包明细',
     '只带入当前草稿明细，不提交生产、不占库存。'
   ];
@@ -4080,6 +6182,63 @@ function verifyPartComponentStructureWorkflow() {
     if (!ordersListSource.includes(snippet)) {
       addFailure(`OrdersListView.vue must keep order BOM recommendation snippet: ${snippet}`);
     }
+  }
+  if (!ordersListSource.includes('modelBomBusinessSummaryText')) {
+    addFailure('OrdersListView.vue must summarize recommended BOM by scope, short ID and line count instead of maintenance time.');
+  }
+  if (ordersListSource.includes("`适用范围：${bom.scopeLabel || '未设置范围'}")) {
+    addFailure('OrdersListView.vue recommended BOM tooltip must use the compact scope preview instead of raw scopeLabel.');
+  }
+  if (ordersListSource.includes('const parts = [bom.scopeLabel,')) {
+    addFailure('OrdersListView.vue recommended BOM business summary must use modelBomScopePreview instead of raw scopeLabel.');
+  }
+  if (
+    ordersListSource.includes('formatDateTime(bom.updatedAt)') ||
+    ordersListSource.includes('modelBomApplyPreview.bom.updatedAt') ||
+    ordersListSource.includes('短 ID、更新时间')
+  ) {
+    addFailure('OrdersListView.vue must not ask operators to choose BOM by updatedAt maintenance time.');
+  }
+  if (ordersListSource.includes("modelBomApplyPreview.duplicatePartCodes.join('、')")) {
+    addFailure('OrdersListView.vue must summarize duplicate BOM part codes instead of rendering the full joined list.');
+  }
+  if (ordersListSource.includes('<el-tag size="small" effect="plain">{{ bom.scopeLabel }}</el-tag>')) {
+    addFailure('OrdersListView.vue must summarize recommended BOM scope labels with tooltip instead of rendering raw scopeLabel in recommendation cards.');
+  }
+  if (ordersListSource.includes('<span v-if="bom.remark">{{ bom.remark }}</span>')) {
+    addFailure('OrdersListView.vue must summarize recommended BOM remarks instead of rendering full remark text in recommendation cards.');
+  }
+  if (/<el-table-column\s+prop="defaultProcessRoute"\s+label="[^"]*"\s+min-width="160"\s+show-overflow-tooltip\s*>/.test(ordersListSource)) {
+    addFailure('OrdersListView.vue must use explicit defaultProcessRoute preview/title instead of raw show-overflow-tooltip.');
+  }
+  if (ordersListSource.includes(".map((bom) => `${bom.bomName}（${bom.lineCount} 行）`).join('；')")) {
+    addFailure('OrdersListView.vue must summarize existing BOM names in import draft preview instead of rendering the full joined list.');
+  }
+  if (ordersListSource.includes("visiblePreview.join('、')")) {
+    addFailure('OrdersListView.vue must summarize material sync preview codes instead of rendering the full joined list.');
+  }
+  if (
+    ordersListSource.includes("steps.join('、')") ||
+    ordersListSource.includes("line.processRoute || '-'") ||
+    ordersListSource.includes("line.defaultProcessRoute || '-'") ||
+    ordersListSource.includes("row.draftLine.defaultProcessRoute || '未维护默认工艺'") ||
+    ordersListSource.includes("row.existingLine.defaultProcessRoute || '未维护默认工艺'") ||
+    ordersListSource.includes("bom.diffSummary.changedFields.join('、')")
+  ) {
+    addFailure('OrdersListView.vue must summarize process routes and BOM diff fields instead of rendering the full joined list.');
+  }
+  if (
+    ordersListSource.includes('v-for="issue in line.issues"') ||
+    ordersListSource.includes('v-for="issue in draft.issues"') ||
+    ordersListSource.includes('v-for="issue in row.issues"')
+  ) {
+    addFailure('OrdersListView.vue must summarize import issue lists instead of rendering every issue tag in table cells.');
+  }
+  if (
+    ordersListSource.includes("visibleOrderNos.join('、')") ||
+    ordersListSource.includes("visibleFileNames.join('、')")
+  ) {
+    addFailure('OrdersListView.vue must summarize import session order/file lists through formatLimitedListPreview.');
   }
 
   const componentTraceFiles = [
@@ -4179,6 +6338,7 @@ function verifyPartComponentStructureWorkflow() {
   const orderBackendSnippets = [
     'validateOrderLineComponentStructure',
     '同一订单内组件编号重复',
+    'this.formatLimitedList(Array.from(duplicateNos), 10)',
     '不能填写所属组件',
     '不能填写组件编号；如属于组件，请填写所属组件',
     '所属组件 ${parentComponentNo} 在当前订单内不存在',
@@ -4201,6 +6361,9 @@ function verifyPartComponentStructureWorkflow() {
     if (!ordersServiceSource.includes(snippet)) {
       addFailure(`orders.service.ts must keep component structure backend validation snippet: ${snippet}`);
     }
+  }
+  if (ordersServiceSource.includes("Array.from(duplicateNos).join('、')")) {
+    addFailure('orders.service.ts must summarize duplicate component numbers instead of listing every duplicate.');
   }
 
   const bomBackendSnippets = [
@@ -4236,7 +6399,8 @@ function verifyPartComponentStructureWorkflow() {
     'modelBomCustomerScopeModeFromRow',
     'modelBomCustomerScopeBroadens',
     'modelBomProjectScopeBroadens',
-    'modelBomSelectedCustomerScopeAdds',
+    'modelBomCustomerScopeExposesNewCustomers',
+    'modelBomVisibleCustomerIds',
     'projectModel: true',
     'nextScopeCustomerIds',
     'scopeBroadens',
@@ -4248,6 +6412,13 @@ function verifyPartComponentStructureWorkflow() {
     '常用 BOM 只提升同一客户/机型范围内的显示优先级',
     'commonSortOrder',
     'isCommon: Boolean(row.isCommon)',
+    'previewScopeCustomers: withPage',
+    'previewLines: withPage',
+    'scopeCustomerCount',
+    'visibleScopeCustomers',
+    'summarizeSerializedModelBomLines',
+    'lines: options.previewLines ? [] : lines',
+    'lineSummary',
     "query.commonOnly === 'true'",
     "query.status === 'ALL' ? undefined : query.status || 'ENABLED'",
     "const projectModel = String(dto.projectModel || '').trim();",
@@ -4263,6 +6434,11 @@ function verifyPartComponentStructureWorkflow() {
     'partThicknessByScopeKey.get(this.modelBomThicknessKey(partCode, scope.customerId, scope.projectModel))',
     'const materialDrawingRevision = line.material?.drawingRevisions?.[0] || null;',
     "materialDrawingRevision?.isDefault ? 'MATERIAL_DEFAULT' : materialDrawingRevision ? 'MATERIAL_LATEST'",
+    'BOM 行默认工艺优先，其次零件基础库默认工艺',
+    'const defaultProcessRoute = line.defaultProcessRoute || line.material?.defaultProcessRoute || null',
+    "const defaultProcessRouteSource = line.defaultProcessRoute ? 'BOM_LINE' : line.material?.defaultProcessRoute ? 'MATERIAL' : null",
+    'bomLineDefaultProcessRoute: line.defaultProcessRoute',
+    'defaultProcessRouteSource',
     '...(status ? { status } : {})',
     'async reorderModelBomLines(bomId: string',
     'BOM 拖拽排序必须事务化保存',
@@ -4272,16 +6448,19 @@ function verifyPartComponentStructureWorkflow() {
     'return new Map(ordered.map((line, index) => [line.id, index + 1]))',
     'copyableSourceLines',
     'copyableSourceLines.length === 0',
-    'scopedDuplicate',
-    'handleModelBomScopeUniqueError',
-    'isModelBomScopeUniqueError',
+    'existingBoms',
+    'findModelBomNameScopeDuplicate',
+    'normalizeModelBomNameScopeKey',
+    ".trim().toLowerCase()",
+    'handleModelBomNameUniqueError',
+    'isModelBomNameUniqueError',
     "error.code !== 'P2002'",
     'Prisma.PrismaClientKnownRequestError',
-    'ModelBom_customerScopeKey_projectModelScopeKey_key',
-    'this.handleModelBomScopeUniqueError(error,',
-    '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免重复新建',
-    '当前客户/机型范围已存在 BOM，请直接维护现有零件包，避免编辑覆盖其他 BOM 范围',
-    '当前客户和机型/项目已存在客户零件包，请打开现有客户 BOM 继续维护，避免重复复制',
+    'ModelBom_bomName_ci_customerScopeKey_projectModelScopeKey_key',
+    'ModelBom_bomName_customerScopeKey_projectModelScopeKey_key',
+    'this.handleModelBomNameUniqueError(error,',
+    '相同名称、客户范围和机型/项目的零件包已存在',
+    '目标客户下已存在相同名称和机型/项目的零件包',
     "if (line.lineType === 'COMPONENT')",
     'return !!this.normalizeModelBomComponentNo(line.componentNo);',
     'if (this.normalizeModelBomComponentNo(line.componentNo))',
@@ -4406,11 +6585,11 @@ function verifyPartComponentStructureWorkflow() {
     'MODEL_BOM_COMPONENT_NO_RANGE_INVALID',
     'MODEL_BOM_COMPONENT_THICKNESS_SNAPSHOT_NOT_ALLOWED',
     'MODEL_BOM_PROJECT_SCOPE_KEY_MISMATCH',
-    'MODEL_BOM_SCOPE_DUPLICATE',
+    'MODEL_BOM_NAME_SCOPE_DUPLICATE',
     '厚度只核对子零件和单独零件',
     "bom.customerScopeMode === 'SELECTED'",
     "const expectedProjectModelScopeKey = stringValue(bom.projectModel).toLocaleUpperCase() || 'ALL';",
-    'const bomsByScope = new Map',
+    'const bomsByNameAndScope = new Map',
     'ORDER_LINE_COMPONENT_NO_DUPLICATE',
     'ORDER_LINE_COMPONENT_NO_RANGE_INVALID',
     'ORDER_LINE_CHILD_PARENT_MISSING',
@@ -4455,7 +6634,7 @@ function verifyPartComponentStructureWorkflow() {
     }
   }
   const bomScopeDatabaseSnippets = [
-    '@@unique([customerScopeKey, projectModelScopeKey])',
+    '@@unique([bomName, customerScopeKey, projectModelScopeKey])',
     'model ModelBomDiffReview',
     'ModelBomDiffReviewTarget',
     'ModelBomDiffReviewSource',
@@ -4465,10 +6644,12 @@ function verifyPartComponentStructureWorkflow() {
     'MaterialCommonProjectModel_projectModelNormalized_key',
     'isCommon              Boolean                 @default(false)',
     'ModelBom_isCommon_commonSortOrder_idx',
-    'ModelBom_customerScopeKey_projectModelScopeKey_key',
-    'ON "ModelBom"("customerScopeKey", "projectModelScopeKey")',
-    'GROUP BY "customerScopeKey", "projectModelScopeKey"',
-    "RAISE EXCEPTION 'ModelBom has duplicate customerScopeKey/projectModelScopeKey scopes."
+    'ModelBom_bomName_customerScopeKey_projectModelScopeKey_key',
+    'ModelBom_bomName_ci_customerScopeKey_projectModelScopeKey_key',
+    'lower(trim("bomName"))',
+    'duplicate case-insensitive bomName/customerScopeKey/projectModelScopeKey scopes',
+    'DROP INDEX IF EXISTS "ModelBom_customerScopeKey_projectModelScopeKey_key"',
+    '允许同一客户 / 同一机型保留多个不同用途的 BOM'
   ];
   for (const snippet of bomScopeDatabaseSnippets) {
     if (!prismaSchemaSource.includes(snippet) && !migrationSqlSource.includes(snippet)) {
@@ -4597,6 +6778,8 @@ function verifyPartComponentStructureWorkflow() {
     "query.inventoryDecision === 'SOURCE_REWORK'",
     "query.inventoryDecision === 'NO_STOCK'",
     "const and: Prisma.MaterialTransformRuleWhereInput[] = status === 'ALL' ? [] : [{ status }]",
+    'isTestFixtureMaterialTransformRule',
+    'const businessRows = includeTestFixtures ? rows : rows.filter',
     '是否使用库存仍由库存来源核对弹窗人工确认'
   ];
   for (const snippet of transformBackendSnippets) {
@@ -4606,6 +6789,99 @@ function verifyPartComponentStructureWorkflow() {
   }
 
   const bomApiSnippets = [
+    ["package.json", packageSource, '"verify:model-bom-scope-approval-api": "node scripts/verify-model-bom-scope-approval-api.cjs"'],
+    ["scripts/verify-first-stage-api.cjs", firstStageApiRegressionSource, "'verify:model-bom-scope-approval-api'"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-expansion-requires-approval'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-approval-consumed-on-save'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-approval-duplicate-pending-request-blocked'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-approval-duplicate-approved-request-blocked'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-approval-requested-scope-query-filters'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-approval-test-fixture-filter'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'includeTestFixtures=true'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'default BOM scope approval list must hide reusable verification fixtures'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'requestedCustomerScopeMode=ALL&requestedScopeKey=ALL&requestedProjectModelScopeKey='],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "const customerCodePrefix = 'VERIFY-SCOPE-CUST-STABLE';"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "const bomName = 'VERIFY_SCOPE_APPROVAL_STABLE';"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'async function prepareScopeApprovalBom(customer)'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'prisma.modelBomScopeApprovalRequest.updateMany'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'prisma.modelBomCustomerScope.updateMany'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'prisma.modelBom.update'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'prisma.customer.findFirst'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'customerCode: `${baseCode}${archiveSuffix}`'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'customerName: `${baseName}${archiveSuffix}`'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'createScopeApprovalCustomer'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'cleanupCustomer(customer.id)'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'async function safeCleanup'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "await safeCleanup('model BOM fixture'"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "await safeCleanup('scope approval customer fixture'"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "await safeCleanup('scope approval second customer fixture'"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "customerScopeMode: 'SELECTED'"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "private BOM changed to same single selected customer must not require admin approval"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "exposing BOM to a different customer must be rejected without approval"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-private-to-same-selected-no-approval'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-selected-to-new-private-requires-approval'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, 'model-bom-scope-approval-temporary-customer-cleanup'],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "customerScopeMode: 'ALL'"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, "isCommon: true"],
+    ["scripts/verify-model-bom-scope-approval-api.cjs", modelBomScopeApprovalRegressionSource, '/inventory/model-bom-scope-approval-requests'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class CreateModelBomScopeApprovalRequestDto extends SaveModelBomDto'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReviewModelBomScopeApprovalRequestDto'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'scopeApprovalRequestId?: string'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'requestedCustomerScopeMode?: \'ALL\' | \'PRIVATE\' | \'SELECTED\''],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'requestedScopeKey?: string'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'requestedProjectModelScopeKey?: string'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'includeTestFixtures?: string'],
+    ["database/prisma/schema.prisma", prismaSchemaSource, '@@index([bomId, status, requestedCustomerScopeMode, requestedScopeKey, requestedProjectModelScopeKey], map: "ModelBomScopeApprovalRequest_scope_query_idx")'],
+    ["database/prisma/migrations", migrationSqlSource, 'CREATE INDEX "ModelBomScopeApprovalRequest_scope_query_idx"'],
+    ["database/prisma/migrations", migrationSqlSource, 'CREATE UNIQUE INDEX "ModelBomScopeApprovalRequest_open_scope_unique"'],
+    ["database/prisma/migrations", migrationSqlSource, 'WHERE "status" IN (\'PENDING\', \'APPROVED\') AND "usedAt" IS NULL'],
+    ["database/prisma/migrations", migrationSqlSource, 'ModelBomScopeApprovalRequest has duplicate open approvals for the same BOM target scope'],
+    ["database/prisma/migrations", migrationSqlSource, 'Run npm run backend:verify:first-stage and reject or consume duplicate approvals before applying this migration'],
+    ["database/prisma/verify-first-stage.ts", dataVerifierSource, 'openScopeApprovalsByKey'],
+    ["database/prisma/verify-first-stage.ts", dataVerifierSource, 'MODEL_BOM_SCOPE_APPROVAL_OPEN_DUPLICATE'],
+    ["database/prisma/verify-first-stage.ts", dataVerifierSource, "request.status === 'PENDING' || request.status === 'APPROVED'"],
+    ["database/prisma/verify-first-stage.ts", dataVerifierSource, 'MODEL_BOM_SCOPE_APPROVAL_USED_STATUS_MISMATCH'],
+    ["database/prisma/verify-first-stage.ts", dataVerifierSource, 'function jsonObjectRows'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Get('model-bom-scope-approval-requests')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Post('model-boms/:bomId/scope-approval-requests')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Post('model-bom-scope-approval-requests/:requestId/approve')"],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "@Post('model-bom-scope-approval-requests/:requestId/reject')"],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomCustomerScopeBroadens(previousMode'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomCustomerScopeExposesNewCustomers(existing, nextScopeMode'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, "previousMode !== 'ALL' && nextMode === 'ALL'"],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomVisibleCustomerIds(row, previousMode)'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomProjectScopeBroadens(existing.projectModel, scopeData.projectModel)'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomScopeApprovalFixtureWhere'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'const includeTestFixtures = query.includeTestFixtures === \'true\';'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'BOM 适用范围扩大需要先提交管理员审批申请'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'const duplicateApproval = await this.prisma.modelBomScopeApprovalRequest.findFirst'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, "status: { in: ['PENDING', 'APPROVED'] }"],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, "orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]"],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, '相同 BOM 范围已有未使用审批申请'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'where.requestedCustomerScopeMode = query.requestedCustomerScopeMode'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'where.requestedScopeKey = query.requestedScopeKey.trim()'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'where.requestedProjectModelScopeKey = query.requestedProjectModelScopeKey.trim()'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'handleModelBomScopeApprovalOpenUniqueError(error);'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'isModelBomScopeApprovalOpenUniqueError(error)'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'ModelBomScopeApprovalRequest_open_scope_unique'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, '相同 BOM 范围已有未使用审批申请，请刷新审批列表后继续处理'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'approvalRequest.status !== \'APPROVED\' || approvalRequest.usedAt'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, "data: { status: 'USED', usedAt: new Date() }"],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'createModelBomScopeApprovalRequest(bomId: string'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'approveModelBomScopeApprovalRequest(requestId: string'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'rejectModelBomScopeApprovalRequest(requestId: string'],
+    ["frontend/src/types/erp.ts", frontendTypesSource, "export type ModelBomScopeApprovalRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'USED'"],
+    ["frontend/src/types/erp.ts", frontendTypesSource, 'export interface ModelBomScopeApprovalRequest'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'requestedCustomerScopeMode: filters.requestedCustomerScopeMode'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'requestedScopeKey: filters.requestedScopeKey'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'requestedProjectModelScopeKey: filters.requestedProjectModelScopeKey'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, '范围审批'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, 'bomScopeChangeBroadens()'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, 'findApprovedBomScopeApprovalForCurrentForm'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, 'bomScopeApprovalBlocksNewRequest'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, 'findOpenBomScopeApprovalForCurrentForm'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, 'bomScopeApprovalCurrentFormFilters'],
+    ["frontend/src/views/ModelBomsView.vue", modelBomSource, "const statuses: Array<'PENDING' | 'APPROVED'> = ['PENDING', 'APPROVED'];"],
     ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class SetModelBomsCommonBatchDto'],
     ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomCommonDto'],
     ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ReorderModelBomCommonItemDto'],
@@ -4619,6 +6895,7 @@ function verifyPartComponentStructureWorkflow() {
     ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, "const withPage = query.withPage === 'true'"],
     ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'modelBomScopeSummary(filtered)'],
     ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'hasMore: offset + items.length < totalCount'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "return this.inventoryService.modelBoms({ ...query, withPage: 'true' });"],
     ["frontend/src/api/erp.ts", frontendApiSource, 'customerScopeCount: number'],
     ["frontend/src/api/erp.ts", frontendApiSource, 'setModelBomsCommonBatch(payload: SetModelBomsCommonBatchPayload)'],
     ["frontend/src/api/erp.ts", frontendApiSource, 'reorderModelBomCommon(payload: ReorderModelBomCommonPayload)'],
@@ -4637,18 +6914,158 @@ function verifyPartComponentStructureWorkflow() {
       addFailure(`${label} must keep single BOM query snippet for source diff: ${snippet}`);
     }
   }
+  if (
+    modelBomScopeApprovalRegressionSource.includes('new Date().toISOString().replace') ||
+    modelBomScopeApprovalRegressionSource.includes('Math.random()') ||
+    modelBomScopeApprovalRegressionSource.includes("method: 'DELETE'") ||
+    modelBomScopeApprovalRegressionSource.includes('/permanent')
+  ) {
+    addFailure('scripts/verify-model-bom-scope-approval-api.cjs must reuse stable fixtures and must not permanently delete BOM or customer data.');
+  }
+  const modelBomListBlock = inventoryServiceSource.match(/async modelBoms\(query: ModelBomQueryDto\) \{[\s\S]*?\n  private modelBomCustomerScopeModeForRow/)?.[0] || '';
+  const modelBomSortBlock = inventoryServiceSource.match(/private sortModelBomRows[\s\S]*?\n  private modelBomCustomerScopeSortScore/)?.[0] || '';
+  const modelBomExportBlock = inventoryServiceSource.match(/async buildModelBomsExport\(query: ModelBomQueryDto\)[\s\S]*?\n  async modelBomDiffReviews/)?.[0] || '';
+  const modelBomSerializeBlock = inventoryServiceSource.match(/private serializeModelBom\([\s\S]*?\n  private serializeModelBomLine/)?.[0] || '';
+  const modelBomLineSerializeBlock = inventoryServiceSource.match(/private serializeModelBomLine\([\s\S]*?\n  private modelBomLineDisplayOrderMap/)?.[0] || '';
+  const modelBomTypeBlock = frontendTypesSource.match(/export interface ModelBom\s*\{[\s\S]*?\n}/)?.[0] || '';
+  const modelBomLineTypeBlock = frontendTypesSource.match(/export interface ModelBomLine[\s\S]*?\n}/)?.[0] || '';
+  if (!modelBomListBlock.includes("{ customerScopeKey: 'asc' }") || !modelBomListBlock.includes("{ id: 'asc' }")) {
+    addFailure('inventory.service.ts modelBoms list must use stable scope/name/id ordering instead of updatedAt maintenance time.');
+  }
+  if (modelBomListBlock.includes("orderBy: [{ updatedAt: 'desc' }, { projectModel: 'asc' }, { bomName: 'asc' }]")) {
+    addFailure('inventory.service.ts modelBoms list must not use updatedAt as initial ordering.');
+  }
+  if (modelBomSortBlock.includes('updatedAt') || modelBomSortBlock.includes('updatedDiff')) {
+    addFailure('inventory.service.ts sortModelBomRows must not use updatedAt as recommendation or list tie-breaker.');
+  }
+  if (!modelBomSortBlock.includes('leftStableKey') || !modelBomSortBlock.includes('rightStableKey')) {
+    addFailure('inventory.service.ts sortModelBomRows must keep stable scope/project/name/id tie-breaker.');
+  }
+  if (modelBomExportBlock.includes("'更新时间'") || modelBomExportBlock.includes('row.updatedAt')) {
+    addFailure('inventory.service.ts model BOM export must not include updatedAt maintenance time in main BOM sheets.');
+  }
+  if (
+    modelBomSerializeBlock.includes('createdAt: row.createdAt') ||
+    modelBomSerializeBlock.includes('updatedAt: row.updatedAt') ||
+    modelBomSerializeBlock.includes('createdAt: Date') ||
+    modelBomSerializeBlock.includes('updatedAt: Date')
+  ) {
+    addFailure('inventory.service.ts model BOM API response must not expose generic maintenance timestamps.');
+  }
+  if (
+    !modelBomSerializeBlock.includes("formatCustomerNamePreview(scopeCustomers.map((scope) => scope.customerName), '指定客户')") ||
+    !modelBomSerializeBlock.includes('private formatCustomerNamePreview') ||
+    !modelBomSerializeBlock.includes("formatBusinessListPreview(names, '客户', emptyText)")
+  ) {
+    addFailure('inventory.service.ts model BOM scopeLabel must summarize selected customers instead of returning every customer name.');
+  }
+  if (modelBomSerializeBlock.includes("scopeCustomers.map((scope) => scope.customerName).filter(Boolean).join('、')")) {
+    addFailure('inventory.service.ts model BOM scopeLabel must not join every selected customer into the list response.');
+  }
+  if (
+    modelBomLineSerializeBlock.includes('createdAt: line.createdAt') ||
+    modelBomLineSerializeBlock.includes('updatedAt: line.updatedAt') ||
+    modelBomLineSerializeBlock.includes('createdAt: Date') ||
+    modelBomLineSerializeBlock.includes('updatedAt: Date')
+  ) {
+    addFailure('inventory.service.ts model BOM line API response must not expose generic maintenance timestamps.');
+  }
+  if (modelBomTypeBlock.includes('createdAt') || modelBomTypeBlock.includes('updatedAt')) {
+    addFailure('frontend/src/types/erp.ts ModelBom must not expose generic maintenance timestamps.');
+  }
+  if (modelBomLineTypeBlock.includes('createdAt') || modelBomLineTypeBlock.includes('updatedAt')) {
+    addFailure('frontend/src/types/erp.ts ModelBomLine must not expose generic maintenance timestamps.');
+  }
+  if (
+    inventoryServiceSource.includes("{ sortOrder: 'asc' }, { createdAt: 'asc' }") ||
+    inventoryServiceSource.includes('left.createdAt.getTime()')
+  ) {
+    addFailure('inventory.service.ts BOM line ordering must use sortOrder/id, not createdAt maintenance time.');
+  }
+  if (
+    inventoryServiceSource.includes("orderBy: [{ isCommon: 'desc' }, { commonSortOrder: 'asc' }, { updatedAt: 'desc' }, { createdAt: 'desc' }]") ||
+    inventoryServiceSource.includes("orderBy: [{ updatedAt: 'desc' }]")
+  ) {
+    addFailure('inventory.service.ts BOM import/delete helper queries must not sort by updatedAt maintenance time.');
+  }
+  const modelBomDiffReviewListBlock = inventoryServiceSource.match(/async modelBomDiffReviews\(bomId: string[\s\S]*?\n  async buildModelBomDiffReviewsExport/)?.[0] || '';
+  const modelBomDiffReviewExportBlock = inventoryServiceSource.match(/async buildModelBomDiffReviewsExport\(bomId: string[\s\S]*?\n  async confirmModelBomDiffReview/)?.[0] || '';
+  const modelBomDiffReviewSerializeBlock = inventoryServiceSource.match(/private serializeModelBomDiffReview\([\s\S]*?\n  private serializeModelBom/)?.[0] || '';
+  const modelBomDiffReviewTypeBlock = frontendTypesSource.match(/export interface ModelBomDiffReview[\s\S]*?\n}/)?.[0] || '';
+  if (!inventoryServiceSource.includes("orderBy: [{ revisionNo: 'desc' }, { id: 'desc' }]")) {
+    addFailure('inventory.service.ts BOM revision pagination must use stable revisionNo/id ordering.');
+  }
+  if (
+    !modelBomDiffReviewListBlock.includes("orderBy: [{ reviewedAt: 'desc' }, { id: 'desc' }]") &&
+    !modelBomDiffReviewListBlock.includes("const orderBy: Prisma.ModelBomDiffReviewOrderByWithRelationInput[] = [{ reviewedAt: 'desc' }, { id: 'desc' }]")
+  ) {
+    addFailure('inventory.service.ts BOM diff review list must use stable reviewedAt/id ordering.');
+  }
+  if (!modelBomDiffReviewExportBlock.includes("orderBy: [{ reviewedAt: 'desc' }, { id: 'desc' }]")) {
+    addFailure('inventory.service.ts BOM diff review export must use the same stable reviewedAt/id ordering as the list.');
+  }
+  const modelBomDiffReviewPaginationSnippets = [
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'export class ModelBomDiffReviewQueryDto'],
+    ["backend/src/modules/inventory/dto.ts", inventoryDtoSource, 'withPage?: string'],
+    ["backend/src/modules/inventory/inventory.controller.ts", inventoryControllerSource, "return this.inventoryService.modelBomDiffReviews(bomId, { ...query, withPage: 'true' });"],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'const limit = Math.min(Math.max(Number(query.limit || 50), 1), 100);'],
+    ["backend/src/modules/inventory/inventory.service.ts", inventoryServiceSource, 'reviewKeys: keyRows.map((row) => row.reviewKey)'],
+    ["frontend/src/types/erp.ts", frontendTypesSource, 'export interface ModelBomDiffReviewListResponse'],
+    ["frontend/src/types/erp.ts", frontendTypesSource, 'reviewKeys: string[]'],
+    ["frontend/src/api/erp.ts", frontendApiSource, 'modelBomDiffReviewsPage(bomId: string']
+  ];
+  for (const [file, source, snippet] of modelBomDiffReviewPaginationSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${file} must keep BOM diff review pagination/reviewKey contract snippet: ${snippet}`);
+    }
+  }
+  if (frontendApiSource.includes('modelBomDiffReviews(bomId: string, sourceBomId?: string)')) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy modelBomDiffReviews() full-list API; use modelBomDiffReviewsPage().');
+  }
+  if (modelBomDiffReviewListBlock.includes('return rows.map((row) => this.serializeModelBomDiffReview(row));')) {
+    addFailure('inventory.service.ts modelBomDiffReviews must always return the paginated list contract, not a legacy full array.');
+  }
+  if (modelBomDiffReviewListBlock.includes("updatedAt: 'desc'")) {
+    addFailure('inventory.service.ts BOM diff review list must sort by reviewedAt and stable id, not updatedAt maintenance time.');
+  }
+  if (
+    modelBomDiffReviewExportBlock.includes("'创建时间'") ||
+    modelBomDiffReviewExportBlock.includes("'更新时间'") ||
+    modelBomDiffReviewExportBlock.includes('row.createdAt') ||
+    modelBomDiffReviewExportBlock.includes('row.updatedAt')
+  ) {
+    addFailure('inventory.service.ts BOM diff review export must keep reviewedAt but omit generic maintenance timestamps.');
+  }
+  if (
+    modelBomDiffReviewSerializeBlock.includes('createdAt: row.createdAt') ||
+    modelBomDiffReviewSerializeBlock.includes('updatedAt: row.updatedAt') ||
+    modelBomDiffReviewSerializeBlock.includes('createdAt: Date') ||
+    modelBomDiffReviewSerializeBlock.includes('updatedAt: Date')
+  ) {
+    addFailure('inventory.service.ts BOM diff review API response must not expose generic maintenance timestamps.');
+  }
+  if (modelBomDiffReviewTypeBlock.includes('createdAt') || modelBomDiffReviewTypeBlock.includes('updatedAt')) {
+    addFailure('frontend/src/types/erp.ts ModelBomDiffReview must not expose generic maintenance timestamps.');
+  }
+  if (modelBomScopeApprovalRegressionSource.includes('scope approval regression needs at least one enabled customer')) {
+    addFailure('scripts/verify-model-bom-scope-approval-api.cjs must create and soft-disable its own customer instead of depending on existing enabled customers.');
+  }
 }
 
 function verifyMaterialImportIssueReportWorkflow() {
   const requiredFiles = [
     'backend/src/modules/inventory/inventory.service.ts',
     'backend/src/modules/inventory/inventory.controller.ts',
+    'backend/src/modules/inventory/dto.ts',
     'frontend/src/api/erp.ts',
+    'frontend/src/types/erp.ts',
     'frontend/src/views/MaterialsView.vue',
+    'frontend/src/views/OrdersListView.vue',
     'database/prisma/schema.prisma',
     'database/prisma/verify-first-stage.ts',
     'database/prisma/migrations/20260515233000_material_import_preview_error_rows/migration.sql',
     'scripts/verify-material-import-api.cjs',
+    'AGENTS.md',
     'package.json'
   ];
   for (const projectPath of requiredFiles) {
@@ -4660,14 +7077,18 @@ function verifyMaterialImportIssueReportWorkflow() {
 
   const inventoryServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
   const inventoryControllerSource = readFile('backend/src/modules/inventory/inventory.controller.ts');
+  const inventoryDtoSource = readFile('backend/src/modules/inventory/dto.ts');
   const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  const frontendTypesSource = readFile('frontend/src/types/erp.ts');
   const materialsViewSource = readFile('frontend/src/views/MaterialsView.vue');
+  const ordersListViewSource = readFile('frontend/src/views/OrdersListView.vue');
   const schemaSource = readFile('database/prisma/schema.prisma');
   const dataVerifierSource = readFile('database/prisma/verify-first-stage.ts');
   const materialImportPreviewErrorMigrationSource = readFile(
     'database/prisma/migrations/20260515233000_material_import_preview_error_rows/migration.sql'
   );
   const materialImportApiVerifySource = readFile('scripts/verify-material-import-api.cjs');
+  const agentsSource = readFile('AGENTS.md');
   const packageSource = readFile('package.json');
   const migrationSqlSource = readMigrationSqlSource();
 
@@ -4686,6 +7107,54 @@ function verifyMaterialImportIssueReportWorkflow() {
     'rowOffset + rowLimit < scopeRowCount',
     'rowOffset + rowLimit < transformRowCount',
     'refreshMaterialImportSessionIssues(sessionId)',
+    'createMaterialImportSessionFromOrderImport(orderImportSessionId: string',
+    '订单净表提取只生成零件库导入草稿，不写入正式零件、BOM、订单、生产任务或库存。',
+    'orderImportPreviewToken({',
+    'orderImportRowToMaterialImportRow',
+    'const applicabilityRows = this.orderImportRowsToMaterialApplicabilityImportRows(sourceRows)',
+    'orderImportRowsToMaterialApplicabilityImportRows',
+    'createModelBomDraftsFromOrderImport(orderImportSessionId: string',
+    "const enabledMaterials = existingMaterials.filter((material) => material.status === 'ENABLED');",
+    'const materialByCode = new Map(enabledMaterials.map',
+    'const materialIdsForDrawingLookup = [...new Set(enabledMaterials.map',
+    'commitModelBomDraftFromOrderImport(',
+    'reviewedExistingBomIds',
+    'missingReviewBoms',
+    'unrelatedReviewedBomIds',
+    'currentSameScopeBoms',
+    'staleReviewedBomIds',
+    'unreviewedCurrentBoms',
+    '核对 BOM 不属于当前草稿范围',
+    'reviewedExistingBomRemark',
+    '已核对已有 BOM',
+    'formatBusinessListPreview',
+    'formatBomNamePreview',
+    'this.formatBomNamePreview(existingBoms.map((bom) => bom.bomName))',
+    'unreviewedCurrentBoms.map((bom) => bom.bomName)',
+    'const references = this.formatBusinessListPreview(',
+    'referencingLines.map(',
+    'const preview = this.formatBusinessListPreview(',
+    'copiedCustomerBoms.map(',
+    '当前范围已有新的正式 BOM 尚未核对',
+    '创建新 BOM 前必须逐个完成差异核对',
+    'normalizedLines: Array<(typeof draft.lines)[number] & { defaultProcessRoute: string | null }>',
+    'modelBomDraftLineKey',
+    'orderImportBomDefaultQuantity',
+    'EXISTING_BOM_SCOPE',
+    'DUPLICATE_COMPONENT_NO',
+    '组件编号在当前 BOM 草稿中重复',
+    '当前 BOM 草稿中存在相同零件和相同结构位置，请先人工合并数量后再确认正式 BOM',
+    'DRAWING_REVISION_NOT_FOUND',
+    'drawingNoVersionKeysForPreview',
+    '零件基础库没有与导入图号和版本一致的启用图纸版本',
+    '有导入图号和版本时只绑定完全一致的图纸',
+    'drawingByMaterialNoAndVersion',
+    'drawingVersion: row.drawingVersion || null',
+    'MATERIAL_NOT_FOUND',
+    'scopeRowCount: applicabilityRows.length',
+    'materialApplicabilityImportRow.createMany',
+    'projectModel: null',
+    'raw: (row.raw || {})',
     'buildMaterialImportPreviewTokenSnapshot(sessionId, tx)',
     'materialImportPreviewToken({',
     'const deletedFile = await runSerializableTransaction(',
@@ -4710,9 +7179,25 @@ function verifyMaterialImportIssueReportWorkflow() {
   if (inventoryServiceSource.includes("['生成时间', new Date().toISOString()")) {
     addFailure('inventory.service.ts material import issue report must use businessDateTimeText() instead of UTC toISOString().');
   }
+  if (inventoryServiceSource.includes("existingBoms.map((bom) => bom.bomName).join('、')")) {
+    addFailure('inventory.service.ts must summarize reviewed existing BOM names instead of storing the full joined list.');
+  }
+  if (inventoryServiceSource.includes("previewRows.join('、')")) {
+    addFailure('inventory.service.ts must summarize copied customer BOM references instead of joining the full list.');
+  }
 
   const controllerSnippets = [
     "@Get('material-import-sessions/:sessionId/error-report')",
+    "@Post('material-import-sessions/from-order-import/:orderImportSessionId')",
+    "@Post('model-bom-drafts/from-order-import/:orderImportSessionId')",
+    "@Post('model-bom-drafts/from-order-import/:orderImportSessionId/commit')",
+    'CreateMaterialImportFromOrderImportDto',
+    'CreateModelBomDraftFromOrderImportDto',
+    'CommitModelBomDraftFromOrderImportDto',
+    'materialImportUploadMaxBytes()',
+    'MATERIAL_IMPORT_UPLOAD_MAX_MB',
+    'const safeMb = Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb : 100',
+    'limits: { fileSize: materialImportUploadMaxBytes() }',
     'downloadMaterialImportIssueReport',
     'buildMaterialImportIssueReport(sessionId)'
   ];
@@ -4721,9 +7206,61 @@ function verifyMaterialImportIssueReportWorkflow() {
       addFailure(`inventory.controller.ts must keep material import issue report API snippet: ${snippet}`);
     }
   }
+  const commitModelBomDraftDtoBlock = inventoryDtoSource.match(/export class CommitModelBomDraftFromOrderImportDto[\s\S]*?\n}/)?.[0] || '';
+  for (const snippet of ['reviewedExistingBomIds', '@IsArray()', '@IsString({ each: true })']) {
+    if (!commitModelBomDraftDtoBlock.includes(snippet)) {
+      addFailure(`inventory dto must keep BOM draft commit reviewedExistingBomIds validation snippet: ${snippet}`);
+    }
+  }
+  if (
+    !agentsSource.includes('reviewedExistingBomIds') ||
+    !agentsSource.includes('不得只依赖前端按钮禁用')
+  ) {
+    addFailure('AGENTS.md must document backend-enforced reviewedExistingBomIds for order-import BOM draft commit.');
+  }
 
   const frontendSnippets = [
     'downloadMaterialImportIssueReport(sessionId: string)',
+    'createMaterialImportSessionFromOrderImport(orderImportSessionId: string, previewToken: string',
+    'createModelBomDraftsFromOrderImport(orderImportSessionId: string, previewToken: string',
+    'commitModelBomDraftFromOrderImport(',
+    'reviewedExistingBomIds?: string[]',
+    'reviewedExistingBomIds: modelBomDraftExistingBoms(draft)',
+    '.filter((bom) => modelBomDraftDiffReviewed(draft, bom))',
+    'modelBomDraftCommittingKey',
+    'modelBomDraftCanCommit',
+    "draft.lines.some((line) => !line.materialId || line.materialStatus !== 'ENABLED')",
+    'return modelBomDraftExistingBoms(draft).length === 0 || modelBomDraftDiffReviewComplete(draft);',
+    'modelBomDraftHasMissingMaterials',
+    'openExistingModelBomFromDraft(draft, bom)',
+    'targetBom?: ModelBomDraftExistingBomSummary',
+    'bomId: saved.id',
+    "scopeMode: 'PRIVATE'",
+    '确认创建正式 BOM',
+    'modelBomDraftPreviewVisible',
+    'modelBomDraftPreviewedAt',
+    'previewModelBomDraftFromOrderImport',
+    '刷新 BOM 草稿',
+    '重新校验，不会写入业务数据',
+    '提取零件库草稿',
+    'materialImportSessionId: result.id',
+    "returnTo: '/orders'",
+    'orderImportSessionId: importPreview.value.id',
+    "previewBomDraft: '1'",
+    'openOrderImportSessionFromRoute',
+    'routeOrderImportOpenKey',
+    'route.query.orderImportSessionId',
+    'route.query.previewBomDraft',
+    'openMaterialImportSessionFromRoute',
+    "routeQueryText(route.query.returnTo) === '/orders'",
+    'routeQueryText(route.query.orderImportSessionId)',
+    'watch(',
+    'route.query.materialImportSessionId',
+    "guardDesktopOperation('打开零件库导入草稿')",
+    'importDialogVisible.value = true;',
+    'openMaterialImportTrace',
+    'materialImportTraceEntries',
+    '导入行追溯',
     '/inventory/material-import-sessions/${sessionId}/error-report',
     '零件库导入问题明细.xlsx',
     '下载问题明细',
@@ -4737,9 +7274,16 @@ function verifyMaterialImportIssueReportWorkflow() {
     '未显示的行不会被静默忽略'
   ];
   for (const snippet of frontendSnippets) {
-    if (!frontendApiSource.includes(snippet) && !materialsViewSource.includes(snippet)) {
+    if (!frontendApiSource.includes(snippet) && !materialsViewSource.includes(snippet) && !ordersListViewSource.includes(snippet)) {
       addFailure(`Frontend must keep material import issue report UI/API snippet: ${snippet}`);
     }
+  }
+  const modelBomDraftCanCommitBlock = ordersListViewSource.match(/function modelBomDraftCanCommit[\s\S]*?\n}/)?.[0] || '';
+  if (modelBomDraftCanCommitBlock.includes('startsWith(')) {
+    addFailure('OrdersListView.vue modelBomDraftCanCommit must use explicit business predicates, not localized message startsWith().');
+  }
+  if (!frontendTypesSource.includes('raw?: Record<string, string | number | boolean | null>;')) {
+    addFailure('frontend/src/types/erp.ts must expose material import raw source trace fields.');
   }
 
   const schemaSnippets = [
@@ -4812,10 +7356,48 @@ function verifyMaterialImportIssueReportWorkflow() {
 
   const regressionScriptSnippets = [
     'verify-material-import-api',
+    "const runId = 'STABLE';",
+    "const materialPrefix = 'MI-API-STABLE';",
     '零件库导入模板',
     '/inventory/material-import-template',
     '/inventory/material-import-config',
     '/inventory/material-import-sessions',
+    '/inventory/material-import-sessions/from-order-import/',
+    '/inventory/model-bom-drafts/from-order-import/',
+    'createOrderImportSourceSession',
+    'assertExtractedOrderImportDraftOnly',
+    'assertExtractedOrderImportModelBomDraftPreviewOnly',
+    'assertDuplicateComponentModelBomDraftBlocked',
+    'seedOrderExtractMaterialsForBomCommit',
+    'createConcurrentOrderImportModelBom',
+    'assertCommittedOrderImportModelBomDraft',
+    'from-order-import-draft-preview',
+    'from-order-import-model-bom-draft-preview',
+    'from-order-import-model-bom-draft-duplicate-component',
+    'from-order-import-model-bom-draft-commit',
+    'from-order-import-model-bom-draft-unrelated-existing-review',
+    'from-order-import-model-bom-draft-revision-snapshot',
+    'from-order-import-model-bom-draft-existing-review',
+    'from-order-import-model-bom-draft-existing-review-audit',
+    'from-order-import-model-bom-draft-partial-existing-review',
+    'from-order-import-model-bom-draft-stale-existing-review',
+    'model-bom-draft commit stale existing BOM review',
+    '逐个完成差异核对',
+    'reviewedExistingBomIds commit revision remark must record reviewed BOM name',
+    'model BOM draft commit must create 1 ModelBomRevision snapshot',
+    "revisions[0].action === 'ORDER_IMPORT_DRAFT_COMMIT'",
+    'model BOM draft commit revision snapshot must keep component and child-part structure',
+    'from-order-import preview applicability rows must be 2',
+    'from-order-import material rows must not store project scope',
+    'MaterialApplicability rows before commit',
+    'model BOM draft preview must not create ModelBom rows',
+    'model BOM draft preview must not create ModelBomLine rows',
+    'model-bom-draft commit duplicate componentNo',
+    'model BOM draft commit must not bind an unrelated default drawing revision',
+    'commit-ready model BOM preview must flag missing matching drawing revision',
+    'model BOM draft commit must not create CustomerOrder rows',
+    'model-bom-draft commit duplicate formal BOM name scope',
+    'raw source trace fields',
     'uploadWorkbook',
     'issueMaterialImportWorkbook',
     'missingRequiredMaterialImportWorkbook',
@@ -4828,12 +7410,44 @@ function verifyMaterialImportIssueReportWorkflow() {
     'assertNoOrderProductionInventorySideEffects',
     'sourceTransformRules',
     'targetTransformRules',
+    'findOrderExtractCustomer',
+    'prepareOrderExtractCustomer',
+    'archiveOrderExtractCustomer',
+    'archivedFixtureIdentity',
+    'ensureProcessDefinitionFixture',
+    'ensureMaterialDefaultProcessFixture',
+    ".replace(/[\\s\\-_./\\\\]+/g, '')",
+    'processNameNormalized = processNameKey(processName)',
+    "requestJson('/process-definitions'",
+    "`/process-definitions/${existing.id}/restore`",
+    'Number(result.createdCount || 0) + Number(result.updatedCount || 0) === 2',
+    'prisma.modelBom.update({',
+    'prisma.material.updateMany({',
+    'prisma.processDefinition.updateMany({',
+    'prisma.customerContact.updateMany',
+    'customerCode: archivedCustomerIdentity(orderExtractCustomerCode, customer.id)',
+    'customerName: archivedCustomerIdentity(orderExtractCustomerName, customer.id)',
+    "contactName: null",
+    "contactPhone: null",
     '来源加工关系只作为建议，不自动扣库存'
   ];
   for (const snippet of regressionScriptSnippets) {
     if (!materialImportApiVerifySource.includes(snippet) && !packageSource.includes(snippet)) {
       addFailure(`verify-material-import-api.cjs/package.json must keep material import API regression snippet: ${snippet}`);
     }
+  }
+  if (
+    materialImportApiVerifySource.includes('prisma.customer.deleteMany') ||
+    materialImportApiVerifySource.includes('prisma.customer.upsert') ||
+    materialImportApiVerifySource.includes('prisma.material.deleteMany') ||
+    materialImportApiVerifySource.includes('prisma.modelBom.deleteMany') ||
+    materialImportApiVerifySource.includes('prisma.processDefinition.deleteMany') ||
+    materialImportApiVerifySource.includes('prisma.materialTransformRule.deleteMany') ||
+    materialImportApiVerifySource.includes('prisma.materialApplicability.deleteMany') ||
+    materialImportApiVerifySource.includes('prisma.materialDrawingRevision.deleteMany') ||
+    materialImportApiVerifySource.includes('new Date().toISOString().replace(/[-:.TZ]/g')
+  ) {
+    addFailure('verify-material-import-api.cjs must reuse stable import fixtures and archive temporary customers instead of creating timestamped master data.');
   }
   if (!packageSource.includes('"verify:material-import-api": "node scripts/verify-material-import-api.cjs"')) {
     addFailure('package.json must expose verify:material-import-api for material Excel import regression testing.');
@@ -5182,6 +7796,15 @@ function verifyMobileCompactOrderCards() {
     'customerBomCommonKeywordMatches',
     '搜索 BOM 名称 / 适用范围 / 机型 / 客户',
     '客户常用 BOM 弹窗只做本地过滤，不改变后端适用范围',
+    'formatCustomerNamePreview(row.scopeCustomers?.map((customer) => customer.customerName) || [], \'指定客户\', row.scopeCustomerCount)',
+    'function formatCustomerNamePreview(names: Array<string | null | undefined>, emptyText = \'-\', totalCount?: number)',
+    'const total = typeof totalCount === \'number\' && totalCount > filtered.length ? totalCount : filtered.length',
+    '等 ${total} 个客户',
+    'customerBomCommonScopePreview(row)',
+    'customerBomCommonScopeTitle(row)',
+    'function customerBomCommonScopeTitle(row: ModelBom)',
+    '`适用范围：${customerBomCommonScopePreview(row)}`',
+    '客户页只显示摘要，需要完整范围时进入 BOM 详情核对；不会修改 BOM 明细、订单、生产任务或库存',
     'customer-common-bom-drag-handle',
     'aria-label="拖拽调整客户常用 BOM 顺序"',
     '<el-icon><Rank /></el-icon>',
@@ -5231,6 +7854,15 @@ function verifyMobileCompactOrderCards() {
     if (!customersSource.includes(snippet)) {
       addFailure(`CustomersView.vue must keep compact mobile customer card snippet: ${snippet}`);
     }
+  }
+  if (customersSource.includes("row.scopeCustomers?.map((customer) => customer.customerName).join('、')")) {
+    addFailure('CustomersView.vue customer BOM scope text must summarize selected customers instead of listing every customer name.');
+  }
+  if (customersSource.includes('`适用范围：${row.scopeLabel || customerBomCommonScopePreview(row)}`')) {
+    addFailure('CustomersView.vue customer common BOM tooltip must not reuse raw scopeLabel because selected-customer ranges can be too long.');
+  }
+  if (customersSource.includes('<strong>{{ row.scopeLabel }}</strong>')) {
+    addFailure('CustomersView.vue customer common BOM table must summarize scope labels with tooltip instead of rendering raw scopeLabel.');
   }
   if (customersSource.includes('ElMessageBox.confirm')) {
     addFailure('CustomersView.vue customer and customer BOM key operations must use el-dialog instead of ElMessageBox.confirm.');
@@ -5379,12 +8011,31 @@ function verifyMobileCompactOrderCards() {
     '工序已停用，历史订单和生产任务不受影响',
     '手机端只查看标准工序',
     '标准工序加载失败，请确认后端服务和筛选条件',
-    '.process-definition-card.expanded .process-definition-actions'
+    '标准工序列表高度只保存为本机 UI 偏好，不写入标准工序、流程记忆、订单、BOM、生产或库存业务数据。',
+    'processDefinitionListHeightStorageKey',
+    'window.localStorage.getItem(processDefinitionListHeightStorageKey)',
+    'window.localStorage.setItem(processDefinitionListHeightStorageKey',
+    'aria-label="标准工序列表高度"',
+    'aria-label="降低标准工序列表高度"',
+    'aria-label="提高标准工序列表高度"',
+    ':style="{ maxHeight: `${processDefinitionListHeight}px` }"',
+    'process-definition-list-height-actions',
+    '.process-definition-card.expanded .process-definition-actions',
+    'processDefinitionRemarkPreview(definition)',
+    ':title="definition.remark || \'\'"',
+    'function processDefinitionRemarkPreview(definition: ProcessDefinition)',
+    'function formatLongTextPreview'
   ];
   for (const snippet of processDefinitionSnippets) {
     if (!processDefinitionSource.includes(snippet)) {
       addFailure(`ProcessDefinitionManager.vue must keep compact mobile process-definition card snippet: ${snippet}`);
     }
+  }
+  if (processDefinitionSource.includes('<small v-if="definition.remark">{{ definition.remark }}</small>')) {
+    addFailure('ProcessDefinitionManager.vue must summarize process-definition remarks in list cards instead of rendering full remark text directly.');
+  }
+  if (processDefinitionSource.includes("<p>{{ definition.remark || '暂无备注' }}</p>")) {
+    addFailure('ProcessDefinitionManager.vue must summarize process-definition remarks in tooltip content instead of rendering full remark text directly.');
   }
   const processTemplateSnippets = [
     'expandedMobileTemplateIds',
@@ -5412,12 +8063,45 @@ function verifyMobileCompactOrderCards() {
     '手机端只查看流程记忆',
     '标准工序加载失败，流程记忆暂不可编辑新工序',
     '流程记忆加载失败，请确认后端服务和筛选条件',
-    '.process-template-card.expanded .process-template-card-actions'
+    '流程记忆列表高度只保存为本机 UI 偏好，不写入流程记忆、标准工序、订单、BOM、生产或库存业务数据。',
+    'processTemplateListHeightStorageKey',
+    'window.localStorage.getItem(processTemplateListHeightStorageKey)',
+    'window.localStorage.setItem(processTemplateListHeightStorageKey',
+    'aria-label="流程记忆列表高度"',
+    'aria-label="降低流程记忆列表高度"',
+    'aria-label="提高流程记忆列表高度"',
+    ':style="{ maxHeight: `${processTemplateListHeight}px` }"',
+    'process-template-list-height-actions',
+    '.process-template-card.expanded .process-template-card-actions',
+    'templateRemarkPreview(template)',
+    'function templateRemarkPreview(template: ProcessTemplate)',
+    'templateStepRemarkPreview(step)',
+    'templateStepRemarkPreview(step, 28)',
+    'templateStepRemarkTitle(step)',
+    'function templateStepRemarkPreview(step: ProcessStepDetail',
+    'function templateStepRemarkTitle(step: ProcessStepDetail)',
+    'function formatLongTextPreview',
+    '等 ${steps.length} 道工序'
   ];
   for (const snippet of processTemplateSnippets) {
     if (!processTemplateSource.includes(snippet)) {
       addFailure(`ProcessTemplateManager.vue must keep compact mobile process-template card snippet: ${snippet}`);
     }
+  }
+  if (processTemplateSource.includes('<em v-if="template.remark">{{ template.remark }}</em>')) {
+    addFailure('ProcessTemplateManager.vue must summarize template remarks in list cards instead of rendering full remark text directly.');
+  }
+  if (processTemplateSource.includes("return steps.map((step) => (step.processRemark ? `${step.processName}(${step.processRemark})` : step.processName)).join(' → ');")) {
+    addFailure('ProcessTemplateManager.vue must summarize process template step lists instead of rendering every full step remark in cards.');
+  }
+  if (processTemplateSource.includes('<span v-if="step.processRemark">：{{ step.processRemark }}</span>')) {
+    addFailure('ProcessTemplateManager.vue must summarize process template step remarks in tooltip/detail views instead of rendering full remark text directly.');
+  }
+  if (processTemplateSource.includes('<p v-if="template.remark">备注：{{ template.remark }}</p>')) {
+    addFailure('ProcessTemplateManager.vue must summarize process template remarks in tooltip/detail views instead of rendering full remark text directly.');
+  }
+  if (processTemplateSource.includes('<p v-if="previewTemplate.remark">备注：{{ previewTemplate.remark }}</p>')) {
+    addFailure('ProcessTemplateManager.vue must summarize process template preview remarks instead of rendering full remark text directly.');
   }
   const styleSnippets = [
     '.mobile-order-card',
@@ -5496,8 +8180,8 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     '生产任务已取消，只能查看历史记录',
     '订单已完成发货，只能查看工序记录',
     '该订单已完成发货，工序完成表只能查看，不能再修改。',
-    'return \'请先开始生产\';',
-    'return \'请先完成上一道工序\';',
+    '请先开始生产',
+    '请先完成上一道工序',
     'function openProcessCompletion(row: ProductionTask, processName: string)',
     'if (!canOpenProcess(row, processName))',
     ':before-close="handleProcessDialogClose"',
@@ -5505,6 +8189,24 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     '工序完成表正在保存，请等待保存完成',
     'selectedProcessNamesForSave()',
     'missingOperatorProcessNames',
+    'formatProductionListPreview',
+    "formatProductionListPreview(missingOperatorProcessNames, '工序')",
+    "formatProductionListPreview(selectedProcessNames, '工序')",
+    'quantityOverrideReasonPreview',
+    'quantityOverrideReasonTitle',
+    'formatLongTextPreview(processForm.quantityOverrideReason, 42, \'-\')',
+    "formatLongTextPreview(remark, 12, '')",
+    'formatProcessLogPreview(log.beforeSnapshot)',
+    'formatProcessLogTitle(log.beforeSnapshot)',
+    'function formatProcessLogPreview(snapshot?: Record<string, unknown> | null)',
+    "formatLongTextPreview(formatProcessLog(snapshot), 96, '-')",
+    "function processStepTitle(row: { processStepDetails?: ProductionTask['processStepDetails'] }",
+    "function processStepRemark(row: { processStepDetails?: ProductionTask['processStepDetails'] }",
+    "formatProductionProcessSteps(task, '未配置生产流程', ' → ')",
+    "function formatProductionProcessSteps(row: { processSteps: string[]; processStepDetails?: ProductionTask['processStepDetails'] }",
+    'function orderSummaryProgressPreviewItems(row: ProductionOrderSummary)',
+    'function orderSummaryProgressText(row: ProductionOrderSummary)',
+    'return formatProductionListPreview(orderSummaryProgressItems(row), \'进度\');',
     '确认工序完成时必须选择操作人员',
     'erpApi.completeProcessSteps(activeTask.value.id',
     'erpApi.completeProcessStep(activeTask.value.id',
@@ -5515,6 +8217,27 @@ function verifyProductionProcessCompletionSequenceWorkflow() {
     if (!viewSource.includes(snippet)) {
       addFailure(`ProductionView.vue must keep process completion sequence UI snippet: ${snippet}`);
     }
+  }
+  if (
+    viewSource.includes("missingOperatorProcessNames.join('、')") ||
+    viewSource.includes("selectedProcessNames.join('、')") ||
+    viewSource.includes("task.processSteps.map((step) => processStepDisplay(task, step)).join('、')") ||
+    viewSource.includes("task.processSteps.map((step) => processStepDisplay(task, step)).join(' → ')") ||
+    viewSource.includes("row.processSteps.map((step) => processStepDisplay(row, step)).join('、')") ||
+    viewSource.includes("orderSummaryProgressItems(selectedOrderOverview).join('、')") ||
+    viewSource.includes("orderSummaryProgressItems(summary).join('、')") ||
+    viewSource.includes("orderSummaryProgressItems(row).join('、')")
+  ) {
+    addFailure('ProductionView.vue must summarize batch/process-step names instead of rendering every item in rows or messages.');
+  }
+  if (viewSource.includes('<strong>{{ processForm.quantityOverrideReason }}</strong>')) {
+    addFailure('ProductionView.vue must summarize quantity override reasons in confirmation dialogs.');
+  }
+  if (viewSource.includes('{{ formatProcessLog(log.beforeSnapshot) }}') || viewSource.includes('{{ formatProcessLog(log.afterSnapshot) }}')) {
+    addFailure('ProductionView.vue must summarize process log snapshots with formatProcessLogPreview and keep full text in title.');
+  }
+  if (viewSource.includes('return remark ? `${processName}（${remark}）` : processName;')) {
+    addFailure('ProductionView.vue must summarize process step remarks in pills/buttons instead of rendering full remarks directly.');
   }
 
   const apiSource = readFile(apiPath);
@@ -5585,7 +8308,7 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
   const controllerSource = readFile(controllerPath);
   const controllerSnippets = [
     "@Get('replenishment-requests')",
-    'return this.productionService.replenishmentRequests(query)',
+    "return this.productionService.replenishmentRequests({ ...query, withPage: 'true' })",
     "@Post('process-completions/:id/replenishment-request/approve')",
     'return this.productionService.approveReplenishmentRequest(id, dto)',
     "@Post('process-completions/:id/replenishment-request/reject')",
@@ -5612,6 +8335,7 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'reason!: string',
     'export class ProductionReplenishmentRequestQueryDto',
     '@IsIn(productionReplenishmentRequestStatuses)',
+    'withPage?: string',
     'export class WithdrawProductionTaskDto',
     '@IsIn(productionWithdrawHandlingModes)',
     'handlingQuantity!: number',
@@ -5747,7 +8471,7 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'export interface ApproveProductionReplenishmentRequestPayload',
     'export interface RejectProductionReplenishmentRequestPayload',
     'export interface WithdrawProductionTaskPayload',
-    'productionReplenishmentRequests(filters: ProductionReplenishmentRequestFilters = {})',
+    'productionReplenishmentRequestsPage(filters: ProductionReplenishmentRequestFilters = {})',
     '/production/tasks/replenishment-requests',
     'withdrawProductionTask(id: string, payload: WithdrawProductionTaskPayload)',
     '/production/tasks/${id}/withdraw',
@@ -5767,6 +8491,8 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
   const typeSnippets = [
     "export type ProductionReplenishmentRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED'",
     'export interface ProductionReplenishmentRequest',
+    'export interface ProductionReplenishmentRequestListResponse',
+    'export interface ProductionScrapRecordListResponse',
     "sourceType: 'PRODUCTION_SCRAP' | string",
     'processCompletionId?: string',
     'requestQuantity: number',
@@ -5796,7 +8522,22 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     'v-model="replenishmentRequestVisible"',
     'title="生产报废补单申请"',
     'loadProductionReplenishmentRequests',
-    'erpApi.productionReplenishmentRequests',
+    'erpApi.productionReplenishmentRequestsPage',
+    'replenishmentRequestPagination',
+    'handleReplenishmentRequestPageChange',
+    'scrapRecordPagination',
+    'handleScrapRecordPageChange',
+    'productionNoticeReasonPreview(notice)',
+    'function productionNoticeReasonPreview(notice: ProductionNotice)',
+    'scrapRecordReasonPreview(row)',
+    'scrapRecordReasonTitle(row)',
+    'function scrapRecordReasonPreview(record: ProductionScrapRecord)',
+    'function scrapRecordReasonTitle(record: ProductionScrapRecord)',
+    'replenishmentRequestReasonPreview(request)',
+    'function replenishmentRequestReasonPreview(request: ProductionReplenishmentRequest)',
+    'replenishmentSupervisorRemarkPreview(request)',
+    'function replenishmentSupervisorRemarkPreview(request: ProductionReplenishmentRequest)',
+    'function formatLongTextPreview',
     'canReviewReplenishmentRequest',
     'replenishmentRequestLockedReason',
     '订单已完成发货，不能处理生产报废补单申请',
@@ -5841,6 +8582,18 @@ function verifyProductionReplenishmentAndWithdrawWorkflow() {
     if (!viewSource.includes(snippet)) {
       addFailure(`ProductionView.vue must keep replenishment/withdraw dialog workflow snippet: ${snippet}`);
     }
+  }
+  if (viewSource.includes('<template v-if="request.supervisorRemark"> / 审核说明：{{ request.supervisorRemark }}</template>')) {
+    addFailure('ProductionView.vue must summarize replenishment supervisor remarks instead of rendering full text in the request list.');
+  }
+  if (viewSource.includes('<p>{{ notice.reason }}</p>')) {
+    addFailure('ProductionView.vue must summarize production notice reasons instead of rendering full text in the notice list.');
+  }
+  if (viewSource.includes('<p class="replenishment-request-reason">{{ request.reason }}</p>')) {
+    addFailure('ProductionView.vue must summarize replenishment request reasons instead of rendering full text in the request list.');
+  }
+  if (/<el-table-column\s+prop="reason"\s+label="[^"]*"\s+min-width="260"\s+show-overflow-tooltip\s*\/>/.test(viewSource)) {
+    addFailure('ProductionView.vue must summarize production scrap record reasons instead of rendering full reason text through raw overflow tooltip.');
   }
 
   const verifierSource = readFile(verifierPath);
@@ -6407,6 +9160,19 @@ function verifyShortageReplenishmentClosureWorkflow() {
     'function lineCompletedReplenishmentText(line: OrderLine)',
     "['COMPLETED', 'STORED'].includes(task.status)",
     'return `补单已完成 ${formatQuantity(quantity, line.unit)}',
+    'formatOrderDetailListPreview',
+    "formatOrderDetailListPreview(line.productionReplenishmentRequestNos || [], '补单申请')",
+    "formatOrderDetailListPreview(line.productionReplenishmentTaskNos || [], '补单任务')",
+    "formatOrderDetailListPreview(rows.map((row) => formatQuantity(row.quantity, row.unit)), '单位')",
+    "formatOrderDetailListPreview(line.processSteps, '工序')",
+    "formatOrderDetailListPreview(detailLine.materialIdentityConflictFields, '字段')",
+    'formatLineShortagePreview(line)',
+    'function formatLineShortagePreview(line: OrderLine',
+    'shortageRecordReasonPreview(record)',
+    'function shortageRecordReasonPreview(record:',
+    'stockSourceSummaryPreview(line)',
+    'stockSourceSummaryPreview(row, 42)',
+    'function stockSourceSummaryPreview(line: OrderLine | CreateOrderLinePayload',
     'function lineNeedsReplenishmentAction(line: OrderLine)',
     'return Boolean(line.unresolvedShortageQuantity && line.unresolvedShortageQuantity > 0)',
     'linesNeedingReplenishmentAction.value[0] || linesWithShortageRecords.value[0]',
@@ -6417,6 +9183,31 @@ function verifyShortageReplenishmentClosureWorkflow() {
     if (!detailViewSource.includes(snippet)) {
       addFailure(`OrderDetailView.vue must keep shortage replenishment closure UI snippet: ${snippet}`);
     }
+  }
+  if (
+    detailViewSource.includes("line.productionReplenishmentRequestNos.join('、')") ||
+    detailViewSource.includes("line.productionReplenishmentTaskNos.join('、')") ||
+    detailViewSource.includes("completedTasks.map((task) => task.productionTaskNo).join('、')") ||
+    detailViewSource.includes("rows.map((row) => formatQuantity(row.quantity, row.unit)).join('、')") ||
+    detailViewSource.includes("line.processSteps.join('、')") ||
+    detailViewSource.includes("detailLine.materialIdentityConflictFields.join('、')")
+  ) {
+    addFailure('OrderDetailView.vue must summarize replenishment/process/conflict lists instead of rendering the full joined list.');
+  }
+  if (detailViewSource.includes('<p>{{ formatLineShortageText(line) }}</p>')) {
+    addFailure('OrderDetailView.vue must summarize shortage text in pending/resolved shortage lists.');
+  }
+  if (detailViewSource.includes('{{ formatLineShortageText(row) || \'-\' }}')) {
+    addFailure('OrderDetailView.vue must summarize shortage text in the order-line table.');
+  }
+  if (detailViewSource.includes('<small>{{ record.managerName || \'-\' }}确认：{{ record.shortageReason || \'-\' }}</small>')) {
+    addFailure('OrderDetailView.vue must summarize shortage record reasons in shortage handling dialogs.');
+  }
+  if (
+    detailViewSource.includes('库存来源：{{ stockSourceSummary(line) }}') ||
+    detailViewSource.includes('{{ stockSourceSummary(row) }}')
+  ) {
+    addFailure('OrderDetailView.vue must summarize selected stock source text in cards and table rows.');
   }
 
   const verifierSource = readFile(verifierPath);
@@ -6440,11 +9231,14 @@ function verifyShortageReplenishmentClosureWorkflow() {
 function verifyWarehouseWorkflow() {
   const controllerPath = 'backend/src/modules/warehouses/warehouses.controller.ts';
   const servicePath = 'backend/src/modules/warehouses/warehouses.service.ts';
+  const dtoPath = 'backend/src/modules/warehouses/dto.ts';
   const apiPath = 'frontend/src/api/erp.ts';
   const viewPath = 'frontend/src/views/WarehouseView.vue';
   const verifierPath = 'database/prisma/verify-first-stage.ts';
+  const warehouseApiScriptPath = 'scripts/verify-warehouse-config-api.cjs';
+  const packagePath = 'package.json';
 
-  for (const projectPath of [controllerPath, servicePath, apiPath, viewPath, verifierPath]) {
+  for (const projectPath of [controllerPath, servicePath, dtoPath, apiPath, viewPath, verifierPath, warehouseApiScriptPath, packagePath]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing warehouse workflow file: ${projectPath}`);
       return;
@@ -6453,6 +9247,7 @@ function verifyWarehouseWorkflow() {
 
   const controllerSource = readFile(controllerPath);
   const controllerSnippets = [
+    "@Get('warehouses/export')",
     "@Get('warehouse/notices')",
     "@Post('warehouse/notices/:id/acknowledge')",
     "@Get('warehouse/receipts/pending')",
@@ -6470,9 +9265,19 @@ function verifyWarehouseWorkflow() {
   }
 
   const serviceSource = readFile(servicePath);
+  const dtoSource = readFile(dtoPath);
   const verifierSource = readFile(verifierPath);
   const migrationSqlSource = readMigrationSqlSource();
   const serviceSnippets = [
+    'async findWarehouses(query: WarehouseConfigQueryDto = {})',
+    'async buildWarehouseConfigExport(query: WarehouseConfigQueryDto = {})',
+    "query.locationStatus === 'ALL' ? undefined : query.locationStatus || statusFilter",
+    'this.warehouseConfigWhere(statusFilter, includeTestFixtures)',
+    'this.warehouseLocationConfigWhere(locationStatusFilter, includeTestFixtures)',
+    'const WAREHOUSE_TEST_FIXTURE_PREFIXES = [',
+    "'MAT-STABLE'",
+    'warehouseConfigExportScopeText(query)',
+    'warehouseConfigStatusLabel(locationStatus)',
     'async warehouseNotices(query: WarehouseNoticeQueryDto = {})',
     'target: ProductionNoticeTarget.WAREHOUSE',
     'async acknowledgeWarehouseNotice',
@@ -6536,6 +9341,17 @@ function verifyWarehouseWorkflow() {
     }
   }
 
+  const dtoSnippets = [
+    'export class WarehouseConfigQueryDto',
+    "status?: 'ALL' | CommonStatus;",
+    "locationStatus?: 'ALL' | CommonStatus;"
+  ];
+  for (const snippet of dtoSnippets) {
+    if (!dtoSource.includes(snippet)) {
+      addFailure(`warehouses dto must keep warehouse config export filter snippet: ${snippet}`);
+    }
+  }
+
   const verifierSnippets = [
     'WAREHOUSE_IDENTITY_MISSING',
     'WAREHOUSE_LOCATION_IDENTITY_MISSING',
@@ -6563,6 +9379,11 @@ function verifyWarehouseWorkflow() {
 
   const apiSource = readFile(apiPath);
   const apiSnippets = [
+    'warehouses(filters: { status?: CommonStatus | \'ALL\'; locationStatus?: CommonStatus | \'ALL\'; includeTestFixtures?: boolean } = {})',
+    'downloadWarehouseConfigExport(',
+    'includeTestFixtures?: boolean',
+    'locationStatus: filters.locationStatus',
+    "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined",
     'pendingReceipts(filters: WarehouseWorkFilters = {})',
     '/warehouse/receipts/pending',
     'confirmReceipt(productionTaskId: string, warehouseId: string, locationId: string, remark?: string)',
@@ -6571,11 +9392,12 @@ function verifyWarehouseWorkflow() {
     'confirmShipment(batchId: string, remark?: string)',
     'confirmBatchShipment(batchIds: string[], remark?: string)',
     'confirmOrderShipment(orderNo: string, remark?: string)',
-    'warehouseNotices(status?: ProductionNoticeStatus, filters: Omit<ProductionNoticeFilters',
+    'warehouseNoticesPage(status?: ProductionNoticeStatus, filters: Omit<ProductionNoticeFilters',
+    "withPage: 'true'",
     'noticeType: filters.noticeType',
     'customerKeyword: filters.customerKeyword?.trim() || undefined',
     'acknowledgeWarehouseNotice(id: string, payload: AcknowledgeWarehouseNoticePayload | string)',
-    'warehouseTransactions(filters: WarehouseTransactionFilters = {})'
+    'warehouseTransactionsPage(filters: WarehouseTransactionFilters = {})'
   ];
   for (const snippet of apiSnippets) {
     if (!apiSource.includes(snippet)) {
@@ -6590,8 +9412,75 @@ function verifyWarehouseWorkflow() {
     '<OrderSelect',
     'erpApi.pendingReceipts(warehouseWorkParams())',
     'erpApi.pendingShipments(warehouseWorkParams())',
-    'erpApi.warehouseNotices()',
-    'erpApi.warehouseTransactions',
+    'warehouseConfigExportFilters',
+    'warehouseConfigStatusOptions',
+    'warehouse-config-export-title',
+    'warehouse-config-export-filter',
+    'warehouseConfigVisibleWarehouses',
+    'warehouseConfigStatusMatches(item.status, warehouseConfigExportFilters.status)',
+    'warehouseConfigVisibleWarehouses.value.flatMap',
+    'const visibleLocations = warehouse.locations.filter',
+    'warehouseConfigStatusMatches(location.status, warehouseConfigExportFilters.locationStatus)',
+    "warehouseConfigExportFilters.locationStatus === 'ALL'",
+    "function warehouseConfigStatusMatches(status: CommonStatus, filter: CommonStatus | 'ALL')",
+    'locationStatus: warehouseConfigExportFilters.locationStatus',
+    'erpApi.downloadWarehouseConfigExport',
+    'warehouseWorkTableHeightLimits',
+    'warehouseWorkTableDefaultHeights',
+    'warehouseWorkTableHeightStorageKey',
+    "type WarehouseWorkTableKey = 'receipts' | 'shipments' | 'locations' | 'transactions' | 'batchShipment' | 'notices';",
+    'const warehouseWorkTableKeys: WarehouseWorkTableKey[]',
+    '仓库现场表格和通知列表高度只保存为本机 UI 偏好，不写入入库、发货、通知状态、库存批次或库存流水业务数据。',
+    'const warehouseWorkTableHeights = reactive<Record<WarehouseWorkTableKey, number>>',
+    'function clampWarehouseWorkTableHeight',
+    'function adjustWarehouseWorkTableHeight',
+    'function resetWarehouseWorkTableHeight',
+    'function warehouseWorkTableHeightStyle',
+    'function restoreWarehouseWorkTableHeights',
+    'function saveWarehouseWorkTableHeights',
+    'localStorage.getItem(warehouseWorkTableHeightStorageKey)',
+    'localStorage.setItem(',
+    'locations: warehouseWorkTableHeights.locations',
+    'transactions: warehouseWorkTableHeights.transactions',
+    'batchShipment: warehouseWorkTableHeights.batchShipment',
+    'notices: warehouseWorkTableHeights.notices',
+    'restoreWarehouseWorkTableHeights();',
+    ':max-height="warehouseWorkTableHeights.receipts"',
+    ':max-height="warehouseWorkTableHeights.shipments"',
+    ':max-height="warehouseWorkTableHeights.locations"',
+    ':max-height="warehouseWorkTableHeights.transactions"',
+    ':max-height="warehouseWorkTableHeights.batchShipment"',
+    'aria-label="提高待入库表格高度"',
+    'aria-label="提高待发货表格高度"',
+    'aria-label="提高仓库库位表格高度"',
+    'aria-label="提高库存流水表格高度"',
+    'aria-label="批量发货明细表格高度"',
+    'aria-label="降低批量发货明细表格高度"',
+    'aria-label="提高批量发货明细表格高度"',
+    'aria-label="恢复批量发货明细表格默认高度"',
+    'aria-label="仓库通知列表高度"',
+    'aria-label="降低仓库通知列表高度"',
+    'aria-label="提高仓库通知列表高度"',
+    'aria-label="恢复仓库通知列表默认高度"',
+    ":style=\"{ maxHeight: warehouseWorkTableHeightStyle('notices') }\"",
+    'aria-label="恢复待入库表格默认高度"',
+    'aria-label="恢复待发货表格默认高度"',
+    'aria-label="恢复仓库库位表格默认高度"',
+    'aria-label="恢复库存流水表格默认高度"',
+    '.warehouse-table-height-actions',
+    '.warehouse-dialog-list-toolbar',
+    'notice-scroll-list',
+    '.batch-shipment-table-toolbar',
+    "erpApi.warehouseNoticesPage('PENDING'",
+    'warehouseNoticePagination',
+    'handleWarehouseNoticePageChange',
+    'erpApi.warehouseTransactionsPage',
+    'transactionPagination',
+    'handleTransactionPageChange',
+    'formatLongTextPreview(row.remark)',
+    'longTextTooltipText(row.remark)',
+    'formatLongTextPreview(transaction.remark)',
+    'function formatLongTextPreview',
     'function acknowledgeWarehouseNotice',
     'erpApi.acknowledgeWarehouseNotice',
     'async function confirmReceipt()',
@@ -6652,6 +9541,58 @@ function verifyWarehouseWorkflow() {
       addFailure(`WarehouseView.vue must keep first-stage warehouse UI workflow snippet: ${snippet}`);
     }
   }
+  if (viewSource.includes('<el-table-column prop="remark" label="备注" min-width="160" />') || viewSource.includes('{{ transaction.remark || \'-\' }}')) {
+    addFailure('WarehouseView.vue must summarize warehouse transaction remarks instead of rendering full remark text directly.');
+  }
+
+  const warehouseApiScriptSource = readFile(warehouseApiScriptPath);
+  const packageSource = readFile(packagePath);
+  const warehouseApiRegressionSnippets = [
+    "const runId = 'STABLE';",
+    "const testPrefix = 'COD-WH-STABLE';",
+    'async function cleanupEmptyWarehouseFixture',
+    'async function upsertRegressionWarehouseWithLocation(suffix)',
+    'createTemporaryWarehouseWithLocation',
+    'prisma.warehouseLocation.updateMany',
+    'prisma.warehouse.updateMany',
+    'hasInventoryHistory',
+    'assertEmptyWarehouseCanBeDeleted',
+    'assertWarehouseWithHistoryCanOnlyBeDisabled',
+    'warehouse config list must hide reusable test fixtures unless includeTestFixtures=true',
+    'warehouse config export must hide reusable test fixtures unless includeTestFixtures=true',
+    'includeTestFixtures=true',
+    'warehouse config list locationStatus=ALL should include disabled locations under enabled warehouses',
+    'warehouse config list locationStatus=DISABLED must exclude enabled locations',
+    'warehouse config list locationStatus=ENABLED must exclude disabled locations',
+    'delete location with inventory history',
+    'delete warehouse with inventory history',
+    'soft-disabling warehouse must keep inventory batch history',
+    'soft-disabling warehouse must keep inventory transaction history',
+    'status=ENABLED&locationStatus=ALL',
+    'status=ALL&locationStatus=DISABLED',
+    'warehouse config export locationStatus=ALL should include disabled locations under enabled warehouses',
+    'warehouse config export locationStatus=DISABLED must exclude enabled locations'
+  ];
+  for (const snippet of warehouseApiRegressionSnippets) {
+    if (!warehouseApiScriptSource.includes(snippet)) {
+      addFailure(`verify-warehouse-config-api.cjs must keep warehouse delete/disable regression snippet: ${snippet}`);
+    }
+  }
+  if (warehouseApiScriptSource.includes('function localDateTimeStamp')) {
+    addFailure('verify-warehouse-config-api.cjs must reuse a stable warehouse prefix instead of creating timestamped warehouse config data.');
+  }
+  const forbiddenWarehouseApiCleanupSnippets = [
+    'await prisma.warehouseLocation.deleteMany({ where: { locationCode: { startsWith: testPrefix } } });',
+    'await prisma.warehouse.deleteMany({ where: { warehouseCode: { startsWith: testPrefix } } });'
+  ];
+  for (const snippet of forbiddenWarehouseApiCleanupSnippets) {
+    if (warehouseApiScriptSource.includes(snippet)) {
+      addFailure('verify-warehouse-config-api.cjs must soft-disable reusable warehouse config fixtures instead of broad physical cleanup.');
+    }
+  }
+  if (!packageSource.includes('"verify:warehouse-config-api": "node scripts/verify-warehouse-config-api.cjs"')) {
+    addFailure('package.json must expose verify:warehouse-config-api for warehouse delete/disable regression testing.');
+  }
 }
 
 function verifyNoticeCustomerNameDisplay() {
@@ -6691,20 +9632,26 @@ function verifyNoticeCustomerNameDisplay() {
   }
 
   const serviceSnippets = [
-    [productionServicePath, 'return this.toNoticesWithCustomerNames(notices);'],
+    [productionServicePath, 'const items = await this.toNoticesWithCustomerNames(notices);'],
     [productionServicePath, 'async adminNotices(query: ProductionNoticeQueryDto = {})'],
     [productionServicePath, 'buildProductionNoticeWhere(query, query.target)'],
     [productionServicePath, 'buildProductionNoticeWhere'],
     [productionServicePath, 'const where: Prisma.ProductionNoticeWhereInput = target ? { target } : {};'],
     [productionServicePath, 'productionNoticeCustomerScope'],
+    [productionServicePath, 'PRODUCTION_TEST_FIXTURE_PREFIXES'],
+    [productionServicePath, 'productionNoticeFixtureWhere'],
+    [productionServicePath, "query.includeTestFixtures !== 'true'"],
     [productionServicePath, '通知历史筛选必须覆盖订单、客户、零件、通知原因和任务号'],
     [productionServicePath, 'const customerNameByOrderId = new Map(orders.map((order) => [order.id, order.customerName]));'],
     [productionServicePath, 'customerNameByOrderId.get(notice.orderId) || customerNameByOrderNo.get(notice.orderNo) || undefined'],
     [productionControllerPath, "@Get('notices/admin')"],
-    [productionControllerPath, 'return this.productionService.adminNotices(query);'],
-    [warehouseServicePath, 'return this.toNoticesWithCustomerNames(notices);'],
+    [productionControllerPath, "return this.productionService.notices({ ...query, withPage: 'true' });"],
+    [productionControllerPath, "return this.productionService.adminNotices({ ...query, withPage: 'true' });"],
+    [warehouseServicePath, 'const items = await this.toNoticesWithCustomerNames(notices);'],
     [warehouseServicePath, 'buildWarehouseNoticeWhere'],
     [warehouseServicePath, 'warehouseNoticeCustomerScope'],
+    [warehouseServicePath, 'warehouseNoticeFixtureWhere'],
+    [warehouseServicePath, "query.includeTestFixtures !== 'true'"],
     [warehouseServicePath, '仓库历史通知筛选必须支持订单、客户、零件、通知类型和时间组合查询'],
     [warehouseServicePath, 'const customerNameByOrderId = new Map(orders.map((order) => [order.id, order.customerName]));'],
     [warehouseServicePath, 'customerNameByOrderId.get(notice.orderId) || customerNameByOrderNo.get(notice.orderNo) || undefined']
@@ -6725,9 +9672,19 @@ function verifyNoticeCustomerNameDisplay() {
   if (!noticeDialogSource.includes("<strong>{{ noticeTitle || '-' }}</strong>")) {
     addFailure('NoticeAcknowledgeDialog.vue must display the full noticeTitle passed by production/warehouse views.');
   }
+  if (!noticeDialogSource.includes('<p :title="noticeReasonTitle">{{ noticeReasonPreview }}</p>')) {
+    addFailure('NoticeAcknowledgeDialog.vue must summarize noticeReason in the acknowledgement dialog while preserving the full reason in title.');
+  }
+  if (!noticeDialogSource.includes('const noticeReasonPreview = computed(() => formatLongTextPreview(props.noticeReason, 72, \'-\'));')) {
+    addFailure('NoticeAcknowledgeDialog.vue must keep a compact notice reason preview for long production/warehouse notice reasons.');
+  }
+  if (noticeDialogSource.includes('<p>{{ noticeReason || \'-\' }}</p>')) {
+    addFailure('NoticeAcknowledgeDialog.vue must not render full noticeReason directly in the acknowledgement dialog.');
+  }
   const noticeDialogResponsiveSnippets = [
     'class="responsive-dialog notice-acknowledge-dialog"',
     'overflow-wrap: anywhere',
+    'function formatLongTextPreview',
     'useSelect',
     "emit('search', keyword)",
     "emit('visibleChange', visible)"
@@ -6757,22 +9714,33 @@ function verifyNoticeCustomerNameDisplay() {
   const warehouseViewSnippets = [
     'function warehouseNoticeTitle(notice: ProductionNotice)',
     '[notice.customerName, notice.orderNo, notice.partCode, notice.partName]',
+    'warehouseNoticeReasonPreview(notice)',
+    'function warehouseNoticeReasonPreview(notice: ProductionNotice)',
     'warehouseNoticeFilters',
     'resetWarehouseNoticeFilters',
     'noticeType: warehouseNoticeFilters.noticeType === \'ALL\' ? undefined : warehouseNoticeFilters.noticeType',
-    ':notice-title="activeWarehouseNotice ? warehouseNoticeTitle(activeWarehouseNotice) : \'\'"'
+    ':notice-title="activeWarehouseNotice ? warehouseNoticeTitle(activeWarehouseNotice) : \'\'"',
+    'warehouseNoticeReasonPreview(activeWarehouseNotice)',
+    'warehouseNoticeReasonTitle(activeWarehouseNotice)'
   ];
   for (const snippet of warehouseViewSnippets) {
     if (!warehouseViewSource.includes(snippet)) {
       addFailure(`WarehouseView.vue must keep customerName in warehouse notice title snippet: ${snippet}`);
     }
   }
+  if (warehouseViewSource.includes('<p>{{ notice.reason }}</p>')) {
+    addFailure('WarehouseView.vue must summarize warehouse notice reasons instead of rendering full text in the notice list.');
+  }
+  if (warehouseViewSource.includes('<p>{{ activeWarehouseNotice.reason }}</p>')) {
+    addFailure('WarehouseView.vue must summarize active warehouse notice reasons instead of rendering full text directly.');
+  }
 
   const apiSource = readFile(apiPath);
   const apiSnippets = [
-    'adminProductionNotices(filters: ProductionNoticeFilters = {})',
+    'adminProductionNoticesPage(filters: ProductionNoticeFilters = {})',
     '`/production/tasks/notices/admin${toQuery({',
-    'target: filters.target'
+    'target: filters.target',
+    "withPage: 'true'"
   ];
   for (const snippet of apiSnippets) {
     if (!apiSource.includes(snippet)) {
@@ -6782,18 +9750,33 @@ function verifyNoticeCustomerNameDisplay() {
 
   const adminNoticesViewSource = readFile(adminNoticesViewPath);
   const adminNoticesViewSnippets = [
-    'erpApi.adminProductionNotices',
+    'erpApi.adminProductionNoticesPage',
+    'adminNoticePagination',
+    'handleAdminNoticePageChange',
     "targetFilter.value === 'ALL' ? undefined : targetFilter.value",
     "statusFilter.value === 'ALL' ? undefined : statusFilter.value",
     "noticeTypeFilter.value === 'ALL' ? undefined : noticeTypeFilter.value",
     'noticeTargetLabel',
     'noticeStatusLabel',
+    'noticeTitlePreview(notice)',
+    'noticeCustomerPreview(row)',
+    'noticePartPreview(row)',
+    'noticeReasonPreview(notice)',
+    'noticeAcknowledgementPreview(row)',
+    'function noticeReasonPreview(notice: ProductionNotice)',
+    'function formatLongTextPreview',
     '管理员通知中心只读拉取历史消息'
   ];
   for (const snippet of adminNoticesViewSnippets) {
     if (!adminNoticesViewSource.includes(snippet)) {
       addFailure(`AdminNoticesView.vue must keep read-only admin notice center snippet: ${snippet}`);
     }
+  }
+  if (adminNoticesViewSource.includes('<span>{{ notice.reason || \'-\' }}</span>')) {
+    addFailure('AdminNoticesView.vue must summarize notice reasons in mobile list rows.');
+  }
+  if (adminNoticesViewSource.includes('<strong>{{ noticeTitle(notice) }}</strong>')) {
+    addFailure('AdminNoticesView.vue must summarize mobile notice card titles instead of rendering full title text.');
   }
 
   const routerSource = readFile(routerPath);
@@ -6818,21 +9801,248 @@ function verifyNoticeCustomerNameDisplay() {
     'seedShortageTask',
     'assertProductionShortageCompletionRequiresHandling',
     'assertFinalProcessStepShortageRequestCreatesPendingReview',
+    'assertDefaultBusinessListsHideFixtures',
+    'includeTestFixtures',
     'final process step shortage request must wait for supervisor review',
     "shortageMode: 'REPLENISHMENT_REQUEST'",
     "request?.sourceType === 'PRODUCTION_SCRAP'",
     'shortage completion without handling must be rejected',
     "shortageMode: 'MANAGER_APPROVED'",
     'shortage completion must record shortageQuantity=2',
-    'Production and warehouse notice API filter verification passed.'
+    'repeat production notice acknowledgement',
+    'repeat acknowledgement must not overwrite acknowledgedBy',
+    'warehouse acknowledged notice must keep warehouse operator snapshot',
+    'repeat warehouse notice acknowledgement',
+    'repeat warehouse acknowledgement must not overwrite acknowledgedBy',
+    '不能重复确认',
+    'Production and warehouse notice API filter verification passed.',
+    "const runId = 'STABLE';",
+    "const testPrefix = 'COD-NOTICE-STABLE';",
+    'prisma.customer.findFirst',
+    'prisma.customer.update',
+    'prisma.customer.create',
+    'prisma.customerContact.updateMany',
+    'customerCode: `${customerCode}${archiveSuffix}`',
+    'customerName: `${customerName}${archiveSuffix}`',
+    "contactName: null",
+    "contactPhone: null"
   ];
   for (const snippet of noticeApiScriptSnippets) {
     if (!noticeApiScriptSource.includes(snippet)) {
       addFailure(`verify-production-notices-api.cjs must keep notice API filter regression snippet: ${snippet}`);
     }
   }
+  if (
+    noticeApiScriptSource.includes('prisma.customer.deleteMany') ||
+    noticeApiScriptSource.includes('function localDateTimeStamp') ||
+    noticeApiScriptSource.includes('prisma.customer.upsert')
+  ) {
+    addFailure('verify-production-notices-api.cjs must reuse stable customer master data and soft-disable it after verification.');
+  }
   if (!readFile(packagePath).includes('"verify:production-notices-api": "node scripts/verify-production-notices-api.cjs"')) {
     addFailure('package.json must expose verify:production-notices-api for real API notice filter regression checks.');
+  }
+}
+
+function verifyAdminNoticeTableHeightControls() {
+  const viewPath = 'frontend/src/views/AdminNoticesView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing admin notice table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';",
+    'adminNoticeTableHeightLimits',
+    'adminNoticeTableDefaultHeight',
+    'baisheng.erp.adminNoticeTableHeight.v1',
+    '管理员通知表格高度只保存为本机 UI 偏好，不写入通知、订单、生产或仓库业务数据。',
+    'adminNoticeTableHeight = ref(adminNoticeTableDefaultHeight)',
+    'function adjustAdminNoticeTableHeight',
+    'function resetAdminNoticeTableHeight',
+    'function restoreAdminNoticeTableHeight',
+    'function saveAdminNoticeTableHeight',
+    'const savedHeightText = window.localStorage.getItem(adminNoticeTableHeightStorageKey)',
+    'if (!savedHeightText)',
+    'window.localStorage.setItem(adminNoticeTableHeightStorageKey',
+    'aria-label="管理员通知表格高度"',
+    'aria-label="降低管理员通知表格高度"',
+    'aria-label="提高管理员通知表格高度"',
+    'aria-label="恢复管理员通知表格默认高度"',
+    ':max-height="adminNoticeTableHeight"',
+    'noticeReasonPreview(row)',
+    'noticeReasonTitle(row)',
+    'noticeTitlePreview(notice)',
+    'function noticeTitlePreview(notice: ProductionNotice)',
+    'noticeCustomerPreview(row)',
+    'noticeCustomerTitle(row)',
+    'noticeTaskNoPreview(row)',
+    'noticePartPreview(row)',
+    'noticeAcknowledgementPreview(row)',
+    'noticeAcknowledgementTitle(row)',
+    'function noticeReasonPreview(notice: ProductionNotice)',
+    'function noticeReasonTitle(notice: ProductionNotice)',
+    'function noticeAcknowledgementPreview(notice: ProductionNotice)',
+    'restoreAdminNoticeTableHeight();',
+    'admin-notice-table-height-actions',
+    'admin-notice-table-height-label'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`AdminNoticesView.vue must keep adjustable admin notice table height control snippet: ${snippet}`);
+    }
+  }
+  if (/<el-table-column\s+prop="reason"\s+label="[^"]*"\s+min-width="280"\s+show-overflow-tooltip\s*\/>/.test(viewSource)) {
+    addFailure('AdminNoticesView.vue must summarize admin notice reasons instead of rendering full reason text through raw overflow tooltip.');
+  }
+  if (/<el-table-column\s+prop="(?:customerName|productionTaskNo)"\s+label="[^"]*"\s+(?:min-)?width="(?:150|160)"\s+show-overflow-tooltip\s*\/>/.test(viewSource)) {
+    addFailure('AdminNoticesView.vue must summarize customer/task text with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (/<el-table-column\s+label="(?:零件|确认信息)"\s+min-width="(?:180|210)"\s+show-overflow-tooltip\s*>/.test(viewSource)) {
+    addFailure('AdminNoticesView.vue must summarize part and acknowledgement text with explicit title text instead of raw show-overflow-tooltip.');
+  }
+  if (viewSource.includes('<span>{{ noticeAcknowledgementText(notice) }}</span>')) {
+    addFailure('AdminNoticesView.vue must summarize mobile acknowledgement text instead of rendering full text directly.');
+  }
+}
+
+function verifyUiPreferenceStorageGuards() {
+  const guardedPreferenceSnippets = [
+    {
+      path: 'frontend/src/views/AdminNoticesView.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响管理员历史通知查看。',
+        '本机 UI 偏好写入失败不阻断管理员历史通知查询。'
+      ]
+    },
+    {
+      path: 'frontend/src/views/CustomersView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断客户资料、多联系人或常用 BOM 查看维护。']
+    },
+    {
+      path: 'frontend/src/views/InventoryView.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响库存查询和盘点。',
+        '本机 UI 偏好写入失败不阻断库存查看、溯源或盘点。'
+      ]
+    },
+    {
+      path: 'frontend/src/views/MaterialTransformsView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断来源加工关系查询、建议维护或库存来源核对。']
+    },
+    {
+      path: 'frontend/src/views/MaterialsManagementView.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响零件控制面板查询。',
+        '本机 UI 偏好写入失败不阻断零件控制面板筛选、导出或维护。'
+      ]
+    },
+    {
+      path: 'frontend/src/views/MaterialsView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断零件基础库、适用范围、图纸版本或导入预览。']
+    },
+    {
+      path: 'frontend/src/views/ModelBomsView.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响 BOM 维护。',
+        '本机 UI 偏好写入失败不阻断 BOM 查询、复制或明细维护。'
+      ]
+    },
+    {
+      path: 'frontend/src/views/OrderDetailView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断订单明细、来源 Excel 预览或提交生产核对。']
+    },
+    {
+      path: 'frontend/src/views/OrdersListView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断订单查询、草稿编辑、Excel 导入或 BOM 带入预览。']
+    },
+    {
+      path: 'frontend/src/views/ProcessSelectionView.vue',
+      snippets: [
+        '本机 UI 偏好写入失败不阻断生产流程订单列表查看。',
+        '本机 UI 偏好写入失败不阻断流程结构查看或提交生产明细核对。'
+      ]
+    },
+    {
+      path: 'frontend/src/views/ProductionView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断开始生产、工序确认、完成确认、通知或补单处理。']
+    },
+    {
+      path: 'frontend/src/views/StatisticsView.vue',
+      snippets: ['本机 UI 偏好写入失败不阻断只读统计查询。']
+    },
+    {
+      path: 'frontend/src/views/WarehouseView.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响仓库业务操作。',
+        '本机 UI 偏好写入失败不阻断入库、发货或通知处理。'
+      ]
+    },
+    {
+      path: 'frontend/src/components/InventorySourceDetailsDialog.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响库存来源核对、替代物料搜索或订单库存预览。',
+        '本机 UI 偏好写入失败不阻断库存来源核对、替代物料搜索或订单库存预览。'
+      ]
+    },
+    {
+      path: 'frontend/src/components/OrderLineEditor.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响订单零件编辑。',
+        '本机 UI 偏好写入失败不阻断订单零件编辑、库存来源核对或导入草稿维护。'
+      ]
+    },
+    {
+      path: 'frontend/src/components/ProcessDefinitionManager.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响标准工序维护。',
+        '本机 UI 偏好写入失败不阻断标准工序查询、编辑或停用。'
+      ]
+    },
+    {
+      path: 'frontend/src/components/ProcessTemplateManager.vue',
+      snippets: [
+        '本机 UI 偏好读取失败时使用默认高度，不影响流程记忆维护。',
+        '本机 UI 偏好写入失败不阻断流程记忆查询、编辑、复制或停用。'
+      ]
+    }
+  ];
+
+  for (const check of guardedPreferenceSnippets) {
+    if (!fileExists(check.path)) {
+      addFailure(`Missing UI preference storage guard file: ${check.path}`);
+      continue;
+    }
+    const source = readFile(check.path);
+    for (const snippet of check.snippets) {
+      if (!source.includes(snippet)) {
+        addFailure(`${check.path} must keep localStorage UI preference failure guard: ${snippet}`);
+      }
+    }
+  }
+
+  const frontendFiles = walkFiles(resolveProjectPath('frontend/src'));
+  const browserStorageCallPattern = /(?:window\.)?(?:localStorage|sessionStorage)\s*(?:\?\.|\.)\s*(?:getItem|setItem|removeItem|clear)\s*\(/g;
+  for (const filePath of frontendFiles) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    for (const match of source.matchAll(browserStorageCallPattern)) {
+      const index = match.index ?? 0;
+      const before = source.slice(Math.max(0, index - 500), index);
+      const after = source.slice(index, Math.min(source.length, index + 1000));
+      const lastTryIndex = before.lastIndexOf('try {');
+      const lastCatchIndex = before.lastIndexOf('catch');
+      const hasOpenTryBefore = lastTryIndex >= 0 && lastTryIndex > lastCatchIndex;
+      const hasCatchAfter = /\}\s*catch\s*\{/.test(after);
+      if (!hasOpenTryBefore || !hasCatchAfter) {
+        addFailure(
+          `Frontend browser storage UI preference call must stay guarded by try/catch: ${toProjectPath(filePath)}:${sourceLineForIndex(
+            source,
+            index
+          )}`
+        );
+      }
+    }
   }
 }
 
@@ -7611,10 +10821,59 @@ function verifyNoSilentSearchResultLimits() {
   }
 }
 
+function verifyFixedFrontendLimitsExposeContinuation() {
+  const frontendDir = resolveProjectPath('frontend/src');
+  if (!fs.existsSync(frontendDir)) {
+    return;
+  }
+
+  const limitPatterns = [
+    /\b(?:limit|pageSize)\s*:\s*Number\s*\(\s*\d+\s*\)/,
+    /\b(?:limit|pageSize)\s*=\s*Number\s*\(\s*\d+\s*\)/,
+    /\b\w*Limit\s*=\s*Number\s*\(\s*\d+\s*\)/
+  ];
+  const continuationPatterns = [
+    /\btotalCount\b/,
+    /\bhasMore\b/,
+    /\btotal\b/,
+    /<el-pagination\b/,
+    /continue/i,
+    /loadMore/i,
+    /加载更多/,
+    /继续加载/,
+    /已显示/
+  ];
+
+  for (const filePath of walkFiles(frontendDir)) {
+    if (path.extname(filePath) !== '.vue') {
+      continue;
+    }
+
+    const source = fs.readFileSync(filePath, 'utf8');
+    const lines = source.split(/\r?\n/);
+    const hasFixedLimit = lines.some((line) => limitPatterns.some((pattern) => pattern.test(line)));
+    if (!hasFixedLimit) {
+      continue;
+    }
+
+    if (continuationPatterns.some((pattern) => pattern.test(source))) {
+      continue;
+    }
+
+    const firstFixedLimitLine = lines.findIndex((line) => limitPatterns.some((pattern) => pattern.test(line))) + 1;
+    addFailure(
+      `Fixed frontend search/list limit must expose total count, pagination, hasMore, or load-more UI: ${toProjectPath(
+        filePath
+      )}:${firstFixedLimitLine}`
+    );
+  }
+}
+
 function verifyStatisticsDisplayContract() {
   const statusTagPath = 'frontend/src/components/StatusTag.vue';
   const statisticsViewPath = 'frontend/src/views/StatisticsView.vue';
   const statisticsServicePath = 'backend/src/modules/statistics/statistics.service.ts';
+  const statisticsApiRegressionPath = 'scripts/verify-statistics-api.cjs';
 
   if (!fileExists(statusTagPath)) {
     addFailure(`Missing StatusTag component: ${statusTagPath}`);
@@ -7628,10 +10887,15 @@ function verifyStatisticsDisplayContract() {
     addFailure(`Missing statistics service: ${statisticsServicePath}`);
     return;
   }
+  if (!fileExists(statisticsApiRegressionPath)) {
+    addFailure(`Missing statistics API regression script: ${statisticsApiRegressionPath}`);
+    return;
+  }
 
   const statusTagSource = readFile(statusTagPath);
   const statisticsViewSource = readFile(statisticsViewPath);
   const statisticsServiceSource = readFile(statisticsServicePath);
+  const statisticsApiRegressionSource = readFile(statisticsApiRegressionPath);
 
   const requiredLabels = [
     { status: 'ORDER_SHIPPED_COMPLETED', label: '已完成发货' },
@@ -7655,7 +10919,30 @@ function verifyStatisticsDisplayContract() {
   const requiredStatisticsViewSnippets = [
     "import CustomerSelect from '../components/CustomerSelect.vue';",
     '<CustomerSelect v-model="customerId"',
-    'customerId: customerId.value || undefined'
+    'customerId: customerId.value || undefined',
+    ':max="currentBusinessYear"',
+    'statisticsCutoffNotice',
+    'statistics-cutoff-alert',
+    "formatTotalQuantity('currentInventoryQuantity')",
+    "formatTotalQuantity('currentOrderInventoryQuantity')",
+    "formatTotalQuantity('currentStockInventoryQuantity')",
+    "formatTotalQuantity('scrapQuantity')",
+    'totalRows',
+    '{{ periodTitle }}总汇总',
+    'aria-label="统计总汇总表格高度"',
+    ':max-height="statisticsWorkTableHeights.totals"',
+    'OrderStatisticsCustomerRow',
+    'customerRows',
+    'customerMobileCardKey',
+    'aria-label="统计客户汇总表格高度"',
+    ':max-height="statisticsWorkTableHeights.customers"',
+    'downloadStatisticsExport',
+    '统计导出复用当前只读筛选条件',
+    '统计 Excel 已导出',
+    'row.currentInventoryQuantity',
+    'row.currentOrderInventoryQuantity',
+    'row.currentStockInventoryQuantity',
+    'row.scrapQuantity'
   ];
   for (const snippet of requiredStatisticsViewSnippets) {
     if (!statisticsViewSource.includes(snippet)) {
@@ -7664,10 +10951,11 @@ function verifyStatisticsDisplayContract() {
   }
 
   const statisticsApiCalls = [...statisticsViewSource.matchAll(/erpApi\.([A-Za-z0-9_]+)/g)].map((match) => match[1]);
-  const unexpectedStatisticsApiCalls = statisticsApiCalls.filter((methodName) => methodName !== 'orderStatistics');
+  const allowedStatisticsApiCalls = new Set(['orderStatistics', 'downloadStatisticsExport']);
+  const unexpectedStatisticsApiCalls = statisticsApiCalls.filter((methodName) => !allowedStatisticsApiCalls.has(methodName));
   if (unexpectedStatisticsApiCalls.length > 0) {
     addFailure(
-      `StatisticsView.vue must remain read-only and only call erpApi.orderStatistics; found erpApi.${[
+      `StatisticsView.vue must remain read-only and only call statistics query/export APIs; found erpApi.${[
         ...new Set(unexpectedStatisticsApiCalls)
       ].join(', erpApi.')}.`
     );
@@ -7677,6 +10965,44 @@ function verifyStatisticsDisplayContract() {
   }
 
   const requiredServiceSnippets = [
+    "import { businessDateKey } from '../../common/business-date';",
+    'resolveStatisticsDateWindow',
+    'businessDateKey()',
+    'isFuturePeriod',
+    'isCurrentPeriodPartial',
+    'statisticsEndDate',
+    '未来日期不纳入已发生数据',
+    'appendCurrentInventoryStatisticsRows',
+    'appendScrapStatisticsRows',
+    'buildOrderStatisticsExport',
+    'orderStatisticsTotalExportRows',
+    '订单统计表 - 总汇总',
+    '订单统计表 - 客户汇总',
+    '订单统计表 - 零件汇总',
+    '订单统计表 - 订单展示',
+    'workbook.xlsx.writeBuffer()',
+    '统计导出只复用只读统计结果生成真实 .xlsx',
+    'InternalCustomerSummaryRow',
+    'customerRows: customerSummaryRows',
+    'getCustomerStatisticsRow',
+    'findOrderCustomerMapForStatistics',
+    'inventoryBatchCustomerSnapshot',
+    'InventoryStatus.AVAILABLE',
+    'sourceOrderId: true',
+    'currentInventoryQuantity',
+    'currentOrderInventoryQuantity',
+    'currentStockInventoryQuantity',
+    '当前订单库存数量',
+    '当前备货库存数量',
+    'scrapQuantity',
+    '只从 InventoryBatch 实时计算',
+    '报废统计只统计有效报废来源',
+    'STATISTICS_TEST_FIXTURE_PREFIXES',
+    'isStatisticsTestFixtureOrder',
+    'isStatisticsTestFixtureInventoryBatch',
+    '!this.isStatisticsTestFixtureOrder(order)',
+    '!this.hasTestFixturePrefix(record.orderNo, record.partCode, record.partName)',
+    'visibleBatches',
     "sourceRecordType: 'InventoryBatch'",
     "sourceRecordType: 'OrderLineStockAllocation'",
     "sourceRecordType: 'ProductionTask'",
@@ -7711,6 +11037,89 @@ function verifyStatisticsDisplayContract() {
   const statisticsWritePattern = /this\.prisma\.[A-Za-z0-9_]+\.(create|createMany|update|updateMany|upsert|delete|deleteMany)\s*\(/;
   if (statisticsWritePattern.test(statisticsServiceSource)) {
     addFailure('StatisticsService must remain read-only and must not write through Prisma models.');
+  }
+
+  const requiredStatisticsApiRegressionSnippets = [
+    'STATISTICS_API_BASE_URL',
+    '/statistics/orders?period=month&year=${currentYear}',
+    '/statistics/orders?period=year&year=${futureYear}',
+    '/statistics/orders?period=quarter&year=${completedYear}',
+    'statistics-current-year-cutoff',
+    "statisticsFixturePrefix = 'COD-STATS-STABLE'",
+    'seedStatisticsFixture',
+    'statistics default response must hide reusable test fixture orders, parts, inventory and customers',
+    'statistics default export must hide reusable test fixture orders, parts, inventory and customers',
+    'statistics-test-fixture-filter',
+    'statistics-export-test-fixture-filter',
+    'statistics-current-inventory-and-scrap-fields',
+    'statistics-current-inventory-source-split-fields',
+    'statistics-customer-summary-fields',
+    'statistics-total-summary-export',
+    'statistics-export-xlsx',
+    'statistics-future-year-empty',
+    'statistics-completed-year-end-date',
+    '未来日期不纳入已发生数据',
+    '未来期间'
+  ];
+  for (const snippet of requiredStatisticsApiRegressionSnippets) {
+    if (!statisticsApiRegressionSource.includes(snippet)) {
+      addFailure(`verify-statistics-api.cjs must keep statistics cutoff API regression snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyStatisticsTableHeightControls() {
+  const viewPath = 'frontend/src/views/StatisticsView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing statistics table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Download, Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';",
+    "type StatisticsWorkTableKey = 'totals' | 'summary' | 'customers' | 'orders'",
+    'statisticsWorkTableHeightLimits',
+    'statisticsWorkTableDefaultHeights',
+    'baisheng.erp.statisticsWorkTableHeights.v1',
+    '统计页表格高度只保存为本机 UI 偏好，不写入订单、生产、仓库或库存业务数据。',
+    'statisticsWorkTableHeights = reactive<Record<StatisticsWorkTableKey, number>>',
+    ':max-height="statisticsWorkTableHeights.totals"',
+    'function adjustStatisticsWorkTableHeight',
+    'function resetStatisticsWorkTableHeight',
+    'function restoreStatisticsWorkTableHeights',
+    'function saveStatisticsWorkTableHeights',
+    'window.localStorage.getItem(statisticsWorkTableHeightStorageKey)',
+    'window.localStorage.setItem(',
+    'statisticsWorkTableHeightStorageKey',
+    'statisticsWorkTableHeights.totals = statisticsWorkTableDefaultHeights.totals;',
+    'totals: statisticsWorkTableHeights.totals',
+    'aria-label="统计汇总表格高度"',
+    'aria-label="降低统计汇总表格高度"',
+    'aria-label="提高统计汇总表格高度"',
+    'aria-label="恢复统计汇总表格默认高度"',
+    'aria-label="统计总汇总表格高度"',
+    'aria-label="降低统计总汇总表格高度"',
+    'aria-label="提高统计总汇总表格高度"',
+    'aria-label="恢复统计总汇总表格默认高度"',
+    'aria-label="统计客户汇总表格高度"',
+    'aria-label="降低统计客户汇总表格高度"',
+    'aria-label="提高统计客户汇总表格高度"',
+    'aria-label="恢复统计客户汇总表格默认高度"',
+    'aria-label="统计订单展示表格高度"',
+    'aria-label="降低统计订单展示表格高度"',
+    'aria-label="提高统计订单展示表格高度"',
+    'aria-label="恢复统计订单展示表格默认高度"',
+    ':max-height="statisticsWorkTableHeights.summary"',
+    ':max-height="statisticsWorkTableHeights.customers"',
+    ':max-height="statisticsWorkTableHeights.orders"',
+    'restoreStatisticsWorkTableHeights();',
+    'statistics-table-height-actions'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`StatisticsView.vue must keep adjustable read-only statistics table height control snippet: ${snippet}`);
+    }
   }
 }
 
@@ -7858,6 +11267,14 @@ function verifySharedDateFormattingContract() {
   if (!orderDetailSource.includes('partThickness: line.lineType === \'COMPONENT\' ? 0 : (line.partThickness ?? 1)')) {
     addFailure('OrderDetailView.vue must preserve existing partThickness values when opening the edit dialog.');
   }
+  if (
+    !orderDetailSource.includes('formatOrderDetailLineDrawingText(line)') ||
+    !orderDetailSource.includes('function formatOrderDetailLineDrawingText(line: OrderLine)') ||
+    !orderDetailSource.includes('<el-table-column prop="drawingDate" label="图纸日期"') ||
+    !orderDetailSource.includes('<el-table-column prop="drawingStatus" label="图纸状态"')
+  ) {
+    addFailure('OrderDetailView.vue must show drawingNo, drawingVersion, drawingDate and drawingStatus in order detail review areas.');
+  }
 
   const inventorySource = readFile('frontend/src/views/InventoryView.vue');
   if (!inventorySource.includes("import { formatDate, formatDateTime, formatDateTimeInputValue, formatQuantity } from '../utils/format';")) {
@@ -7880,6 +11297,8 @@ function verifySharedDateFormattingContract() {
   const processSelectionSource = readFile('frontend/src/views/ProcessSelectionView.vue');
   const statisticsSource = readFile('frontend/src/views/StatisticsView.vue');
   const inventorySourceDialogSource = readFile('frontend/src/components/InventorySourceDetailsDialog.vue');
+  const stockSourceReviewSource = readFile('frontend/src/utils/stockSourceReview.ts');
+  const ordersDrawingServiceSource = readFile('backend/src/modules/orders/orders.service.ts');
   if (!productionSource.includes("import { formatDate, formatDateTime, formatQuantity } from '../utils/format';")) {
     addFailure('ProductionView.vue must use shared formatDateTime for production notices, logs, and print timestamps.');
   }
@@ -7889,11 +11308,143 @@ function verifySharedDateFormattingContract() {
   if (!/import\s+\{[^}]*formatDateTime[^}]*formatQuantity[^}]*\}\s+from '\.\.\/utils\/format';/.test(modelBomsSource)) {
     addFailure('ModelBomsView.vue must use shared formatDateTime for BOM diff review timestamps.');
   }
-  if (!/import\s+\{[^}]*formatDateTime[^}]*formatQuantity[^}]*\}\s+from '\.\.\/utils\/format';/.test(materialsSource)) {
-    addFailure('MaterialsView.vue must use shared formatDateTime for material updatedAt timestamps.');
+  if (materialsSource.includes('label="更新时间"') || materialsSource.includes('formatDateTime(row.updatedAt)')) {
+    addFailure('MaterialsView.vue must hide material updatedAt from the main table; current stage does not use material maintenance timestamps as business criteria.');
   }
   if (!inventorySourceDialogSource.includes("import { formatDate, formatDateTime, formatDateTimeInputValue, formatQuantity } from '../utils/format';")) {
     addFailure('InventorySourceDetailsDialog.vue must use shared formatDateTime for manual stock-source confirmation timestamps.');
+  }
+  const productionServiceSource = readFile('backend/src/modules/production/production.service.ts');
+  const productionTypesSource = readFile('frontend/src/types/erp.ts');
+  if (
+    !productionServiceSource.includes('drawingDate: task.orderLine?.drawingDate ? this.formatDateOnly(task.orderLine.drawingDate) || undefined : undefined') ||
+    !productionServiceSource.includes('drawingStatus: task.orderLine?.drawingStatus') ||
+    !productionServiceSource.includes('生产端只能展示订单行图纸快照') ||
+    !productionTypesSource.includes('drawingDate?: string;') ||
+    !productionTypesSource.includes('drawingStatus?: string;') ||
+    !productionSource.includes('formatProductionTaskDrawingText(activeTask)') ||
+    !productionSource.includes("function formatProductionTaskDrawingText(row: Pick<ProductionTask, 'drawingNo' | 'drawingVersion' | 'drawingDate' | 'drawingStatus'>)") ||
+    !productionSource.includes('<label>图纸日期</label>') ||
+    !productionSource.includes('<label>图纸状态</label>')
+  ) {
+    addFailure('Production task API and ProductionView.vue must preserve and display order-line drawingDate and drawingStatus snapshots.');
+  }
+  if (
+    !materialsSource.includes('function formatMaterialDrawingSnapshot(row: {') ||
+    !materialsSource.includes('[row.drawingNo, row.drawingVersion, row.drawingDate, row.drawingStatus]') ||
+    !materialsSource.includes('formatMaterialDrawingSnapshot(activeDefaultDrawingRevision)') ||
+    !materialsSource.includes('name: formatMaterialDrawingSnapshot(row)') ||
+    materialsSource.includes("`${row.drawingNo} / ${row.drawingVersion}${row.drawingDate ? ` / ${row.drawingDate}` : ''}`")
+  ) {
+    addFailure('MaterialsView.vue must display full drawing snapshots with drawingNo, drawingVersion, drawingDate and drawingStatus in material drawing maintenance.');
+  }
+  const inventoryDrawingServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
+  const inventoryDrawingOrderLineEditorSource = readFile('frontend/src/components/OrderLineEditor.vue');
+  if (
+    !inventoryDrawingServiceSource.includes('drawingDate: this.formatDateOnly(sourceLine?.drawingDate)') ||
+    !inventoryDrawingServiceSource.includes('drawingStatus: sourceLine?.drawingStatus') ||
+    !inventoryDrawingServiceSource.includes('projectModel: sourceLine?.projectModel') ||
+    !productionTypesSource.includes('drawingDate?: string;') ||
+    !productionTypesSource.includes('drawingStatus?: string;') ||
+    !productionTypesSource.includes('projectModel?: string;') ||
+    !inventorySourceDialogSource.includes('图纸文件不同') ||
+    !inventorySourceDialogSource.includes('图纸文件名不同') ||
+    !inventorySourceDialogSource.includes('库存缺图纸文件名') ||
+    !inventorySourceDialogSource.includes('库存缺零件类型') ||
+    !inventorySourceDialogSource.includes('库存缺项目型号') ||
+    !inventorySourceDialogSource.includes("sameText(row.partCategory, target.partCategory) ? '' : '零件类型不同'") ||
+    !inventorySourceDialogSource.includes("sameText(row.projectModel, target.projectModel) ? '' : '项目型号不同'") ||
+    !inventorySource.includes("[row.drawingNo || '未记录图号', row.drawingVersion, row.drawingDate, row.drawingStatus]") ||
+    !inventorySourceDialogSource.includes("function drawingTitle(row: Pick<InventorySourceBatchDetail | InventorySourceExpected, 'drawingNo' | 'drawingVersion' | 'drawingDate' | 'drawingStatus'>)") ||
+    !inventorySourceDialogSource.includes('库存缺图纸日期') ||
+    !inventorySourceDialogSource.includes('图纸状态不同') ||
+    !inventorySourceDialogSource.includes('!row.drawingNo || !row.drawingVersion || !row.drawingDate || !row.drawingStatus || !row.drawingFileName || !row.drawingFileUrl') ||
+    !inventorySourceDialogSource.includes("sameText(row.lineType || 'PART', target.lineType || 'PART') ? '' : '行类型不同'") ||
+    !inventorySourceDialogSource.includes("sourceStructureKind(row) === sourceStructureKind(target) ? '' : '组件结构不同'") ||
+    !inventorySourceDialogSource.includes("sameText(row.partName, target.partName) ? '' : '零件名称不同'") ||
+    !inventorySourceDialogSource.includes("sameText(row.unit, target.unit) ? '' : '单位不同'") ||
+    !inventoryDrawingOrderLineEditorSource.includes('drawingDate: line.drawingDate') ||
+    !inventoryDrawingOrderLineEditorSource.includes('drawingStatus: line.drawingStatus') ||
+    !inventoryDrawingOrderLineEditorSource.includes('partCategory: line.partCategory') ||
+    !inventoryDrawingOrderLineEditorSource.includes('parentComponentNo: line.parentComponentNo') ||
+    !stockSourceReviewSource.includes("requiredTextMatches(line.lineType || 'PART', source.lineType || 'PART')") ||
+    !stockSourceReviewSource.includes('stockSourceStructureKind(line) === stockSourceStructureKind(source)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.partCategory, source.partCategory)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.projectModel, source.projectModel)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.partName, source.partName)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.unit, source.unit)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.drawingDate, source.drawingDate)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.drawingStatus, source.drawingStatus)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.drawingFileName, source.drawingFileName)') ||
+    !stockSourceReviewSource.includes('requiredTextMatches(line.drawingFileUrl, source.drawingFileUrl)') ||
+    !stockSourceReviewSource.includes('line.drawingFileName,') ||
+    !stockSourceReviewSource.includes('line.drawingFileUrl,') ||
+    !stockSourceReviewSource.includes("!String(line.drawingDate || '').trim() ? '图纸日期' : ''") ||
+    !stockSourceReviewSource.includes("!String(line.drawingStatus || '').trim() ? '图纸状态' : ''") ||
+    !stockSourceReviewSource.includes("!String(line.drawingFileName || '').trim() ? '图纸文件名' : ''") ||
+    !stockSourceReviewSource.includes("!String(line.drawingFileUrl || '').trim() ? '图纸文件' : ''") ||
+    !stockSourceReviewSource.includes("本次订单资料不完整：${formatStockSourceReviewListPreview(missingOrderInfo, '字段', 5)}") ||
+    stockSourceReviewSource.includes('本次订单缺少${missingOrderInfo.join') ||
+    !stockSourceReviewSource.includes('normalize(source.drawingDate) &&') ||
+    !stockSourceReviewSource.includes('normalize(source.drawingStatus) &&') ||
+    !stockSourceReviewSource.includes('normalize(source.drawingFileName) &&') ||
+    !stockSourceReviewSource.includes('normalize(source.drawingFileUrl)') ||
+    !stockSourceReviewSource.includes("Boolean((line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && missingOrderInfo.length > 0)") ||
+    !stockSourceReviewSource.includes('export function stockSourceComparableKey(line: StockSourceComparableLine)') ||
+    !stockSourceReviewSource.includes('line.partCategory,') ||
+    !stockSourceReviewSource.includes('line.componentNo,') ||
+    !stockSourceReviewSource.includes('line.parentComponentNo,') ||
+    !stockSourceReviewSource.includes('line.projectModel,') ||
+    !stockSourceReviewSource.includes('line.partName,') ||
+    !stockSourceReviewSource.includes('line.drawingVersion,\n    line.drawingDate,\n    line.drawingStatus,\n    line.drawingFileName,\n    line.drawingFileUrl,') ||
+    !ordersDrawingServiceSource.includes('this.normalizeEditableLineType(line.lineType) === this.normalizeEditableLineType(sourceLine.lineType)') ||
+    !ordersDrawingServiceSource.includes('this.stockSourceStructureKind(line) === this.stockSourceStructureKind(sourceLine)') ||
+    !ordersDrawingServiceSource.includes('private stockSourceStructureKind(row: any)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.partCategory, sourceLine.partCategory)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.projectModel, sourceLine.projectModel)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.partName, sourceLine.partName || batch.partName)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.unit, batch.unit)') ||
+    !ordersDrawingServiceSource.includes('this.requiredDateMatches(line.drawingDate, sourceLine.drawingDate)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.drawingStatus, sourceLine.drawingStatus)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.drawingFileName, sourceLine.drawingFileName)') ||
+    !ordersDrawingServiceSource.includes('this.requiredTextMatches(line.drawingFileUrl, sourceLine.drawingFileUrl)') ||
+    !ordersDrawingServiceSource.includes("!this.formatDateOnly(line.drawingDate) ? '图纸日期' : ''") ||
+    !ordersDrawingServiceSource.includes("!String(line.drawingStatus || '').trim() ? '图纸状态' : ''") ||
+    !ordersDrawingServiceSource.includes("!String(line.drawingFileName || '').trim() ? '图纸文件名' : ''") ||
+    !ordersDrawingServiceSource.includes("!String(line.drawingFileUrl || '').trim() ? '图纸文件' : ''") ||
+    !ordersDrawingServiceSource.includes("!this.formatDateOnly(sourceLine.drawingDate) ? '图纸日期' : ''") ||
+    !ordersDrawingServiceSource.includes("!String(sourceLine.drawingStatus || '').trim() ? '图纸状态' : ''") ||
+    !ordersDrawingServiceSource.includes("!String(sourceLine.drawingFileName || '').trim() ? '图纸文件名' : ''") ||
+    !ordersDrawingServiceSource.includes('this.formatDateOnly(sourceLine.drawingDate) &&') ||
+    !ordersDrawingServiceSource.includes("String(sourceLine.drawingStatus || '').trim() &&") ||
+    !ordersDrawingServiceSource.includes('String(sourceLine.drawingFileName || \'\').trim() &&') ||
+    !ordersDrawingServiceSource.includes('private stockSourceManualConfirmationReason(line: any, batch: any, sourceTaskMap: Map<string, any>, usageOrderIssue?: string)') ||
+    !ordersDrawingServiceSource.includes('本次订单资料不完整：${this.formatLimitedList(missingOrderInfo, 5)}') ||
+    !ordersDrawingServiceSource.includes('库存来源资料不完整：${this.formatLimitedList(missingSourceInfo, 5)}') ||
+    !ordersDrawingServiceSource.includes('库存来源与订单不一致：${this.formatLimitedList(mismatchReasons, 5)}') ||
+    !ordersDrawingServiceSource.includes('this.stockSourceMissingOrderInfo(line).length > 0 ||\n              !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap)') ||
+    !ordersDrawingServiceSource.includes('private requiredDateMatches(required?: Date | string | null, actual?: Date | string | null)')
+  ) {
+    addFailure('Inventory pages and stock-source review must preserve and compare drawingDate and drawingStatus snapshots.');
+  }
+  const warehouseDrawingServiceSource = readFile('backend/src/modules/warehouses/warehouses.service.ts');
+  if (
+    !warehouseDrawingServiceSource.includes('drawingDate: this.formatDateOnly(task.orderLine?.drawingDate)') ||
+    !warehouseDrawingServiceSource.includes('drawingStatus: task.orderLine?.drawingStatus') ||
+    !warehouseDrawingServiceSource.includes('drawingDate: this.formatDateOnly(sourceLine?.drawingDate)') ||
+    !warehouseDrawingServiceSource.includes('drawingStatus: sourceLine?.drawingStatus') ||
+    !warehouseDrawingServiceSource.includes('drawingNo: sourceLine?.drawingNo') ||
+    !warehouseDrawingServiceSource.includes('drawingVersion: sourceLine?.drawingVersion') ||
+    !warehouseDrawingServiceSource.includes('drawingFileName: sourceLine?.drawingFileName') ||
+    !warehouseDrawingServiceSource.includes('drawingFileUrl: sourceLine?.drawingFileUrl') ||
+    !warehouseSource.includes("function drawingTitle(row: Pick<WarehouseReceipt | WarehouseShipment | WarehouseTransaction, 'drawingNo' | 'drawingVersion' | 'drawingDate' | 'drawingStatus'>)") ||
+    !warehouseSource.includes('label="图纸快照"') ||
+    !warehouseSource.includes('drawingTitle(transaction)') ||
+    !warehouseSource.includes(':file-name="transaction.drawingFileName || undefined"') ||
+    !warehouseSource.includes('drawingDate: source.drawingDate || targetLine.drawingDate') ||
+    !warehouseSource.includes('drawingStatus: source.drawingStatus || targetLine.drawingStatus')
+  ) {
+    addFailure('Warehouse receipt/shipment/transaction APIs and WarehouseView.vue must preserve full drawing snapshots and drawing files.');
   }
   const zeroSafeQuantityFallbacks = [
     ['WarehouseView.vue', warehouseSource, 'completedQuantity || row.quantity'],
@@ -8026,6 +11577,39 @@ function verifySharedDateFormattingContract() {
   for (const [viewName, viewSource, snippet] of zeroSafeQuantityFallbacks) {
     if (viewSource.includes(snippet)) {
       addFailure(`${viewName} must use ?? for quantity fallback so a valid 0 quantity is not replaced by another business quantity.`);
+    }
+  }
+  const shortageQuantityPreviewSnippets = [
+    ['WarehouseView.vue', warehouseSource, 'formatQuantityByUnitPreview(order.pendingProductionReplenishmentQuantityByUnit)'],
+    ['WarehouseView.vue', warehouseSource, 'formatQuantityByUnitPreview(order.unresolvedShortageQuantityByUnit)'],
+    ['ProductionView.vue', productionSource, 'formatQuantityByUnitPreview(row.pendingProductionReplenishmentQuantityByUnit)'],
+    ['ProductionView.vue', productionSource, 'formatQuantityByUnitPreview(row.unresolvedShortageQuantityByUnit)'],
+    ['OrdersListView.vue', ordersListSource, 'formatQuantityByUnitPreview(order.pendingProductionReplenishmentQuantityByUnit)'],
+    ['OrdersListView.vue', ordersListSource, 'formatQuantityByUnitPreview(order.unresolvedShortageQuantityByUnit)'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'formatQuantityByUnitPreview(order.pendingProductionReplenishmentQuantityByUnit)'],
+    ['ProcessSelectionView.vue', processSelectionSource, 'formatQuantityByUnitPreview(order.unresolvedShortageQuantityByUnit)']
+  ];
+  for (const [viewName, viewSource, snippet] of shortageQuantityPreviewSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`${viewName} must summarize shortage quantity-by-unit text: ${snippet}`);
+    }
+  }
+  const shortageQuantityFullJoinSnippets = [
+    'pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join(\'、\')',
+    'unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join(\'、\')',
+    'pendingProductionReplenishmentQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join(\'、\')',
+    'unresolvedShortageQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join(\'、\')'
+  ];
+  for (const [viewName, viewSource] of [
+    ['WarehouseView.vue', warehouseSource],
+    ['ProductionView.vue', productionSource],
+    ['OrdersListView.vue', ordersListSource],
+    ['ProcessSelectionView.vue', processSelectionSource]
+  ]) {
+    for (const snippet of shortageQuantityFullJoinSnippets) {
+      if (viewSource.includes(snippet)) {
+        addFailure(`${viewName} must not render full shortage quantity-by-unit joins: ${snippet}`);
+      }
     }
   }
   if (!warehouseSource.includes('function stockNoticeDisplayQuantity(notice: ProductionNotice)')) {
@@ -8180,6 +11764,43 @@ function verifyBackendBusinessDateKeyContract() {
   if (!ordersSource.includes("['生成时间', this.businessDateTimeText(), '说明', '仅用于修正 Excel；创建草稿前后端仍会重新校验']")) {
     addFailure('OrdersService order import issue report must keep business-time 生成时间 in Excel issue report.');
   }
+  if (!ordersSource.includes("['涉及零件编码', preview.summary.materialSyncCount, '零件编码示例', this.formatLimitedList(preview.summary.materialSyncPreview || [], 5)]")) {
+    addFailure('OrdersService order import issue report must summarize material sync preview codes.');
+  }
+  if (ordersSource.includes("(preview.summary.materialSyncPreview || []).join('、')")) {
+    addFailure('OrdersService order import issue report must not render every material sync preview code in one Excel cell.');
+  }
+  const orderServiceLimitedListSnippets = [
+    "private formatLimitedList(values: string[], limit = 20, delimiter = '、')",
+    'this.formatLimitedList(missingProcessNames, 5)',
+    'this.formatLimitedList(completedNames, 5)',
+    'this.formatLimitedList(invalidValues, 10)',
+    'this.formatLimitedList(info.conflictFields, 5)',
+    'this.formatLimitedList(missingOrderInfo, 5)',
+    'this.formatLimitedList(missingSourceInfo, 5)',
+    'this.formatLimitedList(mismatchReasons, 5)',
+    "this.formatLimitedList(summaries, 5, '；')"
+  ];
+  for (const snippet of orderServiceLimitedListSnippets) {
+    if (!ordersSource.includes(snippet)) {
+      addFailure(`OrdersService must summarize long validation/progress lists: ${snippet}`);
+    }
+  }
+  const orderServiceForbiddenFullJoinSnippets = [
+    "missingProcessNames.join('、')",
+    "completedNames.join('、')",
+    "invalidValues.join('、')",
+    "info.conflictFields.join('、')",
+    "missingOrderInfo.join('、')",
+    "missingSourceInfo.join('、')",
+    "mismatchReasons.join('、')",
+    "summaries.join('；')"
+  ];
+  for (const snippet of orderServiceForbiddenFullJoinSnippets) {
+    if (ordersSource.includes(snippet)) {
+      addFailure(`OrdersService must not render full joined validation/progress lists: ${snippet}`);
+    }
+  }
   if (ordersSource.includes('this.formatDateTime(file.createdAt)') || ordersSource.includes('private formatDateTime(value?: Date | string | null)')) {
     addFailure('OrdersService order import issue report upload time must use businessDateTimeText(file.createdAt), not server-local formatDateTime().');
   }
@@ -8275,6 +11896,22 @@ function verifyStockSourcePayloadSanitizer() {
   if (!/function\s+normalizeSelectedStockSources\s*\([^)]*\)\s*{[\s\S]*const\s+quantity\s*=\s*Number\(source\.quantity\s*\?\?\s*0\)[\s\S]*if\s*\(!batchId\s*\|\|\s*quantity\s*<=\s*0\)\s*{[\s\S]*continue;[\s\S]*}/.test(source)) {
     addFailure('stockSourceReview.ts must keep zero-quantity queue placeholders out of normalized selectedStockSources.');
   }
+  if (
+    !source.includes('const stockSourceCompatibilityRank: Record<StockSourceCompatibilityStatus, number>') ||
+    !source.includes('function stricterStockSourceCompatibilityStatus') ||
+    !source.includes('if (!incoming || !current)') ||
+    !source.includes('mergeStockSourceCompatibilityReason(source.compatibilityReason, current?.compatibilityReason)') ||
+    !source.includes('function stockSourceManualConfirmationSource') ||
+    !source.includes('function formatStockSourceReviewListPreview') ||
+    !source.includes("formatStockSourceReviewListPreview([...issue.partTexts], '零件', 5)") ||
+    !source.includes("formatStockSourceReviewListPreview(missingOrderInfo, '字段', 5)") ||
+    !source.includes('manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim()')
+  ) {
+    addFailure('stockSourceReview.ts must merge duplicated selectedStockSources by the strictest compatibility status and only preserve matching manual confirmations.');
+  }
+  if (source.includes("[...issue.partTexts].join('、')") || source.includes("missingOrderInfo.join('、')")) {
+    addFailure('stockSourceReview.ts must summarize long stock-source validation lists instead of rendering full joined lists.');
+  }
   const stockSourceUtilityZeroFallbacks = [
     [stockSourceReviewPath, source, 'Number(line.quantity || 0)'],
     [stockSourceReviewPath, source, 'Number(source.quantity || 0)'],
@@ -8324,6 +11961,16 @@ function verifyStockSourcePayloadSanitizer() {
     addFailure('OrdersService.normalizeStockSourceSelections must ignore zero-quantity queue placeholders before saving or reserving stock.');
   }
   if (
+    !orderServiceSource.includes('const stockSourceCompatibilityRank: Record<StockSourceCompatibilityStatus, number>') ||
+    !orderServiceSource.includes('private stricterStockSourceCompatibilityStatus') ||
+    !orderServiceSource.includes('if (!incoming || !current)') ||
+    !orderServiceSource.includes('this.mergeStockSourceCompatibilityReason(selection.compatibilityReason, current?.compatibilityReason)') ||
+    !orderServiceSource.includes('private stockSourceManualConfirmationSource') ||
+    !orderServiceSource.includes('manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim()')
+  ) {
+    addFailure('OrdersService.normalizeStockSourceSelections must preserve the strictest duplicated selectedStockSources compatibility status and only preserve matching manual confirmations.');
+  }
+  if (
     !orderServiceSource.includes('private stockSourceSelectionsToJson') ||
     !orderServiceSource.includes('const normalized = this.normalizeStockSourceSelections(selections);') ||
     !orderServiceSource.includes('return normalized.length > 0 ? (normalized as Prisma.InputJsonValue) : undefined;')
@@ -8354,6 +12001,56 @@ function verifyInventorySourceDialogReviewGuard() {
   const source = readFile(dialogPath);
   if (!/const\s+directStockBlockedIssue\s*=\s*computed\(\(\)\s*=>\s*{[\s\S]*compatibilityStatus[\s\S]*缺少库存来源核对结果[\s\S]*}\);/.test(source)) {
     addFailure('InventorySourceDetailsDialog.vue must block review confirmation when selected stock sources lack compatibilityStatus.');
+  }
+  if (
+    source.includes('compatibilityStatus: normalizeCompatibilityStatus(source.compatibilityStatus || current?.compatibilityStatus)') ||
+    source.includes('const savedManualReason = source.manualConfirmedBy && source.compatibilityReason ? source.compatibilityReason :') ||
+    !source.includes('const selectedSourceCompatibilityRank: Record<CompatibilityStatus, number>') ||
+    !source.includes('function stricterSelectedSourceCompatibilityStatus') ||
+    !source.includes('function selectedSourceManualConfirmationSource') ||
+    !source.includes('compatibilityStatus: nextCompatibilityStatus') ||
+    !source.includes('compatibilityReason: nextCompatibilityReason') ||
+    !source.includes('const manualConfirmationSource = selectedSourceManualConfirmationSource(previous, undefined, compatibilityStatus, compatibilityReason)') ||
+    !source.includes('manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim()') ||
+    !source.includes('sourceNeedsReviewMerge = quantity > 0') ||
+    !source.includes('currentNeedsReviewMerge = currentQuantity > 0') ||
+    !source.includes('reasonKey: string') ||
+    !source.includes('function manualConfirmationReasonKey') ||
+    !source.includes('current.reasonKey === manualConfirmationReasonKey(source)') ||
+    !source.includes('form.reasonKey = reason.trim()')
+  ) {
+    addFailure('InventorySourceDetailsDialog.vue must merge duplicated selected sources by strict compatibility status while ignoring zero-quantity placeholders for review state.');
+  }
+  if (!source.includes("expected.value?.fulfillmentMode === 'STOCK' || expected.value?.fulfillmentMode === 'REWORK'")) {
+    addFailure('InventorySourceDetailsDialog.vue must require manual confirmation for missing order drawing info in both STOCK and REWORK modes.');
+  }
+  if (
+    !source.includes('expectedOrderInfoReasons.value.length > 0') ||
+    source.includes('orderDrawingInfoComplete') ||
+    source.includes('expectedFileMissing.value')
+  ) {
+    addFailure('InventorySourceDetailsDialog.vue must base missing-order-info manual confirmation on expectedOrderInfoReasons only.');
+  }
+  if (
+    !source.includes('const expectedFileMissingReasons = computed(() => {') ||
+    !source.includes("!normalizeValue(row.drawingDate) ? '缺图纸日期' : ''") ||
+    !source.includes("!normalizeValue(row.drawingStatus) ? '缺图纸状态' : ''") ||
+    !source.includes("!normalizeValue(row.drawingFileName) ? '缺图纸文件名' : ''") ||
+    !source.includes("!normalizeValue(row.drawingFileUrl) ? '缺图纸文件' : ''") ||
+    !source.includes('const expectedOrderInfoReasons = computed(() => [...expectedMissingInfoReasons.value, ...expectedFileMissingReasons.value]') ||
+    !source.includes("formatDialogReasonPreview(expectedOrderInfoReasons, '字段')") ||
+    !source.includes("formatDialogReasonPreview(expectedOrderInfoReasons.value, '字段')")
+  ) {
+    addFailure('InventorySourceDetailsDialog.vue must show specific missing order drawing/file fields in manual confirmation reasons.');
+  }
+  if (
+    source.includes("expectedOrderInfoReasons.join('、')") ||
+    source.includes("expectedOrderInfoReasons.value.join('、')") ||
+    source.includes("missingReasons.join('、')") ||
+    source.includes("mismatchReasons.join('、')") ||
+    source.includes("item.identityConflictFields.join('、')")
+  ) {
+    addFailure('InventorySourceDetailsDialog.vue must summarize missing/mismatch/identity reason lists instead of rendering every field.');
   }
 }
 
@@ -8427,7 +12124,7 @@ function verifyInventorySourceCurrentOrderReservationUi() {
     'function moveSelectedSource',
     '拖动左侧手柄调整扣库顺序；提交生产会按当前顺序消耗库存',
     '跨零件搜索后选中的批次',
-    "import { Rank } from '@element-plus/icons-vue'",
+    "import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
     'class="selected-source-drag-handle"',
     'aria-label="拖拽调整使用顺序"',
     '<el-icon><Rank /></el-icon>',
@@ -8606,6 +12303,20 @@ function verifyStockProductionPlanOverridePreserved() {
   if (!submitCheckSource.includes('findProductionPlanOverrideIssue(line, { requireResolvedOperator: true })')) {
     addFailure('submitStockSourceChecks.ts must require resolved production plan override operator snapshots before submitting production.');
   }
+  const submitPayloadFields = [
+    'lineType: line.lineType',
+    'partCategory: line.partCategory',
+    'componentNo: line.componentNo',
+    'parentComponentNo: line.parentComponentNo',
+    'projectModel: line.projectModel',
+    'drawingDate: line.drawingDate',
+    'drawingStatus: line.drawingStatus'
+  ];
+  for (const snippet of submitPayloadFields) {
+    if (!submitCheckSource.includes(snippet)) {
+      addFailure(`submitStockSourceChecks.ts must preserve order-line stock source comparison field: ${snippet}`);
+    }
+  }
 }
 
 function verifyOrderStockSourceValidationTransaction() {
@@ -8647,9 +12358,33 @@ function verifyOrderStockSourceValidationTransaction() {
     !source.includes('OR: [...keys.values()].map((key) => ({') ||
     !source.includes('partCode: { equals: key.partCode, mode: \'insensitive\' }') ||
     !source.includes('for (const batch of selectedBatches)') ||
-    !source.includes('rows.set(batch.id, batch)')
+    !source.includes('rows.set(batch.id, batch)') ||
+    !source.includes('findAvailableStockUsageCandidateBatches(tx, stockBatches, order)') ||
+    !source.includes('findAvailableStockUsageCandidateBatches(client, batches, currentOrder)') ||
+    !source.includes('const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(') ||
+    !source.includes('候选批次也必须按当前草稿优先级计算预占') ||
+    !source.includes('reservedByOtherOrders: reservedQuantity') ||
+    !source.includes('availableQuantity: Math.max(this.roundQuantity(decimalToNumber(batch.quantity) - reservedQuantity), 0)')
   ) {
-    addFailure('OrdersService must include unselected same-part stock batches when checking skipped smaller-batch manual confirmation.');
+    addFailure('OrdersService must include unselected same-part stock batches and calculate their availability by draft priority when checking skipped smaller-batch manual confirmation.');
+  }
+  if (
+    !source.includes('const orderSelectedSources = (order.lines || [])') ||
+    !source.includes('const allSelectedSources = selectedRows.map((row) => row.source)') ||
+    !source.includes('allSelectedSources: ReturnType<OrdersService[\'jsonToStockSourceSelections\']> = selectedSources') ||
+    !source.includes('同一张草稿订单的其它零件行可能已经占用了小批次') ||
+    !source.includes('for (const source of allSelectedSources)') ||
+    !/currentOrder\?\.id,\s*allSelectedSources/.test(source)
+  ) {
+    addFailure('OrdersService skipped-smaller-batch validation must subtract stock sources selected by other lines in the same draft order.');
+  }
+  if (
+    !source.includes('private stockSourceManualConfirmationCoversUsageOrderIssue') ||
+    !source.includes('compatibilityReason.includes(issue) || manualRemark.includes(issue)') ||
+    !source.includes('!this.stockSourceManualConfirmationCoversUsageOrderIssue(selectedSource, usageOrderIssue)') ||
+    !source.includes('!this.stockSourceManualConfirmationCoversUsageOrderIssue(source, usageOrderIssue)')
+  ) {
+    addFailure('OrdersService must reject stale manual confirmations when the recalculated stock source usage-order issue changes.');
   }
   if (source.includes('Math.min(batchQuantity, selectedLimit, remainingQuantity)')) {
     addFailure('OrdersService consumeAvailableStock must deduct from batchAvailableQuantity, not physical batchQuantity.');
@@ -8660,7 +12395,25 @@ function verifyOrderStockSourceValidationTransaction() {
   if (!source.includes('consumeActiveInventoryReservations') || !source.includes('草稿预占数量异常')) {
     addFailure('OrdersService must consume ACTIVE InventoryReservation rows only after matching the exact selected stock batch quantity.');
   }
-  if (!source.includes('stockReservationConsumesAvailability') || !source.includes('reservationOrder.createdAt.getTime()')) {
+  const consumeReservationSource = source.slice(source.indexOf('private async consumeActiveInventoryReservations'), source.indexOf('private stockAvailabilitySummary'));
+  if (
+    consumeReservationSource.indexOf('缺少草稿库存预占记录') < 0 ||
+    consumeReservationSource.indexOf('缺少草稿库存预占记录') > consumeReservationSource.indexOf('草稿预占数量异常')
+  ) {
+    addFailure('OrdersService.consumeActiveInventoryReservations must report missing ACTIVE reservations before reporting quantity mismatch.');
+  }
+  const submitSource = source.slice(source.indexOf('async submit(orderNo: string, dto: SubmitOrderDto)'), source.indexOf('private async resolveSubmitPlanOperator'));
+  if (!submitSource.includes('提交生产必须消费订单保存时形成的 ACTIVE 预占')) {
+    addFailure('OrdersService.submit must document that submit consumes saved ACTIVE InventoryReservation rows instead of rebuilding them.');
+  }
+  if (submitSource.includes('syncOrderInventoryReservations(tx, order.id)')) {
+    addFailure('OrdersService.submit must not release and recreate draft InventoryReservation rows before consuming stock.');
+  }
+  if (
+    !source.includes('stockReservationConsumesAvailability') ||
+    !source.includes('reservationOrder.createdAt.getTime()') ||
+    !source.includes('reservationOrder.orderNo.localeCompare(currentOrder.orderNo) < 0')
+  ) {
     addFailure('OrdersService must calculate active stock reservations by draft order priority, not by simply subtracting every other draft.');
   }
   if (
@@ -8711,7 +12464,22 @@ function verifyInventorySourcePriority() {
   const dtoPath = 'backend/src/modules/inventory/dto.ts';
   const apiPath = 'frontend/src/api/erp.ts';
   const editorPath = 'frontend/src/components/OrderLineEditor.vue';
-  for (const projectPath of [servicePath, dtoPath, apiPath, editorPath]) {
+  const sourceDialogPath = 'frontend/src/components/InventorySourceDetailsDialog.vue';
+  const inventoryViewPath = 'frontend/src/views/InventoryView.vue';
+  const materialDashboardPath = 'frontend/src/views/MaterialsManagementView.vue';
+  const materialTransformsPath = 'frontend/src/views/MaterialTransformsView.vue';
+  const warehousePath = 'frontend/src/views/WarehouseView.vue';
+  for (const projectPath of [
+    servicePath,
+    dtoPath,
+    apiPath,
+    editorPath,
+    sourceDialogPath,
+    inventoryViewPath,
+    materialDashboardPath,
+    materialTransformsPath,
+    warehousePath
+  ]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing inventory source priority file: ${projectPath}`);
       return;
@@ -8722,18 +12490,70 @@ function verifyInventorySourcePriority() {
   const dtoSource = readFile(dtoPath);
   const apiSource = readFile(apiPath);
   const editorSource = readFile(editorPath);
+  const sourceDialogSource = readFile(sourceDialogPath);
+  const inventoryViewSource = readFile(inventoryViewPath);
+  const materialDashboardSource = readFile(materialDashboardPath);
+  const materialTransformsSource = readFile(materialTransformsPath);
+  const warehouseSource = readFile(warehousePath);
   if (!/class\s+InventorySourceDetailQueryDto[\s\S]*customerId\?:\s*string/.test(dtoSource)) {
     addFailure('InventorySourceDetailQueryDto must accept customerId for stock source context.');
   }
   if (!/interface\s+InventorySourceDetailFilters[\s\S]*customerId\?:\s*string/.test(apiSource) || !apiSource.includes('customerId: filters.customerId')) {
     addFailure('erpApi.inventoryMaterialSourceDetails must send customerId to source-details.');
   }
+  if (
+    !/class\s+InventorySourceDetailQueryDto[\s\S]*limit\?:\s*number[\s\S]*offset\?:\s*number[\s\S]*withPage\?:\s*string/.test(dtoSource) ||
+    !/interface\s+InventorySourceDetailFilters[\s\S]*limit\?:\s*number[\s\S]*offset\?:\s*number[\s\S]*withPage\?:\s*boolean/.test(apiSource) ||
+    !apiSource.includes("withPage: filters.withPage ? 'true' : undefined") ||
+    !source.includes('totalSourceCount') ||
+    !source.includes('sourceHasMore')
+  ) {
+    addFailure('Inventory source-details must keep explicit pagination metadata without changing the legacy unpaged response.');
+  }
+  if (
+    !sourceDialogSource.includes('sourcePageChange') ||
+    !sourceDialogSource.includes('sourcePaginationVisible') ||
+    !sourceDialogSource.includes('<el-pagination') ||
+    !sourceDialogSource.includes('mobileSourceBatchStateKey') ||
+    !sourceDialogSource.includes('expandedMobileSourceBatchKeys.value = []')
+  ) {
+    addFailure('InventorySourceDetailsDialog.vue must expose visible source pagination controls and reset stale mobile expanded source rows for paged read-only source-details.');
+  }
+  for (const [file, viewSource] of [
+    [inventoryViewPath, inventoryViewSource],
+    [materialDashboardPath, materialDashboardSource],
+    [materialTransformsPath, materialTransformsSource]
+  ]) {
+    if (!viewSource.includes('@source-page-change="handleSourceDetailsPageChange"') || !viewSource.includes('withPage: true')) {
+      addFailure(`${file} read-only inventory source detail views must request paged source-details and expose pagination.`);
+    }
+  }
+  if (editorSource.includes('withPage: true') || warehouseSource.includes('withPage: true')) {
+    addFailure('Order and warehouse stock-source review flows must keep loading full source-details instead of paginating selectable batches.');
+  }
   if (!editorSource.includes('customerId: props.customerId')) {
     addFailure('OrderLineEditor.vue must pass current customerId into inventory source-details.');
     return;
   }
-  if (!source.includes('resolveStockReservationPriorityOrder') || !source.includes('stockReservationConsumesAvailability')) {
+  if (
+    !source.includes('resolveStockReservationPriorityOrder') ||
+    !source.includes('stockReservationConsumesAvailability') ||
+    !source.includes('reservationOrder.orderNo.localeCompare(currentOrder.orderNo) < 0')
+  ) {
     addFailure('InventoryService must calculate stock source available quantity by current draft order priority.');
+  }
+  const priorityResolverSource = source.slice(source.indexOf('private async resolveStockReservationPriorityOrder'), source.indexOf('private stockReservationConsumesAvailability'));
+  if (
+    !priorityResolverSource.includes('const excludeOrderId = query.excludeOrderId?.trim()') ||
+    !priorityResolverSource.includes('const excludeOrderNo = query.excludeOrderNo?.trim()') ||
+    priorityResolverSource.indexOf('const excludeOrderId = query.excludeOrderId?.trim()') > priorityResolverSource.indexOf('const excludeOrderNo = query.excludeOrderNo?.trim()')
+  ) {
+    addFailure('InventoryService.resolveStockReservationPriorityOrder must prefer excludeOrderId before excludeOrderNo when both are supplied.');
+  }
+  if (
+    !/const\s+currentOrder\s*=\s*await\s+this\.prisma\.customerOrder\.findUnique[\s\S]*if\s*\(\s*currentOrder\s*\)\s*{[\s\S]*return\s+currentOrder;[\s\S]*const\s+excludeOrderNo\s*=\s*query\.excludeOrderNo\?\.trim\(\)/.test(priorityResolverSource)
+  ) {
+    addFailure('InventoryService.resolveStockReservationPriorityOrder must fall back to excludeOrderNo when excludeOrderId is stale.');
   }
   if (!source.includes('inventoryBatchMatchesCustomerScope') || !source.includes('不过滤全局备货，避免新客户无法使用可用库存')) {
     addFailure('InventoryService source-details must prioritize current-customer stock source batches without hiding global backup stock.');
@@ -8750,6 +12570,14 @@ function verifyInventorySourcePriority() {
   if (!/async\s+findAll\s*\([^)]*\)\s*{[\s\S]*resolveStockReservationPriorityOrder\(query\)[\s\S]*stockReservationConsumesAvailability\(reservation\.order,\s*currentOrder\)/.test(source)) {
     addFailure('InventoryService findAll must calculate availableQuantity by current draft order priority.');
   }
+  const materialSuggestionsSource = source.slice(source.indexOf('async materialSuggestions'), source.indexOf('private async findMaterialSuggestionHistory'));
+  if (
+    !materialSuggestionsSource.includes('activeReservationQuantityByBatchId') ||
+    !materialSuggestionsSource.includes('query') ||
+    !materialSuggestionsSource.includes('reservedQuantityByBatchId.get(batch.id)')
+  ) {
+    addFailure('InventoryService materialSuggestions must calculate availableQuantity by current draft order priority.');
+  }
 }
 
 function verifyInventoryAdjustmentWorkflow() {
@@ -8760,8 +12588,20 @@ function verifyInventoryAdjustmentWorkflow() {
   const viewPath = 'frontend/src/views/InventoryView.vue';
   const verifierPath = 'database/prisma/verify-first-stage.ts';
   const seedPath = 'database/prisma/seed.ts';
+  const inventoryAdjustmentApiScriptPath = 'scripts/verify-inventory-adjustment-api.cjs';
+  const packagePath = 'package.json';
 
-  for (const projectPath of [controllerPath, servicePath, dtoPath, apiPath, viewPath, verifierPath, seedPath]) {
+  for (const projectPath of [
+    controllerPath,
+    servicePath,
+    dtoPath,
+    apiPath,
+    viewPath,
+    verifierPath,
+    seedPath,
+    inventoryAdjustmentApiScriptPath,
+    packagePath
+  ]) {
     if (!fileExists(projectPath)) {
       addFailure(`Missing inventory adjustment workflow file: ${projectPath}`);
       return;
@@ -8975,6 +12815,75 @@ function verifyInventoryAdjustmentWorkflow() {
       addFailure(`seed.ts must keep first-stage inventory adjustment seed snippet: ${snippet}`);
     }
   }
+
+  const inventoryAdjustmentApiScriptSource = readFile(inventoryAdjustmentApiScriptPath);
+  const packageSource = readFile(packagePath);
+  const apiRegressionSnippets = [
+    'submitAdjustment',
+    'expectRequestFailure',
+    'expectAdjustmentFailure',
+    'expectForgedAttachmentFailure',
+    'seedActiveReservation',
+    '`Inventory Adjustment Reservation Customer ${runId}`',
+    'assertAdjustmentTransaction',
+    '盘点到 0 时批次必须转 USED',
+    '0 数量批次重新盘点为正数时必须恢复 AVAILABLE',
+    '盘点后数量不能低于已预占数量',
+    '盘点后数量不能小于已预占数量',
+    '伪造库存盘点附件必须被拦截',
+    '库存盘点附件必须通过系统上传接口上传',
+    '库存盘点附件文件不存在',
+    '报废或销毁清零后数量必须为 0',
+    '报废盘点必须清零并转 SCRAPPED',
+    "usedBatch?.status === 'USED'",
+    "restoredBatch?.status === 'AVAILABLE'",
+    "scrappedBatch?.status === 'SCRAPPED'",
+    "reservedBatchAfterFailure?.status === 'AVAILABLE'",
+    "activeReservation?.status === 'ACTIVE'",
+    'failed reserved adjustment must not create InventoryAdjustment',
+    "forgedAttachmentBatchAfterFailure?.status === 'AVAILABLE'",
+    'forged attachment adjustment must not create InventoryAdjustment',
+    "await assertAdjustmentTransaction(zeroAdjustment, 'OUT', 5)",
+    "await assertAdjustmentTransaction(restoreAdjustment, 'IN', 3)",
+    "await assertAdjustmentTransaction(scrapAdjustment, 'OUT', 7)",
+    'adjustment history should keep 2 records',
+    'scrap adjustment history should keep 1 record',
+    "const runId = 'STABLE';",
+    "const testPrefix = 'COD-INV-ADJ-STABLE';",
+    'prisma.customer.findFirst',
+    'prisma.customer.update',
+    'prisma.customer.create',
+    'prisma.customerContact.updateMany',
+    'async function upsertRegressionWarehouse(warehouseCode, warehouseName)',
+    'async function upsertRegressionWarehouseLocation(warehouseId, locationCode, locationName)',
+    'prisma.warehouse.upsert',
+    'prisma.warehouseLocation.findFirst',
+    'prisma.warehouseLocation.update',
+    'prisma.warehouseLocation.create',
+    'prisma.warehouseLocation.updateMany',
+    'prisma.warehouse.updateMany',
+    'customerCode: `${testPrefix}-CUST${archiveSuffix}`',
+    'customerName: `Inventory Adjustment Reservation Customer ${runId}${archiveSuffix}`',
+    "contactName: null",
+    "contactPhone: null",
+    'Inventory adjustment API verification passed.'
+  ];
+  for (const snippet of apiRegressionSnippets) {
+    if (!inventoryAdjustmentApiScriptSource.includes(snippet)) {
+      addFailure(`verify-inventory-adjustment-api.cjs must keep inventory adjustment API regression snippet: ${snippet}`);
+    }
+  }
+  if (
+    inventoryAdjustmentApiScriptSource.includes('prisma.customer.deleteMany') ||
+    inventoryAdjustmentApiScriptSource.includes('prisma.warehouse.deleteMany') ||
+    inventoryAdjustmentApiScriptSource.includes('prisma.warehouseLocation.deleteMany') ||
+    inventoryAdjustmentApiScriptSource.includes('function localDateTimeStamp')
+  ) {
+    addFailure('verify-inventory-adjustment-api.cjs must reuse stable customer master data and soft-disable it after verification.');
+  }
+  if (!packageSource.includes('"verify:inventory-adjustment-api": "node scripts/verify-inventory-adjustment-api.cjs"')) {
+    addFailure('package.json must expose verify:inventory-adjustment-api for inventory adjustment status regression testing.');
+  }
 }
 
 function verifyProcessDefinitionReferenceGuard() {
@@ -8989,10 +12898,11 @@ function verifyProcessDefinitionReferenceGuard() {
     !source.includes('findProcessDefinitionReferences') ||
     !source.includes('orderLineProcessStep.findMany') ||
     !source.includes('processTemplate.findMany') ||
+    !source.includes('material.findMany') ||
     !source.includes('modelBomLine.findMany') ||
     !source.includes('materialTransformRule.findMany')
   ) {
-    addFailure('ProcessDefinitionsService must check order process, process template, BOM, and transform-rule references before disabling or renaming a process definition.');
+    addFailure('ProcessDefinitionsService must check order process, process template, material default process, BOM, and transform-rule references before disabling or renaming a process definition.');
   }
   if (!source.includes('processSnapshotToDetails') || !source.includes("action: '停用' | '改名'") || !source.includes('不能${action}')) {
     addFailure('ProcessDefinitionsService must parse process template steps and reject disabling or renaming referenced process definitions with a clear message.');
@@ -9000,8 +12910,9 @@ function verifyProcessDefinitionReferenceGuard() {
   const processReferenceSnippets = [
     'splitDefaultProcessRoute',
     '.split(/(?:->|→|[、,，;；\\n\\r]+)/)',
+    '零件默认工艺 ${material.partCode} / ${material.partName}',
     '来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode}',
-    '订单流程、流程记忆、BOM 或来源加工关系'
+    '订单流程、流程记忆、零件默认工艺、BOM 或来源加工关系'
   ];
   for (const snippet of processReferenceSnippets) {
     if (!source.includes(snippet)) {
@@ -9038,7 +12949,7 @@ function verifyProcessDefinitionReferenceGuard() {
     addFailure('ProcessDefinitionsService.delete must soft-disable unused process definitions instead of physically deleting them.');
   }
   if (!source.includes('async restore(id: string)') || !source.includes('恢复标准工序只恢复后续下拉可选')) {
-    addFailure('ProcessDefinitionsService.restore must explicitly restore disabled process definitions without mutating historical orders, BOM, or transform rules.');
+    addFailure('ProcessDefinitionsService.restore must explicitly restore disabled process definitions without mutating historical orders, material default process, BOM, or transform rules.');
   }
 }
 
@@ -9063,9 +12974,11 @@ function verifyMissingProcessDefinitionRepairCoverage() {
     'prisma.processDefinition.findMany',
     'prisma.processTemplate.findMany',
     'prisma.orderLineProcessStep.findMany',
+    'prisma.material.findMany',
     'prisma.modelBomLine.findMany',
     'prisma.materialTransformRule.findMany',
     'splitDefaultProcessRoute',
+    '零件默认工艺 ${material.partCode} / ${material.partName}',
     '来源加工关系 ${rule.sourceMaterial.partCode} -> ${rule.targetMaterial.partCode}',
     'processSnapshotToDetails(template.steps)',
     'normalizeSearchKeyword(processName)',
@@ -9104,11 +13017,14 @@ function verifyMissingProcessDefinitionRepairCoverage() {
     'ORDER_LINE_PROCESS_DEFINITION_MISSING',
     'MODEL_BOM_DEFAULT_PROCESS_DUPLICATE',
     'MODEL_BOM_DEFAULT_PROCESS_DEFINITION_MISSING',
+    'MATERIAL_DEFAULT_PROCESS_DUPLICATE',
+    'MATERIAL_DEFAULT_PROCESS_DEFINITION_MISSING',
     'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DUPLICATE',
     'MATERIAL_TRANSFORM_DEFAULT_PROCESS_DEFINITION_MISSING',
     'PRODUCTION_TASK_PROCESS_STEP_DUPLICATE',
     'PRODUCTION_TASK_PROCESS_DEFINITION_MISSING',
     'prisma.modelBomLine.findMany',
+    'prisma.material.findMany',
     'prisma.materialTransformRule.findMany',
     'splitDefaultProcessRoute',
     '没有对应的启用标准工序'
@@ -9185,9 +13101,17 @@ function verifyRepairDraftReservationPriority() {
     !source.includes('collectModelBomScopeBlocks') ||
     !source.includes('printModelBomScopeBlocks') ||
     !source.includes('ModelBomScopeBlock') ||
-    !source.includes('BOM 范围重复')
+    !source.includes('BOM 同名范围重复')
   ) {
-    addFailure('repair-first-stage.ts must report and block duplicate ModelBom customer/project scopes before migration or write mode.');
+    addFailure('repair-first-stage.ts must report and block duplicate ModelBom name/customer/project scopes before migration or write mode.');
+  }
+  if (
+    !source.includes('collectModelBomScopeApprovalBlocks') ||
+    !source.includes('printModelBomScopeApprovalBlocks') ||
+    !source.includes('ModelBomScopeApprovalBlock') ||
+    !source.includes('BOM 范围审批重复')
+  ) {
+    addFailure('repair-first-stage.ts must report and block duplicate open ModelBom scope approval requests before migration or write mode.');
   }
   if (
     !source.includes('collectModelBomComponentStructureBlocks') ||
@@ -9203,7 +13127,7 @@ function verifyRepairDraftReservationPriority() {
     addFailure('repair-first-stage.ts must repair invalid production plan override operator snapshots and roles.');
   }
   const blockedPreflightPattern =
-    /assertNoBlockedRepairs\s*\(\s*stockSourceReviewStatusRepairs\s*,\s*draftReservationSyncRepairs\s*,\s*consumedReservationRepairs\s*,\s*stockAllocationRepairs\s*,\s*componentStructureBlocks\s*,\s*modelBomScopeBlocks\s*\)/;
+    /assertNoBlockedRepairs\s*\(\s*stockSourceReviewStatusRepairs\s*,\s*draftReservationSyncRepairs\s*,\s*consumedReservationRepairs\s*,\s*stockAllocationRepairs\s*,\s*componentStructureBlocks\s*,\s*modelBomScopeBlocks\s*,\s*modelBomScopeApprovalBlocks\s*\)/;
   if (!blockedPreflightPattern.test(source)) {
     addFailure('repair-first-stage.ts write mode must run a full blocked-repair preflight before any repair write.');
   }
@@ -9267,6 +13191,7 @@ function verifyDataVerifierStockSourceReviewStatus() {
     'CUSTOMER_ORDER_SNAPSHOT_INVALID',
     'ORDER_LINE_IDENTITY_MISSING',
     'ORDER_LINE_QUANTITY_INVALID',
+    '非取消订单 quantity 必须大于 0',
     'ORDER_LINE_PART_THICKNESS_MISSING',
     'isImportDraftMissingThickness',
     'ORDER_LINE_OPTIONAL_TEXT_BLANK'
@@ -9282,6 +13207,7 @@ function verifyDataVerifierStockSourceReviewStatus() {
     'CustomerOrder_customer_snapshot_shape',
     'OrderLine_required_text_not_blank',
     'OrderLine_quantities_valid',
+    '"quantity" >= 0',
     'OrderLine_optional_text_not_blank',
     'OrderLine_component_shape_valid',
     "!~ '^C[0-9]+$'",
@@ -9340,6 +13266,8 @@ function verifyReadmeRepairSafetyDocs() {
     '生产操作人员基础资料',
     '已消耗库存来源缺失的 `InventoryReservation`',
     '使用库存转订单待发货',
+    'BOM 同名范围重复',
+    'BOM 范围审批重复',
     'Serializable',
     'P2034',
     '整次修复回滚'
@@ -9369,6 +13297,15 @@ function verifyOrderExcelImportWorkflow() {
   const readmePath = 'README.md';
   const packagePath = 'package.json';
   const regressionScriptPath = 'scripts/verify-order-import-api.cjs';
+  const materialImportApiRegressionScriptPath = 'scripts/verify-material-import-api.cjs';
+  const inventoryAdjustmentApiRegressionScriptPath = 'scripts/verify-inventory-adjustment-api.cjs';
+  const inventoryExportApiRegressionScriptPath = 'scripts/verify-inventory-export-api.cjs';
+  const materialDrawingRevisionsExportApiRegressionScriptPath = 'scripts/verify-material-drawing-revisions-export-api.cjs';
+  const materialApplicabilitiesExportApiRegressionScriptPath = 'scripts/verify-material-applicabilities-export-api.cjs';
+  const materialDashboardExportApiRegressionScriptPath = 'scripts/verify-material-dashboard-export-api.cjs';
+  const productionNoticesApiRegressionScriptPath = 'scripts/verify-production-notices-api.cjs';
+  const productionExportApiRegressionScriptPath = 'scripts/verify-production-export-api.cjs';
+  const warehouseConfigApiRegressionScriptPath = 'scripts/verify-warehouse-config-api.cjs';
   const uploadFileNameRegressionScriptPath = 'scripts/verify-upload-filenames-api.cjs';
   const fileNameNormalizerRegressionScriptPath = 'scripts/verify-file-name-normalizers.cjs';
   const workbookRegressionScriptPath = 'scripts/verify-order-import-workbooks.cjs';
@@ -9391,6 +13328,15 @@ function verifyOrderExcelImportWorkflow() {
     readmePath,
     packagePath,
     regressionScriptPath,
+    materialImportApiRegressionScriptPath,
+    inventoryAdjustmentApiRegressionScriptPath,
+    inventoryExportApiRegressionScriptPath,
+    materialDrawingRevisionsExportApiRegressionScriptPath,
+    materialApplicabilitiesExportApiRegressionScriptPath,
+    materialDashboardExportApiRegressionScriptPath,
+    productionNoticesApiRegressionScriptPath,
+    productionExportApiRegressionScriptPath,
+    warehouseConfigApiRegressionScriptPath,
     uploadFileNameRegressionScriptPath,
     fileNameNormalizerRegressionScriptPath,
     workbookRegressionScriptPath,
@@ -9418,6 +13364,15 @@ function verifyOrderExcelImportWorkflow() {
   const readmeSource = readFile(readmePath);
   const packageSource = readFile(packagePath);
   const regressionScriptSource = readFile(regressionScriptPath);
+  const materialImportApiRegressionScriptSource = readFile(materialImportApiRegressionScriptPath);
+  const inventoryAdjustmentApiRegressionScriptSource = readFile(inventoryAdjustmentApiRegressionScriptPath);
+  const inventoryExportApiRegressionScriptSource = readFile(inventoryExportApiRegressionScriptPath);
+  const materialDrawingRevisionsExportApiRegressionScriptSource = readFile(materialDrawingRevisionsExportApiRegressionScriptPath);
+  const materialApplicabilitiesExportApiRegressionScriptSource = readFile(materialApplicabilitiesExportApiRegressionScriptPath);
+  const materialDashboardExportApiRegressionScriptSource = readFile(materialDashboardExportApiRegressionScriptPath);
+  const productionNoticesApiRegressionScriptSource = readFile(productionNoticesApiRegressionScriptPath);
+  const productionExportApiRegressionScriptSource = readFile(productionExportApiRegressionScriptPath);
+  const warehouseConfigApiRegressionScriptSource = readFile(warehouseConfigApiRegressionScriptPath);
   const uploadFileNameRegressionScriptSource = readFile(uploadFileNameRegressionScriptPath);
   const fileNameNormalizerRegressionScriptSource = readFile(fileNameNormalizerRegressionScriptPath);
   const workbookRegressionScriptSource = readFile(workbookRegressionScriptPath);
@@ -9463,11 +13418,18 @@ function verifyOrderExcelImportWorkflow() {
     "files: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }",
     "const fileIdCompare = String(left.file?.id || left.fileId || '')",
     'buildImportPreviewToken',
+    "drawingVersion: this.importColumn(header.columns, '版本', '图纸版本', '图纸版本号')",
+    'drawingVersion: this.cellText(row, columns.drawingVersion)',
+    'drawingVersion: row.drawingVersion || null',
+    'drawingVersion: row.drawingVersion || undefined',
     '导入提交必须携带 previewToken',
     '导入预览已变化，请刷新预览后重新提交',
     'submitValidationLines',
     'this.validateOrderLineComponentStructure(submitValidationLines)',
     'buildOrderImportIssueReport',
+    "issueSheet.autoFilter = { from: 'A1', to: 'R1' }",
+    'row.drawingVersion,',
+    'row.drawingDate,',
     'formatImportDateOnly',
     "mode: 'insensitive' as const",
     'allSelectable',
@@ -9655,7 +13617,8 @@ function verifyOrderExcelImportWorkflow() {
     'sourceImportRowNo',
     'committedOrderNos',
     'componentNo',
-    'parentComponentNo'
+    'parentComponentNo',
+    'drawingVersion    String?'
   ];
   for (const snippet of schemaSnippets) {
     if (!schemaSource.includes(snippet)) {
@@ -9687,6 +13650,8 @@ function verifyOrderExcelImportWorkflow() {
     'OrderImportFile_counts_valid',
     'OrderImportRow_identity_not_blank',
     'OrderImportRow_line_type_valid',
+    'OrderImportRow_optional_text_not_blank',
+    '"drawingVersion" IS NULL OR BTRIM("drawingVersion") <>',
     'OrderImportRow_quantities_valid',
     'OrderImportRow_json_shape_valid',
     'OrderImportRow_clean_required_fields',
@@ -9766,9 +13731,12 @@ function verifyOrderExcelImportWorkflow() {
     'deleteDraftOrder',
     '组件编号',
     '所属组件',
+    '[line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus]',
+    'function formatModelBomApplyMissingThicknessLine(line: CreateOrderLinePayload)',
     'orderImportSourceFilePreview',
     'orderImportFilePreview',
     'OrderImportFilePreview',
+    'prop="drawingVersion" label="版本"',
     'openImportFilePreview',
     '上传文件预览',
     'OrderImportSourceFilePreview',
@@ -9791,6 +13759,18 @@ function verifyOrderExcelImportWorkflow() {
     ) {
       addFailure(`Frontend must keep Excel import UI/API snippet: ${snippet}`);
     }
+  }
+  if (
+    !/function formatModelBomApplyMissingThicknessLine\(line: CreateOrderLinePayload\)[\s\S]*\[line\.drawingNo, line\.drawingVersion, line\.drawingDate, line\.drawingStatus\]/.test(
+      ordersViewSource
+    )
+  ) {
+    addFailure('OrdersListView.vue BOM missing-thickness review text must include drawingNo, drawingVersion, drawingDate and drawingStatus.');
+  }
+  const orderImportDrawingDateColumnCount = (ordersViewSource.match(/prop="drawingDate"\s+label="图纸日期"/g) || []).length;
+  const orderImportDrawingStatusColumnCount = (ordersViewSource.match(/prop="drawingStatus"\s+label="图纸状态"/g) || []).length;
+  if (orderImportDrawingDateColumnCount < 3 || orderImportDrawingStatusColumnCount < 3) {
+    addFailure('OrdersListView.vue order import, source preview and BOM draft preview tables must show drawingDate and drawingStatus columns.');
   }
   const forbiddenFrontendSnippets = [
     '可导入订单较多，请直接使用“创建全部可导入草稿”',
@@ -9852,11 +13832,23 @@ function verifyOrderExcelImportWorkflow() {
   if (!packageSource.includes('"verify:order-import-api": "node scripts/verify-order-import-api.cjs"')) {
     addFailure('package.json must expose verify:order-import-api for Excel import regression testing.');
   }
+  if (!packageSource.includes('"verify:inventory-adjustment-api": "node scripts/verify-inventory-adjustment-api.cjs"')) {
+    addFailure('package.json must expose verify:inventory-adjustment-api for inventory adjustment status regression testing.');
+  }
+  if (!packageSource.includes('"verify:production-export-api": "node scripts/verify-production-export-api.cjs"')) {
+    addFailure('package.json must expose verify:production-export-api for production Excel export regression testing.');
+  }
+  if (!packageSource.includes('"verify:warehouse-config-api": "node scripts/verify-warehouse-config-api.cjs"')) {
+    addFailure('package.json must expose verify:warehouse-config-api for warehouse delete/disable regression testing.');
+  }
   if (!packageSource.includes('"verify:upload-filenames-api": "node scripts/verify-upload-filenames-api.cjs"')) {
     addFailure('package.json must expose verify:upload-filenames-api for upload filename regression testing.');
   }
   if (!packageSource.includes('"verify:file-name-normalizers": "node scripts/verify-file-name-normalizers.cjs"')) {
     addFailure('package.json must expose verify:file-name-normalizers for frontend/backend filename normalizer regression testing.');
+  }
+  if (!packageSource.includes('"verify:excel-export-format": "node scripts/verify-excel-export-format.cjs"')) {
+    addFailure('package.json must expose verify:excel-export-format for real .xlsx export regression testing.');
   }
   if (!packageSource.includes('"verify:order-import-workbooks": "node scripts/verify-order-import-workbooks.cjs"')) {
     addFailure('package.json must expose verify:order-import-workbooks for Excel workbook artifact validation.');
@@ -9867,36 +13859,247 @@ function verifyOrderExcelImportWorkflow() {
   if (!packageSource.includes('"verify:first-stage:api": "node scripts/verify-first-stage-api.cjs"')) {
     addFailure('package.json must expose verify:first-stage:api for self-contained first-stage API regression checks.');
   }
+  if (!packageSource.includes('"verify:first-stage:api:after-build": "node scripts/verify-first-stage-api.cjs --skip-build"')) {
+    addFailure('package.json must expose verify:first-stage:api:after-build to reuse the backend build in total verification.');
+  }
   if (
     !packageSource.includes(
-      'npm run verify:file-name-normalizers && npm run verify:prisma-client-enums && npm run verify:order-import-workbooks && npm run backend:verify:first-stage'
+      'npm run verify:file-name-normalizers && npm run verify:excel-export-format && npm run verify:prisma-client-enums && npm run verify:order-import-workbooks && npm run backend:verify:first-stage && npm run backend:build && npm run verify:first-stage:api:after-build && npm run frontend:build'
     )
   ) {
-    addFailure('verify:first-stage must check generated Prisma Client enums and workbook artifacts before backend/frontend builds.');
+    addFailure('verify:first-stage must check generated Prisma Client enums, workbook artifacts, self-contained API regressions and backend/frontend builds.');
   }
-  if (!packageSource.includes('npm run backend:build && npm run verify:first-stage:api && npm run frontend:build')) {
+  if (!packageSource.includes('npm run backend:build && npm run verify:first-stage:api:after-build && npm run frontend:build')) {
     addFailure('verify:first-stage:strict must include self-contained API regressions after backend build and before frontend build.');
   }
 
   const apiAggregateRegressionSnippets = [
+    "const { createServer } = require('node:net');",
+    "const { existsSync, readdirSync, readFileSync, statSync } = require('node:fs');",
+    "const skipBackendBuild = process.argv.includes('--skip-build') || process.env.FIRST_STAGE_API_SKIP_BUILD === '1';",
+    'FIRST_STAGE_API_SCRIPT_TIMEOUT_MS',
+    'defaultCommandTimeoutMs',
+    'timed out after',
+    'function stopProcessTree',
+    "const backendBuildEntry = resolve(rootDir, 'backend/dist/main.js');",
+    "const backendBuildStamp = resolve(rootDir, 'backend/dist/tsconfig.tsbuildinfo');",
+    'const backendBuildInputPaths = [',
     'FIRST_STAGE_API_BASE_URL',
+    'FIRST_STAGE_API_SKIP_BUILD',
     'FIRST_STAGE_API_PORT',
+    'const explicitApiBaseUrl = process.env.FIRST_STAGE_API_BASE_URL || process.env.ORDER_IMPORT_API_BASE_URL ||',
+    'async function findAvailablePort',
+    'const selectedPort = await findAvailablePort(apiPort)',
+    'Building backend and starting a temporary API server on port',
+    'Starting a temporary API server on port',
+    'using the existing backend build',
+    'Explicit API health check failed',
+    'verify:customers-export-api',
+    'verify:orders-export-api',
     'verify:material-import-api',
+    'verify:inventory-adjustment-api',
+    'verify:inventory-export-api',
+    'verify:inventory-materials-export-api',
+    'verify:material-drawing-revisions-export-api',
+    'verify:material-applicabilities-export-api',
+    'verify:material-dashboard-export-api',
+    'verify:model-boms-export-api',
+    'verify:model-bom-diff-reviews-export-api',
+    'verify:material-transform-rules-export-api',
+    'verify:statistics-api',
     'verify:order-import-api',
     'verify:production-notices-api',
+    'verify:production-notices-export-api',
+    'verify:production-replenishment-requests-export-api',
+    'verify:production-scrap-records-export-api',
+    'verify:production-export-api',
+    'verify:process-exports-api',
+    'verify:warehouse-config-api',
+    'verify:warehouse-work-export-api',
+    'verify:warehouse-notices-export-api',
+    'verify:warehouse-transactions-export-api',
     'verify:upload-filenames-api',
+    "FIRST_STAGE_API_BASE_URL: apiBaseUrl",
+    "CUSTOMERS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "ORDERS_EXPORT_API_BASE_URL: apiBaseUrl",
     "ORDER_IMPORT_API_BASE_URL: apiBaseUrl",
     "MATERIAL_IMPORT_API_BASE_URL: apiBaseUrl",
+    "INVENTORY_ADJUSTMENT_API_BASE_URL: apiBaseUrl",
+    "INVENTORY_EXPORT_API_BASE_URL: apiBaseUrl",
+    "INVENTORY_MATERIALS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "MATERIAL_DRAWING_REVISIONS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "MATERIAL_APPLICABILITIES_EXPORT_API_BASE_URL: apiBaseUrl",
+    "MATERIAL_DASHBOARD_EXPORT_API_BASE_URL: apiBaseUrl",
+    "MODEL_BOMS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "MODEL_BOM_SCOPE_APPROVAL_API_BASE_URL: apiBaseUrl",
+    "MODEL_BOM_DIFF_REVIEWS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "MATERIAL_TRANSFORM_RULES_EXPORT_API_BASE_URL: apiBaseUrl",
+    "STATISTICS_API_BASE_URL: apiBaseUrl",
     "NOTICE_API_BASE_URL: apiBaseUrl",
-    "await runCommand(['run', 'backend:build'])",
+    "PRODUCTION_NOTICES_EXPORT_API_BASE_URL: apiBaseUrl",
+    "PRODUCTION_REPLENISHMENT_REQUESTS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "PRODUCTION_SCRAP_RECORDS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "PRODUCTION_EXPORT_API_BASE_URL: apiBaseUrl",
+    "PROCESS_EXPORT_API_BASE_URL: apiBaseUrl",
+    "WAREHOUSE_CONFIG_API_BASE_URL: apiBaseUrl",
+    "WAREHOUSE_WORK_EXPORT_API_BASE_URL: apiBaseUrl",
+    "WAREHOUSE_NOTICES_EXPORT_API_BASE_URL: apiBaseUrl",
+    "WAREHOUSE_TRANSACTION_EXPORT_API_BASE_URL: apiBaseUrl",
+    'function latestFileMtime',
+    'function assertBackendBuildCurrent',
+    'if (!skipBackendBuild)',
+    'assertBackendBuildCurrent();',
+    'requires an existing backend build stamp',
+    'const buildMtimeMs = statSync(backendBuildStamp).mtimeMs',
+    'latestInput.mtimeMs > buildMtimeMs + 1000',
+    '--skip-build found backend build older than',
+    'Run npm run backend:build first',
+    "await runCommand(['run', 'backend:build'], { timeoutMs: Math.max(defaultCommandTimeoutMs, 300000) })",
     "spawn(command.file, command.args",
     "spawnSync('taskkill'",
-    'await waitForHealth(backend.output)'
+    'timeoutMs: Math.max(defaultCommandTimeoutMs, 300000)',
+    'await waitForHealth(backend)',
+    'const exitStatus = backend.exited();',
+    'Temporary API server exited before health check passed',
+    'exited: () => exitStatus',
+    'First-stage API regression verification passed.',
+    'process.exit(0);',
+    'process.exit(1);'
   ];
   for (const snippet of apiAggregateRegressionSnippets) {
     if (!apiAggregateRegressionScriptSource.includes(snippet)) {
       addFailure(`verify-first-stage-api.cjs must keep self-contained API regression snippet: ${snippet}`);
     }
+  }
+  if (
+    !/async function main\(\) \{[\s\S]*let backend = null;[\s\S]*try \{[\s\S]*backend = startBackend\(\);[\s\S]*await waitForHealth\(backend\);[\s\S]*finally \{[\s\S]*if \(backend\) \{[\s\S]*stopBackend\(backend\.child\);/.test(
+      apiAggregateRegressionScriptSource
+    )
+  ) {
+    addFailure('verify-first-stage-api.cjs must stop the temporary backend even when health check or child regressions fail.');
+  }
+  if (
+    !/main\(\)[\s\S]*\.then\(\(\)\s*=>\s*\{[\s\S]*First-stage API regression verification passed\.[\s\S]*process\.exit\(0\);[\s\S]*\.catch\(\(error\)\s*=>\s*\{[\s\S]*process\.exit\(1\);/.test(
+      apiAggregateRegressionScriptSource
+    )
+  ) {
+    addFailure('verify-first-stage-api.cjs must explicitly exit after cleanup so lingering API/test handles cannot hang verify:first-stage:api.');
+  }
+  if (
+    !/function runCommand\(args, options = \{\}\)[\s\S]*defaultCommandTimeoutMs[\s\S]*setTimeout\(\(\) => \{[\s\S]*stopProcessTree\(child\)[\s\S]*timed out after[\s\S]*clearTimeout\(timer\)/.test(
+      apiAggregateRegressionScriptSource
+    )
+  ) {
+    addFailure('verify-first-stage-api.cjs must timeout and clean up child regression scripts so a hung API script cannot block first-stage verification.');
+  }
+
+  const apiRegressionScriptSources = [
+    ['verify-order-import-api.cjs', regressionScriptSource],
+    ['verify-material-import-api.cjs', materialImportApiRegressionScriptSource],
+    ['verify-inventory-adjustment-api.cjs', inventoryAdjustmentApiRegressionScriptSource],
+    ['verify-inventory-export-api.cjs', inventoryExportApiRegressionScriptSource],
+    ['verify-material-drawing-revisions-export-api.cjs', materialDrawingRevisionsExportApiRegressionScriptSource],
+    ['verify-material-applicabilities-export-api.cjs', materialApplicabilitiesExportApiRegressionScriptSource],
+    ['verify-material-dashboard-export-api.cjs', materialDashboardExportApiRegressionScriptSource],
+    ['verify-production-notices-api.cjs', productionNoticesApiRegressionScriptSource],
+    ['verify-production-export-api.cjs', productionExportApiRegressionScriptSource],
+    ['verify-warehouse-config-api.cjs', warehouseConfigApiRegressionScriptSource],
+    ['verify-upload-filenames-api.cjs', uploadFileNameRegressionScriptSource]
+  ];
+  for (const [scriptName, scriptSource] of apiRegressionScriptSources) {
+    if (!scriptSource.includes('FIRST_STAGE_API_BASE_URL')) {
+      addFailure(`${scriptName} must accept FIRST_STAGE_API_BASE_URL so verify:first-stage:api can run on a temporary API port.`);
+    }
+  }
+  for (const [scriptName, scriptSource] of [
+    ['verify-material-drawing-revisions-export-api.cjs', materialDrawingRevisionsExportApiRegressionScriptSource],
+    ['verify-material-applicabilities-export-api.cjs', materialApplicabilitiesExportApiRegressionScriptSource]
+  ]) {
+    for (const snippet of [
+      "const { PrismaClient } = require('@prisma/client');",
+      "for (const envPath of [resolve('.env'), resolve('backend/.env')])",
+      'prepareStableVerificationData',
+      'cleanupStableVerificationData',
+      'prisma.material.upsert',
+      'prisma.material.updateMany',
+      'await prisma.$disconnect();',
+      'let material;',
+      'try {',
+      'finally {'
+    ]) {
+      if (!scriptSource.includes(snippet)) {
+        addFailure(`${scriptName} must reuse and soft-disable stable verification material after export verification: ${snippet}`);
+      }
+    }
+    if (scriptSource.includes('new Date().toISOString().replace') || scriptSource.includes("method: 'DELETE'")) {
+      addFailure(`${scriptName} must not create timestamped verification materials or use DELETE cleanup.`);
+    }
+  }
+  if (!materialDrawingRevisionsExportApiRegressionScriptSource.includes("const partCode = 'VERIFY-DRAWING-EXPORT-STABLE';")) {
+    addFailure('verify-material-drawing-revisions-export-api.cjs must use the stable VERIFY-DRAWING-EXPORT-STABLE material.');
+  }
+  if (!materialDrawingRevisionsExportApiRegressionScriptSource.includes('prisma.materialDrawingRevision.upsert')) {
+    addFailure('verify-material-drawing-revisions-export-api.cjs must upsert the stable drawing revision instead of creating a new one per run.');
+  }
+  if (!materialDrawingRevisionsExportApiRegressionScriptSource.includes('prisma.materialDrawingRevision.updateMany')) {
+    addFailure('verify-material-drawing-revisions-export-api.cjs must soft-disable stable drawing revisions after verification.');
+  }
+  if (!materialApplicabilitiesExportApiRegressionScriptSource.includes("const partCode = 'VERIFY-APPLICABILITY-EXPORT-STABLE';")) {
+    addFailure('verify-material-applicabilities-export-api.cjs must use the stable VERIFY-APPLICABILITY-EXPORT-STABLE material.');
+  }
+  if (!materialApplicabilitiesExportApiRegressionScriptSource.includes('prisma.materialApplicability.upsert')) {
+    addFailure('verify-material-applicabilities-export-api.cjs must upsert the stable applicability row instead of creating a new one per run.');
+  }
+  if (!materialApplicabilitiesExportApiRegressionScriptSource.includes('prisma.materialApplicability.updateMany')) {
+    addFailure('verify-material-applicabilities-export-api.cjs must soft-disable stable applicability rows after verification.');
+  }
+
+  const inventoryExportRegressionSnippets = [
+    'seedInventoryExportRows',
+    '`Inventory Export Source Split Customer ${runId}`',
+    'inventory-export-stock-source-split',
+    '正常备货',
+    '取消转备货',
+    '客户变更转备货',
+    'stockInventoryQuantity === normalOrderStockQuantity + cancelledOrderStockQuantity + customerChangeStockQuantity',
+    'availableQuantity === orderInventoryQuantity + stockInventoryQuantity',
+    'sourceKind: \'CANCELLED_ORDER\'',
+    'sourceKind: \'CUSTOMER_CHANGE\'',
+    'sourceOrderId: order.id',
+    "const runId = 'STABLE';",
+    "const testPrefix = 'COD-INV-EXP-STABLE';",
+    'inventory-export-test-fixture-filter',
+    'inventory export default response must hide reusable test fixture inventory',
+    'includeTestFixtures=true',
+    'prisma.customer.findFirst',
+    'prisma.customer.update',
+    'prisma.customer.create',
+    'prisma.customerContact.updateMany',
+    'async function upsertRegressionWarehouse(warehouseCode, warehouseName)',
+    'async function upsertRegressionWarehouseLocation(warehouseId, locationCode, locationName)',
+    'prisma.warehouse.upsert',
+    'prisma.warehouseLocation.findFirst',
+    'prisma.warehouseLocation.update',
+    'prisma.warehouseLocation.create',
+    'prisma.warehouseLocation.updateMany',
+    'prisma.warehouse.updateMany',
+    'customerCode: `${testPrefix}-CUST${archiveSuffix}`',
+    'customerName: `Inventory Export Source Split Customer ${runId}${archiveSuffix}`',
+    "contactName: null",
+    "contactPhone: null"
+  ];
+  for (const snippet of inventoryExportRegressionSnippets) {
+    if (!inventoryExportApiRegressionScriptSource.includes(snippet)) {
+      addFailure(`verify-inventory-export-api.cjs must keep stock source split regression snippet: ${snippet}`);
+    }
+  }
+  if (
+    inventoryExportApiRegressionScriptSource.includes('prisma.customer.deleteMany') ||
+    inventoryExportApiRegressionScriptSource.includes('prisma.warehouse.deleteMany') ||
+    inventoryExportApiRegressionScriptSource.includes('prisma.warehouseLocation.deleteMany') ||
+    inventoryExportApiRegressionScriptSource.includes('function localDateTimeStamp')
+  ) {
+    addFailure('verify-inventory-export-api.cjs must reuse stable customer master data and soft-disable it after verification.');
   }
 
   const regressionSnippets = [
@@ -9905,8 +14108,16 @@ function verifyOrderExcelImportWorkflow() {
     'downloadTemplate',
     'assertTemplateWorkbook',
     "optionsSheet.getCell('E10000').text === 'C9999'",
+    "uploadSheet.getCell('X4').text === '版本'",
     "dataValidation?.errorStyle === 'warning'",
     'assertIssueReportWorkbook',
+    "headerColumns.has('版本')",
+    "headerColumns.has('图纸日期')",
+    "headerColumns.has('图纸状态')",
+    'requiredDrawingVersions',
+    'requiredDrawingDates',
+    'requiredDrawingStatuses',
+    '问题明细必须在错误代码',
     'toOrderUpdateLine',
     '/selectable-order-nos',
     '/error-report',
@@ -9988,6 +14199,66 @@ function verifyOrderExcelImportWorkflow() {
     'THICKNESS_DEFAULTED',
     '订单导入父级组件行不应产生 THICKNESS_DEFAULTED 厚度待核对警告',
     'assertImportMissingThicknessDraftRequiresReview',
+    'assertOrderImportDrawingVersionSnapshot',
+    'assertDraftStockReservationReleasedOnCancel',
+    'assertDraftStockReservationRemovedOnDelete',
+    'assertDraftStockReservationReplacedOnEdit',
+    'assertDraftStockReservationOrderNoRenumberedOnEdit',
+    'assertDraftWithInventoryCannotBeDeleted',
+    'assertSubmittedOrderCannotBeDeleted',
+    'assertDraftWithProductionTaskCannotBeDeleted',
+    'assertDraftWithInventoryTransactionCannotBeDeleted',
+    'draft stock reservation must become RELEASED after order cancel',
+    'deleted draft order must remove ACTIVE InventoryReservation rows',
+    'deleted unsubmitted draft must release orderNo reservation for corrected re-import',
+    'stock batch quantity should remain 9 after draft delete',
+    '草稿编辑同批次增加数量后必须保留原预占 createdAt',
+    '草稿编辑同批次减少数量后仍必须保留原预占 createdAt',
+    '草稿编辑库存来源失败后必须保留原 ACTIVE InventoryReservation',
+    '草稿编辑库存来源失败后不得提前释放旧预占',
+    '草稿编辑库存来源失败后不得生成新库存批次预占',
+    '草稿编辑库存来源失败后不得生成 InventoryTransaction',
+    '草稿修改订单号后 ACTIVE InventoryReservation 必须同步新 orderNo',
+    '草稿修改订单号后旧订单号预占必须释放',
+    '草稿修改订单号后旧订单号占用必须释放',
+    '草稿修改订单号后新订单号必须继续占用',
+    '草稿改成已占用订单号失败后订单号必须保持不变',
+    '草稿改成已占用订单号失败后原 ACTIVE 预占必须保持 ACTIVE',
+    '草稿改成已占用订单号失败后原订单号占用必须保持',
+    '草稿改成已占用订单号失败后不得把目标订单号占用转给当前订单',
+    '草稿修改订单号后删除草稿必须清理全部 InventoryReservation',
+    '草稿修改订单号后删除草稿必须释放新订单号占用',
+    '避免后下单抢占库存优先级',
+    '草稿编辑换库存批次后旧 ACTIVE 预占必须释放',
+    '草稿编辑换库存批次后新库存批次必须创建 ACTIVE InventoryReservation',
+    '草稿编辑清空库存来源后不得保留 ACTIVE InventoryReservation',
+    '草稿编辑清空库存来源后旧库存批次预占必须释放',
+    '草稿编辑清空库存来源不得生成 InventoryTransaction',
+    '清空库存来源草稿提交失败后订单必须保持 DRAFT',
+    '清空库存来源草稿提交失败后不得重新生成 ACTIVE InventoryReservation',
+    '清空库存来源草稿提交失败后不得生成 InventoryTransaction',
+    '清空库存来源草稿提交失败后不得生成 ProductionTask',
+    '草稿编辑改为重新生产后不得保留 ACTIVE InventoryReservation',
+    '草稿编辑库存来源不得生成 InventoryTransaction',
+    'draft with inventory must stay after rejected delete',
+    'draft inventory batch must stay linked after rejected delete',
+    'rejected draft delete must keep orderNo reservation occupied',
+    'submitted order must stay after rejected delete',
+    'submitted order status must remain PENDING_PRODUCTION',
+    'rejected submitted delete must keep orderNo reservation occupied',
+    'draft with production task must stay after rejected delete',
+    'draft production task must stay linked after rejected delete',
+    'rejected draft task delete must keep orderNo reservation occupied',
+    'draft with inventory transaction must stay after rejected delete',
+    'draft inventory transaction must stay linked after rejected delete',
+    'rejected draft transaction delete must keep orderNo reservation occupied',
+    "releasedReservation?.statusReason === 'ORDER_CANCELLED'",
+    'released reservation must keep releasedAt for audit',
+    'cancelled draft reservation must not be marked consumed',
+    'stock batch quantity should remain 8 after draft cancel',
+    'cancelled order must keep orderNo reservation instead of releasing reused order number',
+    '订单行图纸版本快照必须保留 B',
+    '来源 Excel 预览必须保留图纸版本',
     '缺厚度订单应允许导入草稿',
     '缺厚度草稿提交生产必须被厚度校验拦截',
     '厚度必须大于 0',
@@ -10017,11 +14288,252 @@ function verifyOrderExcelImportWorkflow() {
     'deleteSubmittedOrderStatusRegressionData',
     "submittedOrder.status === 'PENDING_PRODUCTION'",
     '订单提交生产后必须返回 PENDING_PRODUCTION',
+    'assertSubmitConsumesDraftStockReservation',
+    '库存全覆盖草稿保存后必须创建 ACTIVE InventoryReservation',
+    '提交生产后草稿库存预占必须转为 CONSUMED',
+    'CONSUMED InventoryReservation 必须记录 consumedAt',
+    '原备货批次提交后应剩余 2',
+    '库存全覆盖提交后必须生成订单待发货库存批次',
+    '库存全覆盖提交后必须给原备货批次追加 OUT InventoryTransaction',
+    '库存全覆盖提交后必须给订单待发货批次追加 IN InventoryTransaction',
+    '库存全覆盖且 productionPlanQuantity=0 时不得生成 ProductionTask',
+    'assertSubmitPartiallyConsumesStockAndCreatesProductionTask',
+    '部分库存覆盖订单生产计划必须是',
+    '部分库存覆盖提交后草稿预占必须转为 CONSUMED',
+    '部分库存覆盖提交后必须生成订单待发货库存批次',
+    '部分库存覆盖提交后必须给原备货批次追加 OUT InventoryTransaction',
+    '部分库存覆盖提交后必须给订单待发货批次追加 IN InventoryTransaction',
+    '部分库存覆盖只应按剩余数量生成 1 个 ProductionTask',
+    '部分库存覆盖 ProductionTask plannedQuantity 应为',
+    '部分库存覆盖 ProductionTask 必须保留下单时的 processSnapshot',
+    'assertSubmitRejectsPartialStockWithoutProcessSteps',
+    '部分库存缺工序提交失败后订单必须保持 DRAFT',
+    '部分库存缺工序提交失败后预占必须保持 ACTIVE',
+    '部分库存缺工序提交失败后不得生成 InventoryTransaction',
+    '部分库存缺工序提交失败后不得生成订单待发货库存批次',
+    '部分库存缺工序提交失败后不得生成 ProductionTask',
+    'assertSubmitConsumesReworkStockAndCreatesProductionTask',
+    '库存再加工清空来源后不得保留 ACTIVE InventoryReservation',
+    '库存再加工清空来源提交失败后订单必须保持 DRAFT',
+    '库存再加工清空来源提交失败后不得生成 InventoryTransaction',
+    '库存再加工重新选择来源后必须重新创建 ACTIVE InventoryReservation',
+    '库存再加工提交后草稿预占必须转为 CONSUMED',
+    '库存再加工流水 sourceRecordType 必须是 OrderLineREWORK',
+    '库存再加工提交后不得生成订单待发货库存批次',
+    '库存再加工 ProductionTask 必须保留下单时的 processSnapshot',
+    'assertSubmitRejectsReworkStockSourceShortage',
+    '库存再加工来源不足提交失败后订单必须保持 DRAFT',
+    '库存再加工来源不足提交失败后预占必须保持 ACTIVE',
+    '库存再加工来源不足提交失败后不得生成 InventoryTransaction',
+    '库存再加工来源不足提交失败后不得生成订单待发货库存批次',
+    '库存再加工来源不足提交失败后不得生成 ProductionTask',
+    'assertCreateRejectsStockSourceOverAvailable',
+    '使用库存超可用量保存失败后不得生成草稿订单',
+    '使用库存超可用量保存失败后不得占用订单号',
+    '使用库存超可用量保存失败后不得生成 InventoryReservation',
+    '使用库存超可用量保存失败后不得生成 InventoryTransaction',
+    'assertCreateRejectsSameBatchStockSourcesOverAvailableAcrossLines',
+    '同一草稿订单多行共用同一库存批次超库存保存失败后不得生成草稿订单',
+    '同一草稿订单多行共用同一库存批次超库存保存失败后不得生成 InventoryReservation',
+    '同一草稿订单多行共用同一库存批次超库存保存失败后不得生成 InventoryTransaction',
+    'assertCreateRejectsDuplicateStockSourceStrictStatusWithoutFreshManualConfirmation',
+    '重复库存来源严格状态缺少新人工确认保存失败后不得生成草稿订单',
+    '重复库存来源合并后需要重新人工确认',
+    'assertUpdateRejectsSameBatchStockSourcesOverAvailableAcrossLines',
+    '同批次编辑聚合超库存失败后订单行库存来源必须保持原始合法选择',
+    '同批次编辑聚合超库存失败后必须保留原 2 条 ACTIVE InventoryReservation',
+    '同批次编辑聚合超库存失败后不得提前释放预占',
+    'assertCreateRejectsStockSourceReservedByEarlierDraftOrder',
+    '跨草稿预占优先级第二个草稿超库存保存失败后不得生成 CustomerOrder',
+    '跨草稿预占优先级第二个草稿超库存保存失败后不得生成 InventoryReservation',
+    '跨草稿预占优先级第二个草稿失败后第一个预占必须保持 ACTIVE',
+    'assertLaterDraftSubmitRejectsAfterEarlierDraftReservationIncrease',
+    '较早草稿提高预占后较晚草稿预占仍应保持 ACTIVE',
+    '较晚草稿提交失败后自身预占必须保持 ACTIVE',
+    '较晚草稿提交失败后不得生成订单待发货库存批次',
+    'assertEarlierDraftSubmitWinsPriorityBeforeLaterDraftReservation',
+    '较早草稿提交后不得保留 ACTIVE InventoryReservation',
+    '较早草稿提交后 CONSUMED InventoryReservation 合计必须为',
+    '较早草稿提交后较晚草稿预占仍应保持 ACTIVE',
+    '较晚草稿提交失败后只能保留较早草稿的 OUT/IN InventoryTransaction',
+    'assertLaterDraftSubmitSucceedsAfterEarlierDraftConsumesStock',
+    '较早草稿提交后较晚草稿预占必须保持 ACTIVE',
+    '跨草稿顺序提交较晚预占必须转为 CONSUMED',
+    '跨草稿顺序提交全库存覆盖不得生成 ProductionTask',
+    'assertDraftStockReservationPriorityUsesOrderNoTieBreaker',
+    'same-time higher order stale id source-details must fall back to excludeOrderNo',
+    'same-time higher order stale id inventory summary must fall back to excludeOrderNo',
+    'same-time higher order stale id inventory list must fall back to excludeOrderNo',
+    'same-time higher order stale id material suggestions must fall back to excludeOrderNo',
+    '同时间草稿预占优先级必须把两个 DRAFT 的 createdAt 调整为完全相同',
+    '同时间较小订单号库存来源明细不应扣除较大订单号预占',
+    '同时间较大订单号库存来源明细必须扣除较小订单号预占',
+    '同时间较大订单号库存来源明细只能把较小订单号预占计入占用',
+    '同时间较小订单号库存汇总不应扣除较大订单号预占',
+    '同时间较大订单号库存汇总必须扣除较小订单号预占',
+    '同时间较小订单号库存列表不应扣除较大订单号预占',
+    '同时间较大订单号库存列表必须扣除较小订单号预占',
+    '同时间较大订单号库存列表只能把较小订单号预占计入占用',
+    '同时间较小订单号物料建议不应扣除较大订单号预占',
+    '同时间较大订单号物料建议必须扣除较小订单号预占',
+    '同时间较大订单号物料建议备货库存应为',
+    '同时间较大订单 id 库存来源明细必须扣除较小订单号预占',
+    '同时间较大订单 id 库存汇总必须扣除较小订单号预占',
+    '同时间较大订单 id 库存列表必须扣除较小订单号预占',
+    '同时间较大订单 id 物料建议必须扣除较小订单号预占',
+    '同时间较大订单 id 冲突参数库存来源明细必须优先按 id 扣除较小订单号预占',
+    '同时间较大订单 id 冲突参数库存汇总必须优先按 id 扣除较小订单号预占',
+    '同时间较大订单 id 冲突参数库存列表必须优先按 id 扣除较小订单号预占',
+    '同时间较大订单 id 冲突参数物料建议必须优先按 id 扣除较小订单号预占',
+    '同时间较大订单号物料建议在较小订单号占满库存后不得继续返回 STOCK 候选',
+    '同时间较大订单 id 物料建议在较小订单号占满库存后不得继续返回 STOCK 候选',
+    '同时间较大订单号物料建议 sourceType=ALL 应保留零可用量物料用于人工核对',
+    '同时间较大订单 id 物料建议 sourceType=ALL 应保留零可用量物料用于人工核对',
+    '同时间较小订单号占满整批提交后原库存批次必须转为 USED',
+    '同时间较大订单号提交失败后自身预占必须保持 ACTIVE',
+    '同时间较大订单号提交失败后不得生成 InventoryTransaction',
+    '同时间较小订单号提交后较大订单号预占必须保持 ACTIVE',
+    '同时间草稿预占优先级全库存覆盖不得生成 ProductionTask',
+    'assertSubmitConsumesSameBatchStockSourcesAcrossLines',
+    '同一草稿订单多行合法共用同一库存批次保存后应创建 2 条 ACTIVE InventoryReservation',
+    '同一草稿订单多行合法共用同一库存批次提交后所有预占必须转为 CONSUMED',
+    '同批次合法共用全库存覆盖不得生成 ProductionTask',
+    'assertCreateRejectsReworkStockSourceOverPlan',
+    '库存再加工来源超计划保存失败后不得生成草稿订单',
+    '库存再加工来源超计划保存失败后不得占用订单号',
+    '库存再加工来源超计划保存失败后不得生成 InventoryReservation',
+    '库存再加工来源超计划保存失败后不得生成 InventoryTransaction',
+    'assertSubmitRejectsReworkWithoutStockSources',
+    '库存再加工未选来源草稿不得生成 InventoryReservation',
+    '库存再加工未选来源提交失败后订单必须保持 DRAFT',
+    '库存再加工未选来源提交失败后不得生成 InventoryReservation',
+    '库存再加工未选来源提交失败后不得生成 InventoryTransaction',
+    '库存再加工未选来源提交失败后不得生成 ProductionTask',
+    'assertSubmitConsumesSelectedStockSourcesInManualOrder',
+    '人工库存批次顺序第 1 条 OUT 必须来自先选的 B 批次',
+    '人工库存批次顺序第 2 条 OUT 必须来自后选的 A 批次',
+    'IB-ALLOC-${orderNo}-001-01',
+    'IB-ALLOC-${orderNo}-001-02',
+    '人工库存批次顺序第 1 条 IN 必须写入第 1 个订单库存批次',
+    '人工库存批次顺序全库存覆盖不得生成 ProductionTask',
+    'assertEarlierDraftManualSelectionSeesSmallerBatchReservedByLaterDraft',
+    '未优先使用较小库存批次',
+    'later draft must reserve the smaller batch',
+    'earlier draft rejected manual priority edit must not create InventoryReservation',
+    'stale manual priority confirmation',
+    'earlier draft stale manual priority edit must not create InventoryReservation',
+    'later draft reservation must stay ACTIVE after stale earlier edit rejection',
+    'later draft smaller-batch reservation must remain ACTIVE after earlier submit',
+    'assertSubmitRejectsStaleManualSelectionWhenSmallerBatchAppearsAfterDraftSave',
+    'stale manual priority submit regression must create draft order first',
+    'stale manual priority submit rejection must keep order DRAFT',
+    'stale manual priority submit rejection must keep original reservation ACTIVE',
+    'stale manual priority submit rejection must not create InventoryTransaction',
+    'assertCreateRejectsStockSourceDrawingSnapshotMismatchWithoutManualConfirmation',
+    'fileNameMismatchOrderNo',
+    'fileMismatchOrderNo',
+    'missingFileNameOrderNo',
+    'missingFileOrderNo',
+    'missingSourceDrawingOrderNo',
+    'reworkMissingFileOrderNo',
+    'partNameMismatchOrderNo',
+    'unitMismatchOrderNo',
+    'projectModelMismatchOrderNo',
+    'partCategoryMismatchOrderNo',
+    '库存来源图纸文件不一致保存失败后不得生成 CustomerOrder',
+    '库存来源图纸文件不一致保存失败后不得生成 InventoryReservation',
+    '库存来源图纸文件名不一致保存失败后不得生成 CustomerOrder',
+    '库存来源图纸文件名不一致保存失败后不得生成 InventoryReservation',
+    '库存来源本次订单缺图纸文件保存失败后不得生成 CustomerOrder',
+    '库存来源本次订单缺图纸文件保存失败后不得生成 InventoryReservation',
+    '库存来源本次订单缺图纸文件名保存失败后不得生成 CustomerOrder',
+    '库存来源本次订单缺图纸文件名保存失败后不得生成 InventoryReservation',
+    '库存来源资料不完整：图纸日期、图纸状态',
+    '库存来源与订单不一致',
+    '库存来源批次缺图纸日期和状态保存失败后不得生成 CustomerOrder',
+    '库存来源批次缺图纸日期和状态保存失败后不得生成 InventoryReservation',
+    '库存再加工本次订单缺图纸文件保存失败后不得生成 CustomerOrder',
+    '库存再加工本次订单缺图纸文件保存失败后不得生成 InventoryReservation',
+    '库存来源零件名称不一致保存失败后不得生成 CustomerOrder',
+    '库存来源零件名称不一致保存失败后不得生成 InventoryReservation',
+    '库存来源单位不一致保存失败后不得生成 CustomerOrder',
+    '库存来源单位不一致保存失败后不得生成 InventoryReservation',
+    '库存来源项目型号不一致保存失败后不得生成 CustomerOrder',
+    '库存来源项目型号不一致保存失败后不得生成 InventoryReservation',
+    '库存来源零件类型不一致保存失败后不得生成 CustomerOrder',
+    '库存来源零件类型不一致保存失败后不得生成 InventoryReservation',
+    '库存来源图纸快照不一致保存失败后不得生成 CustomerOrder',
+    '库存来源图纸快照不一致保存失败后不得生成 InventoryReservation',
+    'assertCreateRejectsStockSourceLineTypeMismatchWithoutManualConfirmation',
+    '库存来源行类型不一致保存失败后不得生成 CustomerOrder',
+    '库存来源行类型不一致保存失败后不得生成 InventoryReservation',
+    'assertCreateRejectsStockSourceStructureMismatchWithoutManualConfirmation',
+    '库存来源组件结构不一致保存失败后不得生成 CustomerOrder',
+    '库存来源组件结构不一致保存失败后不得生成 InventoryReservation',
+    'assertSameOrderOtherLineSelectionSatisfiesSmallerBatchPriority',
+    '同订单跨行小批次优先草稿应创建 2 条 ACTIVE InventoryReservation',
+    '同订单跨行小批次优先草稿必须预占已用满的小批次',
+    '同订单跨行小批次优先提交后较小批次应被用完',
+    '同订单跨行小批次优先全库存覆盖不得生成 ProductionTask',
+    'assertSubmittedStockOrderCannotBeSubmittedAgain',
+    '只有待提交生产订单可以提交生产',
+    '重复提交库存订单后不得新增 InventoryTransaction',
+    '重复提交库存订单后不得新增订单待发货库存批次',
+    '重复提交库存订单后原备货批次数量不得继续减少',
+    '重复提交库存订单后不得生成 ProductionTask',
+    'assertSubmitRejectsMismatchedDraftStockReservation',
+    '草稿预占数量异常',
+    '库存预占异常提交失败后订单必须保持 DRAFT',
+    '库存预占异常提交失败后预占必须保持 ACTIVE',
+    '库存预占异常提交失败后原备货批次数量必须保持 6',
+    '库存预占异常提交失败后不得残留 InventoryTransaction',
+    '库存预占异常提交失败后不得生成订单待发货库存批次',
+    '库存预占异常提交失败后不得生成 ProductionTask',
+    'assertSubmitRejectsMissingDraftStockReservation',
+    '缺少草稿库存预占记录',
+    '库存预占缺失提交失败后订单必须保持 DRAFT',
+    '库存预占缺失提交失败后原备货批次数量必须保持 6',
+    '库存预占缺失提交失败后不得残留 InventoryTransaction',
+    '库存预占缺失提交失败后不得生成订单待发货库存批次',
+    '库存预占缺失提交失败后不得生成 ProductionTask',
     'assertSubmitRejectsInvalidPersistedComponentStructure',
     '所属组件 MISSING-COMPONENT 在当前订单内不存在',
+    "const runId = 'STABLE';",
+    "const orderPrefix = 'COD-IMPORT-STABLE';",
+    "const materialPrefix = 'MAT-STABLE';",
+    "const customerSearchPrefix = 'CUST-SEARCH-STABLE';",
+    'function pageItems(result)',
+    'function archivedCustomerIdentity(value, customerId)',
+    'async function archiveDisabledCustomersByIds(prisma, customerIds)',
+    'function orderImportCaseSuffix(customerCode)',
+    "text.match(/^COD-IMPORT-\\d{14}(.+)$/)",
+    "text.match(/^COD-IMPORT-STABLE(.+)$/)",
+    'async function findReusableCustomerByCode(prisma, customerCode)',
+    'async function createRegressionCustomerRecord(prisma, args)',
+    'createRegressionCustomerRecord(prisma,',
+    'async function activateReusableRegressionCustomer(customerCode, customerName, contactName, contactPhone)',
+    'async function softDisableCustomerByCode(prisma, customerCode)',
+    'const suffix = orderImportCaseSuffix(customerCode)',
+    "customerCode: { endsWith: suffix }",
+    "customerCode: { startsWith: `${customerCode}__DISABLED__` }",
+    'async function archiveExistingCustomerByCode(customerCode)',
+    'await archiveExistingCustomerByCode(customerCode);',
+    'createOrderImportRegressionCustomers',
+    'createdRegressionCustomerIds',
+    'prisma.customerContact.updateMany',
+    'customerCode: archivedCustomerIdentity(customer.customerCode, customer.id)',
+    'customerName: archivedCustomerIdentity(customer.customerName, customer.id)',
+    'await archiveDisabledCustomersByIds(prisma, createdRegressionCustomerIds);',
+    'await softDisableCustomerByCode(prisma, customerCode);',
+    'const customerCode = overrides.customerCode',
+    "'RANK-PREFIX'",
+    "'RANK-EXACT'",
+    'resolveHostUploadRoot',
+    "normalized === '/app/storage/uploads'",
     'await cleanup()',
     'new PrismaClient()',
-    'prisma.material.deleteMany',
+    'prisma.material.updateMany',
+    "status: 'DISABLED'",
     'partCode: { startsWith: materialPrefix }'
   ];
   for (const snippet of regressionSnippets) {
@@ -10034,7 +14546,13 @@ function verifyOrderExcelImportWorkflow() {
     '同步物料',
     '物料基础资料',
     '物料示例',
-    '涉及物料号'
+    '涉及物料号',
+    'async function firstEnabledCustomerName()',
+    'prisma.customer.deleteMany',
+    'prisma.material.deleteMany',
+    'customerCode: { startsWith: customerSearchPrefix }',
+    'new Date().toISOString().replace(/[-:.TZ]/g, \'\').slice(0, 14)',
+    'prisma.customer.create({'
   ];
   for (const snippet of forbiddenRegressionScriptSnippets) {
     if (regressionScriptSource.includes(snippet)) {
@@ -10044,6 +14562,7 @@ function verifyOrderExcelImportWorkflow() {
 
   const uploadFileNameRegressionSnippets = [
     '/orders/drawings/upload',
+    '/inventory/material-drawings/upload',
     '/orders/import-sessions',
     '/files',
     '/inventory/adjustments/upload',
@@ -10054,6 +14573,9 @@ function verifyOrderExcelImportWorkflow() {
     '订单图纸-乱码修复验证.png',
     '订单图纸-percent编码验证.png',
     '订单图纸-路径清理验证.png',
+    '零件图纸-中文验证.png',
+    '零件图纸-percent编码验证.png',
+    '零件图纸-路径清理验证.png',
     '库存盘点照片-中文验证.png',
     '库存盘点工单-乱码修复验证.png',
     '库存盘点-percent编码验证.png',
@@ -10069,9 +14591,27 @@ function verifyOrderExcelImportWorkflow() {
     '订单图纸 mojibake 文件名必须修复为中文',
     '订单图纸 percent-encoded 文件名必须修复为中文',
     '订单图纸路径文件名必须只保留 basename',
+    '零件图纸普通中文文件名必须保留',
+    '零件图纸 percent-encoded 文件名必须修复为中文',
+    '零件图纸路径文件名必须只保留 basename',
     '库存附件 mojibake 文件名必须修复为中文',
     '库存附件 percent-encoded 文件名必须修复为中文',
     '库存附件路径文件名必须只保留 basename',
+    'createUploadFilenameCustomerName',
+    'createdCustomerIds',
+    "const uploadFilenameCustomerCode = 'UPLOAD-FILENAME-CUST-STABLE';",
+    "const uploadFilenameCustomerName = '上传文件名验证客户 STABLE';",
+    "const runId = 'STABLE';",
+    'const { PrismaClient } = require(\'@prisma/client\');',
+    'const prisma = new PrismaClient();',
+    'prisma.customer.findFirst',
+    'prisma.customer.update',
+    'prisma.customer.create',
+    'prisma.customerContact.updateMany',
+    'customerCode: `${baseCode}${archiveSuffix}`',
+    'customerName: `${baseName}${archiveSuffix}`',
+    'resolveHostUploadRoot',
+    "normalized === '/app/storage/uploads'",
     "join(uploadRoot, 'drawings', fileName)",
     "join(uploadRoot, 'inventory-adjustments', fileName)"
   ];
@@ -10079,6 +14619,15 @@ function verifyOrderExcelImportWorkflow() {
     if (!uploadFileNameRegressionScriptSource.includes(snippet)) {
       addFailure(`verify-upload-filenames-api.cjs must keep upload filename regression snippet: ${snippet}`);
     }
+  }
+  if (uploadFileNameRegressionScriptSource.includes('async function firstEnabledCustomerName()')) {
+    addFailure('verify-upload-filenames-api.cjs must create and soft-disable its own verification customer instead of depending on pre-existing enabled customers.');
+  }
+  if (
+    uploadFileNameRegressionScriptSource.includes('new Date().toISOString().replace') ||
+    uploadFileNameRegressionScriptSource.includes('UPLOAD-FILENAME-CUST-${runId}')
+  ) {
+    addFailure('verify-upload-filenames-api.cjs must reuse a stable upload filename customer instead of creating timestamped customers.');
   }
 
   const fileNameNormalizerRegressionSnippets = [
@@ -10116,6 +14665,185 @@ function verifyOrderExcelImportWorkflow() {
   for (const snippet of workbookRegressionSnippets) {
     if (!workbookRegressionScriptSource.includes(snippet)) {
       addFailure(`verify-order-import-workbooks.cjs must keep workbook artifact validation snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyOrderTableHeightControls() {
+  const viewPath = 'frontend/src/views/OrdersListView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing order table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, RefreshLeft, WarningFilled } from '@element-plus/icons-vue';",
+    "type OrdersWorkTableKey = 'orders' | 'orderFormStructure' | 'importPreview' | 'importFilePreview' | 'importFileStructure' | 'modelBomDraft' | 'modelBomRecommendationStructure' | 'modelBomApplyStructure'",
+    'ordersWorkTableHeightLimits',
+    'ordersWorkTableDefaultHeights',
+    'baisheng.erp.ordersWorkTableHeights.v1',
+    '订单页面表格和固定格式清单高度只保存为本机 UI 偏好，不写入订单、导入会话、BOM、生产或库存业务数据。',
+    'ordersWorkTableHeights = reactive<Record<OrdersWorkTableKey, number>>',
+    'function adjustOrdersWorkTableHeight',
+    'function resetOrdersWorkTableHeight',
+    'function restoreOrdersWorkTableHeights',
+    'function saveOrdersWorkTableHeights',
+    'window.localStorage.getItem(ordersWorkTableHeightStorageKey)',
+    'window.localStorage.setItem(ordersWorkTableHeightStorageKey',
+    'aria-label="订单总列表表格高度"',
+    'aria-label="降低订单总列表表格高度"',
+    'aria-label="提高订单总列表表格高度"',
+    'aria-label="恢复订单总列表表格默认高度"',
+    'aria-label="当前草稿固定格式清单高度"',
+    'aria-label="降低当前草稿固定格式清单高度"',
+    'aria-label="提高当前草稿固定格式清单高度"',
+    'aria-label="恢复当前草稿固定格式清单默认高度"',
+    'aria-label="订单导入预览表格高度"',
+    'aria-label="降低订单导入预览表格高度"',
+    'aria-label="提高订单导入预览表格高度"',
+    'aria-label="恢复订单导入预览表格默认高度"',
+    'aria-label="上传文件预览表格高度"',
+    'aria-label="降低上传文件预览表格高度"',
+    'aria-label="提高上传文件预览表格高度"',
+    'aria-label="恢复上传文件预览表格默认高度"',
+    'aria-label="上传文件固定格式清单高度"',
+    'aria-label="降低上传文件固定格式清单高度"',
+    'aria-label="提高上传文件固定格式清单高度"',
+    'aria-label="恢复上传文件固定格式清单默认高度"',
+    'aria-label="BOM 草稿预览表格高度"',
+    'aria-label="降低 BOM 草稿预览表格高度"',
+    'aria-label="提高 BOM 草稿预览表格高度"',
+    'aria-label="恢复 BOM 草稿预览表格默认高度"',
+    'aria-label="零件包推荐结构预览高度"',
+    'aria-label="降低零件包推荐结构预览高度"',
+    'aria-label="提高零件包推荐结构预览高度"',
+    'aria-label="恢复零件包推荐结构预览默认高度"',
+    'aria-label="BOM 预览带入结构清单高度"',
+    'aria-label="降低 BOM 预览带入结构清单高度"',
+    'aria-label="提高 BOM 预览带入结构清单高度"',
+    'aria-label="恢复 BOM 预览带入结构清单默认高度"',
+    ':max-height="ordersWorkTableHeights.orders"',
+    ':style="{ maxHeight: `${ordersWorkTableHeights.orderFormStructure}px` }"',
+    ':max-height="ordersWorkTableHeights.importPreview"',
+    ':max-height="ordersWorkTableHeights.importFilePreview"',
+    ':style="{ maxHeight: `${ordersWorkTableHeights.importFileStructure}px` }"',
+    ':max-height="ordersWorkTableHeights.modelBomDraft"',
+    ':style="{ maxHeight: `${ordersWorkTableHeights.modelBomRecommendationStructure}px` }"',
+    ':style="{ maxHeight: `${ordersWorkTableHeights.modelBomApplyStructure}px` }"',
+    'restoreOrdersWorkTableHeights();',
+    'orders-table-height-actions',
+    'orders-table-height-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`OrdersListView.vue must keep adjustable order table height control snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyOrderDetailTableHeightControls() {
+  const viewPath = 'frontend/src/views/OrderDetailView.vue';
+  if (!fileExists(viewPath)) {
+    addFailure(`Missing order detail table height control file: ${viewPath}`);
+    return;
+  }
+
+  const viewSource = readFile(viewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, Rank, RefreshLeft, WarningFilled } from '@element-plus/icons-vue';",
+    "type OrderDetailWorkTableKey = 'lines' | 'importSourcePreview' | 'submitOrderLines'",
+    'orderDetailWorkTableHeightLimits',
+    'orderDetailWorkTableDefaultHeights',
+    'baisheng.erp.orderDetailWorkTableHeights.v1',
+    '订单详情表格和提交生产核对列表高度只保存为本机 UI 偏好，不写入订单明细、导入追溯、生产或库存业务数据。',
+    'orderDetailWorkTableHeights = reactive<Record<OrderDetailWorkTableKey, number>>',
+    'function adjustOrderDetailWorkTableHeight',
+    'function resetOrderDetailWorkTableHeight',
+    'function orderDetailWorkTableHeightStyle',
+    'function restoreOrderDetailWorkTableHeights',
+    'function saveOrderDetailWorkTableHeights',
+    'window.localStorage.getItem(orderDetailWorkTableHeightStorageKey)',
+    'window.localStorage.setItem(',
+    'orderDetailWorkTableHeightStorageKey',
+    'aria-label="订单详情零件明细表格高度"',
+    'aria-label="降低订单详情零件明细表格高度"',
+    'aria-label="提高订单详情零件明细表格高度"',
+    'aria-label="恢复订单详情零件明细表格默认高度"',
+    'aria-label="来源 Excel 预览表格高度"',
+    'aria-label="降低来源 Excel 预览表格高度"',
+    'aria-label="提高来源 Excel 预览表格高度"',
+    'aria-label="恢复来源 Excel 预览表格默认高度"',
+    'aria-label="提交生产订单零件列表高度"',
+    'aria-label="降低提交生产订单零件列表高度"',
+    'aria-label="提高提交生产订单零件列表高度"',
+    'aria-label="恢复提交生产订单零件列表默认高度"',
+    ':max-height="orderDetailWorkTableHeights.lines"',
+    ':max-height="orderDetailWorkTableHeights.importSourcePreview"',
+    ":style=\"{ maxHeight: orderDetailWorkTableHeightStyle('submitOrderLines') }\"",
+    'formatOrderDetailProcessRoutePreview(row.processRoute)',
+    'formatOrderDetailLongTextPreview(row.processRemark)',
+    "formatOrderDetailLongTextPreview(remark, 12, '')",
+    'processStepTitle(line, step)',
+    'processStepTitle(row, step)',
+    'function processStepTitle(line: OrderLine, processName: string)',
+    'function processStepRemark(line: OrderLine, processName: string)',
+    'formatImportSourcePreviewIssuesTitle(row)',
+    "formatOrderDetailListPreview(row.issues?.map((issue) => issue.message) || [], '问题', '')",
+    'function formatOrderDetailProcessRoutePreview',
+    'function formatOrderDetailLongTextPreview',
+    'restoreOrderDetailWorkTableHeights();',
+    'order-detail-table-height-actions',
+    'order-detail-table-height-toolbar'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!viewSource.includes(snippet)) {
+      addFailure(`OrderDetailView.vue must keep adjustable order detail table height control snippet: ${snippet}`);
+    }
+  }
+  if (viewSource.includes("return row.issues?.map((issue) => issue.message).filter(Boolean).join('；') || '';")) {
+    addFailure('OrderDetailView.vue must summarize import source preview issues instead of rendering every issue message in the table.');
+  }
+  if (viewSource.includes('return remark ? `${processName}（${remark}）` : processName;')) {
+    addFailure('OrderDetailView.vue must summarize process step remarks in pills instead of rendering full remarks directly.');
+  }
+}
+
+function verifyOrderLineEditorTableHeightControls() {
+  const componentPath = 'frontend/src/components/OrderLineEditor.vue';
+  if (!fileExists(componentPath)) {
+    addFailure(`Missing order line editor table height control file: ${componentPath}`);
+    return;
+  }
+
+  const source = readFile(componentPath);
+  const requiredSnippets = [
+    "import { Delete, Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';",
+    'orderLineEditorTableHeightLimits',
+    'orderLineEditorTableDefaultHeight',
+    'baisheng.erp.orderLineEditorTableHeight.v1',
+    '订单零件编辑表格高度只保存为本机 UI 偏好，不写入订单明细、导入草稿、生产或库存业务数据。',
+    'orderLineEditorTableHeight = ref(orderLineEditorTableDefaultHeight)',
+    'function adjustOrderLineEditorTableHeight',
+    'function resetOrderLineEditorTableHeight',
+    'function restoreOrderLineEditorTableHeight',
+    'function saveOrderLineEditorTableHeight',
+    'const savedHeightText = window.localStorage.getItem(orderLineEditorTableHeightStorageKey)',
+    'if (!savedHeightText)',
+    'window.localStorage.getItem(orderLineEditorTableHeightStorageKey)',
+    'window.localStorage.setItem(orderLineEditorTableHeightStorageKey',
+    'aria-label="订单零件编辑表格高度"',
+    'aria-label="降低订单零件编辑表格高度"',
+    'aria-label="提高订单零件编辑表格高度"',
+    'aria-label="恢复订单零件编辑表格默认高度"',
+    ':max-height="orderLineEditorTableHeight"',
+    'restoreOrderLineEditorTableHeight();',
+    'order-line-table-height-actions',
+    'order-line-fixed-toolbar-actions'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`OrderLineEditor.vue must keep adjustable order line editor table height control snippet: ${snippet}`);
     }
   }
 }
@@ -10284,6 +15012,219 @@ function verifyMaterialStockAlertWorkflow() {
   }
 }
 
+function verifyMaterialDashboardExportWorkflow() {
+  const controllerPath = 'backend/src/modules/materials/materials.controller.ts';
+  const dtoPath = 'backend/src/modules/materials/dto.ts';
+  const servicePath = 'backend/src/modules/materials/materials.service.ts';
+  const apiPath = 'frontend/src/api/erp.ts';
+  const dashboardViewPath = 'frontend/src/views/MaterialsManagementView.vue';
+  const packagePath = 'package.json';
+  const regressionPath = 'scripts/verify-material-dashboard-export-api.cjs';
+
+  for (const projectPath of [controllerPath, dtoPath, servicePath, apiPath, dashboardViewPath, packagePath, regressionPath]) {
+    if (!fileExists(projectPath)) {
+      addFailure(`Missing material dashboard export source file: ${projectPath}`);
+      return;
+    }
+  }
+
+  const controllerSource = readFile(controllerPath);
+  const dtoSource = readFile(dtoPath);
+  const serviceSource = readFile(servicePath);
+  const apiSource = readFile(apiPath);
+  const dashboardViewSource = readFile(dashboardViewPath);
+  const packageSource = readFile(packagePath);
+  const regressionSource = readFile(regressionPath);
+  const requiredSnippets = [
+    [controllerPath, controllerSource, "@Get('dashboard/export')"],
+    [controllerPath, controllerSource, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    [controllerPath, controllerSource, 'material-dashboard-export.xlsx'],
+    [controllerPath, controllerSource, 'buildDashboardExport(query)'],
+    [dtoPath, dtoSource, "const materialDashboardStatusFilterValues = ['ALL', 'ENABLED', 'DISABLED'] as const;"],
+    [dtoPath, dtoSource, 'status?: MaterialDashboardStatusFilter;'],
+    [dtoPath, dtoSource, 'includeTestFixtures?: string;'],
+    [dtoPath, dtoSource, 'export class MaterialProjectOptionsQueryDto'],
+    [servicePath, serviceSource, 'async buildDashboardExport(query: MaterialDashboardQueryDto): Promise<Uint8Array>'],
+    [servicePath, serviceSource, 'async projectModels(query: MaterialProjectOptionsQueryDto)'],
+    [servicePath, serviceSource, 'testFixturePrefixes'],
+    [servicePath, serviceSource, 'MAT-STABLE'],
+    [servicePath, serviceSource, 'isDisabledTestFixtureMaterial'],
+    [servicePath, serviceSource, 'isTestFixtureMaterial'],
+    [servicePath, serviceSource, 'isArchivedTestFixtureCustomer'],
+    [servicePath, serviceSource, "const includeTestFixtures = query.includeTestFixtures === 'true';"],
+    [servicePath, serviceSource, 'const visibleOrderLines = includeTestFixtures'],
+    [servicePath, serviceSource, '!this.hasTestFixturePrefix(line.partCode, line.partName, line.projectModel, line.order.orderNo)'],
+    [servicePath, serviceSource, "!this.hasTestFixturePrefix(item.projectModel) && !this.isArchivedTestFixtureCustomer(item.customer)"],
+    [servicePath, serviceSource, '!this.hasTestFixturePrefix(line.bom.bomName, line.bom.projectModel)'],
+    [servicePath, serviceSource, 'const visibleApplicabilities = includeTestFixtures ? applicabilities : applicabilities.filter'],
+    [servicePath, serviceSource, 'const visibleBoms = includeTestFixtures'],
+    [servicePath, serviceSource, 'const scopeText = await this.dashboardExportScopeText(query, summary.totalCount);'],
+    [servicePath, serviceSource, "workbook.addWorksheet('零件控制面板'"],
+    [servicePath, serviceSource, '零件管理导出只导出现有筛选结果，不写入零件、BOM、订单、生产任务或库存流水。'],
+    [servicePath, serviceSource, 'private async dashboardExportScopeText'],
+    [servicePath, serviceSource, 'dashboardExportCustomerLabel'],
+    [servicePath, serviceSource, 'dashboardExportStockAlertFilterLabel'],
+    [servicePath, serviceSource, 'dashboardExportDateRangeLabel'],
+    [servicePath, serviceSource, 'dashboardExportDrawingReviewText'],
+    [servicePath, serviceSource, 'dashboardExportBomReviewText'],
+    [servicePath, serviceSource, 'dashboardExportBomStructureText'],
+    [servicePath, serviceSource, 'dashboardExportBomStructureDetailText'],
+    [servicePath, serviceSource, 'private dashboardExportCustomerScopeText(row: Record<string, any>)'],
+    [servicePath, serviceSource, '仅订单历史 ${preview} 等 ${historyCount} 个客户'],
+    [servicePath, serviceSource, 'dashboardExportInventoryReviewText'],
+    [servicePath, serviceSource, 'dashboardExportProcessRouteText(row.defaultProcessRoute)'],
+    [servicePath, serviceSource, 'private dashboardExportProcessRouteText(value?: string | null)'],
+    [servicePath, serviceSource, '等 ${steps.length} 个工序'],
+    [servicePath, serviceSource, "private joinDashboardExportValues(values: Array<string | null | undefined>, emptyText = '-', limit = 10, unitLabel = '项', totalCount?: number)"],
+    [servicePath, serviceSource, 'private dashboardBomNameValues(row: Record<string, any>)'],
+    [servicePath, serviceSource, 'private dashboardRowHasBom(row: Record<string, any>)'],
+    [servicePath, serviceSource, 'this.dashboardBomNameValues(row).length > 0'],
+    [servicePath, serviceSource, 'Boolean(row.bomStructureLabels?.length)'],
+    [servicePath, serviceSource, 'withBomCount: allRows.filter((row) => this.dashboardRowHasBom(row)).length'],
+    [servicePath, serviceSource, "this.compareDashboardNumber(this.dashboardRowHasBom(a) ? 1 : 0, this.dashboardRowHasBom(b) ? 1 : 0, sortOrder)"],
+    [servicePath, serviceSource, "return bomPresence === 'WITH_BOM' ? this.dashboardRowHasBom(row) : !this.dashboardRowHasBom(row);"],
+    [servicePath, serviceSource, 'const displayCount = Math.max(Number(totalCount || 0), filtered.length);'],
+    [servicePath, serviceSource, "return displayCount > filtered.length || filtered.length > limit ? `${preview} 等 ${displayCount} 个${unitLabel}` : preview;"],
+    [servicePath, serviceSource, 'this.dashboardExportCustomerScopeText(row)'],
+    [servicePath, serviceSource, "this.joinDashboardExportValues(this.dashboardBomNameValues(row), '', 10, 'BOM', row.bomNameCount)"],
+    [servicePath, serviceSource, 'this.dashboardExportBomStructureText(row)'],
+    [servicePath, serviceSource, 'Number(row.bomStructureDetailCount || 0) > 0'],
+    [servicePath, serviceSource, 'const projectCount = Math.max(Number(row.projectModelCount || 0)'],
+    [servicePath, serviceSource, '库存核对列只提示人工复核，不自动补单、提交生产、扣库存或写入 InventoryTransaction。'],
+    [servicePath, serviceSource, "if (stockAlert === 'ALL')"],
+    [servicePath, serviceSource, "status && status !== 'ALL' ? { status } : {}"],
+    [apiPath, apiSource, 'downloadMaterialDashboardExport'],
+    [apiPath, apiSource, '/materials/dashboard/export'],
+    [apiPath, apiSource, 'materialProjectModels(customerId?: string, includeTestFixtures = false)'],
+    [apiPath, apiSource, "status?: CommonStatus | 'ALL';"],
+    [apiPath, apiSource, 'includeTestFixtures?: boolean;'],
+    [apiPath, apiSource, "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined"],
+    [dashboardViewPath, dashboardViewSource, 'exportDashboardExcel'],
+    [dashboardViewPath, dashboardViewSource, 'dashboardRequestFilters(false)'],
+    [dashboardViewPath, dashboardViewSource, '零件管理控制面板_${formatFileDateTime()}.xlsx'],
+    [packagePath, packageSource, 'verify:material-dashboard-export-api'],
+    [packagePath, packageSource, 'verify:statistics-api'],
+    [regressionPath, regressionSource, 'material-dashboard-stock-alert-all'],
+    [regressionPath, regressionSource, 'material-dashboard-status-all'],
+    [regressionPath, regressionSource, 'material-dashboard-test-fixture-filter'],
+    [regressionPath, regressionSource, 'material-dashboard-export-test-fixture-filter'],
+    [regressionPath, regressionSource, 'material-project-models-test-fixture-filter'],
+    [regressionPath, regressionSource, 'assertDashboardTestFixtureFilter'],
+    [regressionPath, regressionSource, 'assertProjectModelsTestFixtureFilter'],
+    [regressionPath, regressionSource, 'MAT-STABLE'],
+    [regressionPath, regressionSource, 'material dashboard default list must hide reusable test fixture materials/customers/BOMs'],
+    [regressionPath, regressionSource, 'includeTestFixtures=true must not reduce material dashboard default results'],
+    [regressionPath, regressionSource, 'includeTestFixtures=true'],
+    [regressionPath, regressionSource, 'worksheetTextHasTestFixturePrefix'],
+    [regressionPath, regressionSource, "const { PrismaClient } = require('@prisma/client');"],
+    [regressionPath, regressionSource, 'cleanupDashboardBomPreviewData'],
+    [regressionPath, regressionSource, 'createDashboardBomPreviewData'],
+    [regressionPath, regressionSource, 'bomPreviewPartCode = \'VERIFY-MDB-PART-STABLE\''],
+    [regressionPath, regressionSource, 'const dashboardListLimit = 200;'],
+    [regressionPath, regressionSource, 'limit=${dashboardListLimit}'],
+    [regressionPath, regressionSource, 'prisma.modelBomLine.updateMany'],
+    [regressionPath, regressionSource, 'prisma.modelBom.updateMany'],
+    [regressionPath, regressionSource, 'prisma.material.updateMany'],
+    [regressionPath, regressionSource, 'prisma.material.upsert'],
+    [regressionPath, regressionSource, 'prisma.modelBom.upsert'],
+    [regressionPath, regressionSource, 'prisma.modelBomLine.findFirst'],
+    [regressionPath, regressionSource, 'assertDashboardBomNamePreviewContract'],
+    [regressionPath, regressionSource, 'bomNameCount === 25'],
+    [regressionPath, regressionSource, 'bomStructureDetailCount === 25'],
+    [regressionPath, regressionSource, 'assertDashboardBomStructureExportContract'],
+    [regressionPath, regressionSource, 'assertDashboardCustomerScopeExportContract'],
+    [regressionPath, regressionSource, 'material-dashboard-bom-structure-export-summary'],
+    [regressionPath, regressionSource, 'material-dashboard-customer-scope-export-summary'],
+    [regressionPath, regressionSource, "allScopeText === '全部客户'"],
+    [regressionPath, regressionSource, "historyScopeText.startsWith('仅订单历史')"],
+    [regressionPath, regressionSource, "structureText.includes('25 个结构')"],
+    [regressionPath, regressionSource, "!reviewText.includes('结构待核对')"],
+    [regressionPath, regressionSource, 'assertDashboardPreviewContract'],
+    [regressionPath, regressionSource, 'details.length <= 10'],
+    [regressionPath, regressionSource, 'bomStructureDetailCount >= details.length'],
+    [regressionPath, regressionSource, 'currentScopeBomLineCount'],
+    [regressionPath, regressionSource, 'material-dashboard-bom-preview-limit'],
+    [regressionPath, regressionSource, 'material-dashboard-customer-preview-limit'],
+    [regressionPath, regressionSource, 'material-dashboard-all-customer-scope-summary'],
+    [regressionPath, regressionSource, 'material-dashboard-all-customer-scope-common-type'],
+    [regressionPath, regressionSource, 'material-dashboard-all-customer-scope-history-separation'],
+    [regressionPath, regressionSource, 'material-dashboard-order-history-scope-separation'],
+    [regressionPath, regressionSource, 'material-dashboard-scope-type-filter-common'],
+    [regressionPath, regressionSource, 'material-dashboard-scope-type-filter-custom'],
+    [regressionPath, regressionSource, 'material-dashboard-current-scope-bom-context'],
+    [regressionPath, regressionSource, 'material-dashboard-all-project-scope-summary'],
+    [regressionPath, regressionSource, 'material-dashboard-history-customer-preview-limit'],
+    [regressionPath, regressionSource, 'material-dashboard-project-model-preview-limit'],
+    [regressionPath, regressionSource, 'customerNames.length <= 20'],
+    [regressionPath, regressionSource, 'customerNameCount >= customerNames.length'],
+    [regressionPath, regressionSource, "row.customerScopeKind === 'ALL'"],
+    [regressionPath, regressionSource, 'customerNames.length === 0'],
+    [regressionPath, regressionSource, 'row.customerNameCount === 0'],
+    [regressionPath, regressionSource, 'row.hasGlobalCustomerScope === true'],
+    [regressionPath, regressionSource, "row.scopeType === 'COMMON'"],
+    [regressionPath, regressionSource, "row.partType === '通用件'"],
+    [regressionPath, regressionSource, 'allCustomerScopeRowCount > 0'],
+    [regressionPath, regressionSource, 'allCustomerScopeHistoryRowCount > 0'],
+    [regressionPath, regressionSource, 'orderHistoryScopeRowCount > 0'],
+    [regressionPath, regressionSource, "row.customerScopeKind === 'ORDER_HISTORY'"],
+    [regressionPath, regressionSource, 'scopeType=COMMON must only return COMMON rows'],
+    [regressionPath, regressionSource, 'scopeType=CUSTOM must not include'],
+    [regressionPath, regressionSource, 'currentScopeBomLineCount > 0'],
+    [regressionPath, regressionSource, "row.partCode === 'P-1001'"],
+    [regressionPath, regressionSource, 'allProjectScopeRowCount > 0'],
+    [regressionPath, regressionSource, 'projectModels.length === 0'],
+    [regressionPath, regressionSource, 'row.projectModelCount === 0'],
+    [regressionPath, regressionSource, 'projectModels.length <= 20'],
+    [regressionPath, regressionSource, 'projectModelCount >= projectModels.length'],
+    [regressionPath, regressionSource, 'historyProjectModels.length <= 20'],
+    [regressionPath, regressionSource, 'historyProjectModelCount >= historyProjectModels.length'],
+    [regressionPath, regressionSource, 'ORDER_HISTORY scope must not expand historical projectModels as formal scope'],
+    [regressionPath, regressionSource, 'material-dashboard-bom-name-preview-limit'],
+    [regressionPath, regressionSource, 'material-dashboard-bom-name-real-total'],
+    [regressionPath, regressionSource, 'material-dashboard-bom-structure-real-total'],
+    [regressionPath, regressionSource, 'historyCustomerNames.length <= 20'],
+    [regressionPath, regressionSource, 'historyCustomerCount >= historyCustomerNames.length'],
+    [regressionPath, regressionSource, 'bomNames.length <= 20'],
+    [regressionPath, regressionSource, 'bomNameCount >= bomNames.length'],
+    [regressionPath, regressionSource, 'material-dashboard-current-scope-bom-count'],
+    [regressionPath, regressionSource, 'material-dashboard-export-xlsx'],
+    [regressionPath, regressionSource, 'material-dashboard-export-review-columns'],
+    [regressionPath, regressionSource, 'material-dashboard-export-status-column'],
+    [regressionPath, regressionSource, '图纸日期：2026-01-01 至 2026-12-31'],
+    [regressionPath, regressionSource, '最近下单日期：2026-01-01 至 2026-12-31'],
+    [regressionPath, regressionSource, '库存报警：全部'],
+    [regressionPath, regressionSource, 'status=ALL'],
+    [regressionPath, regressionSource, '状态：全部'],
+    [regressionPath, regressionSource, 'ExcelJS.Workbook']
+  ];
+
+  for (const [projectPath, source, snippet] of requiredSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`${projectPath} must keep material dashboard export snippet: ${snippet}`);
+    }
+  }
+  for (const forbidden of ['prisma.modelBomLine.deleteMany', 'prisma.modelBom.deleteMany', 'prisma.material.deleteMany']) {
+    if (regressionSource.includes(forbidden)) {
+      addFailure(`Material dashboard export regression must soft-disable stable verification data instead of physically deleting records: ${forbidden}`);
+    }
+  }
+  if (serviceSource.includes('return filtered.length > 0 ? [...new Set(filtered)].join')) {
+    addFailure('MaterialsService material dashboard export must summarize long customer/BOM/project lists instead of writing full joined values.');
+  }
+  if (serviceSource.includes('row.defaultProcessRoute || \'\'')) {
+    addFailure('MaterialsService material dashboard export must summarize default process route text instead of exporting the full route.');
+  }
+  if (
+    serviceSource.includes('row.bomNames.length > 0') ||
+    serviceSource.includes('row.bomNames.length === 0')
+  ) {
+    addFailure('MaterialsService material dashboard BOM presence must use dashboardRowHasBom so BOM structure details are not misclassified.');
+  }
+  if (/dashboardExportBomReviewText[\s\S]*?if \(!row\.bomStructureLabels\?\.length\)/.test(serviceSource)) {
+    addFailure('MaterialsService material dashboard BOM export review must use bomStructureDetailCount-aware summary instead of only checking bomStructureLabels.');
+  }
+}
+
 function verifyMaterialCommonProjectModelGuards() {
   const verifierPath = 'database/prisma/verify-first-stage.ts';
   const servicePath = 'backend/src/modules/materials/materials.service.ts';
@@ -10336,8 +15277,12 @@ function verifyMaterialCommonProjectModelGuards() {
     }
   }
   const dashboardSource = readFile('frontend/src/views/MaterialsManagementView.vue');
-  if (/localStorage|commonProjectStorageKey|saveCommonProjectModelsToCache|本机缓存/.test(dashboardSource)) {
+  if (/commonProjectStorageKey|saveCommonProjectModelsToCache|本机缓存/.test(dashboardSource)) {
     addFailure('MaterialsManagementView.vue must not store common project model business configuration in browser localStorage.');
+  }
+  const commonProjectLocalStorageWindow = dashboardSource.match(/commonProject[\s\S]{0,240}localStorage|localStorage[\s\S]{0,240}commonProject/);
+  if (commonProjectLocalStorageWindow) {
+    addFailure('MaterialsManagementView.vue must not connect common project model business configuration to browser localStorage.');
   }
 }
 
@@ -10359,27 +15304,783 @@ function verifyRuntimeStorageIgnored() {
   }
 }
 
+function verifyTestDataCleanupWorkflow() {
+  const packageSource = readFile('package.json');
+  const cleanupScriptPath = 'scripts/cleanup-test-data.cjs';
+  if (!packageSource.includes('"cleanup:test-data": "node scripts/cleanup-test-data.cjs"')) {
+    addFailure('package.json must expose cleanup:test-data for safe verification data cleanup.');
+  }
+  if (!fileExists(cleanupScriptPath)) {
+    addFailure(`Missing test data cleanup script: ${cleanupScriptPath}`);
+    return;
+  }
+  const source = readFile(cleanupScriptPath);
+  const requiredSnippets = [
+    "const knownPrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];",
+    'cleanup:test-data dry run. Pass --apply',
+    'const previewLimit = Math.max(Number(process.env.CLEANUP_TEST_DATA_PREVIEW_LIMIT || 8), 1);',
+    'function cleanupTargetSummary(databaseUrl = process.env.DATABASE_URL)',
+    'return `${url.protocol}//${userText}:***@${hostText}/${databaseName}?schema=${schemaName} (${localText})`;',
+    'function printCleanupTarget()',
+    'Mode: dry-run only; no database rows are changed.',
+    'function printRecordPreview(title, rows, formatter, totalCount = rows.length)',
+    'function printBlockingRecordPreviews(previews)',
+    'const activeBusinessCount = (label) => activeBusinessData.find((row) => row.label === label)?.count || 0;',
+    'Matched customer preview',
+    'Matched material preview',
+    'Matched BOM preview',
+    'Customer identity archive preview',
+    'CustomerOrder not CANCELLED preview',
+    'ProductionTask not CANCELLED/STORED preview',
+    'ProductionNotice PENDING preview',
+    'InventoryReservation ACTIVE preview',
+    'InventoryBatch AVAILABLE/RESERVED preview',
+    'function archivedCustomerIdentity(value, customerId)',
+    'async function archiveCustomerIdentities(customers)',
+    'function isLocalCleanupDatabaseUrl(databaseUrl = process.env.DATABASE_URL)',
+    "host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'",
+    'function assertCleanupApplyAllowed()',
+    "const cleanupConfirmed = process.env.CLEANUP_TEST_DATA_CONFIRMED === 'true';",
+    "const allowTestDataCleanup = process.env.ALLOW_TEST_DATA_CLEANUP === 'true';",
+    'cleanup:test-data --apply is blocked',
+    'assertCleanupApplyAllowed();',
+    'function numericCount(row)',
+    'function sumCounts(rows)',
+    'function printCleanupRecommendation(masterCleanupResults, activeBusinessData)',
+    'function assertNoActiveBusinessDataForApply(activeBusinessData)',
+    'cleanup:test-data --apply is blocked because matching business records require manual review first',
+    'assertNoActiveBusinessDataForApply(activeBusinessData);',
+    'function startsWithKnownPrefixAny(fields)',
+    "where: { OR: startsWithKnownPrefixAny(['customerCode', 'customerName']) }",
+    'Pending soft-clean actions',
+    'Next step: run npm run cleanup:test-data -- --apply when the target database is confirmed.',
+    'printCleanupRecommendation(masterCleanupResults, activeBusinessData);',
+    'function statusCounts(rows)',
+    'statusSummary(statusCounts(testCustomers))',
+    'Customer ENABLED -> DISABLED',
+    "status: 'DISABLED', isPrimary: false",
+    'Customer identity -> archived disabled key',
+    'customerCode: archivedCustomerIdentity(customer.customerCode, customer.id)',
+    'customerName: archivedCustomerIdentity(customer.customerName, customer.id)',
+    'Material ENABLED -> DISABLED',
+    'Material test defaultProcessRoute -> NULL',
+    '{ id: { in: materialIds }, defaultProcessRoute: { not: null } }',
+    "status: 'DISABLED', isDefault: false",
+    'ModelBom ENABLED -> DISABLED',
+    'ModelBomScopeApprovalRequest PENDING/APPROVED/REJECTED -> USED',
+    "'modelBomScopeApprovalRequest'",
+    "status: { in: ['PENDING', 'APPROVED', 'REJECTED'] }",
+    'usedAt: now',
+    'Warehouse ENABLED -> DISABLED',
+    'Business records requiring manual review',
+    'InventoryBatch AVAILABLE/RESERVED',
+    'printBlockingRecordPreviews(activeBusinessPreviews);',
+    "...startsWithKnownPrefix('sourceOrderNo')",
+    "...startsWithKnownPrefix('sourceProductionTaskNo')",
+    'prisma.$disconnect()'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!source.includes(snippet)) {
+      addFailure(`cleanup-test-data.cjs must keep safe dry-run and soft-disable snippet: ${snippet}`);
+    }
+  }
+  const businessBlockIndex = source.indexOf('assertNoActiveBusinessDataForApply(activeBusinessData);');
+  const masterCleanupIndex = source.indexOf('const masterCleanupResults');
+  const firstCleanupMutationIndex = source.indexOf('await updateMany(');
+  if (businessBlockIndex < 0 || masterCleanupIndex < 0 || firstCleanupMutationIndex < 0) {
+    addFailure('cleanup-test-data.cjs must keep explicit business-record blocking before soft-clean mutations.');
+  } else if (!(businessBlockIndex < masterCleanupIndex && businessBlockIndex < firstCleanupMutationIndex)) {
+    addFailure('cleanup-test-data.cjs must call assertNoActiveBusinessDataForApply before constructing or applying soft-clean mutations.');
+  }
+  const knownPrefixLine = source.split(/\r?\n/).find((line) => line.includes('const knownPrefixes')) || '';
+  const cleanupPrefixes = [...knownPrefixLine.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  const detectedTestPrefixes = new Set();
+  const scriptDir = resolveProjectPath('scripts');
+  for (const scriptName of fs.readdirSync(scriptDir).filter((name) => name.endsWith('.cjs'))) {
+    const scriptSource = readFile(`scripts/${scriptName}`);
+    for (const match of scriptSource.matchAll(/[`'"]([^`'"]*(?:VERIFY|COD-|MI-API|MAT-STABLE|UPLOAD-FILENAME|CUST-SEARCH|TEST-CUSTOMER)[^`'"]*)[`'"]/g)) {
+      const prefixMatch = match[1].match(/^(VERIFY[-_]|COD-|MI-API-|MAT-STABLE|UPLOAD-FILENAME|CUST-SEARCH-|TEST-CUSTOMER)/);
+      if (prefixMatch) {
+        detectedTestPrefixes.add(prefixMatch[1]);
+      }
+    }
+  }
+  for (const prefix of detectedTestPrefixes) {
+    if (!cleanupPrefixes.some((cleanupPrefix) => prefix.startsWith(cleanupPrefix))) {
+      addFailure(`cleanup-test-data.cjs knownPrefixes must cover regression test prefix: ${prefix}`);
+    }
+  }
+  const readmeSource = fileExists('README.md') ? readFile('README.md') : '';
+  const agentsSource = fileExists('AGENTS.md') ? readFile('AGENTS.md') : '';
+  for (const snippet of [
+    'npm run cleanup:test-data -- --apply',
+    'CLEANUP_TEST_DATA_CONFIRMED=true',
+    'ALLOW_TEST_DATA_CLEANUP=true',
+    '未取消订单',
+    '有效库存预占'
+  ]) {
+    if (!readmeSource.includes(snippet)) {
+      addFailure(`README.md must document cleanup:test-data apply safety snippet: ${snippet}`);
+    }
+  }
+  for (const snippet of [
+    'cleanup:test-data -- --apply',
+    'CLEANUP_TEST_DATA_CONFIRMED=true',
+    'ALLOW_TEST_DATA_CLEANUP=true',
+    '未取消订单',
+    '有效库存预占'
+  ]) {
+    if (!agentsSource.includes(snippet)) {
+      addFailure(`AGENTS.md must document cleanup:test-data apply safety snippet: ${snippet}`);
+    }
+  }
+  for (const forbidden of ['customer.deleteMany', 'material.deleteMany', 'modelBom.deleteMany', 'inventoryBatch.updateMany({']) {
+    if (source.includes(forbidden)) {
+      addFailure(`cleanup-test-data.cjs must not physically delete or silently mutate inventory test records: ${forbidden}`);
+    }
+  }
+}
+
+function verifySeedResetSafetyWorkflow() {
+  const seedSource = readFile('database/prisma/seed.ts');
+  const dockerDbSource = readFile('scripts/docker-db.cjs');
+  const readmeSource = readFile('README.md');
+  const agentsSource = readFile('AGENTS.md');
+  const seedSnippets = [
+    'function isLocalSeedDatabaseUrl(databaseUrl = process.env.DATABASE_URL)',
+    "host === 'localhost' || host === '127.0.0.1' || host === '::1'",
+    "const backupConfirmed = process.env.SEED_BACKUP_CONFIRMED === 'true';",
+    'allowDestructiveSeed || backupConfirmed || (!isProduction && isLocalSeedDatabaseUrl())',
+    'run npm run docker:db:seed so backup confirmation is passed'
+  ];
+  for (const snippet of seedSnippets) {
+    if (!seedSource.includes(snippet)) {
+      addFailure(`database/prisma/seed.ts must keep seed reset safety guard snippet: ${snippet}`);
+    }
+  }
+  if (!dockerDbSource.includes("'env', 'SEED_BACKUP_CONFIRMED=true', 'npm', 'run', 'db:seed'")) {
+    addFailure('scripts/docker-db.cjs seed command must pass SEED_BACKUP_CONFIRMED=true after creating and verifying a backup.');
+  }
+  if (dockerDbSource.includes("'backend', 'npm', 'run', 'db:seed'")) {
+    addFailure('scripts/docker-db.cjs must not run db:seed without SEED_BACKUP_CONFIRMED=true.');
+  }
+  for (const sourceContract of [
+    { label: 'README.md', source: readmeSource },
+    { label: 'AGENTS.md', source: agentsSource }
+  ]) {
+    for (const snippet of ['SEED_BACKUP_CONFIRMED=true', 'localhost', '127.0.0.1', '::1']) {
+      if (!sourceContract.source.includes(snippet)) {
+        addFailure(`${sourceContract.label} must document seed reset guard snippet: ${snippet}`);
+      }
+    }
+  }
+}
+
+function verifyNoLegacyProcessTemplateFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.processTemplates\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use processTemplatesPage pagination instead of legacy erpApi.processTemplates full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/processTemplates\s*\(\s*keyword\?:\s*string/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy processTemplates(keyword, status) full-list API; use processTemplatesPage only.');
+  }
+  const frontendTemplateManagerSource = readFile('frontend/src/components/ProcessTemplateManager.vue');
+  for (const snippet of ['templatePagination', 'erpApi.processTemplatesPage', 'handleTemplatePageChange', 'reloadTemplatesFromFirstPage']) {
+    if (!frontendTemplateManagerSource.includes(snippet)) {
+      addFailure(`ProcessTemplateManager.vue must keep process template pagination snippet: ${snippet}`);
+    }
+  }
+  const backendDtoSource = readFile('backend/src/modules/process-templates/dto.ts');
+  for (const snippet of ['limit?: number', 'offset?: number', 'withPage?: string', 'includeTestFixtures?: string']) {
+    if (!backendDtoSource.includes(snippet)) {
+      addFailure(`ProcessTemplateQueryDto must keep explicit pagination field: ${snippet}`);
+    }
+  }
+  const backendControllerSource = readFile('backend/src/modules/process-templates/process-templates.controller.ts');
+  if (!backendControllerSource.includes("return this.processTemplatesService.findAll({ ...query, withPage: 'true' });")) {
+    addFailure('ProcessTemplatesController public process template list must force paged responses.');
+  }
+  const regressionSource = readFile('scripts/verify-process-exports-api.cjs');
+  if (!regressionSource.includes('process-templates-public-list-pagination')) {
+    addFailure('scripts/verify-process-exports-api.cjs must verify public process template pagination.');
+  }
+  const backendServiceSource = readFile('backend/src/modules/process-templates/process-templates.service.ts');
+  const fixtureFilterSources = [frontendApiSource, backendDtoSource, backendServiceSource, regressionSource].join('\n');
+  for (const snippet of [
+    'PROCESS_TEMPLATE_TEST_FIXTURE_PREFIXES',
+    'isProcessTemplateTestFixture',
+    "query.includeTestFixtures === 'true'",
+    "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined",
+    'process-templates-fixture-filter',
+    'process-templates-export-fixture-filter'
+  ]) {
+    if (!fixtureFilterSources.includes(snippet)) {
+      addFailure(`Process template list/export must keep reusable test-fixture filter snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyProcessDefinitionPaginationContract() {
+  const frontendDefinitionManagerSource = readFile('frontend/src/components/ProcessDefinitionManager.vue');
+  for (const snippet of ['definitionPagination', 'erpApi.processDefinitionsPage', 'handleDefinitionPageChange', 'reloadDefinitionsFromFirstPage']) {
+    if (!frontendDefinitionManagerSource.includes(snippet)) {
+      addFailure(`ProcessDefinitionManager.vue must keep process definition pagination snippet: ${snippet}`);
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  for (const snippet of [
+    'processDefinitionsPage(filters: ProcessDefinitionFilters = {})',
+    'return request<ProcessDefinitionListResponse>',
+    'const result = await erpApi.processDefinitionsPage({ keyword, status, limit: pageLimit, offset });',
+    'hasMore = result.hasMore && result.items.length > 0;'
+  ]) {
+    if (!frontendApiSource.includes(snippet)) {
+      addFailure(`frontend/src/api/erp.ts must keep explicit process definition pagination helper snippet: ${snippet}`);
+    }
+  }
+  const backendDtoSource = readFile('backend/src/modules/process-definitions/dto.ts');
+  for (const snippet of ['limit?: number', 'offset?: number', 'withPage?: string', 'includeTestFixtures?: string']) {
+    if (!backendDtoSource.includes(snippet)) {
+      addFailure(`ProcessDefinitionQueryDto must keep explicit pagination field: ${snippet}`);
+    }
+  }
+  const backendControllerSource = readFile('backend/src/modules/process-definitions/process-definitions.controller.ts');
+  if (!backendControllerSource.includes("return this.processDefinitionsService.findAll({ ...query, withPage: 'true' });")) {
+    addFailure('ProcessDefinitionsController public process definition list must force paged responses.');
+  }
+  const regressionSource = readFile('scripts/verify-process-exports-api.cjs');
+  if (!regressionSource.includes('process-definitions-public-list-pagination')) {
+    addFailure('scripts/verify-process-exports-api.cjs must verify public process definition pagination.');
+  }
+  const backendServiceSource = readFile('backend/src/modules/process-definitions/process-definitions.service.ts');
+  const fixtureFilterSources = [frontendApiSource, backendDtoSource, backendServiceSource, regressionSource].join('\n');
+  for (const snippet of [
+    'PROCESS_DEFINITION_TEST_FIXTURE_PREFIXES',
+    'isProcessDefinitionTestFixture',
+    "query.includeTestFixtures === 'true'",
+    "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined",
+    'process-definitions-fixture-filter',
+    'process-definitions-export-fixture-filter'
+  ]) {
+    if (!fixtureFilterSources.includes(snippet)) {
+      addFailure(`Process definition list/export must keep reusable test-fixture filter snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyNoLegacyModelBomFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.modelBoms\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use modelBomsPage pagination instead of legacy erpApi.modelBoms full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/modelBoms\s*\(\s*filters\s*:\s*ModelBomFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy modelBoms(filters) full-list API; use modelBomsPage only.');
+  }
+  const modelBomExportRegressionSource = readFile('scripts/verify-model-boms-export-api.cjs');
+  if (!modelBomExportRegressionSource.includes('model-boms-public-list-pagination')) {
+    addFailure('scripts/verify-model-boms-export-api.cjs must verify public model BOM list pagination.');
+  }
+  const inventoryServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
+  const inventoryDtoSource = readFile('backend/src/modules/inventory/dto.ts');
+  const modelBomFixtureFilterSources = [frontendApiSource, inventoryServiceSource, inventoryDtoSource, modelBomExportRegressionSource].join('\n');
+  for (const snippet of [
+    'includeTestFixtures?: string',
+    "const includeTestFixtures = query.includeTestFixtures === 'true';",
+    'isDisabledTestFixtureModelBom',
+    "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined",
+    'model-boms-test-fixture-filter',
+    'model-boms-export-test-fixture-filter'
+  ]) {
+    if (!modelBomFixtureFilterSources.includes(snippet)) {
+      addFailure(`Model BOM list/export must keep disabled test-fixture opt-in filter snippet: ${snippet}`);
+    }
+  }
+  for (const snippet of [
+    'model-boms-list-customer-scope-preview',
+    'model-boms-list-line-summary',
+    'model-boms-detail-full-customer-scope',
+    'model-boms-detail-full-lines',
+    'scopeCustomerCount >= listedBom.scopeCustomers.length',
+    'listedBom.lines.length === 0',
+    'listedBom.lineSummary'
+  ]) {
+    if (!modelBomExportRegressionSource.includes(snippet)) {
+      addFailure(`scripts/verify-model-boms-export-api.cjs must verify model BOM customer-scope preview contract: ${snippet}`);
+    }
+  }
+  const modelBomDiffReviewExportRegressionSource = readFile('scripts/verify-model-bom-diff-reviews-export-api.cjs');
+  const modelBomDiffReviewExportCleanupSnippets = [
+    "const { PrismaClient } = require('@prisma/client');",
+    "for (const envPath of [resolve('.env'), resolve('backend/.env')])",
+    "const partCode = 'VERIFY-BOM-DIFF-STABLE';",
+    "const customerCode = 'VERIFY-BOM-DIFF-CUST-STABLE';",
+    "const sourceBomName = 'VERIFY-BOM-DIFF-SOURCE-STABLE';",
+    "const targetBomName = 'VERIFY-BOM-DIFF-TARGET-STABLE';",
+    'async function prepareStableVerificationData()',
+    'async function cleanupStableVerificationData()',
+    'prisma.material.upsert',
+    'prisma.customer.findFirst',
+    'prisma.customer.update',
+    'prisma.customer.create',
+    'customerCode: `${customerCode}${archiveSuffix}`',
+    'customerName: `${customerName}${archiveSuffix}`',
+    'contactName: null',
+    'contactPhone: null',
+    'prisma.customerContact.updateMany',
+    'prisma.modelBom.upsert',
+    'prisma.modelBomLine.findFirst',
+    'prisma.modelBomDiffReview.updateMany',
+    'prisma.modelBomLine.updateMany',
+    'prisma.modelBom.updateMany',
+    'prisma.material.updateMany',
+    'await cleanupStableVerificationData();',
+    'await prisma.$disconnect();'
+  ];
+  for (const snippet of modelBomDiffReviewExportCleanupSnippets) {
+    if (!modelBomDiffReviewExportRegressionSource.includes(snippet)) {
+      addFailure(`scripts/verify-model-bom-diff-reviews-export-api.cjs must reuse and soft-disable stable test records after export verification: ${snippet}`);
+    }
+  }
+  if (
+    modelBomDiffReviewExportRegressionSource.includes('new Date().toISOString().replace') ||
+    modelBomDiffReviewExportRegressionSource.includes("method: 'DELETE'")
+  ) {
+    addFailure('scripts/verify-model-bom-diff-reviews-export-api.cjs must not create timestamped verification records or use DELETE cleanup.');
+  }
+  const modelBomDiffReviewListRegressionSnippets = [
+    'const savedReview = await requestJson(`/inventory/model-boms/${targetBom.id}/diff-reviews`',
+    'const reviewList = await requestJson(',
+    'withPage=true&limit=10&offset=0',
+    'model-bom-diff-reviews-public-list-pagination',
+    'model-bom-diff-reviews-public-list-default-pagination',
+    'model-bom-diff-reviews-list-review-keys',
+    'model-bom-diff-reviews-list-no-maintenance-timestamps',
+    'reviewList.reviewKeys.includes(reviewKey)',
+    'defaultList.reviewKeys.includes(reviewKey)',
+    "Object.prototype.hasOwnProperty.call(listedReview, 'createdAt')",
+    "Object.prototype.hasOwnProperty.call(listedReview, 'updatedAt')",
+    "listedReview.status === 'ENABLED'"
+  ];
+  for (const snippet of modelBomDiffReviewListRegressionSnippets) {
+    if (!modelBomDiffReviewExportRegressionSource.includes(snippet)) {
+      addFailure(`scripts/verify-model-bom-diff-reviews-export-api.cjs must verify diff review list response contract: ${snippet}`);
+    }
+  }
+}
+
+function verifyNoLegacyInventoryBatchFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.inventory\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use inventoryPage pagination instead of legacy erpApi.inventory full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/inventory\s*\(\s*filters\s*:\s*InventoryFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy inventory(filters) full-list API; use inventoryPage only.');
+  }
+  const inventoryControllerSource = readFile('backend/src/modules/inventory/inventory.controller.ts');
+  if (!inventoryControllerSource.includes("return this.inventoryService.findAll({ ...query, withPage: 'true' });")) {
+    addFailure('InventoryController public inventory batch list must force paged responses.');
+  }
+  const inventorySummaryRegressionSource = readFile('scripts/verify-inventory-summary-api.cjs');
+  if (!inventorySummaryRegressionSource.includes('inventory-batch-public-list-pagination')) {
+    addFailure('scripts/verify-inventory-summary-api.cjs must verify public inventory batch pagination.');
+  }
+  const inventorySource = readFile('backend/src/modules/inventory/inventory.service.ts');
+  const inventoryDtoSource = readFile('backend/src/modules/inventory/dto.ts');
+  const inventoryFrontendApiSource = readFile('frontend/src/api/erp.ts');
+  const inventoryFixtureFilterSources = [inventorySource, inventoryDtoSource, inventoryFrontendApiSource, inventorySummaryRegressionSource].join('\n');
+  for (const snippet of [
+    'includeTestFixtures?: string',
+    'includeTestFixtures?: boolean',
+    "const includeTestFixtures = query.includeTestFixtures === 'true';",
+    'MAT-STABLE',
+    'isTestFixtureInventoryBatch',
+    'visibleBatches',
+    'visibleRawBatches',
+    'inventory-summary-test-fixture-filter'
+  ]) {
+    if (!inventoryFixtureFilterSources.includes(snippet)) {
+      addFailure(`Inventory summary/list must keep reusable test-fixture filter snippet: ${snippet}`);
+    }
+  }
+  for (const snippet of [
+    "const testPrefix = 'COD-INV-SUM-STABLE';",
+    'prisma.material.upsert',
+    'prisma.material.updateMany',
+    'prisma.customer.findFirst',
+    'prisma.customer.update',
+    'prisma.customer.create',
+    'async function upsertRegressionWarehouse(warehouseCode, warehouseName)',
+    'async function upsertRegressionWarehouseLocation(warehouseId, locationCode, locationName)',
+    'prisma.warehouse.upsert',
+    'prisma.warehouseLocation.findFirst',
+    'prisma.warehouseLocation.update',
+    'prisma.warehouseLocation.create',
+    'prisma.warehouseLocation.updateMany',
+    'prisma.warehouse.updateMany',
+    'customerCode: `${testPrefix}-CUST${archiveSuffix}`',
+    'customerName: `Inventory Summary Regression Customer ${runId}${archiveSuffix}`',
+    "contactName: null",
+    "contactPhone: null"
+  ]) {
+    if (!inventorySummaryRegressionSource.includes(snippet)) {
+      addFailure(`scripts/verify-inventory-summary-api.cjs must soft-disable temporary customer snippet: ${snippet}`);
+    }
+  }
+  if (
+    inventorySummaryRegressionSource.includes('prisma.customer.deleteMany') ||
+    inventorySummaryRegressionSource.includes('prisma.material.deleteMany') ||
+    inventorySummaryRegressionSource.includes('prisma.warehouse.deleteMany') ||
+    inventorySummaryRegressionSource.includes('prisma.warehouseLocation.deleteMany') ||
+    inventorySummaryRegressionSource.includes('function localDateTimeStamp')
+  ) {
+    addFailure('scripts/verify-inventory-summary-api.cjs must reuse stable customer/material master data and soft-disable it after verification.');
+  }
+}
+
+function verifyNoLegacyInventoryMaterialFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.inventoryMaterials\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use inventoryMaterialsPage, inventoryMaterialsAllPages, or inventoryMaterialByPartCode instead of legacy erpApi.inventoryMaterials full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/inventoryMaterials\s*\(\s*filters\s*:\s*MaterialMemoryFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy inventoryMaterials(filters) full-list API; use explicit paged helpers only.');
+  }
+  const inventoryControllerSource = readFile('backend/src/modules/inventory/inventory.controller.ts');
+  if (!inventoryControllerSource.includes("return this.inventoryService.materials({ ...query, withPage: 'true' });")) {
+    addFailure('InventoryController public inventory materials list must force paged responses.');
+  }
+  const inventoryMaterialsRegressionSource = readFile('scripts/verify-inventory-materials-export-api.cjs');
+  if (!inventoryMaterialsRegressionSource.includes('inventory-materials-public-list-pagination')) {
+    addFailure('scripts/verify-inventory-materials-export-api.cjs must verify public inventory materials pagination.');
+  }
+  const inventoryServiceSource = readFile('backend/src/modules/inventory/inventory.service.ts');
+  const inventoryDtoSource = readFile('backend/src/modules/inventory/dto.ts');
+  const inventoryMaterialFixtureFilterSources = [frontendApiSource, inventoryServiceSource, inventoryDtoSource, inventoryMaterialsRegressionSource].join('\n');
+  for (const snippet of [
+    'includeTestFixtures?: string',
+    'includeTestFixtures?: boolean',
+    "const includeTestFixtures = query.includeTestFixtures === 'true';",
+    'isTestFixtureMaterial',
+    'MAT-STABLE',
+    "const materialFixturePartCode = 'MAT-STABLE-INVENTORY-MATERIAL';",
+    'visibleMaterialRows',
+    "includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined",
+    'inventory-materials-test-fixture-filter',
+    'inventory-materials-export-test-fixture-filter'
+  ]) {
+    if (!inventoryMaterialFixtureFilterSources.includes(snippet)) {
+      addFailure(`Inventory material list/export must keep disabled test-fixture opt-in filter snippet: ${snippet}`);
+    }
+  }
+}
+
+function verifyNoLegacyProductionNoticesFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.productionNotices\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use productionNoticesPage pagination instead of legacy erpApi.productionNotices full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/productionNotices\s*\(\s*status\?:\s*ProductionNoticeStatus/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy productionNotices(status, target, filters) full-list API; use productionNoticesPage only.');
+  }
+  const productionControllerSource = readFile('backend/src/modules/production/production.controller.ts');
+  if (!productionControllerSource.includes("return this.productionService.notices({ ...query, withPage: 'true' });")) {
+    addFailure('ProductionController public production notices list must force paged responses.');
+  }
+  const productionNoticesRegressionSource = readFile('scripts/verify-production-notices-export-api.cjs');
+  if (!productionNoticesRegressionSource.includes('production-notices-public-list-pagination')) {
+    addFailure('scripts/verify-production-notices-export-api.cjs must verify public production notices pagination.');
+  }
+}
+
+function verifyNoLegacyProductionReplenishmentRequestFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.productionReplenishmentRequests\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use productionReplenishmentRequestsPage pagination instead of legacy erpApi.productionReplenishmentRequests full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/productionReplenishmentRequests\s*\(\s*filters\s*:\s*ProductionReplenishmentRequestFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy productionReplenishmentRequests(filters) full-list API; use productionReplenishmentRequestsPage only.');
+  }
+  const productionControllerSource = readFile('backend/src/modules/production/production.controller.ts');
+  if (!productionControllerSource.includes("return this.productionService.replenishmentRequests({ ...query, withPage: 'true' });")) {
+    addFailure('ProductionController public production replenishment request list must force paged responses.');
+  }
+  const regressionSource = readFile('scripts/verify-production-replenishment-requests-export-api.cjs');
+  if (!regressionSource.includes('production-replenishment-requests-public-list-pagination')) {
+    addFailure('scripts/verify-production-replenishment-requests-export-api.cjs must verify public production replenishment request pagination.');
+  }
+}
+
+function verifyNoLegacyProductionScrapRecordFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.productionScrapRecords\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use productionScrapRecordsPage or productionScrapRecordsAllPages instead of legacy erpApi.productionScrapRecords full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/productionScrapRecords\s*\(\s*filters\s*:\s*ProductionScrapFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy productionScrapRecords(filters) full-list API; use explicit paged helpers only.');
+  }
+  const productionControllerSource = readFile('backend/src/modules/production/production.controller.ts');
+  if (!productionControllerSource.includes("return this.productionService.scrapRecords({ ...query, withPage: 'true' });")) {
+    addFailure('ProductionController public production scrap record list must force paged responses.');
+  }
+  const regressionSource = readFile('scripts/verify-production-scrap-records-export-api.cjs');
+  if (!regressionSource.includes('production-scrap-records-public-list-pagination')) {
+    addFailure('scripts/verify-production-scrap-records-export-api.cjs must verify public production scrap record pagination.');
+  }
+}
+
+function verifyNoLegacyProductionTaskFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    if (toProjectPath(filePath) === 'frontend/src/api/erp.ts') {
+      continue;
+    }
+    const source = fs.readFileSync(filePath, 'utf8');
+    const taskCallPattern = /erpApi\.productionTasks\s*\(/g;
+    for (const match of source.matchAll(taskCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use productionTasksPage pagination instead of legacy erpApi.productionTasks full-list calls.`
+      );
+    }
+    const summaryCallPattern = /erpApi\.productionOrderSummaries\s*\(/g;
+    for (const match of source.matchAll(summaryCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use productionOrderSummariesPage pagination instead of legacy erpApi.productionOrderSummaries full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/productionTasks\s*\(\s*filters\s*:\s*ProductionTaskFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy productionTasks(filters) full-list API; use productionTasksPage only.');
+  }
+  if (/productionOrderSummaries\s*\(\s*filters\s*:\s*ProductionTaskFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy productionOrderSummaries(filters) full-list API; use productionOrderSummariesPage only.');
+  }
+  const productionExportRegressionSource = readFile('scripts/verify-production-export-api.cjs');
+  if (!productionExportRegressionSource.includes('production-tasks-display-status-pagination')) {
+    addFailure('scripts/verify-production-export-api.cjs must verify production task display-status pagination.');
+  }
+}
+
+function verifyNoLegacyAdminProductionNoticesFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.adminProductionNotices\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use adminProductionNoticesPage pagination instead of legacy erpApi.adminProductionNotices full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/adminProductionNotices\s*\(\s*filters\s*:\s*ProductionNoticeFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy adminProductionNotices(filters) full-list API; use adminProductionNoticesPage only.');
+  }
+  const productionControllerSource = readFile('backend/src/modules/production/production.controller.ts');
+  if (!productionControllerSource.includes("return this.productionService.adminNotices({ ...query, withPage: 'true' });")) {
+    addFailure('ProductionController public admin notices list must force paged responses.');
+  }
+  const productionNoticesRegressionSource = readFile('scripts/verify-production-notices-export-api.cjs');
+  if (!productionNoticesRegressionSource.includes('admin-production-notices-public-list-pagination')) {
+    addFailure('scripts/verify-production-notices-export-api.cjs must verify public admin production notices pagination.');
+  }
+}
+
+function verifyNoLegacyWarehouseNoticesFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.warehouseNotices\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use warehouseNoticesPage pagination instead of legacy erpApi.warehouseNotices full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/warehouseNotices\s*\(\s*status\?:\s*ProductionNoticeStatus/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy warehouseNotices(status, filters) full-list API; use warehouseNoticesPage only.');
+  }
+  const warehouseControllerSource = readFile('backend/src/modules/warehouses/warehouses.controller.ts');
+  if (!warehouseControllerSource.includes("return this.warehousesService.warehouseNotices({ ...query, withPage: 'true' });")) {
+    addFailure('WarehousesController public warehouse notices list must force paged responses.');
+  }
+  const warehouseNoticesRegressionSource = readFile('scripts/verify-warehouse-notices-export-api.cjs');
+  if (!warehouseNoticesRegressionSource.includes('warehouse-notices-public-list-pagination')) {
+    addFailure('scripts/verify-warehouse-notices-export-api.cjs must verify public warehouse notices pagination.');
+  }
+}
+
+function verifyNoLegacyWarehouseTransactionsFullListCalls() {
+  const frontendSourceDir = resolveProjectPath('frontend/src');
+  for (const filePath of walkFiles(frontendSourceDir)) {
+    const source = fs.readFileSync(filePath, 'utf8');
+    const legacyCallPattern = /erpApi\.warehouseTransactions\s*\(/g;
+    for (const match of source.matchAll(legacyCallPattern)) {
+      addFailure(
+        `${toProjectPath(filePath)}:${sourceLineForIndex(source, match.index)} must use warehouseTransactionsPage pagination instead of legacy erpApi.warehouseTransactions full-list calls.`
+      );
+    }
+  }
+  const frontendApiSource = readFile('frontend/src/api/erp.ts');
+  if (/warehouseTransactions\s*\(\s*filters\s*:\s*WarehouseTransactionFilters/.test(frontendApiSource)) {
+    addFailure('frontend/src/api/erp.ts must not expose legacy warehouseTransactions(filters) full-list API; use warehouseTransactionsPage only.');
+  }
+  const warehouseControllerSource = readFile('backend/src/modules/warehouses/warehouses.controller.ts');
+  if (!warehouseControllerSource.includes("return this.warehousesService.findTransactions({ ...query, withPage: 'true' });")) {
+    addFailure('WarehousesController public warehouse transactions list must force paged responses.');
+  }
+  const warehouseTransactionRegressionSource = readFile('scripts/verify-warehouse-transactions-export-api.cjs');
+  if (!warehouseTransactionRegressionSource.includes('warehouse-transactions-public-list-pagination')) {
+    addFailure('scripts/verify-warehouse-transactions-export-api.cjs must verify public warehouse transaction pagination.');
+  }
+}
+
+function verifyInventoryTableHeightControls() {
+  const inventoryViewPath = 'frontend/src/views/InventoryView.vue';
+  if (!fileExists(inventoryViewPath)) {
+    addFailure(`Missing inventory table height control file: ${inventoryViewPath}`);
+    return;
+  }
+  const inventoryViewSource = readFile(inventoryViewPath);
+  const requiredSnippets = [
+    "import { Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';",
+    "type InventoryWorkTableKey = 'materialMemory' | 'summary' | 'batches' | 'reservationHistory' | 'adjustmentHistory';",
+    'const inventoryWorkTableKeys: InventoryWorkTableKey[]',
+    'inventoryWorkTableHeightLimits',
+    'inventoryWorkTableDefaultHeights',
+    'inventoryWorkTableHeightStorageKey',
+    '库存页表格高度是本机 UI 偏好，不能写入库存批次、预占、盘点、订单、生产或库存流水业务数据。',
+    'const inventoryWorkTableHeights = reactive<Record<InventoryWorkTableKey, number>>',
+    'function adjustInventoryWorkTableHeight',
+    'function resetInventoryWorkTableHeight',
+    'function restoreInventoryWorkTableHeights',
+    'function saveInventoryWorkTableHeights',
+    'localStorage.getItem(inventoryWorkTableHeightStorageKey)',
+    'materialMemory: inventoryWorkTableHeights.materialMemory',
+    'summary: inventoryWorkTableHeights.summary',
+    'batches: inventoryWorkTableHeights.batches',
+    'reservationHistory: inventoryWorkTableHeights.reservationHistory',
+    'adjustmentHistory: inventoryWorkTableHeights.adjustmentHistory',
+    ':max-height="inventoryWorkTableHeights.materialMemory"',
+    ':max-height="inventoryWorkTableHeights.summary"',
+    ':max-height="inventoryWorkTableHeights.batches"',
+    ':max-height="inventoryWorkTableHeights.reservationHistory"',
+    ':max-height="inventoryWorkTableHeights.adjustmentHistory"',
+    'formatLongTextPreview(row.remark)',
+    'longTextTooltipText(row.remark)',
+    'reservationStatusReasonPreview(row)',
+    'reservationStatusReasonTitle(row)',
+    'function reservationStatusReasonPreview(row: InventoryReservationAudit)',
+    'function formatLongTextPreview',
+    'aria-label="降低库存使用总览表格高度"',
+    'aria-label="提高库存汇总表格高度"',
+    'aria-label="恢复库存溯源表格默认高度"',
+    'aria-label="库存预占记录表格高度"',
+    'aria-label="降低库存预占记录表格高度"',
+    'aria-label="提高库存盘点记录表格高度"',
+    'aria-label="恢复库存盘点记录表格默认高度"',
+    'inventory-table-height-actions'
+  ];
+  for (const snippet of requiredSnippets) {
+    if (!inventoryViewSource.includes(snippet)) {
+      addFailure(`InventoryView.vue must keep desktop inventory table height control snippet: ${snippet}`);
+    }
+  }
+  if (inventoryViewSource.includes("{{ row.remark || '-' }}")) {
+    addFailure('InventoryView.vue must summarize inventory adjustment remarks instead of rendering full remark text directly.');
+  }
+  if (inventoryViewSource.includes('{{ row.statusReason || \'-\' }}')) {
+    addFailure('InventoryView.vue must summarize reservation status reasons instead of rendering full text directly.');
+  }
+}
+
 verifyRequiredFiles();
 verifyOrderStatusEnumContract();
 verifyNoMojibakeInUserFacingSources();
 verifyNavigation();
+verifyNoForbiddenSecondStageEntrypoints();
+verifyNoJsonFilePrimaryDatabase();
 verifyResponsiveMobileBaseline();
+verifyBusinessTablesHaveHorizontalScroll();
+verifyNoElementPlusShowOverflowTooltip();
+verifyNoRawLongTextTableColumns();
 verifyNoNativeBrowserDialogs();
 verifyNoElementPlusConfirmDialogs();
+verifyNoDefaultFirstOption();
 verifyResponsiveElementPlusDialogs();
 verifyElementPlusChineseLocale();
 verifyCustomerSelectOnlyShowsName();
 verifyCustomerContactSoftDisableWorkflow();
+verifyCustomerTableHeightControls();
 verifyOrderSelectDisplayContract();
 verifyOrderFilterOrder();
+verifyOrderTestFixtureFilter();
 verifyCaseInsensitiveBusinessKeyContracts();
 verifyProductionTabOrder();
 verifyProductionOrderSummaryWorkflow();
+verifyProductionTableHeightControls();
+verifyProductionExcelExportWorkflow();
+verifyExportConcurrencyGuards();
 verifyProductionOperatorSearchWorkflow();
 verifyPlannerProcessAndSubmitGuard();
+verifyProcessSelectionTableHeightControls();
+verifyMaterialTransformTableHeightControls();
+verifyMaterialLibraryTableHeightControls();
+verifyInventorySourceDialogTableHeightControls();
 verifyProcessPinyinSearchWorkflow();
 verifyProcessMemoryCoreDataGuards();
 verifyNoBusinessTextHardMaxLength();
+verifyNoPrismaBusinessTextNativeLengthLimits();
 verifyMaterialSuggestionSearchWorkflow();
 verifyProcessEditDisabledReasonWorkflow();
 verifyProcessStepDragSortWorkflow();
@@ -10393,13 +16094,17 @@ verifyOrderChangeAndCancellationWorkflow();
 verifyShortageReplenishmentClosureWorkflow();
 verifyWarehouseWorkflow();
 verifyNoticeCustomerNameDisplay();
+verifyAdminNoticeTableHeightControls();
+verifyUiPreferenceStorageGuards();
 verifyInventoryTransactionOrderLineTraceability();
 verifyPartialShipmentWorkflow();
 verifySharedLinkComponents();
 verifyDrawingDuplicateConfirmationWorkflow();
 verifyNoInlineCustomerDropdowns();
 verifyNoSilentSearchResultLimits();
+verifyFixedFrontendLimitsExposeContinuation();
 verifyStatisticsDisplayContract();
+verifyStatisticsTableHeightControls();
 verifySharedOrderDisplayStatus();
 verifySharedDateFormattingContract();
 verifyBackendBusinessDateKeyContract();
@@ -10417,10 +16122,30 @@ verifyDataVerifierStockSourceReviewStatus();
 verifyRepairScriptEntrypoint();
 verifyReadmeRepairSafetyDocs();
 verifyOrderExcelImportWorkflow();
+verifyOrderTableHeightControls();
+verifyOrderDetailTableHeightControls();
+verifyOrderLineEditorTableHeightControls();
 verifySeedStockReservationCoverage();
 verifyMaterialCommonProjectModelGuards();
 verifyMaterialStockAlertWorkflow();
+verifyInventoryTableHeightControls();
+verifyRealXlsxExportFormatContract();
+verifyMaterialDashboardExportWorkflow();
 verifyRuntimeStorageIgnored();
+verifyTestDataCleanupWorkflow();
+verifySeedResetSafetyWorkflow();
+verifyProcessDefinitionPaginationContract();
+verifyNoLegacyProcessTemplateFullListCalls();
+verifyNoLegacyModelBomFullListCalls();
+verifyNoLegacyInventoryBatchFullListCalls();
+verifyNoLegacyInventoryMaterialFullListCalls();
+verifyNoLegacyProductionNoticesFullListCalls();
+verifyNoLegacyProductionReplenishmentRequestFullListCalls();
+verifyNoLegacyProductionScrapRecordFullListCalls();
+verifyNoLegacyProductionTaskFullListCalls();
+verifyNoLegacyAdminProductionNoticesFullListCalls();
+verifyNoLegacyWarehouseNoticesFullListCalls();
+verifyNoLegacyWarehouseTransactionsFullListCalls();
 
 if (failures.length > 0) {
   console.error('First-stage source verification failed:');

@@ -1,0 +1,393 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: 百胜 ERP
+      - generic [ref=e7]: 第一阶段最小范围
+    - navigation [ref=e8]:
+      - link "客户" [ref=e9] [cursor=pointer]:
+        - /url: /customers
+        - img [ref=e11]
+        - generic [ref=e13]: 客户
+      - link "零件管理" [ref=e14] [cursor=pointer]:
+        - /url: /materials
+        - img [ref=e16]
+        - generic [ref=e18]: 零件管理
+      - link "订单" [ref=e19] [cursor=pointer]:
+        - /url: /orders
+        - img [ref=e21]
+        - generic [ref=e23]: 订单
+      - link "生产流程" [ref=e24] [cursor=pointer]:
+        - /url: /processes
+        - img [ref=e26]
+        - generic [ref=e28]: 生产流程
+      - link "流程记忆" [ref=e29] [cursor=pointer]:
+        - /url: /process-templates
+        - img [ref=e31]
+        - generic [ref=e35]: 流程记忆
+      - link "生产" [ref=e36] [cursor=pointer]:
+        - /url: /production
+        - img [ref=e38]
+        - generic [ref=e41]: 生产
+      - link "统计" [ref=e42] [cursor=pointer]:
+        - /url: /statistics
+        - img [ref=e44]
+        - generic [ref=e46]: 统计
+      - link "仓库" [ref=e47] [cursor=pointer]:
+        - /url: /warehouses
+        - img [ref=e49]
+        - generic [ref=e53]: 仓库
+      - link "库存" [ref=e54] [cursor=pointer]:
+        - /url: /inventory
+        - img [ref=e56]
+        - generic [ref=e58]: 库存
+    - generic [ref=e59]: 第一阶段运行中
+  - generic [ref=e60]:
+    - generic [ref=e61]:
+      - generic [ref=e62]:
+        - button "返回上一级" [disabled] [ref=e63]:
+          - img [ref=e65]
+        - navigation "当前位置" [ref=e67]:
+          - generic [ref=e68]: 零件管理
+      - generic [ref=e69]:
+        - button "全部通知" [ref=e70] [cursor=pointer]:
+          - img [ref=e72]
+          - generic [ref=e76]: 全部通知
+        - generic [ref=e77]: TerraMaster F4-424 MAX / PostgreSQL / Docker
+    - main [ref=e78]:
+      - generic [ref=e79]:
+        - generic [ref=e80]:
+          - generic [ref=e81]:
+            - heading "零件管理" [level=2] [ref=e82]
+            - paragraph [ref=e83]: 下单前维护零件搜索记忆、适用范围、机型 BOM 和最近历史用料；库存数量由 InventoryBatch 独立计算。
+          - generic [ref=e84]:
+            - button "零件基础库" [ref=e85] [cursor=pointer]:
+              - generic [ref=e86]: 零件基础库
+            - button "机型零件包" [ref=e87] [cursor=pointer]:
+              - generic [ref=e88]: 机型零件包
+            - button "来源加工关系" [ref=e89] [cursor=pointer]:
+              - generic [ref=e90]: 来源加工关系
+            - button "新增零件" [ref=e91] [cursor=pointer]:
+              - generic [ref=e92]: 新增零件
+        - generic [ref=e93]:
+          - generic [ref=e94]:
+            - generic [ref=e95]: 筛选结果
+            - generic [ref=e96]: "0"
+          - button "通用件 0" [ref=e97] [cursor=pointer]:
+            - generic [ref=e98]: 通用件
+            - generic [ref=e99]: "0"
+          - button "定制件 0" [ref=e100] [cursor=pointer]:
+            - generic [ref=e101]: 定制件
+            - generic [ref=e102]: "0"
+          - button "已进 BOM 0" [ref=e103] [cursor=pointer]:
+            - generic [ref=e104]: 已进 BOM
+            - generic [ref=e105]: "0"
+          - button "未进 BOM 0" [ref=e106] [cursor=pointer]:
+            - generic [ref=e107]: 未进 BOM
+            - generic [ref=e108]: "0"
+          - button "有历史下单 0" [ref=e109] [cursor=pointer]:
+            - generic [ref=e110]: 有历史下单
+            - generic [ref=e111]: "0"
+          - button "无历史下单 0" [ref=e112] [cursor=pointer]:
+            - generic [ref=e113]: 无历史下单
+            - generic [ref=e114]: "0"
+          - button "低库存报警 0 条" [ref=e115] [cursor=pointer]:
+            - generic [ref=e116]: 低库存报警
+            - generic [ref=e117]: 0 条
+        - generic [ref=e118]:
+          - button "BOM 零件 0" [ref=e119] [cursor=pointer]:
+            - generic [ref=e120]: BOM 零件
+            - strong [ref=e121]: "0"
+          - button "显式适用 0" [ref=e122] [cursor=pointer]:
+            - generic [ref=e123]: 显式适用
+            - strong [ref=e124]: "0"
+          - button "订单历史 0" [ref=e125] [cursor=pointer]:
+            - generic [ref=e126]: 订单历史
+            - strong [ref=e127]: "0"
+          - button "仅搜索记忆 0" [ref=e128] [cursor=pointer]:
+            - generic [ref=e129]: 仅搜索记忆
+            - strong [ref=e130]: "0"
+          - button "BOM 指定图纸 0" [ref=e131] [cursor=pointer]:
+            - generic [ref=e132]: BOM 指定图纸
+            - strong [ref=e133]: "0"
+          - button "零件默认图纸 0" [ref=e134] [cursor=pointer]:
+            - generic [ref=e135]: 零件默认图纸
+            - strong [ref=e136]: "0"
+          - button "零件最新图纸 0" [ref=e137] [cursor=pointer]:
+            - generic [ref=e138]: 零件最新图纸
+            - strong [ref=e139]: "0"
+          - button "历史订单图纸 0" [ref=e140] [cursor=pointer]:
+            - generic [ref=e141]: 历史订单图纸
+            - strong [ref=e142]: "0"
+          - button "无图纸 0" [ref=e143] [cursor=pointer]:
+            - generic [ref=e144]: 无图纸
+            - strong [ref=e145]: "0"
+          - button "组件 0" [ref=e146] [cursor=pointer]:
+            - generic [ref=e147]: 组件
+            - strong [ref=e148]: "0"
+          - button "子零件 0" [ref=e149] [cursor=pointer]:
+            - generic [ref=e150]: 子零件
+            - strong [ref=e151]: "0"
+          - button "单独零件 0" [ref=e152] [cursor=pointer]:
+            - generic [ref=e153]: 单独零件
+            - strong [ref=e154]: "0"
+          - button "未进 BOM 0" [ref=e155] [cursor=pointer]:
+            - generic [ref=e156]: 未进 BOM
+            - strong [ref=e157]: "0"
+          - button "已启用报警 0" [ref=e158] [cursor=pointer]:
+            - generic [ref=e159]: 已启用报警
+            - strong [ref=e160]: "0"
+          - button "低库存 0" [ref=e161] [cursor=pointer]:
+            - generic [ref=e162]: 低库存
+            - strong [ref=e163]: "0"
+          - button "未启用报警 0" [ref=e164] [cursor=pointer]:
+            - generic [ref=e165]: 未启用报警
+            - strong [ref=e166]: "0"
+        - alert [ref=e167]:
+          - img [ref=e169]
+          - generic [ref=e171]:
+            - generic [ref=e172]: 订单历史不等于正式适用范围
+            - paragraph [ref=e173]: 新增订单或 Excel 导入只会补建零件搜索记忆，并在这里显示为订单历史；不会自动变成全部客户通用、客户私有 BOM 或正式适用范围。需要固定推荐时，请维护适用范围或 BOM。
+        - generic [ref=e174]:
+          - generic [ref=e175]: 当前筛选
+          - button "状态：启用 ×" [ref=e176] [cursor=pointer]:
+            - text: 状态：启用
+            - generic [ref=e177]: ×
+          - button "清除全部" [ref=e178] [cursor=pointer]:
+            - generic [ref=e179]: 清除全部
+        - generic [ref=e180]:
+          - generic [ref=e181]:
+            - generic [ref=e182]: 客户
+            - generic [ref=e184]:
+              - generic:
+                - combobox [ref=e186]
+                - generic [ref=e187]: 全部客户
+          - generic [ref=e188]:
+            - generic [ref=e189]: 机型 / 项目
+            - generic [ref=e191]:
+              - generic:
+                - combobox [ref=e193]
+                - generic [ref=e194]: 全部机型 / 项目
+              - img [ref=e197] [cursor=pointer]
+          - generic [ref=e199]:
+            - generic [ref=e200]: 零件关键字
+            - textbox "编码 / 名称 / 客户 / 订单 / 规格" [ref=e203]
+          - generic [ref=e204]:
+            - generic [ref=e205]: 通用 / 定制
+            - generic [ref=e207] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e209]
+                - generic [ref=e210]: 全部
+              - img [ref=e213]
+          - generic [ref=e215]:
+            - generic [ref=e216]: 当前关系
+            - generic [ref=e218] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e220]
+                - generic [ref=e221]: 全部
+              - img [ref=e224]
+          - generic [ref=e226]:
+            - generic [ref=e227]: 图号
+            - textbox "图号" [ref=e230]
+          - generic [ref=e231]:
+            - generic [ref=e232]: 图纸状态
+            - textbox "旧图 / 新图" [ref=e235]
+          - generic [ref=e236]:
+            - generic [ref=e237]: 图纸来源
+            - generic [ref=e239] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e241]
+                - generic [ref=e242]: 全部
+              - img [ref=e245]
+          - generic [ref=e247]:
+            - generic [ref=e248]: BOM 结构
+            - generic [ref=e250] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e252]
+                - generic [ref=e253]: 全部
+              - img [ref=e256]
+          - generic [ref=e258]:
+            - generic [ref=e259]: BOM 状态
+            - generic [ref=e261] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e263]
+                - generic [ref=e264]: 全部
+              - img [ref=e267]
+          - generic [ref=e269]:
+            - generic [ref=e270]: 图纸日期
+            - generic [ref=e271]:
+              - img [ref=e273]
+              - combobox "开始" [ref=e275]
+              - generic [ref=e276]: "-"
+              - combobox "结束" [ref=e277]
+          - generic [ref=e278]:
+            - generic [ref=e279]: 最近下单
+            - generic [ref=e280]:
+              - img [ref=e282]
+              - combobox "开始" [ref=e284]
+              - generic [ref=e285]: "-"
+              - combobox "结束" [ref=e286]
+          - generic [ref=e287]:
+            - generic [ref=e288]: 下单记录
+            - generic [ref=e290] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e292]
+                - generic [ref=e293]: 全部
+              - img [ref=e296]
+          - generic [ref=e298]:
+            - generic [ref=e299]: 库存报警
+            - generic [ref=e301] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e303]
+                - generic [ref=e304]: 全部报警
+              - img [ref=e307]
+          - generic [ref=e309]:
+            - generic [ref=e310]: 状态
+            - generic [ref=e312] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e314]
+                - generic [ref=e315]: 启用
+              - img [ref=e318]
+          - generic [ref=e320]:
+            - generic [ref=e321]: 排序字段
+            - generic [ref=e323] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e325]
+                - generic [ref=e326]: 最近下单
+              - img [ref=e329]
+          - generic [ref=e331]:
+            - generic [ref=e332]: 排序顺序
+            - generic [ref=e334] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e336]
+                - generic [ref=e337]: 降序
+              - img [ref=e340]
+          - button "查询" [disabled]:
+            - generic:
+              - img
+            - generic: 查询
+          - button "重置" [ref=e342] [cursor=pointer]:
+            - generic [ref=e343]: 重置
+        - generic [ref=e344]:
+          - generic [ref=e345]:
+            - generic [ref=e346]: 常用机型
+            - generic:
+              - generic: 数据库已保存 / 2 个
+            - generic [ref=e348]:
+              - generic:
+                - combobox [ref=e350]
+                - generic [ref=e351]: 搜索机型加入常用
+              - img [ref=e354] [cursor=pointer]
+            - button "刷新常用" [ref=e356] [cursor=pointer]:
+              - generic [ref=e357]: 刷新常用
+            - button "设为常用" [disabled] [ref=e358]:
+              - generic [ref=e359]: 设为常用
+            - button "恢复默认 B3/B5" [ref=e360] [cursor=pointer]:
+              - generic [ref=e361]: 恢复默认 B3/B5
+          - generic [ref=e362]: 默认 B3/B5；可搜索机型加入常用，拖拽手柄调整顺序，移除常用只隐藏快捷入口，不删除 BOM 或零件资料。
+          - generic [ref=e363]:
+            - button "拖拽调整常用机型顺序" [ref=e364]:
+              - img [ref=e366]
+            - button "B3" [ref=e368] [cursor=pointer]:
+              - generic [ref=e369]: B3
+            - button "查看/编辑BOM" [ref=e370] [cursor=pointer]:
+              - generic [ref=e371]: 查看/编辑BOM
+            - button "停用BOM" [ref=e372] [cursor=pointer]:
+              - generic [ref=e373]: 停用BOM
+            - button "启用BOM" [ref=e374] [cursor=pointer]:
+              - generic [ref=e375]: 启用BOM
+            - button "删除BOM" [ref=e376] [cursor=pointer]:
+              - generic [ref=e377]: 删除BOM
+            - button "移除常用" [ref=e378] [cursor=pointer]:
+              - generic [ref=e379]: 移除常用
+          - generic [ref=e380]:
+            - button "拖拽调整常用机型顺序" [ref=e381]:
+              - img [ref=e383]
+            - button "B5" [ref=e385] [cursor=pointer]:
+              - generic [ref=e386]: B5
+            - button "查看/编辑BOM" [ref=e387] [cursor=pointer]:
+              - generic [ref=e388]: 查看/编辑BOM
+            - button "停用BOM" [ref=e389] [cursor=pointer]:
+              - generic [ref=e390]: 停用BOM
+            - button "启用BOM" [ref=e391] [cursor=pointer]:
+              - generic [ref=e392]: 启用BOM
+            - button "删除BOM" [ref=e393] [cursor=pointer]:
+              - generic [ref=e394]: 删除BOM
+            - button "移除常用" [ref=e395] [cursor=pointer]:
+              - generic [ref=e396]: 移除常用
+          - generic [ref=e397]: 误操作创建且没有明细、适用客户或差异记录的无效空 BOM 可永久删除；正常暂不用的 BOM 建议停用。查看/编辑会进入机型零件包页维护表头、明细和拖拽顺序。
+        - generic [ref=e398]:
+          - generic [ref=e399]:
+            - generic [ref=e400]:
+              - strong [ref=e401]: 零件控制面板
+              - generic [ref=e402]: 第 1 页，已显示 0 / 0 条
+            - generic [ref=e403]:
+              - button "导出 Excel" [disabled] [ref=e404]:
+                - generic [ref=e405]: 导出 Excel
+              - button "复制筛选链接" [ref=e406] [cursor=pointer]:
+                - generic [ref=e407]: 复制筛选链接
+              - button "查看固定格式" [disabled] [ref=e408]:
+                - generic [ref=e409]: 查看固定格式
+              - button "复制当前页" [disabled] [ref=e410]:
+                - generic [ref=e411]: 复制当前页
+              - generic "零件控制面板表格高度" [ref=e412]:
+                - button "降低零件控制面板表格高度" [disabled] [ref=e413]:
+                  - img [ref=e415]
+                - button "提高零件控制面板表格高度" [ref=e417] [cursor=pointer]:
+                  - img [ref=e419]
+                - button "恢复零件控制面板表格默认高度" [ref=e421] [cursor=pointer]:
+                  - img [ref=e423]
+          - generic [ref=e425]:
+            - generic [ref=e426]:
+              - table [ref=e428]:
+                - rowgroup [ref=e445]:
+                  - row "零件编码 零件名称 类型 当前关系 适用客户 机型 / 项目 图纸 厚度 / 规格 默认数量 默认工艺 最近下单 库存 BOM 状态 操作" [ref=e446]:
+                    - columnheader "零件编码" [ref=e447]:
+                      - generic [ref=e448]: 零件编码
+                    - columnheader "零件名称" [ref=e449]:
+                      - generic [ref=e450]: 零件名称
+                    - columnheader "类型" [ref=e451]:
+                      - generic [ref=e452]: 类型
+                    - columnheader "当前关系" [ref=e453]:
+                      - generic [ref=e454]: 当前关系
+                    - columnheader "适用客户" [ref=e455]:
+                      - generic [ref=e456]: 适用客户
+                    - columnheader "机型 / 项目" [ref=e457]:
+                      - generic [ref=e458]: 机型 / 项目
+                    - columnheader "图纸" [ref=e459]:
+                      - generic [ref=e460]: 图纸
+                    - columnheader "厚度 / 规格" [ref=e461]:
+                      - generic [ref=e462]: 厚度 / 规格
+                    - columnheader "默认数量" [ref=e463]:
+                      - generic [ref=e464]: 默认数量
+                    - columnheader "默认工艺" [ref=e465]:
+                      - generic [ref=e466]: 默认工艺
+                    - columnheader "最近下单" [ref=e467]:
+                      - generic [ref=e468]: 最近下单
+                    - columnheader "库存" [ref=e469]:
+                      - generic [ref=e470]: 库存
+                    - columnheader "BOM" [ref=e471]:
+                      - generic [ref=e472]: BOM
+                    - columnheader "状态" [ref=e473]:
+                      - generic [ref=e474]: 状态
+                    - columnheader "操作" [ref=e475]:
+                      - generic [ref=e476]: 操作
+              - generic [ref=e480]:
+                - table:
+                  - rowgroup
+                - generic [ref=e482]: 暂无数据
+            - img [ref=e485]
+          - generic [ref=e488]:
+            - generic [ref=e489]: 共 0 条
+            - generic [ref=e492] [cursor=pointer]:
+              - generic:
+                - combobox [ref=e494]
+                - generic [ref=e495]: 50条/页
+              - img [ref=e498]
+            - button "上一页" [disabled] [ref=e500]:
+              - generic:
+                - img
+            - list [ref=e501]:
+              - listitem "第 1 页" [ref=e502]: "1"
+            - button "下一页" [disabled] [ref=e503]:
+              - generic:
+                - img

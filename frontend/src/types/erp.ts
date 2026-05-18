@@ -55,6 +55,14 @@ export interface ProcessTemplate {
   updatedAt: string;
 }
 
+export interface ProcessTemplateListResponse {
+  items: ProcessTemplate[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export interface ProcessDefinition {
   id: string;
   processName: string;
@@ -62,6 +70,14 @@ export interface ProcessDefinition {
   status: CommonStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProcessDefinitionListResponse {
+  items: ProcessDefinition[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface OrderQuantityByUnit {
@@ -276,6 +292,8 @@ export interface ProductionTask {
   projectModel?: string;
   drawingNo?: string;
   drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
   partThickness: number;
@@ -298,6 +316,14 @@ export interface ProductionTask {
   startedAt?: string;
   completedAt?: string;
   remark?: string;
+}
+
+export interface ProductionTaskListResponse {
+  items: ProductionTask[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface ProductionOrderSummaryTask {
@@ -376,6 +402,14 @@ export interface ProductionOrderSummary {
     shortageQuantity: number;
     unit: string;
   }>;
+}
+
+export interface ProductionOrderSummaryListResponse {
+  items: ProductionOrderSummary[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface ProductionProcessCompletion {
@@ -459,6 +493,14 @@ export interface ProductionNotice {
   createdAt: string;
 }
 
+export interface ProductionNoticeListResponse {
+  items: ProductionNotice[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export interface ProductionNoticeHandlingPlan {
   handlingMode: 'STOCK' | 'SCRAP' | 'NONE';
   handlingQuantity: number;
@@ -483,6 +525,14 @@ export interface ProductionScrapRecord {
   sourceRecordType: string;
   sourceRecordId: string;
   createdAt: string;
+}
+
+export interface ProductionScrapRecordListResponse {
+  items: ProductionScrapRecord[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface ProductionReplenishmentRequest {
@@ -514,6 +564,14 @@ export interface ProductionReplenishmentRequest {
   updatedAt: string;
 }
 
+export interface ProductionReplenishmentRequestListResponse {
+  items: ProductionReplenishmentRequest[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export interface ProductionAnnualSummaryRow {
   partCode: string;
   partName: string;
@@ -537,6 +595,28 @@ export interface OrderStatisticsSummaryRow {
   completedProductionQuantity: number;
   shippedOrderQuantity: number;
   stockQuantity: number;
+  currentInventoryQuantity: number;
+  currentOrderInventoryQuantity: number;
+  currentStockInventoryQuantity: number;
+  scrapQuantity: number;
+}
+
+export interface OrderStatisticsCustomerRow {
+  periodKey: string;
+  periodLabel: string;
+  customerId?: string;
+  customerName: string;
+  unit: string;
+  orderCount: number;
+  customerOrderQuantity: number;
+  productionPlanQuantity: number;
+  completedProductionQuantity: number;
+  shippedOrderQuantity: number;
+  stockQuantity: number;
+  currentInventoryQuantity: number;
+  currentOrderInventoryQuantity: number;
+  currentStockInventoryQuantity: number;
+  scrapQuantity: number;
 }
 
 export interface OrderStatisticsOrderRow {
@@ -555,9 +635,36 @@ export interface OrderStatisticsOrderRow {
   unit: string;
 }
 
+export interface OrderStatisticsInventorySnapshotRow {
+  partCode: string;
+  partName: string;
+  unit: string;
+  batchCount: number;
+  warehouseCount: number;
+  physicalQuantity: number;
+  reservedQuantity: number;
+  availableQuantity: number;
+  orderInventoryQuantity: number;
+  stockInventoryQuantity: number;
+  stockAlertEnabled: boolean;
+  stockAlertQuantity?: number | null;
+  stockAlertTriggered: boolean;
+}
+
 export interface OrderStatisticsResponse {
   period: StatisticsPeriod;
   year: number;
+  currentBusinessDate?: string;
+  statisticsEndDate?: string;
+  isFuturePeriod?: boolean;
+  isCurrentPeriodPartial?: boolean;
+  cutoffNotice?: string;
+  inventorySnapshotRows: OrderStatisticsInventorySnapshotRow[];
+  inventorySnapshotTotal?: number;
+  inventorySnapshotLimit?: number;
+  inventorySnapshotOffset?: number;
+  inventorySnapshotHasMore?: boolean;
+  customerRows: OrderStatisticsCustomerRow[];
   summaryRows: OrderStatisticsSummaryRow[];
   orderRows: OrderStatisticsOrderRow[];
 }
@@ -609,6 +716,8 @@ export interface WarehouseReceipt {
   unit: string;
   drawingNo?: string;
   drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
   partThickness?: number | null;
@@ -659,6 +768,8 @@ export interface WarehouseShipment {
   productionDate?: string;
   drawingNo?: string;
   drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
   partThickness?: number | null;
@@ -705,11 +816,21 @@ export interface InventoryBatch {
   productionDate?: string;
   drawingNo?: string;
   drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
   partThickness?: number | null;
   partSpecification?: string;
   status: InventoryStatus;
+}
+
+export interface InventoryBatchListResponse {
+  items: InventoryBatch[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface InventorySummaryWarehouseRow {
@@ -743,6 +864,14 @@ export interface InventorySummaryRow {
   warehouses: InventorySummaryWarehouseRow[];
 }
 
+export interface InventorySummaryListResponse {
+  items: InventorySummaryRow[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
 export interface InventoryMaterialSuggestion {
   value: string;
   materialId?: string;
@@ -750,10 +879,13 @@ export interface InventoryMaterialSuggestion {
   partName: string;
   unit: string;
   partSpecification?: string;
+  defaultProcessRoute?: string | null;
   drawingNo?: string;
   drawingVersion?: string;
   drawingDate?: string;
   drawingStatus?: string;
+  drawingFileName?: string;
+  drawingFileUrl?: string;
   partThickness?: number | null;
   projectModel?: string;
   matchedBatchNo?: string;
@@ -775,6 +907,7 @@ export interface InventoryMaterialSuggestion {
   matchedCustomerName?: string;
   matchedHistoryOrderNo?: string;
   historyCustomerNames?: string[];
+  historyCustomerCount?: number;
   availableQuantity: number;
   orderInventoryQuantity: number;
   stockInventoryQuantity: number;
@@ -786,6 +919,7 @@ export interface MaterialMemory {
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  defaultProcessRoute?: string | null;
   stockAlertEnabled: boolean;
   stockAlertQuantity?: number | null;
   status: CommonStatus;
@@ -796,8 +930,6 @@ export interface MaterialMemory {
   lastOrderNo?: string;
   lastCustomerName?: string;
   lastOrderDate?: string;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface MaterialMemoryListResponse {
@@ -837,11 +969,22 @@ export interface MaterialDashboardRow {
   currentRelationLabel?: string;
   currentRelationDescription?: string;
   customerNames: string[];
+  customerNameCount?: number;
+  customerScopeLabel?: string;
+  customerScopeKind?: 'ALL' | 'SCOPED' | 'ORDER_HISTORY' | 'NONE';
+  hasGlobalCustomerScope?: boolean;
+  historyCustomerNames?: string[];
+  historyCustomerCount?: number;
   projectModels: string[];
+  projectModelCount?: number;
+  historyProjectModels?: string[];
+  historyProjectModelCount?: number;
   hasGlobalProjectScope?: boolean;
   applicabilityCount: number;
   bomLineCount: number;
+  currentScopeBomLineCount?: number;
   bomNames: string[];
+  bomNameCount?: number;
   defaultQuantity?: number | null;
   defaultQuantityUnit?: string | null;
   defaultProcessRoute?: string | null;
@@ -858,6 +1001,7 @@ export interface MaterialDashboardRow {
   bomStructureTypes?: Array<'COMPONENT' | 'CHILD_PART' | 'STANDALONE_PART'>;
   bomStructureLabels?: string[];
   bomStructureDetails?: MaterialDashboardBomStructureDetail[];
+  bomStructureDetailCount?: number;
   lastOrderNo?: string | null;
   lastOrderDate?: string | null;
   lastCustomerName?: string | null;
@@ -869,8 +1013,6 @@ export interface MaterialDashboardRow {
   stockAlertEnabled: boolean;
   stockAlertQuantity?: number | null;
   stockAlertTriggered: boolean;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface MaterialDashboardSummary {
@@ -912,8 +1054,6 @@ export interface MaterialDrawingRevision {
   defaultChangedAt?: string | null;
   remark?: string | null;
   status: CommonStatus;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface MaterialDrawingRevisionResponse {
@@ -934,8 +1074,6 @@ export interface MaterialApplicability {
   sourceBomNameSnapshot?: string | null;
   remark?: string | null;
   status: CommonStatus;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface MaterialApplicabilityResponse {
@@ -962,6 +1100,7 @@ export interface MaterialImportPreviewRow {
   partName: string;
   unit: string;
   partSpecification?: string | null;
+  defaultProcessRoute?: string | null;
   drawingNo?: string | null;
   drawingVersion?: string | null;
   drawingDate?: string;
@@ -971,6 +1110,7 @@ export interface MaterialImportPreviewRow {
   stockAlertEnabled?: boolean | null;
   stockAlertQuantity?: number | null;
   remark?: string | null;
+  raw?: Record<string, string | number | boolean | null>;
   issues: MaterialImportIssue[];
   errorCount: number;
   warningCount: number;
@@ -987,6 +1127,7 @@ export interface MaterialApplicabilityImportPreviewRow {
   projectModel?: string | null;
   remark?: string | null;
   status: CommonStatus;
+  raw?: Record<string, string | number | boolean | null>;
   issues: MaterialImportIssue[];
   errorCount: number;
   warningCount: number;
@@ -1008,6 +1149,7 @@ export interface MaterialTransformImportPreviewRow {
   conversionDescription?: string | null;
   remark?: string | null;
   status: CommonStatus;
+  raw?: Record<string, string | number | boolean | null>;
   issues: MaterialImportIssue[];
   errorCount: number;
   warningCount: number;
@@ -1111,15 +1253,15 @@ export interface ModelBomLine {
   drawingFileName?: string | null;
   drawingFileUrl?: string | null;
   drawingSource?: 'BOM_LINE' | 'MATERIAL_DEFAULT' | 'MATERIAL_LATEST';
+  bomLineDefaultProcessRoute?: string | null;
   defaultProcessRoute?: string | null;
+  defaultProcessRouteSource?: 'BOM_LINE' | 'MATERIAL' | null;
   defaultQuantity: number;
   remark?: string | null;
   displayOrder?: number | null;
   sortOrder: number;
   status: CommonStatus;
   materialStatus?: CommonStatus;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface ModelBom {
@@ -1132,6 +1274,7 @@ export interface ModelBom {
   customerScopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
   scopeTypeLabel?: string;
   scopeCustomerIds?: string[];
+  scopeCustomerCount?: number;
   scopeCustomers?: Array<{
     customerId: string;
     customerCode?: string;
@@ -1147,9 +1290,24 @@ export interface ModelBom {
   remark?: string | null;
   status: CommonStatus;
   lineCount: number;
+  lineSummary?: ModelBomLineSummary;
+  sameScopeBomCount?: number;
   lines: ModelBomLine[];
-  createdAt: string;
-  updatedAt: string;
+}
+
+export interface ModelBomLineSummary {
+  componentCount: number;
+  childPartCount: number;
+  standalonePartCount: number;
+  orphanPartCount: number;
+  missingThicknessCount: number;
+  disabledCount: number;
+  materialDisabledCount: number;
+  effectiveCount: number;
+  inactiveCount: number;
+  confirmedThicknessCount: number;
+  historyThicknessCount: number;
+  noThicknessCount: number;
 }
 
 export interface ModelBomScopeSummary {
@@ -1169,6 +1327,184 @@ export interface ModelBomListResponse {
   scopeSummary: ModelBomScopeSummary;
 }
 
+export interface ModelBomRevision {
+  id: string;
+  bomId: string;
+  revisionNo: number;
+  action: string;
+  changedBy?: string | null;
+  changeRemark?: string | null;
+  snapshotJson?: unknown;
+  createdAt: string;
+}
+
+export interface ModelBomRevisionListResponse {
+  items: ModelBomRevision[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export type ModelBomScopeApprovalRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'USED';
+
+export interface ModelBomScopeApprovalRequest {
+  id: string;
+  requestNo: string;
+  bomId: string;
+  bomName: string;
+  requestType: string;
+  status: ModelBomScopeApprovalRequestStatus;
+  requestedBomName: string;
+  requestedCustomerScopeMode: 'ALL' | 'PRIVATE' | 'SELECTED';
+  requestedCustomerId?: string | null;
+  requestedCustomerNameSnapshot?: string | null;
+  requestedCustomerIds?: unknown;
+  requestedProjectModel: string;
+  requestedScopeKey: string;
+  requestedProjectModelScopeKey: string;
+  currentScopeJson?: unknown;
+  requestedScopeJson?: unknown;
+  reason: string;
+  requestedBy: string;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  rejectedBy?: string | null;
+  rejectedAt?: string | null;
+  reviewRemark?: string | null;
+  usedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelBomScopeApprovalRequestListResponse {
+  items: ModelBomScopeApprovalRequest[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface ModelBomDraftIssue {
+  severity: 'ERROR' | 'WARNING';
+  code: string;
+  message: string;
+}
+
+export interface ModelBomDraftPreviewLine {
+  sourceFileName?: string | null;
+  sourceSheetName?: string | null;
+  sourceRowNo: number;
+  orderNo: string;
+  lineType: 'PART' | 'COMPONENT';
+  partCategory?: string | null;
+  componentNo?: string | null;
+  parentComponentNo?: string | null;
+  partCode: string;
+  partName: string;
+  materialId?: string | null;
+  materialStatus?: CommonStatus | null;
+  drawingNo?: string | null;
+  drawingVersion?: string | null;
+  drawingDate?: string | null;
+  drawingStatus?: string | null;
+  partSpecification?: string | null;
+  partThickness?: number | null;
+  defaultQuantity: number;
+  unit: string;
+  defaultProcessRoute?: string | null;
+  sortOrder: number;
+  raw?: unknown;
+  issues: ModelBomDraftIssue[];
+}
+
+export interface ModelBomDraftExistingBomDiffSummary {
+  sameLineCount: number;
+  changedLineCount: number;
+  newLineCount: number;
+  removedLineCount: number;
+  changedFields: string[];
+}
+
+export interface ModelBomDraftExistingBomDiffField {
+  label: string;
+  draftValue: string;
+  existingValue: string;
+  changed: boolean;
+}
+
+export interface ModelBomDraftExistingBomDiffLineSnapshot {
+  id?: string | null;
+  sourceRowNo?: number | null;
+  orderNo?: string | null;
+  structureText: string;
+  partCode: string;
+  partName: string;
+  partCategory?: string | null;
+  defaultQuantityText: string;
+  unit: string;
+  partThicknessText?: string | null;
+  partSpecification?: string | null;
+  defaultProcessRoute?: string | null;
+}
+
+export interface ModelBomDraftExistingBomDiffLine {
+  key: string;
+  status: 'SAME' | 'CHANGED' | 'DRAFT_ONLY' | 'EXISTING_ONLY';
+  structureText: string;
+  partCode: string;
+  partName: string;
+  draftLine?: ModelBomDraftExistingBomDiffLineSnapshot | null;
+  existingLine?: ModelBomDraftExistingBomDiffLineSnapshot | null;
+  fields: ModelBomDraftExistingBomDiffField[];
+}
+
+export interface ModelBomDraftExistingBomSummary {
+  id: string;
+  bomName: string;
+  status: CommonStatus;
+  lineCount: number;
+  diffSummary?: ModelBomDraftExistingBomDiffSummary;
+  diffLines?: ModelBomDraftExistingBomDiffLine[];
+}
+
+export interface ModelBomDraftPreviewItem {
+  draftKey: string;
+  bomName: string;
+  commitBomName?: string;
+  customerId?: string | null;
+  customerCode?: string | null;
+  customerName: string;
+  customerScopeMode: 'PRIVATE';
+  projectModel?: string | null;
+  existingBom?: ModelBomDraftExistingBomSummary | null;
+  existingBoms?: ModelBomDraftExistingBomSummary[];
+  lineCount: number;
+  componentCount: number;
+  childPartCount: number;
+  standalonePartCount: number;
+  issues: ModelBomDraftIssue[];
+  lines: ModelBomDraftPreviewLine[];
+}
+
+export interface ModelBomDraftPreview {
+  sourceOrderImportSessionId: string;
+  sourceStatus: string;
+  previewToken: string;
+  summary: {
+    draftCount: number;
+    lineCount: number;
+    componentCount: number;
+    childPartCount: number;
+    standalonePartCount: number;
+    existingBomScopeCount: number;
+    missingMaterialCount: number;
+    errorCount: number;
+    warningCount: number;
+  };
+  drafts: ModelBomDraftPreviewItem[];
+}
+
 export interface ModelBomDiffReview {
   id: string;
   targetBomId: string;
@@ -1185,8 +1521,15 @@ export interface ModelBomDiffReview {
   reviewRemark?: string | null;
   status: CommonStatus;
   reviewedAt: string;
-  createdAt: string;
-  updatedAt: string;
+}
+
+export interface ModelBomDiffReviewListResponse {
+  items: ModelBomDiffReview[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  reviewKeys: string[];
 }
 
 export interface MaterialTransformRule {
@@ -1220,8 +1563,6 @@ export interface MaterialTransformRule {
   lossRate?: number | null;
   remark?: string | null;
   status: CommonStatus;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface MaterialTransformRuleListResponse {
@@ -1266,10 +1607,13 @@ export interface InventorySourceBatchDetail {
   deliveryDate?: string;
   drawingNo?: string;
   drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
   partThickness?: number | null;
   partSpecification?: string;
+  projectModel?: string;
   status: InventoryStatus;
   createdAt: string;
 }
@@ -1321,14 +1665,23 @@ export interface InventorySourceDetailResponse {
   orderSourceCount: number;
   stockSourceCount: number;
   sources: InventorySourceBatchDetail[];
+  totalSourceCount?: number;
+  sourceLimit?: number;
+  sourceOffset?: number;
+  sourceHasMore?: boolean;
 }
 
 export interface InventorySourceExpected {
   lineType?: 'PART' | 'COMPONENT';
+  partCategory?: string | null;
+  componentNo?: string | null;
+  parentComponentNo?: string | null;
   partCode?: string;
   partName?: string;
   drawingNo?: string;
   drawingVersion?: string;
+  drawingDate?: string;
+  drawingStatus?: string;
   drawingFileName?: string;
   drawingFileUrl?: string;
   partThickness?: number | null;
@@ -1371,6 +1724,12 @@ export interface WarehouseTransaction {
   componentNo?: string;
   parentComponentNo?: string;
   importSequence?: string;
+  drawingNo?: string | null;
+  drawingVersion?: string | null;
+  drawingDate?: string | null;
+  drawingStatus?: string | null;
+  drawingFileName?: string | null;
+  drawingFileUrl?: string | null;
   orderNo?: string;
   sourceOrderNo?: string;
   productionSourceOrderNo?: string;
@@ -1387,4 +1746,12 @@ export interface WarehouseTransaction {
   locationName?: string;
   transactionTime: string;
   remark?: string;
+}
+
+export interface WarehouseTransactionListResponse {
+  items: WarehouseTransaction[];
+  totalCount: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }

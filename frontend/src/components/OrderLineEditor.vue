@@ -4,13 +4,51 @@
       <strong>订单零件清单</strong>
       <span>已填写 {{ orderLineFixedTextLineCount }} 行 / 当前 {{ lines.length }} 行</span>
     </div>
-    <div>
+    <div class="order-line-fixed-toolbar-actions">
+      <div class="order-line-table-height-actions" aria-label="订单零件编辑表格高度">
+        <span class="order-line-table-height-label">表格高度</span>
+        <el-tooltip content="降低表格高度" placement="top">
+          <el-button
+            circle
+            size="small"
+            :icon="Minus"
+            :disabled="orderLineEditorTableHeight <= orderLineEditorTableHeightLimits.min"
+            aria-label="降低订单零件编辑表格高度"
+            @click="adjustOrderLineEditorTableHeight(-orderLineEditorTableHeightLimits.step)"
+          />
+        </el-tooltip>
+        <el-tooltip content="提高表格高度" placement="top">
+          <el-button
+            circle
+            size="small"
+            :icon="Plus"
+            :disabled="orderLineEditorTableHeight >= orderLineEditorTableHeightLimits.max"
+            aria-label="提高订单零件编辑表格高度"
+            @click="adjustOrderLineEditorTableHeight(orderLineEditorTableHeightLimits.step)"
+          />
+        </el-tooltip>
+        <el-tooltip content="恢复默认高度" placement="top">
+          <el-button
+            circle
+            size="small"
+            :icon="RefreshLeft"
+            aria-label="恢复订单零件编辑表格默认高度"
+            @click="resetOrderLineEditorTableHeight"
+          />
+        </el-tooltip>
+      </div>
       <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="openOrderLineFixedTextDialog">查看固定格式</el-button>
       <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="copyOrderLineFixedText">复制清单</el-button>
     </div>
   </div>
 
-  <el-table class="desktop-table order-line-table" :data="lines" border :row-class-name="orderLineRowClassName">
+  <el-table
+    class="desktop-table order-line-table"
+    :data="lines"
+    border
+    :row-class-name="orderLineRowClassName"
+    :max-height="orderLineEditorTableHeight"
+  >
     <el-table-column label="顺序" width="72" fixed="left" align="center">
       <template #default="{ $index }">
         <el-button
@@ -202,9 +240,28 @@
     <el-table-column label="版本" width="90">
       <template #default="{ row }"><el-input v-model="row.drawingVersion" placeholder="A" :disabled="readOnly" @input="handleStockComparableChange(row)" /></template>
     </el-table-column>
-    <el-table-column label="图纸" width="170">
+    <el-table-column label="图纸" width="230">
       <template #default="{ row }">
         <div class="drawing-upload-cell">
+          <el-select
+            v-if="row.partCode"
+            v-model="row.selectedDrawingRevisionId"
+            size="small"
+            clearable
+            filterable
+            placeholder="选择零件库图纸"
+            :loading="isDrawingRevisionLoading(row)"
+            :disabled="readOnly"
+            @visible-change="(visible: boolean) => handleDrawingRevisionVisibleChange(row, visible)"
+            @change="(revisionId: string) => selectLineDrawingRevision(row, revisionId)"
+          >
+            <el-option
+              v-for="revision in drawingRevisionOptionsForLine(row)"
+              :key="revision.id"
+              :label="formatDrawingRevisionOption(revision)"
+              :value="revision.id"
+            />
+          </el-select>
           <el-upload :show-file-list="false" :http-request="createUploadRequest(row)" accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf" :disabled="readOnly">
             <el-button size="small" :disabled="readOnly">上传图纸</el-button>
           </el-upload>
@@ -484,6 +541,24 @@
         <label>
           <span>图纸上传</span>
           <div class="drawing-upload-cell">
+            <el-select
+              v-if="line.partCode"
+              v-model="line.selectedDrawingRevisionId"
+              clearable
+              filterable
+              placeholder="选择零件库图纸"
+              :loading="isDrawingRevisionLoading(line)"
+              :disabled="readOnly"
+              @visible-change="(visible: boolean) => handleDrawingRevisionVisibleChange(line, visible)"
+              @change="(revisionId: string) => selectLineDrawingRevision(line, revisionId)"
+            >
+              <el-option
+                v-for="revision in drawingRevisionOptionsForLine(line)"
+                :key="revision.id"
+                :label="formatDrawingRevisionOption(revision)"
+                :value="revision.id"
+              />
+            </el-select>
             <el-upload :show-file-list="false" :http-request="createUploadRequest(line)" accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf" :disabled="readOnly">
               <el-button :disabled="readOnly">上传图纸</el-button>
             </el-upload>
@@ -572,10 +647,10 @@
 import { computed, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import type { UploadRequestOptions } from 'element-plus';
-import { Delete, Rank } from '@element-plus/icons-vue';
+import { Delete, Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import type { CreateOrderLinePayload, StockSourceSelectionPayload } from '../api/erp';
-import type { InventoryMaterialSuggestion, InventorySourceDetailResponse, InventorySourceExpected, InventorySummaryRow } from '../types/erp';
+import type { InventoryMaterialSuggestion, InventorySourceDetailResponse, InventorySourceExpected, InventorySummaryRow, MaterialDrawingRevision } from '../types/erp';
 import DrawingPreviewLink from './DrawingPreviewLink.vue';
 import InventorySourceDetailsDialog from './InventorySourceDetailsDialog.vue';
 import MaterialSuggestionOption from './MaterialSuggestionOption.vue';
@@ -636,6 +711,10 @@ const mobileLineExpansionInitialized = ref(false);
 const draggedLineIndex = ref<number | null>(null);
 const dragOverLineIndex = ref<number | null>(null);
 const dragOverLineInsertAfter = ref(false);
+const orderLineRuntimeIds = new WeakMap<CreateOrderLinePayload, string>();
+const drawingRevisionOptionsByLineId = ref<Record<string, MaterialDrawingRevision[]>>({});
+const drawingRevisionLoadingByLineId = ref<Record<string, boolean>>({});
+let orderLineRuntimeSeq = 0;
 const otherLineSelectedStockSources = computed(() =>
   currentSourceLine.value
     ? props.lines
@@ -667,6 +746,11 @@ const componentOptions = computed(() => {
 const orderLineFixedTextLines = computed(() => props.lines.filter((line) => !isBlankOrderLineForFixedText(line)));
 const orderLineFixedTextLineCount = computed(() => orderLineFixedTextLines.value.length);
 const orderLineFixedText = computed(() => buildOrderLineFixedText());
+const orderLineEditorTableHeightLimits = { min: 360, max: 920, step: 80 } as const;
+const orderLineEditorTableDefaultHeight = 560;
+const orderLineEditorTableHeightStorageKey = 'baisheng.erp.orderLineEditorTableHeight.v1';
+// 订单零件编辑表格高度只保存为本机 UI 偏好，不写入订单明细、导入草稿、生产或库存业务数据。
+const orderLineEditorTableHeight = ref(orderLineEditorTableDefaultHeight);
 
 const emit = defineEmits<{
   remove: [index: number];
@@ -683,7 +767,10 @@ type AutoMaterialField =
   | 'drawingVersion'
   | 'drawingDate'
   | 'drawingStatus'
+  | 'drawingFileName'
+  | 'drawingFileUrl'
   | 'projectModel'
+  | 'processRoute'
   | 'partThickness';
 type AutoMaterialSnapshot = {
   partCode: string;
@@ -704,6 +791,60 @@ const autoMaterialSnapshots = new WeakMap<CreateOrderLinePayload, AutoMaterialSn
 const materialIdentityWarnings = new WeakMap<CreateOrderLinePayload, MaterialIdentityWarning>();
 const materialIdentityWarningVersion = ref(0);
 const componentNoEditSnapshots = new WeakMap<CreateOrderLinePayload, string>();
+
+function clampOrderLineEditorTableHeight(value: number) {
+  const normalizedHeight = Math.round(Number(value));
+  if (!Number.isFinite(normalizedHeight)) {
+    return orderLineEditorTableDefaultHeight;
+  }
+  return Math.min(
+    orderLineEditorTableHeightLimits.max,
+    Math.max(orderLineEditorTableHeightLimits.min, normalizedHeight)
+  );
+}
+
+function adjustOrderLineEditorTableHeight(delta: number) {
+  orderLineEditorTableHeight.value = clampOrderLineEditorTableHeight(orderLineEditorTableHeight.value + delta);
+}
+
+function resetOrderLineEditorTableHeight() {
+  orderLineEditorTableHeight.value = orderLineEditorTableDefaultHeight;
+}
+
+function restoreOrderLineEditorTableHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const savedHeightText = window.localStorage.getItem(orderLineEditorTableHeightStorageKey);
+    if (!savedHeightText) {
+      return;
+    }
+    const savedHeight = Number(savedHeightText);
+    if (Number.isFinite(savedHeight)) {
+      orderLineEditorTableHeight.value = clampOrderLineEditorTableHeight(savedHeight);
+    }
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响订单零件编辑。
+  }
+}
+
+function saveOrderLineEditorTableHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(orderLineEditorTableHeightStorageKey, String(orderLineEditorTableHeight.value));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断订单零件编辑、库存来源核对或导入草稿维护。
+  }
+}
+
+restoreOrderLineEditorTableHeight();
+
+watch(orderLineEditorTableHeight, () => {
+  saveOrderLineEditorTableHeight();
+});
 
 watch(
   () => props.lines.length,
@@ -737,6 +878,150 @@ function expandAllMobileLineCards() {
 
 function collapseAllMobileLineCards() {
   expandedMobileLineIndexes.value = [];
+}
+
+function orderLineRuntimeId(line: CreateOrderLinePayload) {
+  const existing = orderLineRuntimeIds.get(line);
+  if (existing) {
+    return existing;
+  }
+  orderLineRuntimeSeq += 1;
+  const id = `line-${orderLineRuntimeSeq}`;
+  orderLineRuntimeIds.set(line, id);
+  return id;
+}
+
+function drawingRevisionOptionsForLine(line: CreateOrderLinePayload) {
+  return drawingRevisionOptionsByLineId.value[orderLineRuntimeId(line)] || [];
+}
+
+function isDrawingRevisionLoading(line: CreateOrderLinePayload) {
+  return Boolean(drawingRevisionLoadingByLineId.value[orderLineRuntimeId(line)]);
+}
+
+function setDrawingRevisionOptions(line: CreateOrderLinePayload, rows: MaterialDrawingRevision[]) {
+  const key = orderLineRuntimeId(line);
+  drawingRevisionOptionsByLineId.value = {
+    ...drawingRevisionOptionsByLineId.value,
+    [key]: rows
+  };
+}
+
+function setDrawingRevisionLoading(line: CreateOrderLinePayload, loading: boolean) {
+  const key = orderLineRuntimeId(line);
+  drawingRevisionLoadingByLineId.value = {
+    ...drawingRevisionLoadingByLineId.value,
+    [key]: loading
+  };
+}
+
+function clearSelectedMaterialDrawingRevisions(line: CreateOrderLinePayload) {
+  line.selectedMaterialId = '';
+  line.selectedDrawingRevisionId = '';
+  setDrawingRevisionOptions(line, []);
+}
+
+function formatDrawingRevisionOption(row: MaterialDrawingRevision) {
+  const parts = [
+    `${row.drawingNo} / ${row.drawingVersion}`,
+    row.isDefault ? '默认' : '',
+    row.drawingDate || '',
+    row.drawingStatus || '',
+    row.drawingFileName || ''
+  ].filter(Boolean);
+  return parts.join(' / ');
+}
+
+function matchDrawingRevisionId(line: CreateOrderLinePayload, rows: MaterialDrawingRevision[]) {
+  const drawingNo = normalizeMaterialSuggestionValue(line.drawingNo);
+  const drawingVersion = normalizeMaterialSuggestionValue(line.drawingVersion);
+  const drawingFileUrl = String(line.drawingFileUrl || '').trim();
+  const drawingFileName = normalizeMaterialSuggestionValue(line.drawingFileName);
+  const matched = rows.find((row) => {
+    const sameNo = normalizeMaterialSuggestionValue(row.drawingNo) === drawingNo;
+    const sameVersion = normalizeMaterialSuggestionValue(row.drawingVersion) === drawingVersion;
+    const sameUrl = drawingFileUrl && row.drawingFileUrl === drawingFileUrl;
+    const sameFileName = drawingFileName && normalizeMaterialSuggestionValue(row.drawingFileName) === drawingFileName;
+    return (sameNo && sameVersion) || sameUrl || sameFileName;
+  });
+  return matched?.id || '';
+}
+
+async function loadDrawingRevisionsForLine(line: CreateOrderLinePayload, materialId: string) {
+  if (!materialId) {
+    setDrawingRevisionOptions(line, []);
+    return;
+  }
+  setDrawingRevisionLoading(line, true);
+  try {
+    const response = await erpApi.materialDrawingRevisions(materialId);
+    const rows = response.items.filter((item) => item.status === 'ENABLED');
+    setDrawingRevisionOptions(line, rows);
+    line.selectedDrawingRevisionId = matchDrawingRevisionId(line, rows);
+  } catch (error) {
+    setDrawingRevisionOptions(line, []);
+    ElMessage.error(error instanceof Error ? error.message : '图纸版本加载失败，请确认零件基础库和后端服务');
+  } finally {
+    setDrawingRevisionLoading(line, false);
+  }
+}
+
+async function resolveLineMaterialId(line: CreateOrderLinePayload) {
+  const existing = line.selectedMaterialId?.trim();
+  if (existing) {
+    return existing;
+  }
+  const partCode = line.partCode?.trim();
+  if (!partCode) {
+    return '';
+  }
+  const matched = await erpApi.inventoryMaterialByPartCode(partCode, 'ENABLED');
+  line.selectedMaterialId = matched?.id || '';
+  return line.selectedMaterialId;
+}
+
+async function ensureDrawingRevisionsLoaded(line: CreateOrderLinePayload) {
+  if (readOnly.value) {
+    return;
+  }
+  if (drawingRevisionOptionsForLine(line).length > 0 || isDrawingRevisionLoading(line)) {
+    return;
+  }
+  const materialId = await resolveLineMaterialId(line);
+  if (materialId) {
+    await loadDrawingRevisionsForLine(line, materialId);
+  }
+}
+
+function handleDrawingRevisionVisibleChange(line: CreateOrderLinePayload, visible: boolean) {
+  if (visible) {
+    void ensureDrawingRevisionsLoaded(line);
+  }
+}
+
+function applyDrawingRevisionToLine(line: CreateOrderLinePayload, revision: MaterialDrawingRevision) {
+  if (guardReadOnlyOrderLineMutation('选择图纸版本')) {
+    return;
+  }
+  line.drawingNo = revision.drawingNo;
+  line.drawingVersion = revision.drawingVersion;
+  line.drawingDate = revision.drawingDate || undefined;
+  line.drawingStatus = revision.drawingStatus || '';
+  line.drawingFileName = revision.drawingFileName || '';
+  line.drawingFileUrl = revision.drawingFileUrl || '';
+  line.selectedDrawingRevisionId = revision.id;
+  invalidateStockSourceReview(line, false, true);
+}
+
+function selectLineDrawingRevision(line: CreateOrderLinePayload, revisionId: string) {
+  if (!revisionId) {
+    return;
+  }
+  const revision = drawingRevisionOptionsForLine(line).find((row) => row.id === revisionId);
+  if (!revision) {
+    return;
+  }
+  applyDrawingRevisionToLine(line, revision);
 }
 
 function guardReadOnlyOrderLineMutation(actionText: string) {
@@ -1600,10 +1885,15 @@ async function openStockDetails(line: CreateOrderLinePayload) {
   sourceDetails.value = null;
   sourceExpected.value = {
     lineType: line.lineType,
+    partCategory: line.partCategory,
+    componentNo: line.componentNo,
+    parentComponentNo: line.parentComponentNo,
     partCode: line.partCode,
     partName: line.partName,
     drawingNo: line.drawingNo,
     drawingVersion: line.drawingVersion,
+    drawingDate: line.drawingDate,
+    drawingStatus: line.drawingStatus,
     drawingFileName: line.drawingFileName,
     drawingFileUrl: line.drawingFileUrl,
     partThickness: line.partThickness,
@@ -1805,6 +2095,8 @@ function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryM
       line.drawingVersion?.trim() ||
       line.drawingDate ||
       line.drawingStatus?.trim() ||
+      line.drawingFileName?.trim() ||
+      line.drawingFileUrl?.trim() ||
       line.projectModel?.trim() ||
       line.partSpecification?.trim()
   );
@@ -1838,9 +2130,29 @@ function selectMaterialSuggestion(line: CreateOrderLinePayload, item: InventoryM
     line.drawingStatus = item.drawingStatus;
     autoFields.drawingStatus = item.drawingStatus;
   }
+  if (!line.drawingFileName && item.drawingFileName) {
+    line.drawingFileName = item.drawingFileName;
+    autoFields.drawingFileName = item.drawingFileName;
+  }
+  if (!line.drawingFileUrl && item.drawingFileUrl) {
+    line.drawingFileUrl = item.drawingFileUrl;
+    autoFields.drawingFileUrl = item.drawingFileUrl;
+  }
   if (!line.projectModel && item.projectModel) {
     line.projectModel = item.projectModel;
     autoFields.projectModel = item.projectModel;
+  }
+  if (!line.processRoute && item.defaultProcessRoute) {
+    // 零件默认工艺只作为订单行流程初始建议，保存后仍形成当前订单行自己的流程快照。
+    line.processRoute = item.defaultProcessRoute;
+    autoFields.processRoute = item.defaultProcessRoute;
+  }
+  line.selectedMaterialId = item.materialId || '';
+  line.selectedDrawingRevisionId = '';
+  if (line.selectedMaterialId) {
+    void loadDrawingRevisionsForLine(line, line.selectedMaterialId);
+  } else {
+    setDrawingRevisionOptions(line, []);
   }
   if (orderLineRequiresThickness(line) && !lineHadDrawingInfo && item.partThickness && Number(item.partThickness) > 0) {
     line.partThickness = item.partThickness;
@@ -1859,6 +2171,7 @@ function handlePartCodeInput(line: CreateOrderLinePayload) {
   }
   clearAutoMaterialFieldsWhenMaterialIdentityChanges(line);
   clearMaterialIdentityWarningWhenMaterialIdentityChanges(line);
+  clearSelectedMaterialDrawingRevisions(line);
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
     invalidateStockSourceReview(line, true);
   }
@@ -1870,6 +2183,7 @@ function handlePartNameInput(line: CreateOrderLinePayload) {
   }
   clearAutoMaterialFieldsWhenMaterialIdentityChanges(line);
   clearMaterialIdentityWarningWhenMaterialIdentityChanges(line);
+  clearSelectedMaterialDrawingRevisions(line);
   if (line.selectedStockSources?.length || line.stockSourceReviewed) {
     invalidateStockSourceReview(line, true);
   }
@@ -1933,7 +2247,10 @@ function clearAutoMaterialFieldsWhenMaterialIdentityChanges(line: CreateOrderLin
   clearTextField('drawingVersion');
   clearTextField('drawingDate', undefined);
   clearTextField('drawingStatus');
+  clearTextField('drawingFileName');
+  clearTextField('drawingFileUrl');
   clearTextField('projectModel');
+  clearTextField('processRoute');
   if (
     snapshot.autoFields.unit !== undefined &&
     normalizeMaterialSuggestionValue(line.unit) === normalizeMaterialSuggestionValue(String(snapshot.autoFields.unit || ''))
@@ -1970,6 +2287,7 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
     // 图纸先上传到后端文件目录，订单保存时只保存文件名和访问地址。
     line.drawingFileName = result.fileName;
     line.drawingFileUrl = result.fileUrl;
+    line.selectedDrawingRevisionId = '';
     invalidateStockSourceReview(line, false, true);
     options.onSuccess?.(result);
     ElMessage.success('图纸已上传');
@@ -1998,6 +2316,24 @@ async function uploadDrawing(options: UploadRequestOptions, line: CreateOrderLin
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.order-line-fixed-toolbar-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.order-line-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 4px;
+}
+
+.order-line-table-height-label {
+  color: #475569;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .order-line-fixed-toolbar span {

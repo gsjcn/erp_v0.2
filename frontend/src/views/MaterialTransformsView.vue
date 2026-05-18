@@ -7,6 +7,7 @@
       </div>
       <div class="page-actions">
         <el-button @click="router.push('/materials')">返回零件管理</el-button>
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="exporting" @click="exportTransformRulesExcel">导出 Excel</el-button>
         <el-button
           v-if="!isMobileLayout"
           type="primary"
@@ -144,7 +145,32 @@
     </div>
 
     <div class="table-card desktop-table">
-      <el-table v-loading="loading" :data="rules" max-height="650">
+      <div v-if="!isMobileLayout" class="transform-table-height-toolbar">
+        <div class="transform-table-height-actions" aria-label="来源加工关系表格高度">
+          <span class="transform-table-height-label">来源加工关系表格高度</span>
+          <el-button-group>
+            <el-button
+              :icon="Minus"
+              :disabled="transformRuleTableHeight <= transformRuleTableHeightLimits.min"
+              aria-label="降低来源加工关系表格高度"
+              @click="adjustTransformRuleTableHeight(-transformRuleTableHeightLimits.step)"
+            />
+            <el-button
+              :icon="Plus"
+              :disabled="transformRuleTableHeight >= transformRuleTableHeightLimits.max"
+              aria-label="提高来源加工关系表格高度"
+              @click="adjustTransformRuleTableHeight(transformRuleTableHeightLimits.step)"
+            />
+            <el-button
+              :icon="RefreshLeft"
+              :disabled="transformRuleTableHeight === transformRuleTableDefaultHeight"
+              aria-label="恢复来源加工关系表格默认高度"
+              @click="resetTransformRuleTableHeight"
+            />
+          </el-button-group>
+        </div>
+      </div>
+      <el-table v-loading="loading" :data="rules" :max-height="transformRuleTableHeight">
         <template #empty>
           <div class="transform-empty">
             <strong>暂无来源加工关系</strong>
@@ -182,10 +208,18 @@
             <el-tag class="inventory-decision-tag" :type="transformInventoryDecision(row).type" effect="plain" size="small">
               {{ transformInventoryDecision(row).label }}
             </el-tag>
-            <div class="inventory-decision-reason">{{ transformInventoryDecisionReason(row) }}</div>
+            <div class="inventory-decision-reason" :title="transformInventoryDecisionReasonTitle(row)">
+              {{ transformInventoryDecisionReasonPreview(row) }}
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="scopeLabel" label="适用范围" min-width="220" />
+        <el-table-column label="适用范围" min-width="220">
+          <template #default="{ row }">
+            <el-tooltip :content="transformScopeTitle(row)" placement="top">
+              <span class="transform-scope-cell">{{ transformScopePreview(row) }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column label="换算" width="150">
           <template #default="{ row }">
             <div>倍率 {{ row.multiplier }}</div>
@@ -193,10 +227,18 @@
           </template>
         </el-table-column>
         <el-table-column prop="defaultProcessRoute" label="建议工艺" min-width="180">
-          <template #default="{ row }">{{ row.defaultProcessRoute || '-' }}</template>
+          <template #default="{ row }">
+            <el-tooltip :content="processRouteTooltipText(row.defaultProcessRoute)" placement="top" :disabled="!row.defaultProcessRoute">
+              <span>{{ formatProcessRoutePreview(row.defaultProcessRoute) }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
         <el-table-column prop="conversionDescription" label="转换说明" min-width="240">
-          <template #default="{ row }">{{ row.conversionDescription || '-' }}</template>
+          <template #default="{ row }">
+            <el-tooltip :content="longTextTooltipText(row.conversionDescription)" placement="top" :disabled="!row.conversionDescription">
+              <span>{{ formatLongTextPreview(row.conversionDescription) }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
@@ -204,9 +246,6 @@
               {{ row.status === 'ENABLED' ? '启用' : '停用' }}
             </el-tag>
           </template>
-        </el-table-column>
-        <el-table-column label="更新时间" width="160">
-          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
@@ -291,8 +330,8 @@
         <el-tag :type="transformInventoryDecision(row).type" effect="plain" size="small">
           {{ transformInventoryDecision(row).label }}
         </el-tag>
-        <p>{{ transformInventoryDecisionReason(row) }}</p>
-        <p>{{ row.scopeLabel }} / 倍率 {{ row.multiplier }} / 损耗 {{ row.lossRate ?? '-' }}</p>
+        <p :title="transformInventoryDecisionReasonTitle(row)">{{ transformInventoryDecisionReasonPreview(row, 36) }}</p>
+        <p :title="transformScopeTitle(row)">{{ transformScopePreview(row) }} / 倍率 {{ row.multiplier }} / 损耗 {{ row.lossRate ?? '-' }}</p>
         <div class="mobile-actions">
           <el-button size="small" type="primary" plain :disabled="sourceDetailsLoading" @click="openTransformSourceDetails(row)">来源库存</el-button>
           <el-button size="small" type="primary" plain :disabled="sourceDetailsLoading" @click="openTransformTargetDetails(row)">目标库存</el-button>
@@ -457,6 +496,7 @@
       v-model="sourceDetailsVisible"
       :loading="sourceDetailsLoading"
       :detail="sourceDetails"
+      @source-page-change="handleSourceDetailsPageChange"
     />
 
     <el-dialog
@@ -516,7 +556,8 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Rank } from '@element-plus/icons-vue';
+import { Download } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi, type SaveMaterialTransformRulePayload, type UpdateMaterialTransformRulePayload } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
@@ -529,13 +570,15 @@ import type {
   MaterialTransformRule,
   ProcessDefinition
 } from '../types/erp';
-import { formatDateTime, formatQuantity } from '../utils/format';
+import { formatQuantity } from '../utils/format';
+import { formatFileDateTime } from '../utils/tableExport';
 
 const router = useRouter();
 const route = useRoute();
 const { isMobileLayout } = useDeviceProfile();
 const loading = ref(false);
 const saving = ref(false);
+const exporting = ref(false);
 const prefillLoading = ref(false);
 const operationSavingId = ref('');
 const dialogVisible = ref(false);
@@ -543,6 +586,22 @@ const sourceDetailsVisible = ref(false);
 const sourceDetailsLoading = ref(false);
 const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
 const sourceDetailsRequestSeq = ref(0);
+const sourceDetailsContext = reactive<{
+  partCode: string;
+  unit?: string;
+  customerId?: string;
+  label: string;
+}>({
+  partCode: '',
+  unit: undefined,
+  customerId: undefined,
+  label: '零件'
+});
+const sourceDetailsPagination = reactive({
+  rowsPerPage: 20,
+  offset: 0,
+  total: 0
+});
 const transformRulesTextDialogVisible = ref(false);
 const ruleStatusDialogVisible = ref(false);
 const ruleStatusSaving = ref(false);
@@ -565,6 +624,17 @@ const rulePagination = reactive({
   limit: Number(20),
   total: Number(0)
 });
+
+const transformRuleTableHeightLimits = {
+  min: 360,
+  max: 880,
+  step: 80
+};
+
+const transformRuleTableDefaultHeight = 650;
+const transformRuleTableHeightStorageKey = 'baisheng.erp.materialTransformRuleTableHeight.v1';
+// 来源加工关系表格高度只保存为本机 UI 偏好，不写入来源规则、订单、生产或库存业务数据。
+const transformRuleTableHeight = ref(transformRuleTableDefaultHeight);
 
 const filters = reactive<{
   keyword: string;
@@ -607,6 +677,46 @@ const form = reactive({
 const dialogTitle = computed(() => (form.id ? '编辑来源加工关系' : '新增来源加工关系'));
 const ruleStatusActionText = computed(() => (ruleStatusAction.value === 'disable' ? '停用' : '启用'));
 const ruleStatusDialogTitle = computed(() => `${ruleStatusActionText.value}来源加工关系`);
+
+function clampTransformRuleTableHeight(value: number) {
+  return Math.min(transformRuleTableHeightLimits.max, Math.max(transformRuleTableHeightLimits.min, value));
+}
+
+function adjustTransformRuleTableHeight(delta: number) {
+  transformRuleTableHeight.value = clampTransformRuleTableHeight(transformRuleTableHeight.value + delta);
+}
+
+function resetTransformRuleTableHeight() {
+  transformRuleTableHeight.value = transformRuleTableDefaultHeight;
+}
+
+function restoreTransformRuleTableHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(transformRuleTableHeightStorageKey);
+    const savedHeight = Number(rawValue);
+    if (Number.isFinite(savedHeight)) {
+      transformRuleTableHeight.value = clampTransformRuleTableHeight(savedHeight);
+    }
+  } catch {
+    transformRuleTableHeight.value = transformRuleTableDefaultHeight;
+  }
+}
+
+function saveTransformRuleTableHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(transformRuleTableHeightStorageKey, String(transformRuleTableHeight.value));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断来源加工关系查询、建议维护或库存来源核对。
+  }
+}
 
 const transformDecisionSummary = computed(() => {
   const summary = {
@@ -654,8 +764,7 @@ const transformRulesFixedText = computed(() => {
     '损耗',
     '建议工艺',
     '转换说明',
-    '状态',
-    '更新时间'
+    '状态'
   ].join('\t');
   const rows = rules.value.map((row, index) =>
     [
@@ -668,13 +777,12 @@ const transformRulesFixedText = computed(() => {
       row.targetPartCode,
       row.targetPartName,
       `${formatQuantity(row.targetAvailableQuantity ?? 0, row.targetUnit)} / ${row.targetAvailableBatchCount ?? 0} 批`,
-      row.scopeLabel,
+      transformScopePreview(row),
       row.multiplier,
       row.lossRate ?? '-',
-      row.defaultProcessRoute || '-',
+      formatProcessRoutePreview(row.defaultProcessRoute),
       row.conversionDescription || '-',
-      row.status === 'ENABLED' ? '启用' : '停用',
-      formatDateTime(row.updatedAt)
+      row.status === 'ENABLED' ? '启用' : '停用'
     ].join('\t')
   );
   const filterText = [
@@ -731,6 +839,14 @@ function transformInventoryDecisionReason(row: MaterialTransformRule) {
   return '来源零件和目标零件都暂无可用库存，提交生产时仍需人工确认重新生产。';
 }
 
+function transformInventoryDecisionReasonPreview(row: MaterialTransformRule, maxLength = 32) {
+  return formatLongTextPreview(transformInventoryDecisionReason(row), maxLength, '-');
+}
+
+function transformInventoryDecisionReasonTitle(row: MaterialTransformRule) {
+  return transformInventoryDecisionReason(row);
+}
+
 function setInventoryDecisionFilter(value: 'ALL' | TransformInventoryDecisionValue) {
   filters.inventoryDecision = value;
   searchRules();
@@ -777,6 +893,34 @@ async function loadRules() {
     ElMessage.error(error instanceof Error ? error.message : '来源加工关系加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
+  }
+}
+
+function transformRuleRequestFilters() {
+  return {
+    keyword: filters.keyword.trim() || undefined,
+    targetPartCode: filters.targetPartCode.trim() || undefined,
+    customerId: filters.customerId || undefined,
+    projectModel: filters.projectModel.trim() || undefined,
+    status: filters.status,
+    sourceStockStatus: filters.sourceStockStatus,
+    targetStockStatus: filters.targetStockStatus,
+    inventoryDecision: filters.inventoryDecision
+  };
+}
+
+async function exportTransformRulesExcel() {
+  if (exporting.value) {
+    return;
+  }
+  exporting.value = true;
+  try {
+    await erpApi.downloadMaterialTransformRulesExport(transformRuleRequestFilters(), `来源加工关系_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('来源加工关系 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '来源加工关系导出失败，请稍后重试');
+  } finally {
+    exporting.value = false;
   }
 }
 
@@ -942,8 +1086,7 @@ async function prefillTargetMaterialFromFilter() {
   }
   prefillLoading.value = true;
   try {
-    const rows = await erpApi.inventoryMaterials({ keyword: targetPartCode, status: 'ENABLED' });
-    const matched = rows.find((item) => normalizeMaterialCode(item.partCode) === normalizeMaterialCode(targetPartCode));
+    const matched = await erpApi.inventoryMaterialByPartCode(targetPartCode, 'ENABLED');
     if (matched) {
       selectTargetMaterial(matched);
     } else {
@@ -1026,6 +1169,39 @@ function splitDefaultProcessRoute(value: string) {
     .split(/(?:->|→|[、,，;；\n\r]+)/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function formatProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const steps = splitDefaultProcessRoute(String(value || ''));
+  if (steps.length === 0) {
+    return emptyText;
+  }
+  const preview = steps.filter((_, index) => index < 3).join('、');
+  return steps.length > 3 ? `${preview} 等 ${steps.length} 个工序` : preview;
+}
+
+function processRouteTooltipText(value?: string | null) {
+  return String(value || '').trim();
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function longTextTooltipText(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
+function transformScopePreview(row: MaterialTransformRule) {
+  return formatLongTextPreview(row.scopeLabel, 28, '-');
+}
+
+function transformScopeTitle(row: MaterialTransformRule) {
+  return `适用范围：${transformScopePreview(row)}。完整范围请进入来源加工关系详情核对；来源加工关系只作为库存来源核对建议，不会自动扣库存或生成生产任务。`;
 }
 
 function handleDefaultProcessRouteChange() {
@@ -1154,7 +1330,7 @@ async function queryMaterials(keyword: string, sequenceRef: { value: number }, c
     return;
   }
   try {
-    const rows = await erpApi.inventoryMaterials({ keyword: normalizedKeyword, status: 'ENABLED' });
+    const rows = await erpApi.inventoryMaterialsAllPages({ keyword: normalizedKeyword, status: 'ENABLED' });
     if (requestId === sequenceRef.value) {
       callback(rows);
     }
@@ -1323,20 +1499,46 @@ async function openTransformInventoryDetails(row: MaterialTransformRule, partRol
   sourceDetailsVisible.value = true;
   sourceDetailsLoading.value = true;
   sourceDetails.value = null;
+  sourceDetailsContext.partCode = partCode;
+  sourceDetailsContext.unit = unit;
+  sourceDetailsContext.customerId = row.customerId || filters.customerId || undefined;
+  sourceDetailsContext.label = label;
+  sourceDetailsPagination.offset = Number(0);
+  sourceDetailsPagination.total = Number(0);
+  await loadSourceDetails(partCode);
+}
+
+async function loadSourceDetails(partCode = sourceDetailsContext.partCode) {
+  if (!partCode.trim()) {
+    return;
+  }
   const requestId = ++sourceDetailsRequestSeq.value;
   try {
-    const detail = await erpApi.inventoryMaterialSourceDetails(partCode, {
-      unit,
+    sourceDetailsLoading.value = true;
+    const detail = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
+      unit: sourceDetailsContext.unit,
       sourceType: 'ALL',
-      customerId: row.customerId || filters.customerId || undefined
+      customerId: sourceDetailsContext.customerId,
+      limit: sourceDetailsPagination.rowsPerPage,
+      offset: sourceDetailsPagination.offset,
+      withPage: true
     });
-    if (requestId === sourceDetailsRequestSeq.value) {
-      sourceDetails.value = detail;
+    if (requestId !== sourceDetailsRequestSeq.value) {
+      return;
     }
+    if (detail.totalSourceCount && detail.sources.length === 0 && sourceDetailsPagination.offset > 0) {
+      sourceDetailsPagination.offset =
+        Math.max(Math.ceil(detail.totalSourceCount / sourceDetailsPagination.rowsPerPage) - 1, 0) * sourceDetailsPagination.rowsPerPage;
+      await loadSourceDetails();
+      return;
+    }
+    sourceDetails.value = detail;
+    sourceDetailsPagination.total = Number(detail.totalSourceCount ?? detail.batchCount ?? detail.sources.length);
   } catch (error) {
     if (requestId === sourceDetailsRequestSeq.value) {
       sourceDetails.value = null;
-      ElMessage.error(error instanceof Error ? error.message : `${label}库存查询失败，请确认零件和后端服务`);
+      sourceDetailsPagination.total = Number(0);
+      ElMessage.error(error instanceof Error ? error.message : `${sourceDetailsContext.label}库存查询失败，请确认零件和后端服务`);
     }
   } finally {
     if (requestId === sourceDetailsRequestSeq.value) {
@@ -1345,11 +1547,22 @@ async function openTransformInventoryDetails(row: MaterialTransformRule, partRol
   }
 }
 
+function handleSourceDetailsPageChange(offset: number) {
+  sourceDetailsPagination.offset = offset;
+  void loadSourceDetails();
+}
+
 onMounted(() => {
+  restoreTransformRuleTableHeight();
   applyRouteFilters();
   void loadRules();
   void loadProcessDefinitions();
 });
+
+watch(
+  () => transformRuleTableHeight.value,
+  () => saveTransformRuleTableHeight()
+);
 
 watch(
   () => route.query,
@@ -1426,6 +1639,25 @@ watch(
   white-space: nowrap;
 }
 
+.transform-table-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 0 8px;
+}
+
+.transform-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transform-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
 .table-pagination-row,
 .mobile-pagination-row {
   display: flex;
@@ -1493,6 +1725,15 @@ watch(
 
 .stock-summary-line.target strong.is-empty {
   color: #dc2626;
+}
+
+.transform-scope-cell {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  color: #334155;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inventory-decision-tag {

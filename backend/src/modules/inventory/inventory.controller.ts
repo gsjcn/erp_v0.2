@@ -19,14 +19,18 @@ import { randomUUID } from 'node:crypto';
 import { extname } from 'node:path';
 import { businessDateTimeKey } from '../../common/business-date';
 import { normalizeMultipartFileName } from '../../common/upload-filenames';
-import { inventoryAdjustmentUploadPath, materialImportUploadPath } from '../../storage/upload-paths';
+import { drawingUploadPath, inventoryAdjustmentUploadPath, materialImportUploadPath } from '../../storage/upload-paths';
 import {
   AdjustInventoryBatchDto,
+  CommitModelBomDraftFromOrderImportDto,
   CommitMaterialImportSessionDto,
   ConfirmModelBomDiffReviewDto,
   CopyModelBomDto,
   CreateMaterialDto,
+  CreateMaterialImportFromOrderImportDto,
   CreateMaterialImportSessionDto,
+  CreateModelBomDraftFromOrderImportDto,
+  CreateModelBomScopeApprovalRequestDto,
   GetMaterialImportSessionQueryDto,
   InventoryQueryDto,
   InventorySourceDetailQueryDto,
@@ -35,8 +39,11 @@ import {
   MaterialTransformRuleQueryDto,
   ModelBomDiffReviewQueryDto,
   ModelBomQueryDto,
+  ModelBomRevisionQueryDto,
+  ModelBomScopeApprovalRequestQueryDto,
   ReorderModelBomCommonDto,
   ReorderModelBomLinesDto,
+  ReviewModelBomScopeApprovalRequestDto,
   SaveMaterialApplicabilityDto,
   SaveMaterialDrawingRevisionDto,
   SaveMaterialTransformRuleDto,
@@ -50,6 +57,7 @@ import { InventoryService } from './inventory.service';
 
 const allowedAdjustmentExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff']);
 const allowedMaterialImportExtensions = new Set(['.xlsx']);
+const allowedMaterialDrawingExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.dwg', '.dxf']);
 const allowedAdjustmentMimeTypes = new Set([
   'application/pdf',
   'image/png',
@@ -62,7 +70,9 @@ const allowedAdjustmentMimeTypes = new Set([
 const genericUploadMimeTypes = new Set(['', 'application/octet-stream']);
 
 function materialImportUploadMaxBytes() {
-  return Number(process.env.MATERIAL_IMPORT_UPLOAD_MAX_MB || 100) * 1024 * 1024;
+  const configuredMb = Number(process.env.MATERIAL_IMPORT_UPLOAD_MAX_MB || 100);
+  const safeMb = Number.isFinite(configuredMb) && configuredMb > 0 ? configuredMb : 100;
+  return safeMb * 1024 * 1024;
 }
 
 function safeAdjustmentFileName(
@@ -97,6 +107,22 @@ function safeMaterialImportFileName(
   callback(null, `${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'material-import'}${extension}`);
 }
 
+function safeMaterialDrawingFileName(
+  _request: unknown,
+  file: Express.Multer.File,
+  callback: (error: Error | null, filename: string) => void
+) {
+  const originalName = normalizeMultipartFileName(file.originalname);
+  const extension = extname(originalName).toLowerCase();
+  const baseName = originalName
+    .replace(extension, '')
+    .replace(/[^\w\u4e00-\u9fa5-]+/g, '-')
+    .slice(0, 60);
+  const uniqueSuffix = randomUUID().slice(0, 8);
+  // 零件基础库图纸文件和订单图纸使用同一图纸目录；文件名保留业务时区时间，方便后续按上传时间追溯。
+  callback(null, `${businessDateTimeKey()}-${uniqueSuffix}-${baseName || 'material-drawing'}${extension}`);
+}
+
 @Controller('inventory')
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
@@ -106,6 +132,13 @@ export class InventoryController {
     return this.inventoryService.summary(query);
   }
 
+  @Get('export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="inventory-export.xlsx"')
+  async inventoryExport(@Query() query: InventoryQueryDto) {
+    return new StreamableFile(await this.inventoryService.buildInventoryExport(query));
+  }
+
   @Get('materials/suggestions')
   materialSuggestions(@Query() query: MaterialSuggestionQueryDto) {
     return this.inventoryService.materialSuggestions(query);
@@ -113,7 +146,14 @@ export class InventoryController {
 
   @Get('materials')
   materials(@Query() query: MaterialQueryDto) {
-    return this.inventoryService.materials(query);
+    return this.inventoryService.materials({ ...query, withPage: 'true' });
+  }
+
+  @Get('materials/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="inventory-materials-export.xlsx"')
+  async materialsExport(@Query() query: MaterialQueryDto) {
+    return new StreamableFile(await this.inventoryService.buildMaterialMemoryExport(query));
   }
 
   @Post('materials')
@@ -121,9 +161,48 @@ export class InventoryController {
     return this.inventoryService.createMaterial(dto);
   }
 
+  @Post('material-drawings/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: diskStorage({
+        destination: drawingUploadPath(),
+        filename: safeMaterialDrawingFileName
+      }),
+      limits: { fileSize: 30 * 1024 * 1024 },
+      fileFilter: (_request, file, callback) => {
+        const extension = extname(normalizeMultipartFileName(file.originalname)).toLowerCase();
+        if (!allowedMaterialDrawingExtensions.has(extension)) {
+          callback(new BadRequestException('图纸文件格式不支持'), false);
+          return;
+        }
+        callback(null, true);
+      }
+    })
+  )
+  uploadMaterialDrawing(@UploadedFile() file?: Express.Multer.File) {
+    if (!file) {
+      throw new BadRequestException('必须上传图纸文件');
+    }
+
+    return {
+      fileName: normalizeMultipartFileName(file.originalname),
+      storedFileName: file.filename,
+      fileUrl: `/uploads/drawings/${file.filename}`,
+      size: file.size,
+      mimeType: file.mimetype
+    };
+  }
+
   @Get('materials/:materialId/drawing-revisions')
   materialDrawingRevisions(@Param('materialId') materialId: string) {
     return this.inventoryService.materialDrawingRevisions(materialId);
+  }
+
+  @Get('materials/:materialId/drawing-revisions/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="material-drawing-revisions-export.xlsx"')
+  async materialDrawingRevisionsExport(@Param('materialId') materialId: string) {
+    return new StreamableFile(await this.inventoryService.buildMaterialDrawingRevisionsExport(materialId));
   }
 
   @Post('materials/:materialId/drawing-revisions')
@@ -149,6 +228,14 @@ export class InventoryController {
   @Post('material-import-sessions')
   createMaterialImportSession(@Body() dto: CreateMaterialImportSessionDto) {
     return this.inventoryService.createMaterialImportSession(dto);
+  }
+
+  @Post('material-import-sessions/from-order-import/:orderImportSessionId')
+  createMaterialImportSessionFromOrderImport(
+    @Param('orderImportSessionId') orderImportSessionId: string,
+    @Body() dto: CreateMaterialImportFromOrderImportDto
+  ) {
+    return this.inventoryService.createMaterialImportSessionFromOrderImport(orderImportSessionId, dto);
   }
 
   @Get('material-import-template')
@@ -225,6 +312,13 @@ export class InventoryController {
     return this.inventoryService.materialApplicabilities(materialId);
   }
 
+  @Get('materials/:materialId/applicabilities/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="material-applicabilities-export.xlsx"')
+  async materialApplicabilitiesExport(@Param('materialId') materialId: string) {
+    return new StreamableFile(await this.inventoryService.buildMaterialApplicabilitiesExport(materialId));
+  }
+
   @Post('materials/:materialId/applicabilities')
   saveMaterialApplicability(@Param('materialId') materialId: string, @Body() dto: SaveMaterialApplicabilityDto) {
     return this.inventoryService.saveMaterialApplicability(materialId, dto);
@@ -262,12 +356,42 @@ export class InventoryController {
 
   @Get('model-boms')
   modelBoms(@Query() query: ModelBomQueryDto) {
-    return this.inventoryService.modelBoms(query);
+    return this.inventoryService.modelBoms({ ...query, withPage: 'true' });
+  }
+
+  @Get('model-boms/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="model-boms-export.xlsx"')
+  async modelBomsExport(@Query() query: ModelBomQueryDto) {
+    return new StreamableFile(await this.inventoryService.buildModelBomsExport(query));
+  }
+
+  @Post('model-bom-drafts/from-order-import/:orderImportSessionId')
+  createModelBomDraftsFromOrderImport(
+    @Param('orderImportSessionId') orderImportSessionId: string,
+    @Body() dto: CreateModelBomDraftFromOrderImportDto
+  ) {
+    return this.inventoryService.createModelBomDraftsFromOrderImport(orderImportSessionId, dto);
+  }
+
+  @Post('model-bom-drafts/from-order-import/:orderImportSessionId/commit')
+  commitModelBomDraftFromOrderImport(
+    @Param('orderImportSessionId') orderImportSessionId: string,
+    @Body() dto: CommitModelBomDraftFromOrderImportDto
+  ) {
+    return this.inventoryService.commitModelBomDraftFromOrderImport(orderImportSessionId, dto);
   }
 
   @Get('model-boms/:bomId/diff-reviews')
   modelBomDiffReviews(@Param('bomId') bomId: string, @Query() query: ModelBomDiffReviewQueryDto) {
-    return this.inventoryService.modelBomDiffReviews(bomId, query);
+    return this.inventoryService.modelBomDiffReviews(bomId, { ...query, withPage: 'true' });
+  }
+
+  @Get('model-boms/:bomId/diff-reviews/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="model-bom-diff-reviews-export.xlsx"')
+  async modelBomDiffReviewsExport(@Param('bomId') bomId: string, @Query() query: ModelBomDiffReviewQueryDto) {
+    return new StreamableFile(await this.inventoryService.buildModelBomDiffReviewsExport(bomId, query));
   }
 
   @Post('model-boms/:bomId/diff-reviews')
@@ -278,6 +402,31 @@ export class InventoryController {
   @Delete('model-bom-diff-reviews/:reviewId')
   disableModelBomDiffReview(@Param('reviewId') reviewId: string) {
     return this.inventoryService.disableModelBomDiffReview(reviewId);
+  }
+
+  @Get('model-boms/:bomId/revisions')
+  modelBomRevisions(@Param('bomId') bomId: string, @Query() query: ModelBomRevisionQueryDto) {
+    return this.inventoryService.modelBomRevisions(bomId, query);
+  }
+
+  @Get('model-bom-scope-approval-requests')
+  modelBomScopeApprovalRequests(@Query() query: ModelBomScopeApprovalRequestQueryDto) {
+    return this.inventoryService.modelBomScopeApprovalRequests(query);
+  }
+
+  @Post('model-boms/:bomId/scope-approval-requests')
+  createModelBomScopeApprovalRequest(@Param('bomId') bomId: string, @Body() dto: CreateModelBomScopeApprovalRequestDto) {
+    return this.inventoryService.createModelBomScopeApprovalRequest(bomId, dto);
+  }
+
+  @Post('model-bom-scope-approval-requests/:requestId/approve')
+  approveModelBomScopeApprovalRequest(@Param('requestId') requestId: string, @Body() dto: ReviewModelBomScopeApprovalRequestDto) {
+    return this.inventoryService.approveModelBomScopeApprovalRequest(requestId, dto);
+  }
+
+  @Post('model-bom-scope-approval-requests/:requestId/reject')
+  rejectModelBomScopeApprovalRequest(@Param('requestId') requestId: string, @Body() dto: ReviewModelBomScopeApprovalRequestDto) {
+    return this.inventoryService.rejectModelBomScopeApprovalRequest(requestId, dto);
   }
 
   @Get('model-boms/:bomId')
@@ -348,6 +497,13 @@ export class InventoryController {
   @Get('material-transform-rules')
   materialTransformRules(@Query() query: MaterialTransformRuleQueryDto) {
     return this.inventoryService.materialTransformRules(query);
+  }
+
+  @Get('material-transform-rules/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="material-transform-rules-export.xlsx"')
+  async materialTransformRulesExport(@Query() query: MaterialTransformRuleQueryDto) {
+    return new StreamableFile(await this.inventoryService.buildMaterialTransformRulesExport(query));
   }
 
   @Post('material-transform-rules')
@@ -428,6 +584,6 @@ export class InventoryController {
 
   @Get()
   findAll(@Query() query: InventoryQueryDto) {
-    return this.inventoryService.findAll(query);
+    return this.inventoryService.findAll({ ...query, withPage: 'true' });
   }
 }

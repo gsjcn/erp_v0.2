@@ -2,6 +2,7 @@
   <section class="page">
     <div class="page-header">
       <h2 class="page-title">客户资料</h2>
+      <el-button v-if="!isMobileLayout" :icon="Download" :loading="customerExporting" @click="exportCustomersExcel">导出 Excel</el-button>
       <el-button v-if="!isMobileLayout" type="primary" @click="openCreate">新增客户</el-button>
     </div>
 
@@ -49,7 +50,35 @@
     </div>
 
     <div class="table-card desktop-table">
-      <el-table v-loading="loading" :data="customers" max-height="calc(100vh - 250px)">
+      <div class="customer-table-height-toolbar">
+        <div class="customer-table-height-actions" aria-label="客户资料表格高度">
+          <span class="customer-table-height-label">客户资料表格高度</span>
+          <el-button-group>
+            <el-button
+              size="small"
+              :icon="Minus"
+              :disabled="customerWorkTableHeights.customers <= customerWorkTableHeightLimits.min"
+              aria-label="降低客户资料表格高度"
+              @click="adjustCustomerWorkTableHeight('customers', -customerWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="Plus"
+              :disabled="customerWorkTableHeights.customers >= customerWorkTableHeightLimits.max"
+              aria-label="提高客户资料表格高度"
+              @click="adjustCustomerWorkTableHeight('customers', customerWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="customerWorkTableHeights.customers === customerWorkTableDefaultHeights.customers"
+              aria-label="恢复客户资料表格默认高度"
+              @click="resetCustomerWorkTableHeight('customers')"
+            />
+          </el-button-group>
+        </div>
+      </div>
+      <el-table v-loading="loading" :data="customers" :max-height="customerWorkTableHeights.customers">
         <el-table-column prop="customerCode" label="客户ID" width="130" />
         <el-table-column prop="customerName" label="客户名称" min-width="220" />
         <el-table-column label="地区" min-width="220">
@@ -381,11 +410,43 @@
             placeholder="搜索 BOM 名称 / 适用范围 / 机型 / 客户"
           />
         </div>
+        <div class="customer-common-bom-load-summary">
+          已按分页接口加载 {{ customerBomCommonRows.length }} / {{ customerBomCommonTotal }} 个客户可见 BOM；当前筛选显示
+          {{ filteredCustomerBomCommonRows.length }} 个。
+        </div>
+        <div class="customer-table-height-toolbar">
+          <div class="customer-table-height-actions" aria-label="客户常用 BOM 表格高度">
+            <span class="customer-table-height-label">客户常用 BOM 表格高度</span>
+            <el-button-group>
+              <el-button
+                size="small"
+                :icon="Minus"
+                :disabled="customerWorkTableHeights.commonBoms <= customerWorkTableHeightLimits.min"
+                aria-label="降低客户常用 BOM 表格高度"
+                @click="adjustCustomerWorkTableHeight('commonBoms', -customerWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="customerWorkTableHeights.commonBoms >= customerWorkTableHeightLimits.max"
+                aria-label="提高客户常用 BOM 表格高度"
+                @click="adjustCustomerWorkTableHeight('commonBoms', customerWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="customerWorkTableHeights.commonBoms === customerWorkTableDefaultHeights.commonBoms"
+                aria-label="恢复客户常用 BOM 表格默认高度"
+                @click="resetCustomerWorkTableHeight('commonBoms')"
+              />
+            </el-button-group>
+          </div>
+        </div>
         <el-table
           v-loading="bomCommonBusy"
           :data="filteredCustomerBomCommonRows"
           empty-text="当前条件没有可设置的 BOM"
-          max-height="460"
+          :max-height="customerWorkTableHeights.commonBoms"
         >
           <el-table-column label="排序" width="80">
             <template #default="{ row }">
@@ -417,10 +478,12 @@
           <el-table-column prop="bomName" label="零件包" min-width="220" />
           <el-table-column label="适用范围" min-width="220">
             <template #default="{ row }">
-              <div class="bom-scope-cell">
-                <strong>{{ row.scopeLabel }}</strong>
-                <small>{{ row.projectModel || '全部机型/项目' }}</small>
-              </div>
+              <el-tooltip :content="customerBomCommonScopeTitle(row)" placement="top">
+                <div class="bom-scope-cell">
+                  <strong>{{ customerBomCommonScopePreview(row) }}</strong>
+                  <small>{{ customerBomCommonCustomerText(row) }}</small>
+                </div>
+              </el-tooltip>
             </template>
           </el-table-column>
           <el-table-column label="归属类型" width="150">
@@ -536,12 +599,14 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { Rank } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
+import { Download } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import StatusTag from '../components/StatusTag.vue';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
 import { chinaRegions, worldCountryOptions } from '../config/regions';
 import type { CommonStatus, Customer, CustomerContact, CustomerRegionType, ModelBom } from '../types/erp';
+import { formatFileDateTime } from '../utils/tableExport';
 
 interface CustomerForm {
   customerCode?: string;
@@ -560,13 +625,15 @@ interface CustomerForm {
 type CustomerSearchSuggestion = Customer & { isMoreHint?: boolean };
 type BomCommonViewFilter = 'ALL' | 'COMMON' | 'AVAILABLE';
 type BomCommonOwnershipFilter = 'ALL' | 'PRIVATE' | 'SELECTED' | 'ALL_CUSTOMER';
+type CustomerWorkTableKey = 'customers' | 'commonBoms';
 
 const router = useRouter();
 const { isMobileLayout } = useDeviceProfile();
 const customers = ref<Customer[]>([]);
 const keyword = ref('');
-const statusFilter = ref<CommonStatus>();
+const statusFilter = ref<CommonStatus>('ENABLED');
 const loading = ref(false);
+const customerExporting = ref(false);
 const customerPagination = reactive({ page: 1, limit: Number(20), total: 0 });
 const saving = ref(false);
 const dialogVisible = ref(false);
@@ -589,6 +656,8 @@ const bomCommonLoading = ref(false);
 const bomCommonSavingId = ref('');
 const bomCommonCustomer = ref<Customer>();
 const customerBomCommonRows = ref<ModelBom[]>([]);
+const customerBomCommonTotal = ref(0);
+const customerBomCommonPageLimit = Number(100);
 const bomCommonViewFilter = ref<BomCommonViewFilter>('ALL');
 const bomCommonOwnershipFilter = ref<BomCommonOwnershipFilter>('ALL');
 const bomCommonKeyword = ref('');
@@ -607,6 +676,20 @@ let customerSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 let customerSuggestionSequence = 0;
 const customerSuggestionLimit = Number(20);
 const customerSuggestionKeyword = ref('');
+const customerWorkTableHeightLimits = {
+  min: 320,
+  max: 860,
+  step: 80
+};
+const customerWorkTableDefaultHeights = {
+  customers: 620,
+  commonBoms: 520
+} satisfies Record<CustomerWorkTableKey, number>;
+const customerWorkTableHeightStorageKey = 'baisheng.erp.customerWorkTableHeights.v1';
+// 客户页面表格高度只保存为本机 UI 偏好，不写入客户、多联系人、BOM、订单、生产或库存业务数据。
+const customerWorkTableHeights = reactive<Record<CustomerWorkTableKey, number>>({
+  ...customerWorkTableDefaultHeights
+});
 
 const form = reactive<CustomerForm>(blankForm());
 
@@ -697,6 +780,48 @@ const statusDialogWarning = computed(() =>
       : '启用后该客户可继续创建新订单；系统仍会要求客户至少保留一个主要联系人。'
 );
 
+function clampCustomerWorkTableHeight(value: number) {
+  return Math.min(customerWorkTableHeightLimits.max, Math.max(customerWorkTableHeightLimits.min, value));
+}
+
+function adjustCustomerWorkTableHeight(key: CustomerWorkTableKey, delta: number) {
+  customerWorkTableHeights[key] = clampCustomerWorkTableHeight(customerWorkTableHeights[key] + delta);
+}
+
+function resetCustomerWorkTableHeight(key: CustomerWorkTableKey) {
+  customerWorkTableHeights[key] = customerWorkTableDefaultHeights[key];
+}
+
+function restoreCustomerWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(customerWorkTableHeightStorageKey);
+    const savedValue = rawValue ? JSON.parse(rawValue) : {};
+    for (const key of Object.keys(customerWorkTableDefaultHeights) as CustomerWorkTableKey[]) {
+      const savedHeight = Number(savedValue[key]);
+      if (Number.isFinite(savedHeight)) {
+        customerWorkTableHeights[key] = clampCustomerWorkTableHeight(savedHeight);
+      }
+    }
+  } catch {
+    customerWorkTableHeights.customers = customerWorkTableDefaultHeights.customers;
+    customerWorkTableHeights.commonBoms = customerWorkTableDefaultHeights.commonBoms;
+  }
+}
+
+function saveCustomerWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(customerWorkTableHeightStorageKey, JSON.stringify(customerWorkTableHeights));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断客户资料、多联系人或常用 BOM 查看维护。
+  }
+}
+
 watch([keyword, statusFilter], () => {
   if (customerSearchTimer) {
     window.clearTimeout(customerSearchTimer);
@@ -771,6 +896,25 @@ function searchCustomers() {
   void loadCustomers();
 }
 
+async function exportCustomersExcel() {
+  if (customerExporting.value) {
+    return;
+  }
+  customerExporting.value = true;
+  try {
+    await erpApi.downloadCustomersExport(
+      keyword.value.trim() || undefined,
+      statusFilter.value,
+      `客户资料_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('客户资料 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '客户资料导出失败，请稍后重试');
+  } finally {
+    customerExporting.value = false;
+  }
+}
+
 function handleCustomerPageChange(page: number) {
   customerPagination.page = page;
   void loadCustomers();
@@ -778,7 +922,7 @@ function handleCustomerPageChange(page: number) {
 
 function reset() {
   keyword.value = '';
-  statusFilter.value = undefined;
+  statusFilter.value = 'ENABLED';
   searchCustomers();
 }
 
@@ -920,6 +1064,7 @@ function openCustomerCommonSetup(row: Customer) {
   bomCommonOwnershipFilter.value = 'ALL';
   bomCommonKeyword.value = '';
   customerBomCommonRows.value = [];
+  customerBomCommonTotal.value = 0;
   bomCommonDialogVisible.value = true;
   void loadCustomerCommonRows();
 }
@@ -965,9 +1110,32 @@ function customerBomCommonCustomerText(row: ModelBom) {
     return row.customerName || bomCommonCustomer.value?.customerName || '客户私有';
   }
   if (row.customerScopeMode === 'SELECTED') {
-    return row.scopeCustomers?.map((customer) => customer.customerName).join('、') || '指定客户';
+    return formatCustomerNamePreview(row.scopeCustomers?.map((customer) => customer.customerName) || [], '指定客户', row.scopeCustomerCount);
   }
   return '全部客户';
+}
+
+function customerBomCommonScopePreview(row: ModelBom) {
+  return `${customerBomOwnershipLabel(row)} / ${row.projectModel || '全部机型/项目'}`;
+}
+
+function customerBomCommonScopeTitle(row: ModelBom) {
+  return [
+    `适用范围：${customerBomCommonScopePreview(row)}`,
+    `适用客户：${customerBomCommonCustomerText(row)}`,
+    `机型 / 项目：${row.projectModel || '全部机型/项目'}`,
+    '客户页只显示摘要，需要完整范围时进入 BOM 详情核对；不会修改 BOM 明细、订单、生产任务或库存'
+  ].join('。');
+}
+
+function formatCustomerNamePreview(names: Array<string | null | undefined>, emptyText = '-', totalCount?: number) {
+  const filtered = names.map((name) => String(name || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  const total = typeof totalCount === 'number' && totalCount > filtered.length ? totalCount : filtered.length;
+  return total > 3 ? `${preview} 等 ${total} 个客户` : preview;
 }
 
 function customerBomCommonKeywordMatches(row: ModelBom, keywordText: string) {
@@ -1247,14 +1415,29 @@ async function loadCustomerCommonRows() {
   }
   bomCommonLoading.value = true;
   try {
-    // 客户页常用设置只加载当前客户可见 BOM，并排除全部客户/全部机型泛用包，避免误认为客户资料。
-    customerBomCommonRows.value = await erpApi.modelBoms({
-      customerId: customer.id,
-      excludeGlobalAllProject: true,
-      status: 'ALL'
-    });
+    // 客户页常用设置需要完整的当前客户可见 BOM 来做排序和批量设置；这里显式按页加载并记录总数，不依赖旧全量接口。
+    const rows: ModelBom[] = [];
+    let offset = 0;
+    let totalCount = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const result = await erpApi.modelBomsPage({
+        customerId: customer.id,
+        excludeGlobalAllProject: true,
+        status: 'ALL',
+        limit: customerBomCommonPageLimit,
+        offset
+      });
+      rows.push(...result.items);
+      totalCount = result.totalCount;
+      hasMore = result.hasMore && result.items.length > 0;
+      offset = result.offset + result.items.length;
+    }
+    customerBomCommonRows.value = rows;
+    customerBomCommonTotal.value = totalCount;
   } catch (error) {
     customerBomCommonRows.value = [];
+    customerBomCommonTotal.value = 0;
     ElMessage.error(error instanceof Error ? error.message : '客户可用 BOM 加载失败，请确认客户筛选和后端服务');
   } finally {
     bomCommonLoading.value = false;
@@ -1694,7 +1877,14 @@ function toggleMobileCustomerCard(id: string) {
     : [...expandedMobileCustomerIds.value, id];
 }
 
-onMounted(loadCustomers);
+onMounted(() => {
+  restoreCustomerWorkTableHeights();
+  void loadCustomers();
+});
+watch(
+  () => [customerWorkTableHeights.customers, customerWorkTableHeights.commonBoms],
+  () => saveCustomerWorkTableHeights()
+);
 onBeforeUnmount(clearCheckTimers);
 </script>
 
@@ -1745,6 +1935,25 @@ onBeforeUnmount(clearCheckTimers);
   align-items: stretch;
 }
 
+.customer-table-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.customer-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.customer-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
 .customer-common-bom-dialog {
   display: flex;
   flex-direction: column;
@@ -1785,6 +1994,12 @@ onBeforeUnmount(clearCheckTimers);
 
 .customer-common-bom-filter {
   max-width: 520px;
+}
+
+.customer-common-bom-load-summary {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .customer-common-bom-drag-handle {

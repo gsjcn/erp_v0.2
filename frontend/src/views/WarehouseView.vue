@@ -9,6 +9,12 @@
         </el-badge>
         <el-button v-if="!isMobileLayout" @click="openWarehouseDialog">新增仓库</el-button>
         <el-button v-if="!isMobileLayout" @click="openLocationDialog">新增库位</el-button>
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="warehouseConfigExporting" @click="exportWarehouseConfigExcel">
+          导出配置
+        </el-button>
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="warehouseWorkExporting" @click="exportWarehouseWorkExcel">
+          导出待处理
+        </el-button>
         <el-button :loading="loading" @click="queryWarehouseWork">刷新</el-button>
       </div>
     </div>
@@ -34,7 +40,7 @@
           :orders="orderOptions"
           placeholder="全部订单"
           width="320px"
-          @change="queryWarehouseWork"
+          @change="handleWarehouseOrderChange"
         />
       </div>
       <el-button type="primary" :loading="loading" @click="queryWarehouseWork">查询</el-button>
@@ -63,8 +69,40 @@
     <div class="table-card desktop-table">
       <div class="panel-header">
         <h3 class="panel-title">生产完成待入库</h3>
+        <div class="panel-actions warehouse-table-height-actions" aria-label="待入库表格高度">
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              size="small"
+              circle
+              :icon="Minus"
+              :disabled="warehouseWorkTableHeights.receipts <= warehouseWorkTableHeightLimits.min"
+              aria-label="降低待入库表格高度"
+              @click="adjustWarehouseWorkTableHeight('receipts', -warehouseWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              size="small"
+              circle
+              :icon="Plus"
+              :disabled="warehouseWorkTableHeights.receipts >= warehouseWorkTableHeightLimits.max"
+              aria-label="提高待入库表格高度"
+              @click="adjustWarehouseWorkTableHeight('receipts', warehouseWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              size="small"
+              circle
+              :icon="RefreshLeft"
+              :disabled="warehouseWorkTableHeights.receipts === warehouseWorkTableDefaultHeights.receipts"
+              aria-label="恢复待入库表格默认高度"
+              @click="resetWarehouseWorkTableHeight('receipts')"
+            />
+          </el-tooltip>
+        </div>
       </div>
-      <el-table v-loading="loading" :data="receipts" max-height="clamp(220px, 26vh, 320px)">
+      <el-table v-loading="loading" :data="receipts" :max-height="warehouseWorkTableHeights.receipts">
         <el-table-column label="完成单号" min-width="190">
           <template #default="{ row }">
             <div class="cell-main">{{ row.productionTaskNo }}</div>
@@ -233,6 +271,38 @@
       <div class="panel-header">
         <h3 class="panel-title">待发货库存</h3>
         <div class="panel-actions">
+          <div class="warehouse-table-height-actions" aria-label="待发货表格高度">
+            <el-tooltip content="降低表格高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="Minus"
+                :disabled="warehouseWorkTableHeights.shipments <= warehouseWorkTableHeightLimits.min"
+                aria-label="降低待发货表格高度"
+                @click="adjustWarehouseWorkTableHeight('shipments', -warehouseWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="提高表格高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="Plus"
+                :disabled="warehouseWorkTableHeights.shipments >= warehouseWorkTableHeightLimits.max"
+                aria-label="提高待发货表格高度"
+                @click="adjustWarehouseWorkTableHeight('shipments', warehouseWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="恢复默认高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="RefreshLeft"
+                :disabled="warehouseWorkTableHeights.shipments === warehouseWorkTableDefaultHeights.shipments"
+                aria-label="恢复待发货表格默认高度"
+                @click="resetWarehouseWorkTableHeight('shipments')"
+              />
+            </el-tooltip>
+          </div>
           <span v-if="selectedShipments.length" class="muted">
             已选 {{ selectedShipments.length }} 批{{ selectedShipmentOrderNo ? ` / ${selectedShipmentOrderNo}` : '' }}
           </span>
@@ -272,7 +342,7 @@
         ref="shipmentTableRef"
         :data="shipments"
         row-key="id"
-        max-height="clamp(220px, 26vh, 320px)"
+        :max-height="warehouseWorkTableHeights.shipments"
         @selection-change="handleShipmentSelectionChange"
       >
         <el-table-column type="selection" width="46" :selectable="shipmentRowSelectable" />
@@ -515,8 +585,51 @@
     <div class="table-card mt-24 desktop-table">
       <div class="panel-header">
         <h3 class="panel-title">仓库 / 库位</h3>
+        <div class="panel-actions warehouse-table-height-actions" aria-label="仓库库位表格高度">
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              size="small"
+              circle
+              :icon="Minus"
+              :disabled="warehouseWorkTableHeights.locations <= warehouseWorkTableHeightLimits.min"
+              aria-label="降低仓库库位表格高度"
+              @click="adjustWarehouseWorkTableHeight('locations', -warehouseWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              size="small"
+              circle
+              :icon="Plus"
+              :disabled="warehouseWorkTableHeights.locations >= warehouseWorkTableHeightLimits.max"
+              aria-label="提高仓库库位表格高度"
+              @click="adjustWarehouseWorkTableHeight('locations', warehouseWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              size="small"
+              circle
+              :icon="RefreshLeft"
+              :disabled="warehouseWorkTableHeights.locations === warehouseWorkTableDefaultHeights.locations"
+              aria-label="恢复仓库库位表格默认高度"
+              @click="resetWarehouseWorkTableHeight('locations')"
+            />
+          </el-tooltip>
+        </div>
       </div>
-      <el-table :data="warehouseRows" max-height="clamp(220px, 26vh, 320px)">
+      <div class="warehouse-config-export-filters">
+        <span class="warehouse-config-export-title">配置导出范围</span>
+        <div class="warehouse-config-export-filter">
+          <span>仓库状态</span>
+          <el-segmented v-model="warehouseConfigExportFilters.status" :options="warehouseConfigStatusOptions" />
+        </div>
+        <div class="warehouse-config-export-filter">
+          <span>库位状态</span>
+          <el-segmented v-model="warehouseConfigExportFilters.locationStatus" :options="warehouseConfigStatusOptions" />
+        </div>
+      </div>
+      <el-table :data="warehouseRows" :max-height="warehouseWorkTableHeights.locations">
         <el-table-column prop="warehouseCode" label="仓库编码" width="140" />
         <el-table-column prop="warehouseName" label="仓库名称" min-width="180" />
         <el-table-column label="仓库状态" width="110">
@@ -608,9 +721,46 @@
     <div class="table-card mt-24 desktop-table">
       <div class="panel-header">
         <h3 class="panel-title">库存流水</h3>
-        <el-segmented v-model="transactionType" :options="transactionOptions" @change="loadTransactions" />
+        <div class="panel-actions">
+          <div class="warehouse-table-height-actions" aria-label="库存流水表格高度">
+            <el-tooltip content="降低表格高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="Minus"
+                :disabled="warehouseWorkTableHeights.transactions <= warehouseWorkTableHeightLimits.min"
+                aria-label="降低库存流水表格高度"
+                @click="adjustWarehouseWorkTableHeight('transactions', -warehouseWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="提高表格高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="Plus"
+                :disabled="warehouseWorkTableHeights.transactions >= warehouseWorkTableHeightLimits.max"
+                aria-label="提高库存流水表格高度"
+                @click="adjustWarehouseWorkTableHeight('transactions', warehouseWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="恢复默认高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="RefreshLeft"
+                :disabled="warehouseWorkTableHeights.transactions === warehouseWorkTableDefaultHeights.transactions"
+                aria-label="恢复库存流水表格默认高度"
+                @click="resetWarehouseWorkTableHeight('transactions')"
+              />
+            </el-tooltip>
+          </div>
+          <el-button :icon="Download" :loading="transactionExporting" @click="exportWarehouseTransactions">
+            导出 Excel
+          </el-button>
+          <el-segmented v-model="transactionType" :options="transactionOptions" @change="reloadTransactionsFromFirstPage" />
+        </div>
       </div>
-      <el-table :data="transactions" max-height="clamp(220px, 26vh, 320px)">
+      <el-table :data="transactions" :max-height="warehouseWorkTableHeights.transactions">
         <el-table-column prop="transactionNo" label="流水号" min-width="210" />
         <el-table-column label="类型" width="90">
           <template #default="{ row }">{{ row.transactionType === 'IN' ? '入库' : '出库' }}</template>
@@ -621,6 +771,12 @@
             <div class="cell-main">{{ row.batchNo || '-' }}</div>
             <small v-if="row.productionTaskNo" class="muted">{{ row.productionTaskNo }}</small>
             <small v-if="taskRelationText(row)" class="muted">{{ taskRelationText(row) }}</small>
+          </template>
+        </el-table-column>
+        <el-table-column label="图纸快照" min-width="220">
+          <template #default="{ row }">
+            <div class="cell-main">{{ drawingTitle(row) }}</div>
+            <DrawingPreviewLink :file-name="row.drawingFileName" :file-url="row.drawingFileUrl" empty-text="未上传图纸" />
           </template>
         </el-table-column>
         <el-table-column label="数量" width="120">
@@ -654,14 +810,31 @@
             </small>
           </template>
         </el-table-column>
-        <el-table-column prop="remark" label="备注" min-width="160" />
+        <el-table-column prop="remark" label="备注" min-width="160">
+          <template #default="{ row }">
+            <el-tooltip :content="longTextTooltipText(row.remark)" placement="top" :disabled="!row.remark">
+              <span>{{ formatLongTextPreview(row.remark) }}</span>
+            </el-tooltip>
+          </template>
+        </el-table-column>
       </el-table>
+      <div class="warehouse-transaction-pagination">
+        <span>共 {{ transactionPagination.totalCount }} 条，当前第 {{ transactionPagination.page }} 页</span>
+        <el-pagination
+          background
+          layout="prev, pager, next, jumper"
+          :current-page="transactionPagination.page"
+          :page-size="transactionPagination.limit"
+          :total="transactionPagination.totalCount"
+          @current-change="handleTransactionPageChange"
+        />
+      </div>
     </div>
 
     <div class="mobile-section">
       <div class="mobile-card-header">
         <h3 class="mobile-section-title">库存流水</h3>
-        <el-segmented v-model="transactionType" :options="transactionOptions" @change="loadTransactions" />
+        <el-segmented v-model="transactionType" :options="transactionOptions" @change="reloadTransactionsFromFirstPage" />
       </div>
       <article
         v-for="transaction in transactions"
@@ -702,6 +875,17 @@
               <small v-if="taskRelationText(transaction)" class="muted">{{ taskRelationText(transaction) }}</small>
             </span>
           </div>
+          <div class="mobile-field">
+            <label>图纸快照</label>
+            <span>
+              {{ drawingTitle(transaction) }}
+              <DrawingPreviewLink
+                :file-name="transaction.drawingFileName || undefined"
+                :file-url="transaction.drawingFileUrl || undefined"
+                empty-text="未上传图纸"
+              />
+            </span>
+          </div>
           <div v-if="transaction.batchNo" class="mobile-field">
             <label>批次余量</label>
             <span>
@@ -735,11 +919,22 @@
           </div>
           <div class="mobile-field">
             <label>备注</label>
-            <span>{{ transaction.remark || '-' }}</span>
+            <span :title="longTextTooltipText(transaction.remark)">{{ formatLongTextPreview(transaction.remark) }}</span>
           </div>
         </div>
       </article>
       <div v-if="!transactions.length && !loading" class="mobile-empty">暂无库存流水</div>
+      <div class="warehouse-transaction-pagination">
+        <span>共 {{ transactionPagination.totalCount }} 条，当前第 {{ transactionPagination.page }} 页</span>
+        <el-pagination
+          background
+          layout="prev, pager, next"
+          :current-page="transactionPagination.page"
+          :page-size="transactionPagination.limit"
+          :total="transactionPagination.totalCount"
+          @current-change="handleTransactionPageChange"
+        />
+      </div>
     </div>
 
     <el-dialog
@@ -1085,7 +1280,42 @@
           :closable="false"
           title="本次发货已加入备货库存作为客户额外发货来源，必须填写销售确认人和超发说明。"
         />
-        <el-table :data="batchShipmentRows" max-height="260px" class="batch-shipment-table">
+        <div class="batch-shipment-table-toolbar">
+          <strong>本次发货批次</strong>
+          <div class="warehouse-table-height-actions" aria-label="批量发货明细表格高度">
+            <el-tooltip content="降低表格高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="Minus"
+                :disabled="warehouseWorkTableHeights.batchShipment <= warehouseWorkTableHeightLimits.min"
+                aria-label="降低批量发货明细表格高度"
+                @click="adjustWarehouseWorkTableHeight('batchShipment', -warehouseWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="提高表格高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="Plus"
+                :disabled="warehouseWorkTableHeights.batchShipment >= warehouseWorkTableHeightLimits.max"
+                aria-label="提高批量发货明细表格高度"
+                @click="adjustWarehouseWorkTableHeight('batchShipment', warehouseWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="恢复默认高度" placement="top">
+              <el-button
+                size="small"
+                circle
+                :icon="RefreshLeft"
+                :disabled="warehouseWorkTableHeights.batchShipment === warehouseWorkTableDefaultHeights.batchShipment"
+                aria-label="恢复批量发货明细表格默认高度"
+                @click="resetWarehouseWorkTableHeight('batchShipment')"
+              />
+            </el-tooltip>
+          </div>
+        </div>
+        <el-table :data="batchShipmentRows" :max-height="warehouseWorkTableHeights.batchShipment" class="batch-shipment-table">
           <el-table-column label="库存批次" min-width="190">
             <template #default="{ row }">
               <div class="cell-main">{{ row.batchNo }}</div>
@@ -1303,45 +1533,92 @@
     <el-dialog v-model="noticeVisible" title="仓库通知" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-loading="noticeLoading" class="notice-list">
         <div class="notice-toolbar">
-          <el-radio-group v-model="warehouseNoticeStatusFilter" size="small">
+          <el-radio-group v-model="warehouseNoticeStatusFilter" size="small" @change="reloadWarehouseNoticesFromFirstPage">
             <el-radio-button value="PENDING">待处理 {{ warehouseNoticeCounts.PENDING }}</el-radio-button>
             <el-radio-button value="ACKNOWLEDGED">历史 {{ warehouseNoticeCounts.ACKNOWLEDGED }}</el-radio-button>
             <el-radio-button value="ALL">全部 {{ warehouseNoticeCounts.ALL }}</el-radio-button>
           </el-radio-group>
         </div>
         <div class="notice-filter-grid">
-          <CustomerSelect v-model="warehouseNoticeFilters.customerId" placeholder="通知客户" width="180px" @change="loadWarehouseNotices" />
-          <el-input v-model="warehouseNoticeFilters.orderNo" clearable placeholder="订单号" @keyup.enter="loadWarehouseNotices" />
-          <el-input v-model="warehouseNoticeFilters.partCode" clearable placeholder="零件编码" @keyup.enter="loadWarehouseNotices" />
+          <CustomerSelect
+            v-model="warehouseNoticeFilters.customerId"
+            placeholder="通知客户"
+            width="180px"
+            @change="reloadWarehouseNoticesFromFirstPage"
+          />
+          <el-input v-model="warehouseNoticeFilters.orderNo" clearable placeholder="订单号" @keyup.enter="reloadWarehouseNoticesFromFirstPage" />
+          <el-input v-model="warehouseNoticeFilters.partCode" clearable placeholder="零件编码" @keyup.enter="reloadWarehouseNoticesFromFirstPage" />
           <el-select v-model="warehouseNoticeFilters.noticeType" placeholder="通知类型">
             <el-option label="全部类型" value="ALL" />
             <el-option v-for="item in warehouseNoticeTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
           <DateRangeFilter v-model="warehouseNoticeDateRange" start-placeholder="通知开始" end-placeholder="通知结束" width="220px" />
-          <el-input v-model="warehouseNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="loadWarehouseNotices" />
-          <el-button type="primary" @click="loadWarehouseNotices">查询</el-button>
+          <el-input v-model="warehouseNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="reloadWarehouseNoticesFromFirstPage" />
+          <el-button type="primary" @click="reloadWarehouseNoticesFromFirstPage">查询</el-button>
           <el-button @click="resetWarehouseNoticeFilters">重置</el-button>
+          <el-button :icon="Download" :loading="warehouseNoticeExporting" @click="exportWarehouseNoticesExcel">导出 Excel</el-button>
         </div>
-        <div v-if="filteredWarehouseNotices.length === 0" class="muted">暂无仓库通知</div>
-        <article v-for="notice in filteredWarehouseNotices" :key="notice.id" class="notice-item">
-          <div>
-            <strong>{{ warehouseNoticeTitle(notice) }}</strong>
-            <p>{{ notice.reason }}</p>
-            <small>通知时间：{{ formatDateTime(notice.createdAt) }}</small>
-            <small v-if="notice.status === 'ACKNOWLEDGED'" class="notice-ack-text">
-              确认：{{ notice.acknowledgedBy || '-' }} / {{ formatDateTime(notice.acknowledgedAt) }}
-            </small>
+        <div class="warehouse-dialog-list-toolbar">
+          <div class="warehouse-table-height-actions" aria-label="仓库通知列表高度">
+            <span class="warehouse-table-height-label">通知列表高度</span>
+            <el-button-group>
+              <el-button
+                size="small"
+                :icon="Minus"
+                :disabled="warehouseWorkTableHeights.notices <= warehouseWorkTableHeightLimits.min"
+                aria-label="降低仓库通知列表高度"
+                @click="adjustWarehouseWorkTableHeight('notices', -warehouseWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="warehouseWorkTableHeights.notices >= warehouseWorkTableHeightLimits.max"
+                aria-label="提高仓库通知列表高度"
+                @click="adjustWarehouseWorkTableHeight('notices', warehouseWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="warehouseWorkTableHeights.notices === warehouseWorkTableDefaultHeights.notices"
+                aria-label="恢复仓库通知列表默认高度"
+                @click="resetWarehouseWorkTableHeight('notices')"
+              />
+            </el-button-group>
           </div>
-          <el-button
-            v-if="notice.status === 'PENDING'"
-            size="small"
-            type="primary"
-            @click="acknowledgeWarehouseNotice(notice)"
-          >
-            确认已知晓
-          </el-button>
-          <StatusTag v-else value="ACKNOWLEDGED" compact />
-        </article>
+        </div>
+        <div class="notice-scroll-list" :style="{ maxHeight: warehouseWorkTableHeightStyle('notices') }">
+          <div v-if="filteredWarehouseNotices.length === 0" class="muted">暂无仓库通知</div>
+          <article v-for="notice in filteredWarehouseNotices" :key="notice.id" class="notice-item">
+            <div>
+              <strong>{{ warehouseNoticeTitle(notice) }}</strong>
+              <p :title="warehouseNoticeReasonTitle(notice)">{{ warehouseNoticeReasonPreview(notice) }}</p>
+              <small>通知时间：{{ formatDateTime(notice.createdAt) }}</small>
+              <small v-if="notice.status === 'ACKNOWLEDGED'" class="notice-ack-text">
+                确认：{{ notice.acknowledgedBy || '-' }} / {{ formatDateTime(notice.acknowledgedAt) }}
+              </small>
+            </div>
+            <el-button
+              v-if="notice.status === 'PENDING'"
+              size="small"
+              type="primary"
+              @click="acknowledgeWarehouseNotice(notice)"
+            >
+              确认已知晓
+            </el-button>
+            <StatusTag v-else value="ACKNOWLEDGED" compact />
+          </article>
+        </div>
+        <div class="warehouse-notice-pagination">
+          <span>共 {{ warehouseNoticePagination.totalCount }} 条，当前第 {{ warehouseNoticePagination.page }} 页</span>
+          <el-pagination
+            background
+            layout="prev, pager, next, jumper"
+            :current-page="warehouseNoticePagination.page"
+            :page-size="warehouseNoticePagination.limit"
+            :total="warehouseNoticePagination.totalCount"
+            @current-change="handleWarehouseNoticePageChange"
+          />
+        </div>
       </div>
       <template #footer>
         <el-button @click="noticeVisible = false">关闭</el-button>
@@ -1385,7 +1662,7 @@
         />
         <div class="notice-summary-card">
           <strong>{{ warehouseNoticeTitle(activeWarehouseNotice) }}</strong>
-          <p>{{ activeWarehouseNotice.reason }}</p>
+          <p :title="warehouseNoticeReasonTitle(activeWarehouseNotice)">{{ warehouseNoticeReasonPreview(activeWarehouseNotice) }}</p>
           <span>
             {{ activeWarehouseNotice.partName || '-' }} /
             {{ stockNoticeQuantityText }}
@@ -1480,7 +1757,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Bell, Camera } from '@element-plus/icons-vue';
+import { Bell, Camera, Download, Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
@@ -1507,6 +1784,7 @@ import type {
   WarehouseTransaction
 } from '../types/erp';
 import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
+import { formatFileDateTime } from '../utils/tableExport';
 
 type EditableWarehouseShipment = WarehouseShipment & {
   currentShipmentQuantity?: number;
@@ -1544,6 +1822,9 @@ type WarehouseStatusTarget = {
   warning: string;
 };
 
+type WarehouseWorkTableKey = 'receipts' | 'shipments' | 'locations' | 'transactions' | 'batchShipment' | 'notices';
+const warehouseWorkTableKeys: WarehouseWorkTableKey[] = ['receipts', 'shipments', 'locations', 'transactions', 'batchShipment', 'notices'];
+
 const route = useRoute();
 const router = useRouter();
 const { isMobileLayout } = useDeviceProfile();
@@ -1554,12 +1835,40 @@ const shipments = ref<WarehouseShipment[]>([]);
 const selectedShipments = ref<WarehouseShipment[]>([]);
 const batchShipmentRows = ref<EditableWarehouseShipment[]>([]);
 const transactions = ref<WarehouseTransaction[]>([]);
+const transactionDefaultLimit = Number(20);
+const transactionPagination = reactive({
+  page: 1,
+  limit: transactionDefaultLimit,
+  totalCount: 0
+});
 const warehouseNotices = ref<ProductionNotice[]>([]);
 const warehouseNoticeStatusFilter = ref<ProductionNoticeStatus | 'ALL'>('PENDING');
 const warehouseNoticeDateRange = ref<string[]>([]);
+const warehouseNoticeDefaultLimit = Number(20);
+const warehouseNoticePagination = reactive({
+  page: 1,
+  limit: warehouseNoticeDefaultLimit,
+  totalCount: 0
+});
+const warehouseNoticeServerCounts = reactive({
+  ALL: 0,
+  PENDING: 0,
+  ACKNOWLEDGED: 0
+});
 const dateRange = ref<string[]>([]);
 const transactionType = ref<'ALL' | 'IN' | 'OUT'>('ALL');
+const warehouseConfigExportFilters = reactive<{
+  status: CommonStatus | 'ALL';
+  locationStatus: CommonStatus | 'ALL';
+}>({
+  status: 'ALL',
+  locationStatus: 'ALL'
+});
 const loading = ref(false);
+const warehouseConfigExporting = ref(false);
+const warehouseWorkExporting = ref(false);
+const transactionExporting = ref(false);
+const warehouseNoticeExporting = ref(false);
 const noticeLoading = ref(false);
 const acknowledgeVisible = ref(false);
 const acknowledgeSaving = ref(false);
@@ -1597,6 +1906,22 @@ const expandedMobileWarehouseCardKeys = ref<string[]>([]);
 const warehouseOperatorOptions = ref<ProductionOperator[]>([]);
 const warehouseOperatorCache = reactive<Record<string, ProductionOperator>>({});
 let warehouseOperatorRequestSeq = 0;
+const warehouseWorkTableHeightLimits = {
+  min: 280,
+  max: 680,
+  step: 80
+};
+const warehouseWorkTableDefaultHeights: Record<WarehouseWorkTableKey, number> = {
+  receipts: 400,
+  shipments: 480,
+  locations: 360,
+  transactions: 360,
+  batchShipment: 360,
+  notices: 480
+};
+const warehouseWorkTableHeightStorageKey = 'baisheng.erp.warehouseWorkTableHeights.v1';
+// 仓库现场表格和通知列表高度只保存为本机 UI 偏好，不写入入库、发货、通知状态、库存批次或库存流水业务数据。
+const warehouseWorkTableHeights = reactive<Record<WarehouseWorkTableKey, number>>({ ...warehouseWorkTableDefaultHeights });
 
 const filters = reactive<{
   customerId?: string;
@@ -1666,6 +1991,11 @@ const transactionOptions = [
   { label: '入库', value: 'IN' },
   { label: '出库', value: 'OUT' }
 ];
+const warehouseConfigStatusOptions: Array<{ label: string; value: CommonStatus | 'ALL' }> = [
+  { label: '全部', value: 'ALL' },
+  { label: '启用', value: 'ENABLED' },
+  { label: '停用', value: 'DISABLED' }
+];
 
 type ShipmentOrderGroup = {
   orderNo: string;
@@ -1681,16 +2011,11 @@ type ShipmentOrderGroup = {
 };
 
 const locationCount = computed(() => warehouses.value.reduce((sum, item) => sum + item.locations.length, 0));
-const pendingNoticeCount = computed(() => warehouseNotices.value.filter((notice) => notice.status === 'PENDING').length);
-const warehouseNoticeCounts = computed(() => {
-  const pending = warehouseNotices.value.filter((notice) => notice.status === 'PENDING').length;
-  const acknowledged = warehouseNotices.value.filter((notice) => notice.status === 'ACKNOWLEDGED').length;
-  return { ALL: warehouseNotices.value.length, PENDING: pending, ACKNOWLEDGED: acknowledged };
-});
-const filteredWarehouseNotices = computed(() =>
-  warehouseNoticeStatusFilter.value === 'ALL'
-    ? warehouseNotices.value
-    : warehouseNotices.value.filter((notice) => notice.status === warehouseNoticeStatusFilter.value)
+const pendingNoticeCount = computed(() => warehouseNoticeServerCounts.PENDING);
+const warehouseNoticeCounts = computed(() => warehouseNoticeServerCounts);
+const filteredWarehouseNotices = computed(() => warehouseNotices.value);
+const warehouseConfigVisibleWarehouses = computed(() =>
+  warehouses.value.filter((item) => warehouseConfigStatusMatches(item.status, warehouseConfigExportFilters.status))
 );
 const enabledWarehouses = computed(() => warehouses.value.filter((item) => item.status === 'ENABLED'));
 const warehouseDialogTitle = computed(() => (warehouseEditId.value ? '编辑仓库' : '新增仓库'));
@@ -1868,8 +2193,11 @@ const shipmentOrderGroups = computed(() => {
   return [...groupMap.values()].sort((a, b) => a.orderNo.localeCompare(b.orderNo, 'zh-Hans-CN'));
 });
 const warehouseRows = computed<WarehouseLocationRow[]>(() =>
-  warehouses.value.flatMap((warehouse) => {
-    if (!warehouse.locations.length) {
+  warehouseConfigVisibleWarehouses.value.flatMap((warehouse) => {
+    const visibleLocations = warehouse.locations.filter((location) =>
+      warehouseConfigStatusMatches(location.status, warehouseConfigExportFilters.locationStatus)
+    );
+    if (!warehouse.locations.length && warehouseConfigExportFilters.locationStatus === 'ALL') {
       return [
         {
           warehouseId: warehouse.id,
@@ -1884,7 +2212,7 @@ const warehouseRows = computed<WarehouseLocationRow[]>(() =>
         }
       ];
     }
-    return warehouse.locations.map((location) => ({
+    return visibleLocations.map((location) => ({
       warehouseId: warehouse.id,
       warehouseCode: warehouse.warehouseCode,
       warehouseName: warehouse.warehouseName,
@@ -1897,6 +2225,10 @@ const warehouseRows = computed<WarehouseLocationRow[]>(() =>
     }));
   })
 );
+
+function warehouseConfigStatusMatches(status: CommonStatus, filter: CommonStatus | 'ALL') {
+  return filter === 'ALL' || status === filter;
+}
 
 function normalizeWarehouseOperatorKeyword(value?: string) {
   return String(value || '').trim().toLowerCase().replace(/[\s\-_./\\]+/g, '');
@@ -1999,6 +2331,64 @@ function toggleMobileWarehouseCard(key: string) {
     : [...expandedMobileWarehouseCardKeys.value, key];
 }
 
+function clampWarehouseWorkTableHeight(value: number) {
+  return Math.min(warehouseWorkTableHeightLimits.max, Math.max(warehouseWorkTableHeightLimits.min, value));
+}
+
+function adjustWarehouseWorkTableHeight(key: WarehouseWorkTableKey, delta: number) {
+  warehouseWorkTableHeights[key] = clampWarehouseWorkTableHeight(warehouseWorkTableHeights[key] + delta);
+}
+
+function resetWarehouseWorkTableHeight(key: WarehouseWorkTableKey) {
+  warehouseWorkTableHeights[key] = warehouseWorkTableDefaultHeights[key];
+}
+
+function warehouseWorkTableHeightStyle(key: WarehouseWorkTableKey) {
+  return `${warehouseWorkTableHeights[key]}px`;
+}
+
+function restoreWarehouseWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(warehouseWorkTableHeightStorageKey);
+    if (!rawValue) {
+      return;
+    }
+    const savedHeights = JSON.parse(rawValue) as Partial<Record<WarehouseWorkTableKey, number>>;
+    warehouseWorkTableKeys.forEach((key) => {
+      const savedHeight = Number(savedHeights[key]);
+      if (Number.isFinite(savedHeight)) {
+        warehouseWorkTableHeights[key] = clampWarehouseWorkTableHeight(savedHeight);
+      }
+    });
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响仓库业务操作。
+  }
+}
+
+function saveWarehouseWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      warehouseWorkTableHeightStorageKey,
+      JSON.stringify({
+        receipts: warehouseWorkTableHeights.receipts,
+        shipments: warehouseWorkTableHeights.shipments,
+        locations: warehouseWorkTableHeights.locations,
+        transactions: warehouseWorkTableHeights.transactions,
+        batchShipment: warehouseWorkTableHeights.batchShipment,
+        notices: warehouseWorkTableHeights.notices
+      })
+    );
+  } catch {
+    // 本机 UI 偏好写入失败不阻断入库、发货或通知处理。
+  }
+}
+
 function warehouseWorkParams() {
   return {
     customerId: filters.customerId,
@@ -2032,14 +2422,14 @@ async function loadData() {
       erpApi.warehouses(),
       erpApi.pendingReceipts(warehouseWorkParams()),
       erpApi.pendingShipments(warehouseWorkParams()),
-      erpApi.warehouseNotices()
+      erpApi.warehouseNoticesPage('PENDING', { limit: Number(1), offset: Number(0) })
     ]);
     warehouses.value = warehouseResult;
     receipts.value = receiptResult;
     shipments.value = shipmentResult;
     selectedShipments.value = [];
     shipmentTableRef.value?.clearSelection();
-    warehouseNotices.value = noticeResult;
+    warehouseNoticeServerCounts.PENDING = noticeResult.totalCount;
     await loadTransactions();
   } catch (error) {
     warehouses.value = [];
@@ -2049,6 +2439,7 @@ async function loadData() {
     batchShipmentRows.value = [];
     transactions.value = [];
     warehouseNotices.value = [];
+    warehouseNoticeServerCounts.PENDING = 0;
     expandedMobileWarehouseCardKeys.value = [];
     shipmentTableRef.value?.clearSelection();
     ElMessage.error(error instanceof Error ? error.message : '仓库数据加载失败，请确认后端服务和筛选条件');
@@ -2069,6 +2460,12 @@ async function queryWarehouseWork() {
 
 async function handleScopeChange() {
   filters.orderNo = undefined;
+  transactionPagination.page = 1;
+  await queryWarehouseWork();
+}
+
+async function handleWarehouseOrderChange() {
+  transactionPagination.page = 1;
   await queryWarehouseWork();
 }
 
@@ -2076,18 +2473,145 @@ async function resetFilters() {
   filters.customerId = undefined;
   filters.orderNo = undefined;
   dateRange.value = [];
+  transactionPagination.page = 1;
   await queryWarehouseWork();
 }
 
 async function loadTransactions() {
   try {
-    transactions.value = await erpApi.warehouseTransactions({
+    const offset = (transactionPagination.page - 1) * transactionPagination.limit;
+    const result = await erpApi.warehouseTransactionsPage({
       ...warehouseWorkParams(),
-      transactionType: transactionType.value === 'ALL' ? undefined : transactionType.value
+      transactionType: transactionType.value === 'ALL' ? undefined : transactionType.value,
+      limit: transactionPagination.limit,
+      offset
     });
+    transactions.value = result.items;
+    transactionPagination.totalCount = result.totalCount;
+    transactionPagination.limit = result.limit;
+    transactionPagination.page = Math.floor(result.offset / result.limit) + 1;
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && transactionPagination.page > maxPage) {
+      transactionPagination.page = maxPage;
+      await loadTransactions();
+    }
   } catch (error) {
     transactions.value = [];
+    transactionPagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '库存流水加载失败，请确认后端服务和筛选条件');
+  }
+}
+
+async function reloadTransactionsFromFirstPage() {
+  transactionPagination.page = 1;
+  await loadTransactions();
+}
+
+async function handleTransactionPageChange(page: number) {
+  transactionPagination.page = page;
+  await loadTransactions();
+}
+
+async function exportWarehouseWorkExcel() {
+  if (warehouseWorkExporting.value) {
+    return;
+  }
+  warehouseWorkExporting.value = true;
+  try {
+    // 仓库待处理导出复用当前筛选条件，只读取待入库和待发货列表，不确认入库、不发货、不写库存流水。
+    await erpApi.downloadWarehouseWorkExport(warehouseWorkParams(), `仓库待处理_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('仓库待处理 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '仓库待处理 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    warehouseWorkExporting.value = false;
+  }
+}
+
+async function exportWarehouseConfigExcel() {
+  if (warehouseConfigExporting.value) {
+    return;
+  }
+  warehouseConfigExporting.value = true;
+  try {
+    // 仓库配置导出只读取仓库和库位基础资料，不新增库存批次、不写库存流水、不修改启停用状态。
+    await erpApi.downloadWarehouseConfigExport(
+      {
+        status: warehouseConfigExportFilters.status,
+        locationStatus: warehouseConfigExportFilters.locationStatus
+      },
+      `仓库配置_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('仓库配置 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '仓库配置 Excel 导出失败，请确认后端服务');
+  } finally {
+    warehouseConfigExporting.value = false;
+  }
+}
+
+async function exportWarehouseTransactions() {
+  if (transactionExporting.value) {
+    return;
+  }
+  transactionExporting.value = true;
+  try {
+    const transactionOption = transactionOptions.find((item) => item.value === transactionType.value);
+    const transactionLabel = transactionOption?.label || '全部';
+    // 库存流水导出复用当前只读筛选条件，不新增、不合并、不修改库存批次或流水。
+    await erpApi.downloadWarehouseTransactionsExport(
+      {
+        ...warehouseWorkParams(),
+        transactionType: transactionType.value === 'ALL' ? undefined : transactionType.value
+      },
+      `库存流水_${transactionLabel}_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('库存流水 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存流水 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    transactionExporting.value = false;
+  }
+}
+
+function warehouseNoticeExportFilters() {
+  return {
+    status: warehouseNoticeStatusFilter.value === 'ALL' ? undefined : warehouseNoticeStatusFilter.value,
+    customerId: warehouseNoticeFilters.customerId,
+    orderNo: warehouseNoticeFilters.orderNo,
+    partCode: warehouseNoticeFilters.partCode,
+    keyword: warehouseNoticeFilters.keyword,
+    noticeType: warehouseNoticeFilters.noticeType === 'ALL' ? undefined : warehouseNoticeFilters.noticeType,
+    dateFrom: warehouseNoticeDateRange.value[0],
+    dateTo: warehouseNoticeDateRange.value[1]
+  };
+}
+
+function warehouseNoticeBaseFilters() {
+  return {
+    customerId: warehouseNoticeFilters.customerId,
+    orderNo: warehouseNoticeFilters.orderNo,
+    partCode: warehouseNoticeFilters.partCode,
+    keyword: warehouseNoticeFilters.keyword,
+    noticeType: warehouseNoticeFilters.noticeType === 'ALL' ? undefined : warehouseNoticeFilters.noticeType,
+    dateFrom: warehouseNoticeDateRange.value[0],
+    dateTo: warehouseNoticeDateRange.value[1]
+  };
+}
+
+async function exportWarehouseNoticesExcel() {
+  if (warehouseNoticeExporting.value) {
+    return;
+  }
+  warehouseNoticeExporting.value = true;
+  try {
+    // 仓库通知导出只复用当前筛选条件，不确认通知、不触发库存处理。
+    await erpApi.downloadWarehouseNoticesExport(warehouseNoticeExportFilters(), `仓库通知_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('仓库通知 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '仓库通知 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    warehouseNoticeExporting.value = false;
   }
 }
 
@@ -2106,17 +2630,34 @@ function applyRouteOrderFilter() {
 async function loadWarehouseNotices() {
   noticeLoading.value = true;
   try {
-    warehouseNotices.value = await erpApi.warehouseNotices(undefined, {
-      customerId: warehouseNoticeFilters.customerId,
-      orderNo: warehouseNoticeFilters.orderNo,
-      partCode: warehouseNoticeFilters.partCode,
-      keyword: warehouseNoticeFilters.keyword,
-      noticeType: warehouseNoticeFilters.noticeType === 'ALL' ? undefined : warehouseNoticeFilters.noticeType,
-      dateFrom: warehouseNoticeDateRange.value[0],
-      dateTo: warehouseNoticeDateRange.value[1]
-    });
+    const status = warehouseNoticeStatusFilter.value === 'ALL' ? undefined : warehouseNoticeStatusFilter.value;
+    const offset = (warehouseNoticePagination.page - 1) * warehouseNoticePagination.limit;
+    const baseFilters = warehouseNoticeBaseFilters();
+    const [result, allCount, pendingCount, acknowledgedCount] = await Promise.all([
+      erpApi.warehouseNoticesPage(status, {
+        ...baseFilters,
+        limit: warehouseNoticePagination.limit,
+        offset
+      }),
+      erpApi.warehouseNoticesPage(undefined, { ...baseFilters, limit: Number(1), offset: Number(0) }),
+      erpApi.warehouseNoticesPage('PENDING', { ...baseFilters, limit: Number(1), offset: Number(0) }),
+      erpApi.warehouseNoticesPage('ACKNOWLEDGED', { ...baseFilters, limit: Number(1), offset: Number(0) })
+    ]);
+    warehouseNotices.value = result.items;
+    warehouseNoticePagination.totalCount = result.totalCount;
+    warehouseNoticePagination.limit = result.limit;
+    warehouseNoticePagination.page = Math.floor(result.offset / result.limit) + 1;
+    warehouseNoticeServerCounts.ALL = allCount.totalCount;
+    warehouseNoticeServerCounts.PENDING = pendingCount.totalCount;
+    warehouseNoticeServerCounts.ACKNOWLEDGED = acknowledgedCount.totalCount;
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && warehouseNoticePagination.page > maxPage) {
+      warehouseNoticePagination.page = maxPage;
+      await loadWarehouseNotices();
+    }
   } catch (error) {
     warehouseNotices.value = [];
+    warehouseNoticePagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '仓库通知加载失败，请确认后端服务');
   } finally {
     noticeLoading.value = false;
@@ -2127,9 +2668,20 @@ async function openWarehouseNotices() {
   warehouseNoticeFilters.customerId = filters.customerId;
   warehouseNoticeFilters.orderNo = filters.orderNo || '';
   warehouseNoticeDateRange.value = [...dateRange.value];
+  warehouseNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+  warehouseNoticePagination.page = 1;
   noticeVisible.value = true;
   await loadWarehouseNotices();
-  warehouseNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+}
+
+async function reloadWarehouseNoticesFromFirstPage() {
+  warehouseNoticePagination.page = 1;
+  await loadWarehouseNotices();
+}
+
+async function handleWarehouseNoticePageChange(page: number) {
+  warehouseNoticePagination.page = page;
+  await loadWarehouseNotices();
 }
 
 async function resetWarehouseNoticeFilters() {
@@ -2139,8 +2691,9 @@ async function resetWarehouseNoticeFilters() {
   warehouseNoticeFilters.keyword = '';
   warehouseNoticeFilters.noticeType = 'ALL';
   warehouseNoticeDateRange.value = [];
-  await loadWarehouseNotices();
+  warehouseNoticePagination.page = 1;
   warehouseNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+  await loadWarehouseNotices();
 }
 
 function warehouseNoticeTitle(notice: ProductionNotice) {
@@ -2445,6 +2998,8 @@ function toStockOverShipmentRow(source: InventorySourceBatchDetail, targetLine: 
     productionDate: source.productionDate,
     drawingNo: source.drawingNo || targetLine.drawingNo,
     drawingVersion: source.drawingVersion || targetLine.drawingVersion,
+    drawingDate: source.drawingDate || targetLine.drawingDate,
+    drawingStatus: source.drawingStatus || targetLine.drawingStatus,
     drawingFileName: source.drawingFileName || targetLine.drawingFileName,
     drawingFileUrl: source.drawingFileUrl || targetLine.drawingFileUrl,
     partThickness: source.partThickness ?? targetLine.partThickness,
@@ -2751,10 +3306,8 @@ function warehouseComponentText(row: { lineType?: string; componentNo?: string; 
   return '';
 }
 
-function drawingTitle(row: Pick<WarehouseReceipt | WarehouseShipment, 'drawingNo' | 'drawingVersion'>) {
-  const drawingNo = row.drawingNo || '未填写图号';
-  const version = row.drawingVersion ? ` / ${row.drawingVersion}` : '';
-  return `${drawingNo}${version}`;
+function drawingTitle(row: Pick<WarehouseReceipt | WarehouseShipment | WarehouseTransaction, 'drawingNo' | 'drawingVersion' | 'drawingDate' | 'drawingStatus'>) {
+  return [row.drawingNo || '未填写图号', row.drawingVersion, row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ');
 }
 
 function partThicknessText(row: Pick<WarehouseReceipt | WarehouseShipment, 'lineType' | 'partThickness'>) {
@@ -3323,14 +3876,43 @@ function shipmentQuantityAdjustmentText(row: EditableWarehouseShipment) {
 function orderShortageActionText(order: OrderSummary) {
   if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
     const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
-      ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+      ? formatQuantityByUnitPreview(order.pendingProductionReplenishmentQuantityByUnit)
       : formatQuantity(order.pendingProductionReplenishmentQuantity ?? 0, order.pendingProductionReplenishmentUnit || order.unit);
     return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount ?? 0} 个 / ${quantityText}`;
   }
   const quantityText = order.unresolvedShortageQuantityByUnit?.length
-    ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+    ? formatQuantityByUnitPreview(order.unresolvedShortageQuantityByUnit)
     : formatQuantity(order.unresolvedShortageQuantity ?? 0, order.unresolvedShortageUnit || order.unit);
   return `需补单 ${order.unresolvedShortageLineCount ?? 0} 个 / ${quantityText}`;
+}
+
+function formatQuantityByUnitPreview(rows?: Array<{ quantity: number; unit: string }>) {
+  const values = (rows || []).map((row) => formatQuantity(row.quantity, row.unit)).filter(Boolean);
+  if (values.length === 0) {
+    return '-';
+  }
+  const preview = values.filter((_, index) => index < 3).join('、');
+  return values.length > 3 ? `${preview} 等 ${values.length} 个单位` : preview;
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function longTextTooltipText(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
+function warehouseNoticeReasonPreview(notice: ProductionNotice) {
+  return formatLongTextPreview(notice.reason, 42, '-');
+}
+
+function warehouseNoticeReasonTitle(notice: ProductionNotice) {
+  return longTextTooltipText(notice.reason);
 }
 
 function orderNeedsShortageAttention(order: OrderSummary) {
@@ -3380,7 +3962,13 @@ watch(
   }
 );
 
+watch(
+  () => warehouseWorkTableKeys.map((key) => warehouseWorkTableHeights[key]),
+  () => saveWarehouseWorkTableHeights()
+);
+
 onMounted(async () => {
+  restoreWarehouseWorkTableHeights();
   applyRouteOrderFilter();
   await queryWarehouseWork();
 });
@@ -3402,9 +3990,55 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.warehouse-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.warehouse-config-export-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 0 14px;
+}
+
+.warehouse-config-export-title {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.warehouse-config-export-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.warehouse-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.warehouse-dialog-list-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .notice-list {
   display: grid;
   gap: 10px;
+}
+
+.notice-scroll-list {
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .notice-toolbar {
@@ -3537,6 +4171,18 @@ onMounted(async () => {
   width: 100%;
 }
 
+.batch-shipment-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 10px;
+}
+
+.batch-shipment-table-toolbar strong {
+  color: #0f172a;
+}
+
 .shipment-quantity-input {
   width: 140px;
 }
@@ -3632,6 +4278,28 @@ onMounted(async () => {
   min-height: 28px;
   color: #64748b;
   font-size: 12px;
+}
+
+.warehouse-notice-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.warehouse-transaction-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .table-actions {

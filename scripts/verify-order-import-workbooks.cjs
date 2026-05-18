@@ -33,7 +33,8 @@ const expectedUploadHeaders = [
   '工艺路线',
   '工艺备注',
   '图纸日期',
-  '图纸状态'
+  '图纸状态',
+  '版本'
 ];
 
 function assert(condition, message) {

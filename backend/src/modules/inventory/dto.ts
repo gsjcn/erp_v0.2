@@ -37,6 +37,27 @@ export class InventoryQueryDto {
   @IsOptional()
   @IsString()
   excludeOrderId?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
+
 }
 
 export class MaterialSuggestionQueryDto {
@@ -97,12 +118,51 @@ export class MaterialQueryDto {
   @IsOptional()
   @IsString()
   withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class CreateMaterialImportSessionDto {
   @IsOptional()
   @IsString()
   createdBy?: string;
+}
+
+export class CreateMaterialImportFromOrderImportDto {
+  @IsString()
+  previewToken!: string;
+
+  @IsOptional()
+  @IsString()
+  createdBy?: string;
+}
+
+export class CreateModelBomDraftFromOrderImportDto {
+  @IsString()
+  previewToken!: string;
+}
+
+export class CommitModelBomDraftFromOrderImportDto {
+  @IsString()
+  previewToken!: string;
+
+  @IsString()
+  draftKey!: string;
+
+  @IsOptional()
+  @IsString()
+  bomName?: string;
+
+  @IsOptional()
+  @IsString()
+  confirmedBy?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  reviewedExistingBomIds?: string[];
 }
 
 export class GetMaterialImportSessionQueryDto {
@@ -139,6 +199,10 @@ export class CreateMaterialDto {
   partSpecification?: string;
 
   @IsOptional()
+  @IsString()
+  defaultProcessRoute?: string;
+
+  @IsOptional()
   @IsBoolean()
   stockAlertEnabled?: boolean;
 
@@ -169,6 +233,10 @@ export class UpdateMaterialDto {
   @IsOptional()
   @IsString()
   partSpecification?: string;
+
+  @IsOptional()
+  @IsString()
+  defaultProcessRoute?: string;
 
   @IsOptional()
   @IsBoolean()
@@ -287,6 +355,10 @@ export class ModelBomQueryDto {
   @IsOptional()
   @IsString()
   withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class SaveModelBomDto {
@@ -325,6 +397,65 @@ export class SaveModelBomDto {
   @IsOptional()
   @IsBoolean()
   scopeChangeConfirmed?: boolean;
+
+  @IsOptional()
+  @IsString()
+  scopeApprovalRequestId?: string;
+}
+
+export class CreateModelBomScopeApprovalRequestDto extends SaveModelBomDto {
+  @IsString()
+  requestedBy!: string;
+
+  @IsString()
+  requestReason!: string;
+}
+
+export class ModelBomScopeApprovalRequestQueryDto {
+  @IsOptional()
+  @IsString()
+  bomId?: string;
+
+  @IsOptional()
+  @IsIn(['PENDING', 'APPROVED', 'REJECTED', 'USED', 'ALL'])
+  status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'USED' | 'ALL';
+
+  @IsOptional()
+  @IsIn(['ALL', 'PRIVATE', 'SELECTED'])
+  requestedCustomerScopeMode?: 'ALL' | 'PRIVATE' | 'SELECTED';
+
+  @IsOptional()
+  @IsString()
+  requestedScopeKey?: string;
+
+  @IsOptional()
+  @IsString()
+  requestedProjectModelScopeKey?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+}
+
+export class ReviewModelBomScopeApprovalRequestDto {
+  @IsString()
+  reviewedBy!: string;
+
+  @IsOptional()
+  @IsString()
+  reviewRemark?: string;
 }
 
 export class SetModelBomCommonDto {
@@ -458,6 +589,36 @@ export class ModelBomDiffReviewQueryDto {
   @IsOptional()
   @IsString()
   sourceBomId?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+}
+
+export class ModelBomRevisionQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
 }
 
 export class ConfirmModelBomDiffReviewDto {
@@ -560,6 +721,10 @@ export class MaterialTransformRuleQueryDto {
   @IsOptional()
   @IsString()
   withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class SaveMaterialTransformRuleDto {
@@ -630,6 +795,22 @@ export class InventorySourceDetailQueryDto {
   @IsOptional()
   @IsString()
   excludeOrderId?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
 }
 
 export class AdjustInventoryBatchDto {

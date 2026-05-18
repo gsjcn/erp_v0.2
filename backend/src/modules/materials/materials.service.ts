@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import { CommonStatus, InventoryReservationStatus, Prisma } from '@prisma/client';
+import { InventoryReservationStatus, Prisma } from '@prisma/client';
+import * as ExcelJS from 'exceljs';
+import { businessDateTimeKey } from '../../common/business-date';
 import { decimalToNumber, processSnapshotToDetails } from '../../common/serializers';
 import { normalizeSearchKeyword, pinyinSearchMatches } from '../../common/pinyin-search';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -14,6 +16,7 @@ type DashboardMaterial = Prisma.MaterialGetPayload<{
             id: true;
             customerCode: true;
             customerName: true;
+            status: true;
           };
         };
       };
@@ -29,13 +32,22 @@ type DashboardMaterial = Prisma.MaterialGetPayload<{
                 id: true;
                 customerCode: true;
                 customerName: true;
+                status: true;
               };
             };
             customerScopes: {
               where: { status: 'ENABLED' };
               select: {
                 customerId: true;
+                customerNameSnapshot: true;
                 status: true;
+                customer: {
+                  select: {
+                    customerCode: true;
+                    customerName: true;
+                    status: true;
+                  };
+                };
               };
             };
             lines: {
@@ -72,6 +84,7 @@ type DashboardOrderLine = Prisma.OrderLineGetPayload<{
             id: true;
             customerCode: true;
             customerName: true;
+            status: true;
           };
         };
       };
@@ -93,51 +106,41 @@ type InventoryQuantity = {
 };
 
 const DEFAULT_COMMON_PROJECT_MODELS = ['B3', 'B5'];
+const MATERIAL_DASHBOARD_CUSTOMER_PREVIEW_LIMIT = 20;
+const MATERIAL_DASHBOARD_PROJECT_MODEL_PREVIEW_LIMIT = 20;
+const MATERIAL_DASHBOARD_BOM_NAME_PREVIEW_LIMIT = 20;
+const MATERIAL_DASHBOARD_BOM_STRUCTURE_PREVIEW_LIMIT = 10;
 
 @Injectable()
 export class MaterialsService {
+  private readonly testFixturePrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
+
   constructor(private readonly prisma: PrismaService) {}
+
+  private hasTestFixturePrefix(...values: Array<string | null | undefined>) {
+    return values.some((value) => {
+      const text = String(value || '').trim();
+      return this.testFixturePrefixes.some((prefix) => text.startsWith(prefix));
+    });
+  }
+
+  private isDisabledTestFixtureMaterial(material: { partCode?: string | null; partName?: string | null; status?: string | null }) {
+    return material.status === 'DISABLED' && this.hasTestFixturePrefix(material.partCode, material.partName);
+  }
+
+  private isTestFixtureMaterial(material: { partCode?: string | null; partName?: string | null }) {
+    return this.hasTestFixturePrefix(material.partCode, material.partName);
+  }
+
+  private isArchivedTestFixtureCustomer(customer?: { customerCode?: string | null; customerName?: string | null; status?: string | null } | null) {
+    return customer?.status === 'DISABLED' && this.hasTestFixturePrefix(customer.customerCode, customer.customerName);
+  }
 
   async dashboard(query: MaterialDashboardQueryDto) {
     const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
     const offset = Math.max(Number(query.offset || 0), 0);
-    const sortBy = query.sortBy || 'LAST_ORDER_DATE';
-    const sortOrder = query.sortOrder || 'DESC';
-    const materials = await this.findDashboardMaterials(query.status);
-    const partCodeConditions = materials.map((material) => ({
-      partCode: { equals: material.partCode, mode: 'insensitive' as const }
-    }));
-    const [orderLines, quantityByCode] = await Promise.all([
-      partCodeConditions.length > 0 ? this.findOrderLines(partCodeConditions) : Promise.resolve([]),
-      partCodeConditions.length > 0 ? this.inventoryQuantityByCode(partCodeConditions) : Promise.resolve(new Map<string, InventoryQuantity>())
-    ]);
-    const historyByCode = this.groupHistoryByCode(orderLines);
-
-    const allRows = materials
-      .map((material) => this.buildDashboardRow(material, historyByCode.get(this.codeKey(material.partCode)) || [], quantityByCode, query))
-      .filter((row) => this.rowMatchesQuery(row, query))
-      .sort((a, b) => this.compareDashboardRows(a, b, sortBy, sortOrder));
-
+    const { allRows, summary } = await this.dashboardData(query);
     const pageRows = allRows.slice(offset, offset + limit).map((row) => this.publicDashboardRow(row));
-    const summary = {
-      totalCount: allRows.length,
-      enabledCount: allRows.filter((row) => row.status === 'ENABLED').length,
-      disabledCount: allRows.filter((row) => row.status === 'DISABLED').length,
-      commonCount: allRows.filter((row) => row.scopeType === 'COMMON').length,
-      customCount: allRows.filter((row) => row.scopeType === 'CUSTOM').length,
-      withBomCount: allRows.filter((row) => row.bomNames.length > 0).length,
-      withoutBomCount: allRows.filter((row) => row.bomNames.length === 0).length,
-      withRecentOrderCount: allRows.filter((row) => row.lastOrderDate).length,
-      withoutRecentOrderCount: allRows.filter((row) => !row.lastOrderDate).length,
-      relationCounts: this.dashboardCountMap(allRows.map((row) => row.currentRelationType)),
-      drawingSourceCounts: this.dashboardCountMap(allRows.map((row) => row.drawingSource || 'NONE')),
-      bomStructureCounts: this.dashboardCountMap(allRows.flatMap((row) => (row.bomStructureTypes.length > 0 ? row.bomStructureTypes : ['NONE']))),
-      stockAlertCounts: {
-        ENABLED: allRows.filter((row) => row.stockAlertEnabled).length,
-        TRIGGERED: allRows.filter((row) => row.stockAlertTriggered).length,
-        DISABLED: allRows.filter((row) => !row.stockAlertEnabled).length
-      }
-    };
 
     return {
       items: pageRows,
@@ -149,15 +152,504 @@ export class MaterialsService {
     };
   }
 
+  async buildDashboardExport(query: MaterialDashboardQueryDto): Promise<Uint8Array> {
+    const { allRows, summary } = await this.dashboardData(query);
+    const rows = allRows.map((row) => this.publicDashboardRow(row));
+    const scopeText = await this.dashboardExportScopeText(query, summary.totalCount);
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const headers = [
+      '序号',
+      '零件编码',
+      '零件名称',
+      '零件类型',
+      '当前关系',
+      '适用客户',
+      '机型 / 项目',
+      '图号',
+      '版本',
+      '图纸日期',
+      '图纸状态',
+      '图纸来源',
+      '厚度',
+      '规格',
+      '单位',
+      '默认数量',
+      '默认工艺',
+      '最近订单号',
+      '最近下单日期',
+      '最近客户',
+      '可用库存',
+      '订单库存',
+      '备货库存',
+      '库存报警',
+      'BOM',
+      'BOM 结构',
+      '图纸核对',
+      'BOM 核对',
+      '库存核对',
+      '状态'
+    ];
+    const worksheet = workbook.addWorksheet('零件控制面板', {
+      pageSetup: {
+        paperSize: 9,
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.2, footer: 0.2 }
+      },
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+    const columnCount = headers.length;
+    const titleRow = worksheet.addRow(['零件管理控制面板导出']);
+    worksheet.mergeCells(titleRow.number, 1, titleRow.number, columnCount);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    titleRow.height = 26;
+
+    const scopeRow = worksheet.addRow([scopeText]);
+    worksheet.mergeCells(scopeRow.number, 1, scopeRow.number, columnCount);
+    scopeRow.font = { color: { argb: 'FF475569' } };
+    scopeRow.alignment = { vertical: 'middle', wrapText: true };
+
+    const generatedRow = worksheet.addRow([`制表日期：${this.businessDateTimeText(new Date())}`]);
+    worksheet.mergeCells(generatedRow.number, 1, generatedRow.number, columnCount);
+    generatedRow.font = { color: { argb: 'FF475569' } };
+
+    const headerRow = worksheet.addRow(headers);
+    headerRow.font = { bold: true, color: { argb: 'FF0F172A' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      cell.border = this.dashboardExportThinBorder();
+    });
+
+    rows.forEach((row, index) => {
+      const dataRow = worksheet.addRow([
+        index + 1,
+        row.partCode,
+        row.partName,
+        row.partType || row.scopeLabel,
+        row.currentRelationLabel || '-',
+        this.dashboardExportCustomerScopeText(row),
+        this.dashboardExportProjectScopeText(row),
+        row.drawingNo || '',
+        row.drawingVersion || '',
+        row.drawingDate || '',
+        row.drawingStatus || '',
+        row.drawingSourceLabel || '',
+        row.partThickness ?? '',
+        row.partSpecification || '',
+        row.unit,
+        row.defaultQuantity ?? '',
+        this.dashboardExportProcessRouteText(row.defaultProcessRoute),
+        row.lastOrderNo || '',
+        row.lastOrderDate || '',
+        row.lastCustomerName || '',
+        row.availableQuantity,
+        row.orderInventoryQuantity,
+        row.stockInventoryQuantity,
+        this.dashboardExportStockAlertText(row),
+        this.joinDashboardExportValues(this.dashboardBomNameValues(row), '', 10, 'BOM', row.bomNameCount),
+        this.dashboardExportBomStructureText(row),
+        this.dashboardExportDrawingReviewText(row),
+        this.dashboardExportBomReviewText(row),
+        this.dashboardExportInventoryReviewText(row),
+        row.status === 'ENABLED' ? '启用' : '停用'
+      ]);
+      dataRow.alignment = { vertical: 'top', wrapText: true };
+      dataRow.eachCell((cell) => {
+        cell.border = this.dashboardExportThinBorder();
+      });
+    });
+
+    headers.forEach((header, index) => {
+      const column = worksheet.getColumn(index + 1);
+      const maxLength = [header, ...worksheet.getColumn(index + 1).values.slice(5)]
+        .map((value) => this.dashboardExportDisplayWidth(value))
+        .reduce((max, width) => Math.max(max, width), 0);
+      column.width = Math.min(Math.max(maxLength + 2, 8), 34);
+    });
+
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: columnCount }
+    };
+
+    // 零件管理导出只导出现有筛选结果，不写入零件、BOM、订单、生产任务或库存流水。
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  private async dashboardData(query: MaterialDashboardQueryDto) {
+    const sortBy = query.sortBy || 'LAST_ORDER_DATE';
+    const sortOrder = query.sortOrder || 'DESC';
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const materials = (await this.findDashboardMaterials(query.status)).filter(
+      (material) => includeTestFixtures || !this.isTestFixtureMaterial(material)
+    );
+    const partCodeConditions = materials.map((material) => ({
+      partCode: { equals: material.partCode, mode: 'insensitive' as const }
+    }));
+    const [orderLines, quantityByCode] = await Promise.all([
+      partCodeConditions.length > 0 ? this.findOrderLines(partCodeConditions) : Promise.resolve([]),
+      partCodeConditions.length > 0 ? this.inventoryQuantityByCode(partCodeConditions) : Promise.resolve(new Map<string, InventoryQuantity>())
+    ]);
+    const visibleOrderLines = includeTestFixtures
+      ? orderLines
+      : orderLines.filter(
+          (line) =>
+            !this.hasTestFixturePrefix(line.partCode, line.partName, line.projectModel, line.order.orderNo) &&
+            !this.isArchivedTestFixtureCustomer(line.order.customer)
+        );
+    const historyByCode = this.groupHistoryByCode(visibleOrderLines);
+    const allRows = materials
+      .map((material) => this.buildDashboardRow(material, historyByCode.get(this.codeKey(material.partCode)) || [], quantityByCode, query))
+      .filter((row) => this.rowMatchesQuery(row, query))
+      .sort((a, b) => this.compareDashboardRows(a, b, sortBy, sortOrder));
+    const summary = {
+      totalCount: allRows.length,
+      enabledCount: allRows.filter((row) => row.status === 'ENABLED').length,
+      disabledCount: allRows.filter((row) => row.status === 'DISABLED').length,
+      commonCount: allRows.filter((row) => row.scopeType === 'COMMON').length,
+      customCount: allRows.filter((row) => row.scopeType === 'CUSTOM').length,
+      withBomCount: allRows.filter((row) => this.dashboardRowHasBom(row)).length,
+      withoutBomCount: allRows.filter((row) => !this.dashboardRowHasBom(row)).length,
+      withRecentOrderCount: allRows.filter((row) => row.lastOrderDate).length,
+      withoutRecentOrderCount: allRows.filter((row) => !row.lastOrderDate).length,
+      relationCounts: this.dashboardCountMap(allRows.map((row) => row.currentRelationType)),
+      drawingSourceCounts: this.dashboardCountMap(allRows.map((row) => row.drawingSource || 'NONE')),
+      bomStructureCounts: this.dashboardCountMap(allRows.flatMap((row) => (row.bomStructureTypes.length > 0 ? row.bomStructureTypes : ['NONE']))),
+      stockAlertCounts: {
+        ENABLED: allRows.filter((row) => row.stockAlertEnabled).length,
+        TRIGGERED: allRows.filter((row) => row.stockAlertTriggered).length,
+        DISABLED: allRows.filter((row) => !row.stockAlertEnabled).length
+      }
+    };
+    return { allRows, summary };
+  }
+
+  private async dashboardExportScopeText(query: MaterialDashboardQueryDto, totalCount: number) {
+    const customerLabel = await this.dashboardExportCustomerLabel(query.customerId);
+    return [
+      `筛选结果：${totalCount} 条`,
+      `客户：${customerLabel}`,
+      `机型 / 项目：${query.projectModel?.trim() || '全部'}`,
+      `关键字：${query.keyword?.trim() || '无'}`,
+      `通用 / 定制：${this.dashboardExportScopeTypeLabel(query.scopeType)}`,
+      `当前关系：${this.dashboardExportRelationTypeLabel(query.relationType)}`,
+      `图号：${query.drawingNo?.trim() || '全部'}`,
+      `图纸状态：${query.drawingStatus?.trim() || '全部'}`,
+      `图纸来源：${this.dashboardExportDrawingSourceLabel(query.drawingSource)}`,
+      `图纸日期：${this.dashboardExportDateRangeLabel(query.drawingDateFrom, query.drawingDateTo)}`,
+      `BOM 结构：${this.dashboardExportBomStructureLabel(query.bomStructureType)}`,
+      `BOM 状态：${this.dashboardExportBomPresenceLabel(query.bomPresence)}`,
+      `下单记录：${this.dashboardExportRecentOrderPresenceLabel(query.recentOrderPresence)}`,
+      `最近下单日期：${this.dashboardExportDateRangeLabel(query.lastOrderDateFrom, query.lastOrderDateTo)}`,
+      `库存报警：${this.dashboardExportStockAlertFilterLabel(query.stockAlert)}`,
+      `状态：${this.dashboardExportStatusLabel(query.status)}`,
+      `排序：${this.dashboardExportSortByLabel(query.sortBy)} / ${this.dashboardExportSortOrderLabel(query.sortOrder)}`
+    ].join('；');
+  }
+
+  private async dashboardExportCustomerLabel(customerId?: string) {
+    const id = customerId?.trim();
+    if (!id) {
+      return '全部';
+    }
+    const customer = await this.prisma.customer.findUnique({
+      where: { id },
+      select: { customerCode: true, customerName: true }
+    });
+    // 导出范围必须给操作员可读客户名；找不到客户时保留 id 便于排查历史筛选链接。
+    return customer ? `${customer.customerName}（${customer.customerCode}）` : id;
+  }
+
+  private dashboardExportScopeTypeLabel(value?: MaterialDashboardQueryDto['scopeType']) {
+    return value === 'COMMON' ? '通用件' : value === 'CUSTOM' ? '定制件' : '全部';
+  }
+
+  private dashboardExportRelationTypeLabel(value?: MaterialDashboardQueryDto['relationType']) {
+    const labels: Record<string, string> = {
+      BOM: 'BOM 零件',
+      APPLICABILITY: '显式适用',
+      ORDER_HISTORY: '订单历史',
+      MATERIAL_ONLY: '仅搜索记忆'
+    };
+    return labels[value || ''] || '全部';
+  }
+
+  private dashboardExportDrawingSourceLabel(value?: MaterialDashboardQueryDto['drawingSource']) {
+    const labels: Record<string, string> = {
+      BOM_LINE: 'BOM 指定图纸',
+      MATERIAL_DEFAULT: '零件默认图纸',
+      MATERIAL_LATEST: '零件最新图纸',
+      ORDER_HISTORY: '历史订单图纸',
+      NONE: '无图纸'
+    };
+    return labels[value || ''] || '全部';
+  }
+
+  private dashboardExportBomStructureLabel(value?: MaterialDashboardQueryDto['bomStructureType']) {
+    const labels: Record<string, string> = {
+      COMPONENT: '组件',
+      CHILD_PART: '子零件',
+      STANDALONE_PART: '单独零件',
+      NONE: '未进 BOM'
+    };
+    return labels[value || ''] || '全部';
+  }
+
+  private dashboardExportBomPresenceLabel(value?: MaterialDashboardQueryDto['bomPresence']) {
+    return value === 'WITH_BOM' ? '已进 BOM' : value === 'WITHOUT_BOM' ? '未进 BOM' : '全部';
+  }
+
+  private dashboardExportRecentOrderPresenceLabel(value?: MaterialDashboardQueryDto['recentOrderPresence']) {
+    return value === 'WITH_RECENT_ORDER' ? '有历史下单' : value === 'WITHOUT_RECENT_ORDER' ? '无历史下单' : '全部';
+  }
+
+  private dashboardExportStockAlertFilterLabel(value?: MaterialDashboardQueryDto['stockAlert']) {
+    return value === 'ENABLED' ? '已启用' : value === 'TRIGGERED' ? '低库存' : value === 'DISABLED' ? '未启用' : '全部';
+  }
+
+  private dashboardExportStatusLabel(value?: MaterialDashboardQueryDto['status']) {
+    return value === 'ENABLED' ? '启用' : value === 'DISABLED' ? '停用' : '全部';
+  }
+
+  private dashboardExportSortByLabel(value?: MaterialDashboardQueryDto['sortBy']) {
+    return (
+      {
+        LAST_ORDER_DATE: '最近下单',
+        DRAWING_DATE: '图纸日期',
+        BOM_STATUS: 'BOM 状态',
+        PART_CODE: '零件编码'
+      }[value || 'LAST_ORDER_DATE'] || '最近下单'
+    );
+  }
+
+  private dashboardExportSortOrderLabel(value?: MaterialDashboardQueryDto['sortOrder']) {
+    return value === 'ASC' ? '升序' : '降序';
+  }
+
+  private dashboardExportDateRangeLabel(from?: string, to?: string) {
+    const start = from?.trim();
+    const end = to?.trim();
+    if (start && end) {
+      return `${start} 至 ${end}`;
+    }
+    if (start) {
+      return `${start} 起`;
+    }
+    if (end) {
+      return `${end} 止`;
+    }
+    return '全部';
+  }
+
+  private dashboardExportProjectScopeText(row: Record<string, any>) {
+    const values = this.uniqueList([row.hasGlobalProjectScope ? '全部机型/项目' : '', ...(row.projectModels || [])]);
+    const projectCount = Math.max(Number(row.projectModelCount || 0), Array.isArray(row.projectModels) ? row.projectModels.length : 0);
+    const totalCount = projectCount + (row.hasGlobalProjectScope ? 1 : 0);
+    if (totalCount <= 0) {
+      const historyValues = this.uniqueList(row.historyProjectModels || []);
+      const historyCount = Math.max(Number(row.historyProjectModelCount || 0), historyValues.length);
+      if (historyCount > 0) {
+        const preview = historyValues.filter((_, index) => index < 10).join('、') || `${historyCount} 个机型/项目`;
+        return historyCount > historyValues.length || historyValues.length > 10
+          ? `仅订单历史 ${preview} 等 ${historyCount} 个机型/项目`
+          : `仅订单历史 ${preview}`;
+      }
+      return '未设置机型/项目';
+    }
+    const preview = values.filter((_, index) => index < 10).join('、') || '全部机型/项目';
+    return totalCount > values.length || values.length > 10 ? `${preview} 等 ${totalCount} 个机型/项目` : preview;
+  }
+
+  private dashboardExportCustomerScopeText(row: Record<string, any>) {
+    if (row.customerScopeKind === 'ALL' || row.hasGlobalCustomerScope) {
+      return '全部客户';
+    }
+    const values = this.uniqueList(row.customerNames || []);
+    const customerCount = Math.max(Number(row.customerNameCount || 0), values.length);
+    if (customerCount > 0) {
+      const preview = values.filter((_, index) => index < 10).join('、') || `${customerCount} 个客户`;
+      return customerCount > values.length || values.length > 10 ? `${preview} 等 ${customerCount} 个客户` : preview;
+    }
+    const historyValues = this.uniqueList(row.historyCustomerNames || []);
+    const historyCount = Math.max(Number(row.historyCustomerCount || 0), historyValues.length);
+    if (historyCount > 0) {
+      const preview = historyValues.filter((_, index) => index < 10).join('、') || `${historyCount} 个客户`;
+      return historyCount > historyValues.length || historyValues.length > 10
+        ? `仅订单历史 ${preview} 等 ${historyCount} 个客户`
+        : `仅订单历史 ${preview}`;
+    }
+    return '未设置适用客户';
+  }
+
+  private dashboardExportStockAlertText(row: Record<string, any>) {
+    if (!row.stockAlertEnabled) {
+      return '未启用';
+    }
+    const quantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? '' : `${row.stockAlertQuantity} ${row.unit || ''}`.trim();
+    return row.stockAlertTriggered ? `低库存：${quantity || '-'}` : `报警线：${quantity || '-'}`;
+  }
+
+  private dashboardExportDrawingReviewText(row: Record<string, any>) {
+    if (!row.drawingNo) {
+      return '需补图纸资料';
+    }
+    if (row.drawingSource === 'ORDER_HISTORY') {
+      return '历史订单图纸，建议维护零件图纸版本';
+    }
+    if (row.drawingSource === 'BOM_LINE') {
+      return 'BOM 指定图纸';
+    }
+    if (row.drawingSource === 'MATERIAL_DEFAULT') {
+      return '零件默认图纸';
+    }
+    if (row.drawingSource === 'MATERIAL_LATEST') {
+      return '零件最新启用图纸';
+    }
+    return row.drawingSourceLabel || '已核对';
+  }
+
+  private dashboardExportBomReviewText(row: Record<string, any>) {
+    if (!this.dashboardRowHasBom(row)) {
+      return '未进 BOM';
+    }
+    const structureText = this.dashboardExportBomStructureText(row);
+    if (!structureText) {
+      return 'BOM 已关联，结构待核对';
+    }
+    return `BOM 已关联：${structureText}`;
+  }
+
+  private dashboardExportInventoryReviewText(row: Record<string, any>) {
+    const available = this.dashboardExportQuantityText(row.availableQuantity, row.unit);
+    if (!row.stockAlertEnabled) {
+      return `未启用库存报警；当前可用 ${available}`;
+    }
+    const alertQuantity = this.dashboardExportQuantityText(row.stockAlertQuantity, row.unit);
+    // 库存核对列只提示人工复核，不自动补单、提交生产、扣库存或写入 InventoryTransaction。
+    return row.stockAlertTriggered ? `低库存：可用 ${available} / 报警线 ${alertQuantity}` : `报警线 ${alertQuantity}；当前可用 ${available}`;
+  }
+
+  private dashboardExportQuantityText(value: unknown, unit?: string) {
+    if (value === null || value === undefined || value === '') {
+      return '-';
+    }
+    return `${value} ${unit || ''}`.trim();
+  }
+
+  private dashboardExportProcessRouteText(value?: string | null) {
+    const routeText = String(value || '').trim();
+    if (!routeText) {
+      return '';
+    }
+    const steps = routeText
+      .split(/(?:->|>|→|[、,，;；\n\r]+)/)
+      .map((step) => step.trim())
+      .filter(Boolean);
+    if (steps.length <= 1) {
+      return routeText;
+    }
+    const preview = steps.filter((_, index) => index < 10).join('、');
+    return steps.length > 10 ? `${preview} 等 ${steps.length} 个工序` : preview;
+  }
+
+  private joinDashboardExportValues(values: Array<string | null | undefined>, emptyText = '-', limit = 10, unitLabel = '项', totalCount?: number) {
+    const filtered = [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+    if (filtered.length === 0) {
+      return emptyText;
+    }
+    const preview = filtered.filter((_, index) => index < limit).join('、');
+    const displayCount = Math.max(Number(totalCount || 0), filtered.length);
+    return displayCount > filtered.length || filtered.length > limit ? `${preview} 等 ${displayCount} 个${unitLabel}` : preview;
+  }
+
+  private dashboardBomNameValues(row: Record<string, any>) {
+    return this.uniqueList([
+      ...(row.bomNames || []),
+      ...(row.bomStructureDetails || []).map((detail: Record<string, any>) => detail.bomName)
+    ]);
+  }
+
+  private dashboardExportBomStructureText(row: Record<string, any>) {
+    const details = Array.isArray(row.bomStructureDetails) ? row.bomStructureDetails : [];
+    const detailCount = Math.max(Number(row.bomStructureDetailCount || 0), details.length);
+    if (detailCount > 0) {
+      const detailTexts = details.map((detail: Record<string, any>) => this.dashboardExportBomStructureDetailText(detail));
+      if (detailTexts.length === 0) {
+        return `共 ${detailCount} 条，预览未展开`;
+      }
+      return this.joinDashboardExportValues(detailTexts, '', 10, '结构', detailCount);
+    }
+    return this.joinDashboardExportValues(row.bomStructureLabels || [], '', 10, '结构');
+  }
+
+  private dashboardExportBomStructureDetailText(detail: Record<string, any>) {
+    const bomName = String(detail.bomName || '未命名 BOM').trim();
+    const customerName = String(detail.customerName || '').trim() || '全部客户';
+    const projectModel = String(detail.projectModel || '').trim() || '全部机型/项目';
+    const structureLabel = String(detail.structureLabel || '').trim() || '未设置结构';
+    const orderText = detail.displayOrder ? ` / 顺序 ${detail.displayOrder}` : '';
+    return `${bomName} / ${customerName} / ${projectModel} / ${structureLabel}${orderText}`;
+  }
+
+  private dashboardRowHasBom(row: Record<string, any>) {
+    return (
+      this.dashboardBomNameValues(row).length > 0 ||
+      Boolean(row.bomStructureLabels?.length) ||
+      Number(row.bomStructureDetailCount || 0) > 0
+    );
+  }
+
+  private dashboardExportDisplayWidth(value: unknown) {
+    const text = String(value ?? '');
+    return [...text].reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+  }
+
+  private dashboardExportThinBorder() {
+    return {
+      top: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } },
+      left: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } },
+      bottom: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } },
+      right: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } }
+    };
+  }
+
+  private businessDateTimeText(value: Date) {
+    const stamp = businessDateTimeKey(value);
+    // 零件管理导出时间按公司业务时区展示，避免 NAS / Docker 默认 UTC 造成现场核对偏差。
+    return stamp.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6');
+  }
+
   async projectModels(query: MaterialProjectOptionsQueryDto) {
     const customerId = query.customerId?.trim();
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const [applicabilities, boms, orderLines] = await Promise.all([
       this.prisma.materialApplicability.findMany({
         where: {
           status: 'ENABLED',
           ...(customerId ? { OR: [{ customerId }, { customerId: null }] } : {})
         },
-        select: { projectModel: true, updatedAt: true }
+        select: {
+          projectModel: true,
+          customer: {
+            select: {
+              customerCode: true,
+              customerName: true,
+              status: true
+            }
+          }
+        }
       }),
       this.prisma.modelBom.findMany({
         where: {
@@ -172,7 +664,30 @@ export class MaterialsService {
               }
             : {})
         },
-        select: { projectModel: true, updatedAt: true }
+        select: {
+          bomName: true,
+          projectModel: true,
+          customer: {
+            select: {
+              customerCode: true,
+              customerName: true,
+              status: true
+            }
+          },
+          customerScopes: {
+            where: { status: 'ENABLED' },
+            select: {
+              customerNameSnapshot: true,
+              customer: {
+                select: {
+                  customerCode: true,
+                  customerName: true,
+                  status: true
+                }
+              }
+            }
+          }
+        }
       }),
       this.prisma.orderLine.findMany({
         where: {
@@ -184,12 +699,31 @@ export class MaterialsService {
           createdAt: true,
           order: {
             select: {
-              orderDate: true
+              orderDate: true,
+              customer: {
+                select: {
+                  customerCode: true,
+                  customerName: true,
+                  status: true
+                }
+              }
             }
           }
         }
       })
     ]);
+    const visibleApplicabilities = includeTestFixtures ? applicabilities : applicabilities.filter((row) => !this.isArchivedTestFixtureCustomer(row.customer));
+    const visibleBoms = includeTestFixtures
+      ? boms
+      : boms.filter(
+          (row) =>
+            !this.hasTestFixturePrefix(row.bomName, row.projectModel) &&
+            !this.isArchivedTestFixtureCustomer(row.customer) &&
+            !row.customerScopes.some((scope) => this.isArchivedTestFixtureCustomer(scope.customer))
+        );
+    const visibleOrderLines = includeTestFixtures
+      ? orderLines
+      : orderLines.filter((row) => !this.hasTestFixturePrefix(row.projectModel) && !this.isArchivedTestFixtureCustomer(row.order.customer));
 
     const scoreByProject = new Map<
       string,
@@ -199,7 +733,6 @@ export class MaterialsService {
         bomCount: number;
         applicabilityCount: number;
         latestOrderTime: number;
-        latestMasterTime: number;
       }
     >();
     const ensureProjectScore = (projectModel?: string | null) => {
@@ -215,15 +748,14 @@ export class MaterialsService {
           orderCount: 0,
           bomCount: 0,
           applicabilityCount: 0,
-          latestOrderTime: 0,
-          latestMasterTime: 0
+          latestOrderTime: 0
         };
       scoreByProject.set(key, current);
       return current;
     };
 
     // 客户常用机型按历史下单和 BOM/适用范围热度排序，避免快捷入口静默展示无业务依据的前几项。
-    for (const row of orderLines) {
+    for (const row of visibleOrderLines) {
       const score = ensureProjectScore(row.projectModel);
       if (!score) {
         continue;
@@ -231,21 +763,19 @@ export class MaterialsService {
       score.orderCount += 1;
       score.latestOrderTime = Math.max(score.latestOrderTime, row.order.orderDate?.getTime() || row.createdAt.getTime());
     }
-    for (const row of boms) {
+    for (const row of visibleBoms) {
       const score = ensureProjectScore(row.projectModel);
       if (!score) {
         continue;
       }
       score.bomCount += 1;
-      score.latestMasterTime = Math.max(score.latestMasterTime, row.updatedAt.getTime());
     }
-    for (const row of applicabilities) {
+    for (const row of visibleApplicabilities) {
       const score = ensureProjectScore(row.projectModel);
       if (!score) {
         continue;
       }
       score.applicabilityCount += 1;
-      score.latestMasterTime = Math.max(score.latestMasterTime, row.updatedAt.getTime());
     }
 
     return [...scoreByProject.values()]
@@ -261,9 +791,6 @@ export class MaterialsService {
         if (aMasterCount !== bMasterCount) {
           return bMasterCount - aMasterCount;
         }
-        if (a.latestMasterTime !== b.latestMasterTime) {
-          return b.latestMasterTime - a.latestMasterTime;
-        }
         return a.value.localeCompare(b.value, 'zh-Hans-CN');
       })
       .map((item) => item.value);
@@ -273,7 +800,7 @@ export class MaterialsService {
     const [enabledRows, totalCount] = await Promise.all([
       this.prisma.materialCommonProjectModel.findMany({
         where: { status: 'ENABLED' },
-        orderBy: [{ sortOrder: 'asc' }, { updatedAt: 'asc' }],
+        orderBy: [{ sortOrder: 'asc' }, { projectModelNormalized: 'asc' }],
         select: { projectModel: true }
       }),
       this.prisma.materialCommonProjectModel.count()
@@ -330,9 +857,9 @@ export class MaterialsService {
     return projectModel.trim().toLocaleLowerCase('zh-CN');
   }
 
-  private findDashboardMaterials(status?: CommonStatus) {
+  private findDashboardMaterials(status?: MaterialDashboardQueryDto['status']) {
     return this.prisma.material.findMany({
-      where: status ? { status } : {},
+      where: status && status !== 'ALL' ? { status } : {},
       include: {
         applicabilities: {
           include: {
@@ -340,7 +867,8 @@ export class MaterialsService {
               select: {
                 id: true,
                 customerCode: true,
-                customerName: true
+                customerName: true,
+                status: true
               }
             }
           }
@@ -358,14 +886,23 @@ export class MaterialsService {
                   select: {
                     id: true,
                     customerCode: true,
-                    customerName: true
+                    customerName: true,
+                    status: true
                   }
                 },
                 customerScopes: {
                   where: { status: 'ENABLED' },
                   select: {
                     customerId: true,
-                    status: true
+                    customerNameSnapshot: true,
+                    status: true,
+                    customer: {
+                      select: {
+                        customerCode: true,
+                        customerName: true,
+                        status: true
+                      }
+                    }
                   }
                 },
                 lines: {
@@ -391,7 +928,7 @@ export class MaterialsService {
           }
         }
       },
-      orderBy: [{ updatedAt: 'desc' }, { partCode: 'asc' }]
+      orderBy: [{ partCode: 'asc' }, { id: 'asc' }]
     });
   }
 
@@ -405,7 +942,8 @@ export class MaterialsService {
               select: {
                 id: true,
                 customerCode: true,
-                customerName: true
+                customerName: true,
+                status: true
               }
             }
           }
@@ -507,16 +1045,30 @@ export class MaterialsService {
     const key = this.codeKey(material.partCode);
     const hasScopedDashboardContext = Boolean(query.customerId?.trim() || query.projectModel?.trim());
     const selectedCustomerId = query.customerId?.trim();
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const matchingHistory = this.historyMatchingContext(history, query);
     const displayHistoryRows = hasScopedDashboardContext ? matchingHistory : history;
     const displayHistory = displayHistoryRows[0];
-    const activeApplicabilities = material.applicabilities.filter((item) => item.status === 'ENABLED');
+    const activeApplicabilities = material.applicabilities.filter(
+      (item) =>
+        item.status === 'ENABLED' &&
+        (includeTestFixtures ||
+          (!this.hasTestFixturePrefix(item.projectModel) && !this.isArchivedTestFixtureCustomer(item.customer)))
+    );
     const customerScopedApplicabilities = selectedCustomerId
       ? activeApplicabilities.filter((item) => !item.customerId || item.customerId === selectedCustomerId)
       : activeApplicabilities;
     const matchingApplicabilities = this.applicabilitiesMatchingContext(activeApplicabilities, query);
     const displayApplicabilities = hasScopedDashboardContext ? matchingApplicabilities : activeApplicabilities;
-    const activeBomLines = material.modelBomLines.filter((line) => line.status === 'ENABLED' && line.bom.status === 'ENABLED');
+    const activeBomLines = material.modelBomLines.filter(
+      (line) =>
+        line.status === 'ENABLED' &&
+        line.bom.status === 'ENABLED' &&
+        (includeTestFixtures ||
+          (!this.hasTestFixturePrefix(line.bom.bomName, line.bom.projectModel) &&
+            !this.isArchivedTestFixtureCustomer(line.bom.customer) &&
+            !line.bom.customerScopes.some((scope) => this.isArchivedTestFixtureCustomer(scope.customer))))
+    );
     const customerScopedBomLines = selectedCustomerId
       ? activeBomLines.filter((line) => this.bomLineMatchesCustomerScope(line, selectedCustomerId, { excludeGlobalAllProject: true }))
       : activeBomLines;
@@ -533,6 +1085,7 @@ export class MaterialsService {
     >;
     const bomStructureLabels = this.uniqueList(displayBomLines.map((line) => this.dashboardBomStructureLabel(line)));
     const bomStructureDetails = this.dashboardBomStructureDetails(displayBomLines);
+    const bomStructureDetailCount = bomStructureDetails.length;
     const currentRelation = this.dashboardCurrentRelation({
       hasScopedDashboardContext,
       displayBomLines,
@@ -547,16 +1100,31 @@ export class MaterialsService {
     const stockAlertQuantity =
       material.stockAlertQuantity === null || material.stockAlertQuantity === undefined ? null : decimalToNumber(material.stockAlertQuantity);
     const stockAlertEnabled = Boolean(material.stockAlertEnabled);
-    const customerNames = this.uniqueList([
+    const scopeCustomerNames = this.uniqueList([
       ...displayApplicabilities.map((item) => item.customer?.customerName || item.customerNameSnapshot || ''),
-      ...displayBomLines.map((line) => line.bom.customer?.customerName || line.bom.customerNameSnapshot || ''),
-      ...displayHistoryRows.map((line) => line.order.customerName)
+      ...displayBomLines.flatMap((line) => this.bomCustomerScopeNames(line))
     ]);
-    const projectModels = this.uniqueList([
+    const historyCustomerNames = this.uniqueList(displayHistoryRows.map((line) => line.order.customerName));
+    const formalProjectModels = this.uniqueList([
       ...displayApplicabilities.map((item) => item.projectModel || ''),
-      ...displayBomLines.map((line) => line.bom.projectModel),
-      ...displayHistoryRows.map((line) => line.projectModel || '')
+      ...displayBomLines.map((line) => line.bom.projectModel)
     ]);
+    const historyProjectModels = this.uniqueList(displayHistoryRows.map((line) => line.projectModel || ''));
+    const targetBomProjectModel = query.projectModel?.trim() || (formalProjectModels.length === 1 ? formalProjectModels[0] : '');
+    const currentScopeBomLineCount = targetBomProjectModel
+      ? displayBomLines.filter((line) => {
+          const customerMatches = selectedCustomerId
+            ? this.bomLineMatchesCustomerScope(line, selectedCustomerId)
+            : this.bomLineHasGlobalCustomerScope(line);
+          const projectMatches =
+            line.bom.projectModelScopeKey === 'ALL' ||
+            normalizeSearchKeyword(line.bom.projectModel) === normalizeSearchKeyword(targetBomProjectModel);
+          return (
+            customerMatches &&
+            projectMatches
+          );
+        }).length
+      : 0;
     const projectScopeEntries = [
       ...customerScopedApplicabilities.map((item) => ({
         customerId: item.customerId || null,
@@ -570,20 +1138,34 @@ export class MaterialsService {
       }))
     ];
     const bomNames = this.uniqueList(displayBomLines.map((line) => line.bom.bomName));
-    const hasCustomScope =
-      displayApplicabilities.some((item) => item.customerId || item.projectModel) ||
-      displayBomLines.some((line) => line.bom.customerId) ||
-      displayHistoryRows.some((line) => String(line.partCategory || '').includes('定制'));
-    const currentCustomerUsageCount = query.customerId
-      ? history.filter((line) => line.order.customerId === query.customerId).length
-      : 0;
+      const hasGlobalProjectScope = projectScopeEntries.some(
+        (entry) => entry.hasGlobalProjectScope && this.projectScopeMatchesCustomer(entry.customerId, selectedCustomerId)
+      );
+      const hasGlobalCustomerScope =
+        customerScopedApplicabilities.some((item) => !item.customerId) ||
+        customerScopedBomLines.some((line) => this.bomLineHasGlobalCustomerScope(line));
+      const hasFormalScope = displayApplicabilities.length > 0 || displayBomLines.length > 0;
+      const hasCustomerSpecificScope =
+        !hasGlobalCustomerScope &&
+        (displayApplicabilities.some((item) => item.customerId) ||
+          displayBomLines.some((line) => line.bom.customerId || line.bom.customerScopeMode === 'SELECTED'));
+      const hasHistoryCustomScope = !hasFormalScope && displayHistoryRows.some((line) => String(line.partCategory || '').includes('定制'));
+      const hasCustomScope = hasCustomerSpecificScope || hasHistoryCustomScope;
+      const displayPartType = hasFormalScope ? (hasCustomScope ? '定制件' : '通用件') : displayHistory?.partCategory || (hasCustomScope ? '定制件' : '通用件');
+      const currentCustomerUsageCount = query.customerId
+        ? history.filter((line) => line.order.customerId === query.customerId).length
+        : 0;
+      const publicScopeCustomerNames = hasGlobalCustomerScope ? [] : scopeCustomerNames;
+      const publicScopeCustomerNameCount = hasGlobalCustomerScope ? 0 : scopeCustomerNames.length;
+      const publicProjectModels = hasGlobalProjectScope ? [] : formalProjectModels;
+      const publicProjectModelCount = hasGlobalProjectScope ? 0 : formalProjectModels.length;
     const searchParts = this.searchParts(material, displayHistoryRows, displayApplicabilities, displayBomLines);
 
     return {
       id: material.id,
       partCode: material.partCode,
       partName: material.partName,
-      partType: displayHistory?.partCategory || (hasCustomScope ? '定制件' : '通用件'),
+      partType: displayPartType,
       unit: material.unit,
       partSpecification: displayHistory?.partSpecification || material.partSpecification,
       status: material.status,
@@ -592,27 +1174,34 @@ export class MaterialsService {
       currentRelationType: currentRelation.type,
       currentRelationLabel: currentRelation.label,
       currentRelationDescription: currentRelation.description,
-      customerNames,
+      // 客户列只表达正式适用范围或 BOM 范围；历史订单客户单独返回，避免通用件把所有使用过的客户铺满列表。
+      customerNames: publicScopeCustomerNames,
+      customerNameCount: publicScopeCustomerNameCount,
+      customerScopeLabel: this.dashboardCustomerScopeLabel(hasGlobalCustomerScope, scopeCustomerNames, historyCustomerNames),
+      customerScopeKind: hasGlobalCustomerScope ? 'ALL' : scopeCustomerNames.length > 0 ? 'SCOPED' : historyCustomerNames.length > 0 ? 'ORDER_HISTORY' : 'NONE',
+      historyCustomerNames,
+      historyCustomerCount: historyCustomerNames.length,
       customerIds: this.uniqueList([
         ...customerScopedApplicabilities.map((item) => item.customerId || ''),
         ...customerScopedBomLines.flatMap((line) => this.bomCustomerScopeIds(line)),
         ...history.map((line) => line.order.customerId)
       ]),
-      hasGlobalCustomerScope:
-        customerScopedApplicabilities.some((item) => !item.customerId) ||
-        customerScopedBomLines.some((line) => this.bomLineHasGlobalCustomerScope(line)),
-      projectModels,
+      hasGlobalCustomerScope,
+      projectModels: publicProjectModels,
+      projectModelCount: publicProjectModelCount,
+      historyProjectModels,
+      historyProjectModelCount: historyProjectModels.length,
       projectScopeEntries,
       // 项目筛选必须按当前客户识别“全部机型/项目”，避免其他客户的通用 BOM 污染当前客户筛选。
-      hasGlobalProjectScope: projectScopeEntries.some(
-        (entry) => entry.hasGlobalProjectScope && this.projectScopeMatchesCustomer(entry.customerId, selectedCustomerId)
-      ),
+      hasGlobalProjectScope,
       applicabilityCount: activeApplicabilities.length,
       bomLineCount: displayBomLines.length,
+      currentScopeBomLineCount,
       bomNames,
+      bomNameCount: bomNames.length,
       defaultQuantity: matchedBomLine ? decimalToNumber(matchedBomLine.defaultQuantity) : null,
       defaultQuantityUnit: matchedBomLine?.unitSnapshot || material.unit,
-      defaultProcessRoute: matchedBomLine?.defaultProcessRoute || this.processRouteText(displayHistory),
+      defaultProcessRoute: matchedBomLine?.defaultProcessRoute || material.defaultProcessRoute || this.processRouteText(displayHistory),
       drawingNo: displayDrawing?.drawingNo || null,
       drawingVersion: displayDrawing?.drawingVersion || null,
       drawingDate: this.formatDateOnly(displayDrawing?.drawingDate),
@@ -620,12 +1209,13 @@ export class MaterialsService {
       drawingSource,
       drawingSourceLabel: this.dashboardDrawingSourceLabel(drawingSource),
       partThickness: displayHistory?.partThickness === undefined ? null : decimalToNumber(displayHistory.partThickness),
-      projectModel: displayHistory?.projectModel || projectModels[0] || null,
+      projectModel: hasGlobalProjectScope ? null : formalProjectModels[0] || null,
       bomStructureType: this.dashboardBomStructureType(matchedBomLine),
       bomStructureLabel: this.dashboardBomStructureLabel(matchedBomLine),
       bomStructureTypes,
       bomStructureLabels,
       bomStructureDetails,
+      bomStructureDetailCount,
       lastOrderNo: displayHistory?.order.orderNo || null,
       lastOrderDate: this.formatDateOnly(displayHistory?.order.orderDate),
       lastCustomerName: displayHistory?.order.customerName || null,
@@ -638,9 +1228,7 @@ export class MaterialsService {
       stockAlertTriggered: stockAlertEnabled && stockAlertQuantity !== null && quantity.availableQuantity <= stockAlertQuantity,
       searchText: searchParts.join(' '),
       searchParts,
-      history,
-      createdAt: material.createdAt,
-      updatedAt: material.updatedAt
+      history
     };
   }
 
@@ -714,9 +1302,7 @@ export class MaterialsService {
     } else if (sortBy === 'DRAWING_DATE') {
       result = this.compareDashboardNullableTime(a.drawingDate, b.drawingDate, sortOrder);
     } else if (sortBy === 'BOM_STATUS') {
-      result = this.compareDashboardNumber(a.bomNames.length > 0 ? 1 : 0, b.bomNames.length > 0 ? 1 : 0, sortOrder);
-    } else if (sortBy === 'UPDATED_AT') {
-      result = this.compareDashboardNullableTime(a.updatedAt, b.updatedAt, sortOrder);
+      result = this.compareDashboardNumber(this.dashboardRowHasBom(a) ? 1 : 0, this.dashboardRowHasBom(b) ? 1 : 0, sortOrder);
     } else {
       result = this.compareDashboardNullableTime(a.lastOrderDate, b.lastOrderDate, sortOrder);
     }
@@ -724,9 +1310,9 @@ export class MaterialsService {
   }
 
   private compareDashboardDefault(a: ReturnType<MaterialsService['buildDashboardRow']>, b: ReturnType<MaterialsService['buildDashboardRow']>) {
+    // 第一阶段不把资料维护时间作为业务排序依据；同等业务条件下用稳定零件编码兜底。
     return (
       this.compareDashboardNullableTime(a.lastOrderDate, b.lastOrderDate, 'DESC') ||
-      this.compareDashboardNullableTime(a.updatedAt, b.updatedAt, 'DESC') ||
       this.compareDashboardText(a.partCode, b.partCode, 'ASC')
     );
   }
@@ -768,7 +1354,7 @@ export class MaterialsService {
   }
 
   private rowMatchesBomPresence(row: ReturnType<MaterialsService['buildDashboardRow']>, bomPresence: NonNullable<MaterialDashboardQueryDto['bomPresence']>) {
-    return bomPresence === 'WITH_BOM' ? row.bomNames.length > 0 : row.bomNames.length === 0;
+    return bomPresence === 'WITH_BOM' ? this.dashboardRowHasBom(row) : !this.dashboardRowHasBom(row);
   }
 
   private rowMatchesRecentOrderPresence(
@@ -779,6 +1365,9 @@ export class MaterialsService {
   }
 
   private rowMatchesStockAlert(row: ReturnType<MaterialsService['buildDashboardRow']>, stockAlert: NonNullable<MaterialDashboardQueryDto['stockAlert']>) {
+    if (stockAlert === 'ALL') {
+      return true;
+    }
     if (stockAlert === 'ENABLED') {
       return row.stockAlertEnabled;
     }
@@ -875,6 +1464,32 @@ export class MaterialsService {
       return line.bom.customerScopes.map((scope) => scope.customerId);
     }
     return [''];
+  }
+
+  private bomCustomerScopeNames(line: DashboardMaterial['modelBomLines'][number]) {
+    if (line.bom.customerId) {
+      return [line.bom.customer?.customerName || line.bom.customerNameSnapshot || ''];
+    }
+    if (line.bom.customerScopeMode === 'SELECTED') {
+      return line.bom.customerScopes.map((scope) => scope.customer?.customerName || scope.customerNameSnapshot || '');
+    }
+    return [];
+  }
+
+  private dashboardCustomerScopeLabel(hasGlobalCustomerScope: boolean, scopeCustomerNames: string[], historyCustomerNames: string[]) {
+    if (hasGlobalCustomerScope) {
+      return '全部客户';
+    }
+    if (scopeCustomerNames.length === 1) {
+      return scopeCustomerNames[0];
+    }
+    if (scopeCustomerNames.length > 1) {
+      return `指定客户 ${scopeCustomerNames.length} 个`;
+    }
+    if (historyCustomerNames.length > 0) {
+      return `仅订单历史 ${historyCustomerNames.length} 个客户`;
+    }
+    return '未设置适用客户';
   }
 
   private bomLineHasGlobalCustomerScope(line: DashboardMaterial['modelBomLines'][number]) {
@@ -1190,10 +1805,23 @@ export class MaterialsService {
       searchParts: _searchParts,
       projectScopeEntries: _projectScopeEntries,
       customerIds: _customerIds,
-      hasGlobalCustomerScope: _hasGlobalCustomerScope,
+      customerNames,
+      historyCustomerNames,
+      projectModels,
+      historyProjectModels,
+      bomNames,
+      bomStructureDetails,
       ...publicRow
     } = row;
-    return publicRow;
+    return {
+      ...publicRow,
+      customerNames: customerNames.slice(0, MATERIAL_DASHBOARD_CUSTOMER_PREVIEW_LIMIT),
+      historyCustomerNames: historyCustomerNames.slice(0, MATERIAL_DASHBOARD_CUSTOMER_PREVIEW_LIMIT),
+      projectModels: projectModels.slice(0, MATERIAL_DASHBOARD_PROJECT_MODEL_PREVIEW_LIMIT),
+      historyProjectModels: historyProjectModels.slice(0, MATERIAL_DASHBOARD_PROJECT_MODEL_PREVIEW_LIMIT),
+      bomNames: bomNames.slice(0, MATERIAL_DASHBOARD_BOM_NAME_PREVIEW_LIMIT),
+      bomStructureDetails: bomStructureDetails.slice(0, MATERIAL_DASHBOARD_BOM_STRUCTURE_PREVIEW_LIMIT)
+    };
   }
 
   private dateInRange(value: Date | null | undefined, from?: Date | null, to?: Date | null) {

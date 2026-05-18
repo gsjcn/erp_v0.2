@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, Patch, Post, Query, StreamableFile } from '@nestjs/common';
 import { CustomersService } from './customers.service';
 import {
   CheckCustomerCodeQueryDto,
@@ -15,7 +15,14 @@ export class CustomersController {
 
   @Get()
   findAll(@Query() query: CustomerQueryDto) {
-    return this.customersService.findAll(query);
+    return this.customersService.findAll({ ...query, withPage: 'true' });
+  }
+
+  @Get('export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="customers-export.xlsx"')
+  async exportCustomers(@Query() query: CustomerQueryDto) {
+    return new StreamableFile(await this.customersService.buildCustomersExport(query));
   }
 
   @Get('check-name')

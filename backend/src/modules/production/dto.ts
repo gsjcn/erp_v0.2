@@ -12,6 +12,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   Min,
   ValidateNested
 } from 'class-validator';
@@ -19,6 +20,19 @@ import {
 export const productionShortageModes = ['REPLENISHMENT_REQUEST', 'REPLENISHMENT', 'MANAGER_APPROVED'] as const;
 export const productionWithdrawHandlingModes = ['STOCK', 'SCRAP', 'NONE'] as const;
 export const productionReplenishmentRequestStatuses = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+export const productionExportViewModes = ['ORDER_SUMMARY', 'TASK_DETAIL'] as const;
+export const productionExportStatuses = [
+  'ALL',
+  'ACTIVE',
+  'PENDING',
+  'IN_PROGRESS',
+  'WAITING_CONFIRMATION',
+  'READY_TO_COMPLETE',
+  'COMPLETED',
+  'RECEIVED',
+  'STORED',
+  'CANCELLED'
+] as const;
 
 export class ProductionOperatorQueryDto {
   @IsOptional()
@@ -70,6 +84,26 @@ export class ProductionNoticeQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class AcknowledgeProductionNoticeDto {
@@ -122,6 +156,26 @@ export class ProductionReplenishmentRequestQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class ProductionScrapQueryDto {
@@ -140,6 +194,26 @@ export class ProductionScrapQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class ProductionTaskQueryDto {
@@ -162,6 +236,38 @@ export class ProductionTaskQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @IsIn(productionExportStatuses)
+  displayStatus?: (typeof productionExportStatuses)[number];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
+}
+
+export class ProductionExportQueryDto extends ProductionTaskQueryDto {
+  @IsOptional()
+  @IsIn(productionExportViewModes)
+  viewMode?: (typeof productionExportViewModes)[number];
 }
 
 export class WithdrawProductionTaskDto {

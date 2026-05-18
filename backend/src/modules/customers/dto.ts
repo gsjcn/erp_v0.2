@@ -26,6 +26,10 @@ export class CustomerQueryDto {
   @IsOptional()
   @IsString()
   withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class CheckCustomerNameQueryDto {

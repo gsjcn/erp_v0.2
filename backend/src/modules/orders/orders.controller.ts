@@ -94,6 +94,13 @@ export class OrdersController {
     return this.ordersService.findAll(query);
   }
 
+  @Get('export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="orders-export.xlsx"')
+  async exportOrders(@Query() query: OrderQueryDto) {
+    return new StreamableFile(await this.ordersService.buildOrdersExport(query));
+  }
+
   @Get('next-no')
   nextOrderNo(@Query() query: NextOrderNoQueryDto) {
     return this.ordersService.nextOrderNo(query);
@@ -248,6 +255,13 @@ export class OrdersController {
     @Query() query: GetOrderImportFilePreviewQueryDto
   ) {
     return this.ordersService.importSourceFilePreview(orderNo, fileId, query);
+  }
+
+  @Get(':orderNo/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="order-detail-export.xlsx"')
+  async exportOrderDetail(@Param('orderNo') orderNo: string) {
+    return new StreamableFile(await this.ordersService.buildOrderDetailExport(orderNo));
   }
 
   @Get(':orderNo')

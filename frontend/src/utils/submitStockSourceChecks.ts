@@ -14,10 +14,18 @@ import {
 
 function toStockSourcePayload(line: OrderLine): CreateOrderLinePayload {
   return {
+    lineType: line.lineType,
+    partCategory: line.partCategory,
+    componentNo: line.componentNo,
+    parentComponentNo: line.parentComponentNo,
+    importSequence: line.importSequence,
+    projectModel: line.projectModel,
     partCode: line.partCode,
     partName: line.partName,
     drawingNo: line.drawingNo,
     drawingVersion: line.drawingVersion,
+    drawingDate: line.drawingDate,
+    drawingStatus: line.drawingStatus,
     drawingFileName: line.drawingFileName,
     drawingFileUrl: line.drawingFileUrl,
     partThickness: line.partThickness,

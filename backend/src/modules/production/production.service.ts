@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { OrderStatus, Prisma, ProductionNoticeStatus, ProductionNoticeTarget, ProductionStatus } from '@prisma/client';
+import * as ExcelJS from 'exceljs';
 import { randomUUID } from 'node:crypto';
 import { businessDateKey, businessDateTimeKey } from '../../common/business-date';
 import { decimalToNumber, processSnapshotToDetails, type ProcessStepSnapshot } from '../../common/serializers';
@@ -13,6 +14,7 @@ import {
   CompleteProductionDto,
   AcknowledgeProductionNoticeDto,
   ProductionAnnualSummaryQueryDto,
+  ProductionExportQueryDto,
   ProductionNoticeQueryDto,
   ProductionOperatorQueryDto,
   ProductionReplenishmentRequestQueryDto,
@@ -36,6 +38,7 @@ type ProductionOperatorRow = {
 };
 
 type ProductionOrderSummaryStatus = ProductionStatus | 'READY_TO_COMPLETE' | 'RECEIVED';
+type ProductionExportCellValue = string | number | boolean | Date | null | undefined;
 
 const fallbackProductionOperators: ProductionOperatorRow[] = [
   {
@@ -168,6 +171,17 @@ interface ProcessQuantityGuard {
   quantityOverrideReason: string | null;
 }
 
+const PRODUCTION_TEST_FIXTURE_PREFIXES = [
+  'VERIFY-',
+  'VERIFY_',
+  'COD-',
+  'MI-API-',
+  'MAT-STABLE',
+  'UPLOAD-FILENAME',
+  'CUST-SEARCH-',
+  'TEST-CUSTOMER'
+];
+
 @Injectable()
 export class ProductionService {
   constructor(private readonly prisma: PrismaService) {}
@@ -184,21 +198,120 @@ export class ProductionService {
   async notices(query: ProductionNoticeQueryDto = {}) {
     const target = query.target || ProductionNoticeTarget.PRODUCTION;
     const where = await this.buildProductionNoticeWhere(query, target);
-    const notices = await this.prisma.productionNotice.findMany({
-      where,
-      orderBy: { createdAt: 'desc' }
-    });
-    return this.toNoticesWithCustomerNames(notices);
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, notices] = await Promise.all([
+      this.prisma.productionNotice.count({ where }),
+      this.prisma.productionNotice.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        ...(withPage ? { skip: offset, take: limit } : {})
+      })
+    ]);
+    const items = await this.toNoticesWithCustomerNames(notices);
+    if (!withPage) {
+      return items;
+    }
+    // 生产通知历史必须显式分页，避免车间现场入口随着历史消息增长一次性全量加载。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
   }
 
   async adminNotices(query: ProductionNoticeQueryDto = {}) {
     // 管理员全部通知只做只读历史查询，按 target 过滤展示归类，不参与确认或状态流转。
     const where = await this.buildProductionNoticeWhere(query, query.target);
-    const notices = await this.prisma.productionNotice.findMany({
-      where,
-      orderBy: { createdAt: 'desc' }
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, notices] = await Promise.all([
+      this.prisma.productionNotice.count({ where }),
+      this.prisma.productionNotice.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        ...(withPage ? { skip: offset, take: limit } : {})
+      })
+    ]);
+    const items = await this.toNoticesWithCustomerNames(notices);
+    if (!withPage) {
+      return items;
+    }
+    // 管理员通知中心必须显式返回分页信息，避免历史消息越积越多时一次性全量加载。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async buildProductionNoticesExport(query: ProductionNoticeQueryDto = {}, options: { admin?: boolean } = {}): Promise<Uint8Array> {
+    const target = options.admin ? query.target : ProductionNoticeTarget.PRODUCTION;
+    const exportQuery = options.admin ? query : { ...query, target: ProductionNoticeTarget.PRODUCTION };
+    const where = await this.buildProductionNoticeWhere(exportQuery, target);
+    const notices = await this.toNoticesWithCustomerNames(
+      await this.prisma.productionNotice.findMany({
+        where,
+        orderBy: { createdAt: 'desc' }
+      })
+    );
+    const title = options.admin ? '管理员通知历史导出' : '生产通知历史导出';
+
+    // 通知历史导出只读取 ProductionNotice，不确认通知、不修改 PENDING/ACKNOWLEDGED 状态。
+    return this.buildProductionExportWorkbook({
+      sheetName: options.admin ? '管理员通知' : '生产通知',
+      title,
+      scopeText: await this.productionNoticeExportScopeText(exportQuery, target, Boolean(options.admin)),
+      generatedAt: this.businessDateTimeText(new Date()),
+      headers: [
+        '序号',
+        '通知号',
+        '归类',
+        '状态',
+        '通知类型',
+        '订单号',
+        '客户',
+        '生产任务',
+        '零件编码',
+        '零件名称',
+        '变更前数量',
+        '变更后数量',
+        '变更数量',
+        '单位',
+        '原因',
+        '管理员',
+        '确认人',
+        '确认时间',
+        '通知时间'
+      ],
+      rows: notices.map((notice, index) => [
+        index + 1,
+        notice.noticeNo,
+        this.productionNoticeTargetLabel(notice.target),
+        this.productionNoticeStatusLabel(notice.status),
+        this.productionNoticeTypeLabel(notice.noticeType),
+        notice.orderNo || '',
+        notice.customerName || '',
+        notice.productionTaskNo || '',
+        notice.partCode || '',
+        notice.partName || '',
+        notice.beforeQuantity ?? '',
+        notice.afterQuantity ?? '',
+        notice.deltaQuantity ?? '',
+        notice.unit || '',
+        notice.reason || '',
+        notice.managerName || '',
+        notice.acknowledgedBy || '',
+        this.productionNoticeDateTimeText(notice.acknowledgedAt),
+        this.productionNoticeDateTimeText(notice.createdAt)
+      ])
     });
-    return this.toNoticesWithCustomerNames(notices);
   }
 
   async acknowledgeNotice(id: string, dto: AcknowledgeProductionNoticeDto) {
@@ -277,11 +390,21 @@ export class ProductionService {
         where.createdAt.lte = this.endOfDay(query.dateTo);
       }
     }
+    if (query.includeTestFixtures !== 'true') {
+      where.NOT = this.productionReplenishmentRequestFixtureWhere();
+    }
 
-    const requests = await this.prisma.productionReplenishmentRequest.findMany({
-      where,
-      orderBy: [{ createdAt: 'desc' }]
-    });
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, requests] = await Promise.all([
+      this.prisma.productionReplenishmentRequest.count({ where }),
+      this.prisma.productionReplenishmentRequest.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }],
+        ...(withPage ? { skip: offset, take: limit } : {})
+      })
+    ]);
     const orderIds = Array.from(new Set(requests.map((request) => request.orderId).filter(Boolean))) as string[];
     const orderNos = Array.from(new Set(requests.map((request) => request.orderNo?.trim()).filter(Boolean))) as string[];
     const relatedOrders =
@@ -299,7 +422,7 @@ export class ProductionService {
     const orderStatusByOrderId = new Map(relatedOrders.map((order) => [order.id, order.status]));
     const orderStatusByOrderNo = new Map(relatedOrders.map((order) => [order.orderNo.trim().toUpperCase(), order.status]));
     const statusRank: Record<string, number> = { PENDING: 0, APPROVED: 1, REJECTED: 2 };
-    return requests
+    const items = requests
       .sort((left, right) => (statusRank[left.status] ?? 9) - (statusRank[right.status] ?? 9))
       .map((request) =>
         this.toProductionReplenishmentRequest(
@@ -308,6 +431,71 @@ export class ProductionService {
             orderStatusByOrderNo.get(request.orderNo.trim().toUpperCase())
         )
       );
+    if (!withPage) {
+      return items;
+    }
+    // 生产报废补单申请是长期历史列表，公开接口必须分页，避免车间端一次性加载全部审核记录。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async buildProductionReplenishmentRequestsExport(query: ProductionReplenishmentRequestQueryDto = {}): Promise<Uint8Array> {
+    const replenishmentResponse = await this.replenishmentRequests({ ...query, withPage: undefined });
+    const requests = Array.isArray(replenishmentResponse) ? replenishmentResponse : replenishmentResponse.items;
+    // 生产报废补单申请导出只读取审核列表，不确认补单、不驳回补单、不生成 ProductionTask。
+    return this.buildProductionExportWorkbook({
+      sheetName: '生产报废补单申请',
+      title: '生产报废补单申请导出',
+      scopeText: this.productionReplenishmentRequestExportScopeText(query),
+      generatedAt: this.businessDateTimeText(new Date()),
+      headers: [
+        '序号',
+        '申请单号',
+        '状态',
+        '来源',
+        '订单号',
+        '生产任务',
+        '零件编码',
+        '零件名称',
+        '报废数量',
+        '申请补齐数量',
+        '单位',
+        '申请人员',
+        '申请原因',
+        '主管',
+        '审核说明',
+        '补单任务',
+        '创建时间',
+        '审核时间',
+        '批准时间'
+      ],
+      rows: requests.map((request, index) => [
+        index + 1,
+        request.requestNo,
+        this.productionReplenishmentRequestStatusLabel(request.status),
+        this.productionReplenishmentSourceTypeLabel(request.sourceType),
+        request.orderNo || '',
+        request.productionTaskNo || '',
+        request.partCode,
+        request.partName,
+        request.scrapQuantity,
+        request.requestQuantity,
+        request.unit,
+        [request.requestedByName, request.requestedByCode].filter(Boolean).join(' / '),
+        request.reason || '',
+        request.supervisorName || '',
+        request.supervisorRemark || '',
+        request.replenishmentTaskNo || '',
+        this.productionNoticeDateTimeText(request.createdAt),
+        this.productionNoticeDateTimeText(request.reviewedAt),
+        this.productionNoticeDateTimeText(request.approvedAt)
+      ])
+    });
   }
 
   async scrapRecords(query: ProductionScrapQueryDto = {}) {
@@ -319,6 +507,11 @@ export class ProductionService {
       });
       const orderIds = orders.map((order) => order.id);
       if (orderIds.length === 0) {
+        if (query.withPage === 'true') {
+          const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+          const offset = Math.max(Number(query.offset || 0), 0);
+          return { items: [], totalCount: 0, limit, offset, hasMore: false };
+        }
         return [];
       }
       // ProductionScrapRecord 第一阶段只保存 orderId 快照，不做复杂关系；客户筛选先通过订单表换算 orderId。
@@ -333,11 +526,74 @@ export class ProductionService {
         ...(query.dateTo ? { lte: new Date(`${query.dateTo}T23:59:59.999`) } : {})
       };
     }
-    const records = await this.prisma.productionScrapRecord.findMany({
-      where,
-      orderBy: [{ recordDate: 'desc' }, { scrapNo: 'desc' }]
+    if (query.includeTestFixtures !== 'true') {
+      where.NOT = this.productionScrapRecordFixtureWhere();
+    }
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
+    const [totalCount, records] = await Promise.all([
+      this.prisma.productionScrapRecord.count({ where }),
+      this.prisma.productionScrapRecord.findMany({
+        where,
+        orderBy: [{ recordDate: 'desc' }, { scrapNo: 'desc' }],
+        ...(withPage ? { skip: offset, take: limit } : {})
+      })
+    ]);
+    const items = records.map((record) => this.toScrapRecord(record));
+    if (!withPage) {
+      return items;
+    }
+    // 生产报废统计按历史流水展示，公开接口必须分页，避免报废记录增长后一次性加载。
+    return {
+      items,
+      totalCount,
+      limit,
+      offset,
+      hasMore: offset + items.length < totalCount
+    };
+  }
+
+  async buildProductionScrapRecordsExport(query: ProductionScrapQueryDto = {}): Promise<Uint8Array> {
+    const scrapResponse = await this.scrapRecords({ ...query, withPage: undefined });
+    const records = Array.isArray(scrapResponse) ? scrapResponse : scrapResponse.items;
+    // 生产报废记录导出只读取已保存的报废流水，不归档、不修改报废数量，也不触发补单。
+    return this.buildProductionExportWorkbook({
+      sheetName: '生产报废记录',
+      title: '生产报废统计导出',
+      scopeText: await this.productionScrapRecordExportScopeText(query),
+      generatedAt: this.businessDateTimeText(new Date()),
+      headers: [
+        '序号',
+        '报废记录号',
+        '订单号',
+        '生产任务',
+        '零件编码',
+        '零件名称',
+        '报废数量',
+        '单位',
+        '报废原因',
+        '报废日期',
+        '来源类型',
+        '来源记录',
+        '创建时间'
+      ],
+      rows: records.map((record, index) => [
+        index + 1,
+        record.scrapNo,
+        record.orderNo,
+        record.productionTaskNo || '',
+        record.partCode,
+        record.partName,
+        record.quantity,
+        record.unit,
+        record.reason,
+        this.productionNoticeDateTimeText(record.recordDate),
+        record.sourceRecordType,
+        record.sourceRecordId,
+        this.productionNoticeDateTimeText(record.createdAt)
+      ])
     });
-    return records.map((record) => this.toScrapRecord(record));
   }
 
   private normalizeOperatorKeyword(value: string) {
@@ -451,6 +707,61 @@ export class ProductionService {
     return !role.includes('计划') && (role.includes('车间主任') || role.includes('车间主管') || role.includes('主任'));
   }
 
+  private productionTaskFixtureWhere(): Prisma.ProductionTaskWhereInput {
+    return {
+      OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
+        { customerName: { startsWith: prefix, mode: 'insensitive' as const } },
+        { replenishmentSourceRequestNo: { startsWith: prefix, mode: 'insensitive' as const } }
+      ])
+    };
+  }
+
+  private productionNoticeFixtureWhere(): Prisma.ProductionNoticeWhereInput {
+    return {
+      OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        { noticeNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
+        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
+        { managerName: { startsWith: prefix, mode: 'insensitive' as const } }
+      ])
+    };
+  }
+
+  private productionReplenishmentRequestFixtureWhere(): Prisma.ProductionReplenishmentRequestWhereInput {
+    return {
+      OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        { requestNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
+        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
+        { replenishmentTaskNo: { startsWith: prefix, mode: 'insensitive' as const } }
+      ])
+    };
+  }
+
+  private productionScrapRecordFixtureWhere(): Prisma.ProductionScrapRecordWhereInput {
+    return {
+      OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        { scrapNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
+        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
+        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
+        { sourceRecordId: { startsWith: prefix, mode: 'insensitive' as const } }
+      ])
+    };
+  }
+
   private async resolveWorkshopSupervisor(supervisorCode?: string): Promise<ProductionOperatorRow> {
     const code = supervisorCode?.trim();
     if (!code) {
@@ -526,10 +837,18 @@ export class ProductionService {
       where.order = orderWhere;
     }
 
+    if (query.includeTestFixtures !== 'true') {
+      const existingNot = Array.isArray(where.NOT) ? where.NOT : where.NOT ? [where.NOT] : [];
+      where.NOT = [...existingNot, this.productionTaskFixtureWhere()];
+    }
+
     return where;
   }
 
   async findTasks(query: ProductionTaskQueryDto) {
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
     const tasks = await this.prisma.productionTask.findMany({
       where: this.buildTaskWhere(query),
       include: this.taskInclude(),
@@ -537,10 +856,26 @@ export class ProductionService {
     });
 
     const completedReplenishmentQuantityByLine = this.toCompletedReplenishmentQuantityByLine(tasks);
-    return tasks.map((task) => this.toTask(task, completedReplenishmentQuantityByLine));
+    const mappedTasks = tasks.map((task) => this.toTask(task, completedReplenishmentQuantityByLine));
+    const visibleTasks = this.filterProductionExportTasks(mappedTasks, query.displayStatus);
+    if (!withPage) {
+      return visibleTasks;
+    }
+    const items = visibleTasks.slice(offset, offset + limit);
+    // 生产任务会长期积累，公开列表必须显式分页；导出接口才按筛选条件读取完整结果。
+    return {
+      items,
+      totalCount: visibleTasks.length,
+      limit,
+      offset,
+      hasMore: offset + items.length < visibleTasks.length
+    };
   }
 
   async orderSummary(query: ProductionTaskQueryDto) {
+    const withPage = query.withPage === 'true';
+    const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
+    const offset = Math.max(Number(query.offset || 0), 0);
     const tasks = await this.prisma.productionTask.findMany({
       where: this.buildTaskWhere(query),
       include: this.taskInclude(),
@@ -674,7 +1009,7 @@ export class ProductionService {
       summaries.set(key, current);
     }
 
-    return Array.from(summaries.values()).map((summary) => {
+    const summaryRows = Array.from(summaries.values()).map((summary) => {
       const doneCount = summary.completedCount + summary.receivedCount;
       return {
         orderId: summary.orderId,
@@ -741,6 +1076,104 @@ export class ProductionService {
         pendingTaskIds: summary.pendingTaskIds,
         pendingTasks: summary.pendingTasks
       };
+    });
+    const visibleSummaryRows = this.filterProductionExportSummaries(summaryRows, query.displayStatus);
+    if (!withPage) {
+      return visibleSummaryRows;
+    }
+    const items = visibleSummaryRows.slice(offset, offset + limit);
+    // 生产订单汇总是首页入口，必须返回总数和 hasMore，避免历史订单增长后一次性加载全量汇总。
+    return {
+      items,
+      totalCount: visibleSummaryRows.length,
+      limit,
+      offset,
+      hasMore: offset + items.length < visibleSummaryRows.length
+    };
+  }
+
+  async buildProductionExport(query: ProductionExportQueryDto): Promise<Uint8Array> {
+    const viewMode = query.viewMode === 'TASK_DETAIL' ? 'TASK_DETAIL' : 'ORDER_SUMMARY';
+    const title = viewMode === 'ORDER_SUMMARY' ? '生产订单汇总表' : '生产计划表';
+    const scopeText = await this.productionExportScopeText(query);
+
+    if (viewMode === 'TASK_DETAIL') {
+      const taskResponse = await this.findTasks({
+        ...query,
+        displayStatus: undefined,
+        withPage: undefined,
+        limit: undefined,
+        offset: undefined
+      });
+      const tasks = this.filterProductionExportTasks(Array.isArray(taskResponse) ? taskResponse : taskResponse.items, query.displayStatus);
+      return this.buildProductionExportWorkbook({
+        sheetName: title,
+        title,
+        scopeText,
+        generatedAt: this.businessDateTimeText(new Date()),
+        headers: [
+          '序号',
+          '任务号',
+          '订单号',
+          '客户',
+          '订单日期',
+          '交期',
+          '零件',
+          '客户订单',
+          '完成/生产计划',
+          '生产流程',
+          '当前工序',
+          '状态'
+        ],
+        rows: tasks.map((task, index) => [
+          index + 1,
+          this.joinProductionExportLines(task.productionTaskNo, this.productionExportTaskRelationText(task)),
+          task.orderNo,
+          task.customerName,
+          this.formatBusinessDateText(task.orderDate),
+          this.formatBusinessDateText(task.deliveryDate),
+          task.partName,
+          this.formatProductionExportQuantity(task.customerOrderQuantity ?? task.plannedQuantity, task.unit),
+          this.joinProductionExportLines(
+            `${this.formatProductionExportCompletedQuantity(task)} / ${this.formatProductionExportQuantity(task.plannedQuantity, task.unit)}`,
+            this.productionExportShortageSummary(task)
+          ),
+          this.productionExportProcessStepsText(task),
+          this.joinProductionExportLines(this.productionExportCurrentProcessText(task), this.productionExportProcessProgressText(task)),
+          this.productionStatusLabelForSummary(this.productionDisplayStatus(task))
+        ])
+      });
+    }
+
+    const summaryResponse = await this.orderSummary({
+      ...query,
+      displayStatus: undefined,
+      withPage: undefined,
+      limit: undefined,
+      offset: undefined
+    });
+    const summaries = this.filterProductionExportSummaries(
+      Array.isArray(summaryResponse) ? summaryResponse : summaryResponse.items,
+      query.displayStatus
+    );
+    return this.buildProductionExportWorkbook({
+      sheetName: title,
+      title,
+      scopeText,
+      generatedAt: this.businessDateTimeText(new Date()),
+      headers: ['序号', '订单号', '客户', '订单日期', '交期', '零件/任务', '生产数量', '订单进度', '当前进度', '订单状态'],
+      rows: summaries.map((summary, index) => [
+        index + 1,
+        summary.orderNo,
+        summary.customerName,
+        this.formatBusinessDateText(summary.orderDate),
+        this.formatBusinessDateText(summary.deliveryDate),
+        `${summary.partCount} / ${summary.taskCount}`,
+        this.productionExportOrderSummaryQuantityText(summary),
+        `${summary.progressPercent}%`,
+        this.productionExportOrderSummaryProgressText(summary),
+        this.productionStatusLabelForSummary(summary.status)
+      ])
     });
   }
 
@@ -2715,6 +3148,420 @@ export class ProductionService {
     return `${this.roundQuantity(value)} ${unit || '件'}`;
   }
 
+  private formatBusinessDateText(value?: Date | string | null) {
+    if (!value) {
+      return '-';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '-';
+    }
+    const stamp = businessDateKey(date);
+    return `${stamp.substring(0, 4)}-${stamp.substring(4, 6)}-${stamp.substring(6, 8)}`;
+  }
+
+  private async productionExportScopeText(query: ProductionExportQueryDto) {
+    const customer = query.customerId
+      ? await this.prisma.customer.findUnique({ where: { id: query.customerId }, select: { customerName: true } })
+      : undefined;
+    const customerText = customer?.customerName || (query.customerId ? `客户ID ${query.customerId}` : '全部客户');
+    const dateText =
+      query.dateFrom || query.dateTo
+        ? `${query.dateFrom || '不限'} 至 ${query.dateTo || '不限'}`
+        : '全部订单日期';
+    const orderText = query.orderNo?.trim() || '全部订单';
+    const statusText = this.productionExportStatusText(query.displayStatus);
+    return `客户：${customerText} | 订单日期：${dateText} | 订单：${orderText} | 状态：${statusText}`;
+  }
+
+  private async productionNoticeExportScopeText(query: ProductionNoticeQueryDto, target?: ProductionNoticeTarget, admin = false) {
+    const customer = query.customerId
+      ? await this.prisma.customer.findUnique({ where: { id: query.customerId }, select: { customerName: true } })
+      : undefined;
+    const customerText = customer?.customerName || (query.customerId ? `客户ID ${query.customerId}` : '全部客户');
+    const dateText =
+      query.dateFrom || query.dateTo ? `${query.dateFrom || '开始'} 至 ${query.dateTo || '结束'}` : '全部';
+    return [
+      `归类：${admin ? this.productionNoticeTargetLabel(target) || '全部' : '生产通知'}`,
+      `状态：${this.productionNoticeStatusLabel(query.status) || '全部'}`,
+      `通知类型：${this.productionNoticeTypeLabel(query.noticeType) || '全部'}`,
+      `客户：${customerText}`,
+      `订单：${query.orderNo?.trim() || '全部'}`,
+      `任务：${query.productionTaskNo?.trim() || '全部'}`,
+      `零件：${query.partCode?.trim() || '全部'}`,
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `通知时间：${dateText}`
+    ].join('；');
+  }
+
+  private productionNoticeTargetLabel(target?: string | null) {
+    if (target === ProductionNoticeTarget.WAREHOUSE) {
+      return '仓库通知';
+    }
+    if (target === ProductionNoticeTarget.PRODUCTION) {
+      return '生产通知';
+    }
+    return target || '';
+  }
+
+  private productionNoticeStatusLabel(status?: string | null) {
+    if (status === ProductionNoticeStatus.PENDING) {
+      return '待确认';
+    }
+    if (status === ProductionNoticeStatus.ACKNOWLEDGED) {
+      return '已确认';
+    }
+    return status || '';
+  }
+
+  private productionNoticeTypeLabel(noticeType?: string | null) {
+    if (noticeType === 'QUANTITY_INCREASE') {
+      return '客户增量';
+    }
+    if (noticeType === 'QUANTITY_DECREASE') {
+      return '客户减量';
+    }
+    if (noticeType === 'ORDER_CANCELLED') {
+      return '订单取消';
+    }
+    if (noticeType === 'MATERIAL_ADDED') {
+      return '新增物料';
+    }
+    if (noticeType === 'TASK_WITHDRAWN') {
+      return '生产撤回';
+    }
+    return noticeType || '';
+  }
+
+  private productionNoticeDateTimeText(value?: Date | string | null) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '';
+    }
+    return this.businessDateTimeText(date);
+  }
+
+  private productionReplenishmentRequestExportScopeText(query: ProductionReplenishmentRequestQueryDto) {
+    const dateText =
+      query.dateFrom || query.dateTo ? `${query.dateFrom || '开始'} 至 ${query.dateTo || '结束'}` : '全部';
+    return [
+      `状态：${this.productionReplenishmentRequestStatusLabel(query.status) || '全部'}`,
+      `关键词：${query.keyword?.trim() || '全部'}`,
+      `订单：${query.orderNo?.trim() || '全部'}`,
+      `任务：${query.productionTaskNo?.trim() || '全部'}`,
+      `零件：${query.partCode?.trim() || '全部'}`,
+      `申请时间：${dateText}`
+    ].join('；');
+  }
+
+  private productionReplenishmentRequestStatusLabel(status?: string | null) {
+    if (status === 'PENDING') {
+      return '待确认';
+    }
+    if (status === 'APPROVED') {
+      return '已生成报废补单';
+    }
+    if (status === 'REJECTED') {
+      return '已驳回';
+    }
+    return status || '';
+  }
+
+  private productionReplenishmentSourceTypeLabel(sourceType?: string | null) {
+    if (sourceType === 'PRODUCTION_SCRAP') {
+      return '生产报废补单';
+    }
+    if (sourceType === 'ORDER_CHANGE') {
+      return '订单补单';
+    }
+    return sourceType || '生产报废补单';
+  }
+
+  private async productionScrapRecordExportScopeText(query: ProductionScrapQueryDto) {
+    const customer = query.customerId
+      ? await this.prisma.customer.findUnique({ where: { id: query.customerId }, select: { customerName: true } })
+      : undefined;
+    const customerText = customer?.customerName || (query.customerId ? `客户ID ${query.customerId}` : '全部客户');
+    const dateText =
+      query.dateFrom || query.dateTo ? `${query.dateFrom || '开始'} 至 ${query.dateTo || '结束'}` : '全部';
+    return [`客户：${customerText}`, `订单：${query.orderNo?.trim() || '全部'}`, `报废日期：${dateText}`].join('；');
+  }
+
+  private productionExportStatusText(status?: string) {
+    if (!status || status === 'ALL') {
+      return '全部';
+    }
+    if (status === 'ACTIVE') {
+      return '待处理';
+    }
+    return this.productionStatusLabelForSummary(status as ProductionOrderSummaryStatus);
+  }
+
+  private filterProductionExportTasks(tasks: any[], displayStatus?: string) {
+    if (!displayStatus || displayStatus === 'ALL') {
+      return tasks;
+    }
+    if (displayStatus === 'ACTIVE') {
+      return tasks.filter((task) => ['PENDING', 'IN_PROGRESS', 'READY_TO_COMPLETE'].includes(this.productionDisplayStatus(task)));
+    }
+    return tasks.filter((task) => this.productionDisplayStatus(task) === displayStatus);
+  }
+
+  private filterProductionExportSummaries(summaries: any[], displayStatus?: string) {
+    if (!displayStatus || displayStatus === 'ALL') {
+      return summaries;
+    }
+    if (displayStatus === 'ACTIVE') {
+      return summaries.filter((summary) => ['PENDING', 'IN_PROGRESS', 'READY_TO_COMPLETE'].includes(summary.status));
+    }
+    return summaries.filter((summary) => summary.status === displayStatus);
+  }
+
+  private productionExportProcessStepsText(task: any) {
+    const steps = Array.isArray(task.processSteps) ? task.processSteps : [];
+    return steps.length > 0 ? steps.map((step: string) => this.processStepTextForSummary(task, step)).join('、') : '-';
+  }
+
+  private productionExportCurrentProcessText(task: any) {
+    const status = this.productionDisplayStatus(task);
+    if (status === 'PENDING') {
+      return '待确认生产';
+    }
+    if (status === 'READY_TO_COMPLETE') {
+      return '待确认完成';
+    }
+    if (['COMPLETED', 'RECEIVED', 'STORED', 'CANCELLED'].includes(status)) {
+      return this.productionStatusLabelForSummary(status);
+    }
+    const steps = Array.isArray(task.processSteps) ? task.processSteps : [];
+    const current = steps.find((step: string) => !this.isProductionExportProcessCompleted(task, step));
+    return current ? this.processStepTextForSummary(task, current) : '待确认完成';
+  }
+
+  private productionExportProcessProgressText(task: any) {
+    const steps = Array.isArray(task.processSteps) ? task.processSteps : [];
+    if (steps.length === 0) {
+      return '未配置生产流程';
+    }
+    const completedCount = steps.filter((step: string) => this.isProductionExportProcessCompleted(task, step)).length;
+    return `${completedCount} / ${steps.length} 道`;
+  }
+
+  private isProductionExportProcessCompleted(task: any, processName: string) {
+    return (
+      task.status === ProductionStatus.COMPLETED ||
+      task.status === ProductionStatus.STORED ||
+      Boolean(task.processCompletions?.find((completion: any) => completion.processName === processName && completion.isCompleted))
+    );
+  }
+
+  private productionExportTaskRelationText(task: any) {
+    const texts: string[] = [];
+    if (task.isReplenishment && task.sourceProductionTaskNo) {
+      const sourceRequest = task.replenishmentSourceRequestNo ? ` / 来源单 ${task.replenishmentSourceRequestNo}` : '';
+      texts.push(`${this.productionExportReplenishmentTaskTypeText(task)}：源任务 ${task.sourceProductionTaskNo}${sourceRequest}`);
+    } else if (task.isReplenishment) {
+      const sourceRequest = task.replenishmentSourceRequestNo ? `：来源单 ${task.replenishmentSourceRequestNo}` : '';
+      texts.push(`${this.productionExportReplenishmentTaskTypeText(task)}${sourceRequest}`);
+    }
+    const componentText = this.productionExportComponentText(task);
+    if (componentText) {
+      texts.push(componentText);
+    }
+    if (task.importSequence) {
+      texts.push(`Excel 序号 ${task.importSequence}`);
+    }
+    return texts.join('；');
+  }
+
+  private productionExportComponentText(task: any) {
+    if (task.lineType === 'COMPONENT' && task.componentNo) {
+      return `组件 ${String(task.componentNo || '').trim().toUpperCase() || '未编号'}`;
+    }
+    if (task.parentComponentNo) {
+      return `子零件 -> ${String(task.parentComponentNo || '').trim().toUpperCase()}`;
+    }
+    if (task.lineType === 'PART') {
+      return '单独零件';
+    }
+    return '';
+  }
+
+  private productionExportReplenishmentTaskTypeText(task: any) {
+    return task.replenishmentSourceLabel || (task.replenishmentSourceType === 'PRODUCTION_SCRAP' ? '生产报废补单' : '订单补单');
+  }
+
+  private productionExportShortageSummary(task: any) {
+    const completion = this.productionExportFinalProcessCompletion(task);
+    if (!completion || !completion.shortageQuantity || completion.shortageQuantity <= 0) {
+      return '';
+    }
+
+    const shortage = this.formatQuantity(Number(completion.shortageQuantity ?? 0), task.unit);
+    const scrap = this.formatQuantity(Number(completion.scrapQuantity ?? 0), task.unit);
+    if (completion.shortageMode === 'REPLENISHMENT_REQUEST' && !completion.replenishmentTaskNo) {
+      return `缺 ${shortage}，报废 ${scrap}，生产报废补单申请待主管确认${completion.replenishmentRequestNo ? `：${completion.replenishmentRequestNo}` : ''}`;
+    }
+    if (completion.shortageMode === 'REPLENISHMENT') {
+      const sourceText = completion.replenishmentSource === 'PRODUCTION_SCRAP' ? '生产报废补单' : '补单';
+      return `缺 ${shortage}，报废 ${scrap}，${sourceText} ${completion.replenishmentTaskNo || '-'}`;
+    }
+    if (completion.shortageResolutionMode) {
+      const modeText =
+        completion.shortageResolutionMode === 'NO_REPLENISHMENT'
+          ? '无需补单'
+          : completion.shortageResolutionMode === 'CUSTOMER_QUANTITY_CHANGED'
+            ? '客户数量已变更'
+            : '已创建订单补单';
+      return `缺 ${shortage}，报废 ${scrap}，${modeText}：${completion.shortageResolutionReason || '-'}`;
+    }
+
+    return `缺 ${shortage}，报废 ${scrap}，${completion.managerName || '-'}确认：${completion.shortageReason || '-'}`;
+  }
+
+  private productionExportFinalProcessCompletion(task: any) {
+    const steps = Array.isArray(task.processSteps) ? task.processSteps : [];
+    const finalProcessName = steps[steps.length - 1];
+    return finalProcessName
+      ? task.processCompletions?.find((completion: any) => completion.processName === finalProcessName)
+      : undefined;
+  }
+
+  private formatProductionExportCompletedQuantity(task: any) {
+    return this.formatQuantity(Number(task.completedQuantity ?? 0), task.unit);
+  }
+
+  private formatProductionExportQuantity(quantity: unknown, unit?: string | null) {
+    return this.formatQuantity(Number(quantity ?? 0), unit);
+  }
+
+  private productionExportOrderSummaryQuantityText(summary: any) {
+    if (!summary.quantityByUnit?.length) {
+      return `${this.formatQuantity(Number(summary.totalCompletedQuantity ?? 0), summary.unit)} / ${this.formatQuantity(
+        Number(summary.totalPlannedQuantity ?? 0),
+        summary.unit
+      )}`;
+    }
+    return summary.quantityByUnit
+      .map(
+        (item: any) =>
+          `${this.formatQuantity(Number(item.completedQuantity ?? 0), item.unit)} / ${this.formatQuantity(
+            Number(item.plannedQuantity ?? 0),
+            item.unit
+          )}`
+      )
+      .join('；');
+  }
+
+  private productionExportOrderSummaryProgressText(summary: any) {
+    return summary.progressItems?.length
+      ? summary.progressItems.map((item: any) => item.text || `${item.label} ${item.count}`).join('、')
+      : '-';
+  }
+
+  private joinProductionExportLines(...values: Array<string | undefined | null>) {
+    return values.filter((value) => value && value.trim()).join('\n');
+  }
+
+  private async buildProductionExportWorkbook(options: {
+    sheetName: string;
+    title: string;
+    scopeText: string;
+    generatedAt: string;
+    headers: string[];
+    rows: ProductionExportCellValue[][];
+  }): Promise<Uint8Array> {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const worksheet = workbook.addWorksheet(this.safeProductionExportSheetName(options.sheetName), {
+      pageSetup: {
+        paperSize: 9,
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.3, right: 0.3, top: 0.35, bottom: 0.35, header: 0.2, footer: 0.2 }
+      },
+      views: [{ state: 'frozen', ySplit: 4 }]
+    });
+
+    const columnCount = Math.max(options.headers.length, 1);
+    const titleRow = worksheet.addRow([options.title]);
+    worksheet.mergeCells(titleRow.number, 1, titleRow.number, columnCount);
+    titleRow.font = { bold: true, size: 16 };
+    titleRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    titleRow.height = 26;
+
+    const scopeRow = worksheet.addRow([options.scopeText]);
+    worksheet.mergeCells(scopeRow.number, 1, scopeRow.number, columnCount);
+    scopeRow.font = { color: { argb: 'FF475569' } };
+    scopeRow.alignment = { vertical: 'middle', wrapText: true };
+
+    const generatedRow = worksheet.addRow([`制表日期：${options.generatedAt}`]);
+    worksheet.mergeCells(generatedRow.number, 1, generatedRow.number, columnCount);
+    generatedRow.font = { color: { argb: 'FF475569' } };
+
+    const headerRow = worksheet.addRow(options.headers);
+    headerRow.font = { bold: true, color: { argb: 'FF0F172A' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+      cell.border = this.productionExportThinBorder();
+    });
+
+    for (const row of options.rows) {
+      const dataRow = worksheet.addRow(row);
+      dataRow.alignment = { vertical: 'top', wrapText: true };
+      dataRow.eachCell((cell) => {
+        cell.border = this.productionExportThinBorder();
+      });
+    }
+
+    options.headers.forEach((header, index) => {
+      const column = worksheet.getColumn(index + 1);
+      const maxLength = [header, ...options.rows.map((row) => row[index])]
+        .map((value) => this.productionExportDisplayWidth(value))
+        .reduce((max, width) => Math.max(max, width), 0);
+      column.width = Math.min(Math.max(maxLength + 2, 8), 32);
+    });
+
+    worksheet.autoFilter = {
+      from: { row: headerRow.number, column: 1 },
+      to: { row: headerRow.number, column: columnCount }
+    };
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  private safeProductionExportSheetName(value: string) {
+    const safeName = value.replace(/[\\/*?:[\]]/g, '').trim() || 'Sheet1';
+    return safeName.substring(0, 31);
+  }
+
+  private productionExportDisplayWidth(value: ProductionExportCellValue) {
+    const text = value instanceof Date ? this.formatBusinessDateText(value) : String(value ?? '');
+    return [...text].reduce((width, char) => width + (char.charCodeAt(0) > 255 ? 2 : 1), 0);
+  }
+
+  private productionExportThinBorder() {
+    return {
+      top: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } },
+      left: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } },
+      bottom: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } },
+      right: { style: 'thin' as const, color: { argb: 'FFE2E8F0' } }
+    };
+  }
+
   private pickEarliestDate(current?: Date | string | null, candidate?: Date | string | null) {
     if (!current) {
       return candidate;
@@ -3064,6 +3911,9 @@ export class ProductionService {
     if (customerScope) {
       and.push(customerScope);
     }
+    if (query.includeTestFixtures !== 'true') {
+      and.push({ NOT: this.productionNoticeFixtureWhere() });
+    }
 
     const keyword = query.keyword?.trim();
     if (keyword) {
@@ -3306,8 +4156,11 @@ export class ProductionService {
       parentComponentNo: task.orderLine?.parentComponentNo,
       importSequence: task.orderLine?.importSequence,
       projectModel: task.orderLine?.projectModel,
+      // 生产端只能展示订单行图纸快照，不能回读零件库当前图纸覆盖历史下单信息。
       drawingNo: task.orderLine?.drawingNo,
       drawingVersion: task.orderLine?.drawingVersion,
+      drawingDate: task.orderLine?.drawingDate ? this.formatDateOnly(task.orderLine.drawingDate) || undefined : undefined,
+      drawingStatus: task.orderLine?.drawingStatus,
       drawingFileName: task.orderLine?.drawingFileName,
       drawingFileUrl: task.orderLine?.drawingFileUrl,
       partThickness: decimalToNumber(task.orderLine?.partThickness),
@@ -3426,5 +4279,23 @@ export class ProductionService {
     }
     date.setHours(23, 59, 59, 999);
     return date;
+  }
+
+  private formatDateOnly(value?: Date | string | null) {
+    if (!value) {
+      return undefined;
+    }
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) {
+        return undefined;
+      }
+      const year = value.getFullYear();
+      const month = String(value.getMonth() + 1).padStart(2, '0');
+      const day = String(value.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    const text = String(value).trim();
+    const dateMatch = text.match(/^(\d{4}-\d{2}-\d{2})/);
+    return dateMatch ? dateMatch[1] : text || undefined;
   }
 }

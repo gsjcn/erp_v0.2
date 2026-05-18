@@ -2,23 +2,95 @@ import type { CreateOrderLinePayload } from '../api/erp';
 import type { InventorySourceBatchDetail } from '../types/erp';
 import { formatQuantity } from './format';
 
+type StockSourceCompatibilityStatus = Exclude<
+  NonNullable<CreateOrderLinePayload['selectedStockSources']>[number]['compatibilityStatus'],
+  undefined
+>;
+
 export type StockSourceComparableLine = Pick<
   CreateOrderLinePayload,
   | 'partCode'
   | 'partName'
+  | 'partCategory'
   | 'drawingNo'
   | 'drawingVersion'
+  | 'drawingDate'
+  | 'drawingStatus'
+  | 'drawingFileName'
+  | 'drawingFileUrl'
   | 'partSpecification'
   | 'partThickness'
   | 'quantity'
   | 'productionPlanQuantity'
   | 'fulfillmentMode'
   | 'lineType'
+  | 'componentNo'
+  | 'parentComponentNo'
+  | 'projectModel'
   | 'unit'
 >;
 
 function normalize(value?: string | number | null) {
   return String(value ?? '').trim().toLocaleLowerCase();
+}
+
+const stockSourceCompatibilityRank: Record<StockSourceCompatibilityStatus, number> = {
+  MATCHED: 0,
+  NEEDS_CONFIRMATION: 1,
+  INCOMPLETE: 2,
+  UNKNOWN: 3
+};
+
+function stricterStockSourceCompatibilityStatus(
+  incoming?: StockSourceCompatibilityStatus,
+  current?: StockSourceCompatibilityStatus,
+  hasCurrent = false
+) {
+  if (!hasCurrent) {
+    return incoming;
+  }
+  if (!incoming || !current) {
+    return undefined;
+  }
+  return stockSourceCompatibilityRank[incoming] > stockSourceCompatibilityRank[current] ? incoming : current;
+}
+
+function mergeStockSourceCompatibilityReason(incoming?: string, current?: string) {
+  const reasons = [current, incoming].map((reason) => reason?.trim()).filter(Boolean);
+  return [...new Set(reasons)].join('；') || undefined;
+}
+
+function formatStockSourceReviewListPreview(values: Array<string | null | undefined>, unitLabel: string, maxCount = 5) {
+  const filtered = values.map((value) => String(value || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return '';
+  }
+  const preview = filtered.filter((_, index) => index < maxCount).join('、');
+  return filtered.length > maxCount ? `${preview} 等 ${filtered.length} 个${unitLabel}` : preview;
+}
+
+function compatibilityReasonText(reason?: string) {
+  return reason?.trim() || undefined;
+}
+
+function stockSourceManualConfirmationSource<
+  T extends {
+    compatibilityStatus?: StockSourceCompatibilityStatus;
+    compatibilityReason?: string;
+    manualConfirmedBy?: string;
+    manualConfirmedAt?: string;
+    manualConfirmRemark?: string;
+  }
+>(incoming: T, current: T | undefined, mergedStatus?: StockSourceCompatibilityStatus, mergedReason?: string) {
+  const normalizedMergedReason = compatibilityReasonText(mergedReason);
+  const sourceMatchesMerged =
+    incoming.compatibilityStatus === mergedStatus && compatibilityReasonText(incoming.compatibilityReason) === normalizedMergedReason;
+  if (sourceMatchesMerged) {
+    return incoming;
+  }
+  const currentMatchesMerged =
+    current?.compatibilityStatus === mergedStatus && compatibilityReasonText(current?.compatibilityReason) === normalizedMergedReason;
+  return currentMatchesMerged ? current : undefined;
 }
 
 export function stockSourceRequiredQuantity(line: CreateOrderLinePayload) {
@@ -45,11 +117,19 @@ export function stockSourceReviewSignature(line: CreateOrderLinePayload) {
   return [
     line.fulfillmentMode || 'PRODUCTION',
     line.lineType || 'PART',
+    line.partCategory,
+    line.componentNo,
+    line.parentComponentNo,
+    line.projectModel,
     line.partCode,
+    line.partName,
     line.unit,
     line.drawingNo,
     line.drawingVersion,
+    line.drawingDate,
+    line.drawingStatus,
     line.drawingFileName,
+    line.drawingFileUrl,
     line.partThickness,
     line.partSpecification,
     // 使用库存时数量也属于核对对象，避免核对 20 件后又改成 40 件仍显示已核对。
@@ -314,12 +394,29 @@ export function validateReviewedStockSourceLines(lines: CreateOrderLinePayload[]
 export function sourceMatchesOrderLine(source: InventorySourceBatchDetail, line: StockSourceComparableLine) {
   return (
     sourceHasDirectStockDrawingInfo(source) &&
+    requiredTextMatches(line.lineType || 'PART', source.lineType || 'PART') &&
+    stockSourceStructureKind(line) === stockSourceStructureKind(source) &&
+    requiredTextMatches(line.partCategory, source.partCategory) &&
+    requiredTextMatches(line.projectModel, source.projectModel) &&
     requiredTextMatches(line.partCode, source.partCode) &&
+    requiredTextMatches(line.partName, source.partName) &&
+    requiredTextMatches(line.unit, source.unit) &&
     requiredTextMatches(line.drawingNo, source.drawingNo) &&
     requiredTextMatches(line.drawingVersion, source.drawingVersion) &&
+    requiredTextMatches(line.drawingDate, source.drawingDate) &&
+    requiredTextMatches(line.drawingStatus, source.drawingStatus) &&
+    requiredTextMatches(line.drawingFileName, source.drawingFileName) &&
+    requiredTextMatches(line.drawingFileUrl, source.drawingFileUrl) &&
     requiredTextMatches(line.partSpecification, source.partSpecification) &&
     requiredNumberMatches(line.partThickness, source.partThickness)
   );
+}
+
+function stockSourceStructureKind(row: { lineType?: string | null; parentComponentNo?: string | null }) {
+  if (String(row.lineType || 'PART').trim().toUpperCase() === 'COMPONENT') {
+    return 'COMPONENT';
+  }
+  return String(row.parentComponentNo || '').trim() ? 'CHILD_PART' : 'STANDALONE_PART';
 }
 
 export function matchedInventorySourceQuantity(sources: InventorySourceBatchDetail[], line: StockSourceComparableLine) {
@@ -464,7 +561,7 @@ export function findOverusedSelectedStockBatchIssue(lines: CreateOrderLinePayloa
     return '';
   }
 
-  const relatedParts = [...issue.partTexts].join('、');
+  const relatedParts = formatStockSourceReviewListPreview([...issue.partTexts], '零件', 5);
   return `库存批次 ${issue.batchNo || issue.batchId} 被多行重复选用${
     relatedParts ? `（${relatedParts}）` : ''
   }，当前可用 ${formatQuantity(issue.availableQuantity ?? 0, issue.unit)}，合计选用 ${formatQuantity(
@@ -505,6 +602,13 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
       source.availableQuantity === undefined && current?.availableQuantity === undefined
         ? undefined
         : Math.max(Number(source.availableQuantity ?? 0), Number(current?.availableQuantity ?? 0));
+    const compatibilityStatus = stricterStockSourceCompatibilityStatus(
+      source.compatibilityStatus,
+      current?.compatibilityStatus,
+      Boolean(current)
+    );
+    const compatibilityReason = mergeStockSourceCompatibilityReason(source.compatibilityReason, current?.compatibilityReason);
+    const manualConfirmationSource = stockSourceManualConfirmationSource(source, current, compatibilityStatus, compatibilityReason);
     rows.set(batchId, {
       batchId,
       batchNo: source.batchNo?.trim() || current?.batchNo,
@@ -516,11 +620,11 @@ export function normalizeSelectedStockSources(line: CreateOrderLinePayload) {
       replenishmentSourceType: source.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
       replenishmentSourceRequestNo: source.replenishmentSourceRequestNo?.trim() || current?.replenishmentSourceRequestNo,
       replenishmentSourceLabel: source.replenishmentSourceLabel?.trim() || current?.replenishmentSourceLabel,
-      compatibilityStatus: source.compatibilityStatus || current?.compatibilityStatus,
-      compatibilityReason: source.compatibilityReason?.trim() || current?.compatibilityReason,
-      manualConfirmedBy: source.manualConfirmedBy?.trim() || current?.manualConfirmedBy,
-      manualConfirmedAt: source.manualConfirmedAt?.trim() || current?.manualConfirmedAt,
-      manualConfirmRemark: source.manualConfirmRemark?.trim() || current?.manualConfirmRemark
+      compatibilityStatus,
+      compatibilityReason,
+      manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim(),
+      manualConfirmedAt: manualConfirmationSource?.manualConfirmedAt?.trim(),
+      manualConfirmRemark: manualConfirmationSource?.manualConfirmRemark?.trim()
     });
   }
   return [...rows.values()];
@@ -554,7 +658,9 @@ export function findMissingStockSourceManualConfirmation(line: CreateOrderLinePa
   const issueReason =
     issueSource.compatibilityReason ||
     (!requiredTextMatches(line.partCode, issueSource.partCode) ? '零件编码不同，属于替代库存' : '') ||
-    (missingOrderInfo.length > 0 ? `本次订单缺少${missingOrderInfo.join('、')}` : '库存来源需要人工确认');
+    (missingOrderInfo.length > 0
+      ? `本次订单资料不完整：${formatStockSourceReviewListPreview(missingOrderInfo, '字段', 5)}`
+      : '库存来源需要人工确认');
   return `${partText} 已选库存批次 ${issueSource.batchNo || issueSource.batchId} 需要填写人工确认记录：${issueReason}`;
 }
 
@@ -584,7 +690,7 @@ export function selectedStockSourceNeedsManualConfirmation(
   return (
     explicitCompatibilityIssue ||
     !requiredTextMatches(line.partCode, source.partCode) ||
-    Boolean(line.fulfillmentMode === 'STOCK' && missingOrderInfo.length > 0)
+    Boolean((line.fulfillmentMode === 'STOCK' || line.fulfillmentMode === 'REWORK') && missingOrderInfo.length > 0)
   );
 }
 
@@ -606,6 +712,10 @@ export function stockSourceMissingOrderInfo(line: CreateOrderLinePayload) {
   return [
     !String(line.drawingNo || '').trim() ? '图号' : '',
     !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
+    !String(line.drawingDate || '').trim() ? '图纸日期' : '',
+    !String(line.drawingStatus || '').trim() ? '图纸状态' : '',
+    !String(line.drawingFileName || '').trim() ? '图纸文件名' : '',
+    !String(line.drawingFileUrl || '').trim() ? '图纸文件' : '',
     !String(line.partSpecification || '').trim() ? '成品规格' : '',
     line.lineType !== 'COMPONENT' && Number(line.partThickness ?? 0) <= 0 ? '零件厚度' : ''
   ].filter(Boolean);
@@ -615,10 +725,19 @@ export function stockSourceComparableKey(line: StockSourceComparableLine) {
   return [
     line.fulfillmentMode || 'PRODUCTION',
     line.lineType || 'PART',
+    line.partCategory,
+    line.componentNo,
+    line.parentComponentNo,
+    line.projectModel,
     line.partCode,
+    line.partName,
     line.unit,
     line.drawingNo,
     line.drawingVersion,
+    line.drawingDate,
+    line.drawingStatus,
+    line.drawingFileName,
+    line.drawingFileUrl,
     line.partSpecification,
     line.partThickness
   ]
@@ -628,7 +747,14 @@ export function stockSourceComparableKey(line: StockSourceComparableLine) {
 
 function sourceHasDirectStockDrawingInfo(source: InventorySourceBatchDetail) {
   // 来源图纸完整时才算自动匹配；资料缺失时不硬拦截，但必须转人工确认记录。
-  return Boolean(source.drawingNo?.trim() && source.drawingVersion?.trim() && source.drawingFileUrl?.trim());
+  return Boolean(
+    normalize(source.drawingNo) &&
+      normalize(source.drawingVersion) &&
+      normalize(source.drawingDate) &&
+      normalize(source.drawingStatus) &&
+      normalize(source.drawingFileName) &&
+      normalize(source.drawingFileUrl)
+  );
 }
 
 function requiredTextMatches(required?: string | null, actual?: string | null) {

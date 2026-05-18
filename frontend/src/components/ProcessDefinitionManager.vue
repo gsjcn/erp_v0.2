@@ -11,16 +11,17 @@
           clearable
           placeholder="搜索工序名称 / 备注 / 拼音 / 首字母"
           class="process-definition-search"
-          @keyup.enter="loadDefinitions"
-          @clear="loadDefinitions"
+          @keyup.enter="reloadDefinitionsFromFirstPage"
+          @clear="reloadDefinitionsFromFirstPage"
         />
-        <el-button :loading="loading" @click="loadDefinitions">搜索</el-button>
+        <el-button :loading="loading" @click="reloadDefinitionsFromFirstPage">搜索</el-button>
+        <el-button v-if="!readOnly" :icon="Download" :loading="exporting" @click="exportDefinitionsExcel">导出 Excel</el-button>
         <el-select
           v-if="showStatusFilter && !readOnly"
           v-model="statusFilter"
           class="process-definition-status-filter"
           style="width: 118px"
-          @change="loadDefinitions"
+          @change="reloadDefinitionsFromFirstPage"
         >
           <el-option label="启用" value="ENABLED" />
           <el-option label="停用" value="DISABLED" />
@@ -31,7 +32,33 @@
       </div>
     </div>
 
-    <div v-loading="loading" class="process-definition-list">
+    <div class="process-definition-list-height-toolbar">
+      <div class="process-definition-list-height-actions" aria-label="标准工序列表高度">
+        <span class="process-definition-list-height-label">标准工序列表高度</span>
+        <el-button-group>
+          <el-button
+            :icon="Minus"
+            :disabled="processDefinitionListHeight <= processDefinitionListHeightLimits.min"
+            aria-label="降低标准工序列表高度"
+            @click="adjustProcessDefinitionListHeight(-processDefinitionListHeightLimits.step)"
+          />
+          <el-button
+            :icon="Plus"
+            :disabled="processDefinitionListHeight >= processDefinitionListHeightLimits.max"
+            aria-label="提高标准工序列表高度"
+            @click="adjustProcessDefinitionListHeight(processDefinitionListHeightLimits.step)"
+          />
+          <el-button
+            :icon="RefreshLeft"
+            :disabled="processDefinitionListHeight === processDefinitionListDefaultHeight"
+            aria-label="恢复标准工序列表默认高度"
+            @click="resetProcessDefinitionListHeight"
+          />
+        </el-button-group>
+      </div>
+    </div>
+
+    <div v-loading="loading" class="process-definition-list" :style="{ maxHeight: `${processDefinitionListHeight}px` }">
       <el-tooltip
         v-for="definition in definitions"
         :key="definition.id"
@@ -43,7 +70,7 @@
         <template #content>
           <div class="process-definition-tooltip">
             <strong>{{ definition.processName }}</strong>
-            <p>{{ definition.remark || '暂无备注' }}</p>
+            <p :title="definition.remark || ''">{{ processDefinitionRemarkPreview(definition) }}</p>
             <small>用于订单零件流程配置和流程记忆；历史订单中的已保存工序不会被删除。</small>
           </div>
         </template>
@@ -52,7 +79,7 @@
           <div class="process-definition-main">
             <strong>{{ definition.processName }}</strong>
             <el-tag v-if="showStatusFilter && definition.status === 'DISABLED'" size="small" type="info" effect="plain">已停用</el-tag>
-            <small v-if="definition.remark">{{ definition.remark }}</small>
+            <small v-if="definition.remark" :title="definition.remark">{{ processDefinitionRemarkPreview(definition) }}</small>
             <small v-else>暂无备注</small>
           </div>
           <el-button class="process-definition-detail-toggle" link type="primary" @click.stop="toggleMobileDefinitionCard(definition.id)">
@@ -80,6 +107,22 @@
       </el-tooltip>
 
       <el-empty v-if="!loading && definitions.length === 0" description="没有匹配的工序" />
+    </div>
+
+    <div v-if="definitionPagination.totalCount > 0" class="process-definition-pagination">
+      <span>
+        第 {{ definitionPagination.page }} 页，已显示 {{ definitions.length }} / {{ definitionPagination.totalCount }} 条
+      </span>
+      <el-pagination
+        v-model:current-page="definitionPagination.page"
+        background
+        size="small"
+        layout="prev, pager, next"
+        :page-size="definitionPagination.limit"
+        :total="definitionPagination.totalCount"
+        :disabled="loading"
+        @current-change="handleDefinitionPageChange"
+      />
     </div>
 
     <el-dialog
@@ -138,8 +181,11 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
+import { Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';
+import { Download } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import type { ProcessDefinition } from '../types/erp';
+import { formatFileDateTime } from '../utils/tableExport';
 
 const props = withDefaults(
   defineProps<{
@@ -164,6 +210,7 @@ const definitions = ref<ProcessDefinition[]>([]);
 const keyword = ref('');
 const statusFilter = ref<'ENABLED' | 'DISABLED' | 'ALL'>('ENABLED');
 const loading = ref(false);
+const exporting = ref(false);
 const saving = ref(false);
 const deleting = ref(false);
 const restoringDefinitionId = ref('');
@@ -177,16 +224,78 @@ const form = reactive({
   processName: '',
   remark: ''
 });
+const definitionPagination = reactive({
+  page: 1,
+  limit: Number(24),
+  totalCount: 0
+});
+const processDefinitionListHeightLimits = {
+  min: 240,
+  max: 760,
+  step: 80
+};
+const processDefinitionListDefaultHeight = 360;
+const processDefinitionListHeightStorageKey = 'baisheng.erp.processDefinitionListHeight.v1';
+// 标准工序列表高度只保存为本机 UI 偏好，不写入标准工序、流程记忆、订单、BOM、生产或库存业务数据。
+const processDefinitionListHeight = ref(processDefinitionListDefaultHeight);
 
 async function loadDefinitions() {
   loading.value = true;
   try {
-    definitions.value = await erpApi.processDefinitions(keyword.value.trim() || undefined, props.showStatusFilter ? statusFilter.value : 'ENABLED');
+    const requestPage = Math.max(definitionPagination.page, 1);
+    const requestLimit = definitionPagination.limit;
+    let result = await erpApi.processDefinitionsPage({
+      keyword: keyword.value.trim() || undefined,
+      status: props.showStatusFilter ? statusFilter.value : 'ENABLED',
+      limit: requestLimit,
+      offset: (requestPage - 1) * requestLimit
+    });
+    if (result.totalCount > 0 && result.items.length === 0 && requestPage > 1) {
+      definitionPagination.page = Math.max(Math.ceil(result.totalCount / requestLimit), 1);
+      result = await erpApi.processDefinitionsPage({
+        keyword: keyword.value.trim() || undefined,
+        status: props.showStatusFilter ? statusFilter.value : 'ENABLED',
+        limit: requestLimit,
+        offset: (definitionPagination.page - 1) * requestLimit
+      });
+    }
+    definitions.value = result.items;
+    definitionPagination.totalCount = result.totalCount;
   } catch (error) {
     definitions.value = [];
+    definitionPagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '标准工序加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
+  }
+}
+
+function reloadDefinitionsFromFirstPage() {
+  definitionPagination.page = 1;
+  void loadDefinitions();
+}
+
+function handleDefinitionPageChange(page: number) {
+  definitionPagination.page = page;
+  void loadDefinitions();
+}
+
+async function exportDefinitionsExcel() {
+  if (exporting.value) {
+    return;
+  }
+  exporting.value = true;
+  try {
+    await erpApi.downloadProcessDefinitionsExport(
+      keyword.value.trim() || undefined,
+      props.showStatusFilter ? statusFilter.value : 'ENABLED',
+      `标准工序_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('标准工序 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '标准工序导出失败，请稍后重试');
+  } finally {
+    exporting.value = false;
   }
 }
 
@@ -293,6 +402,18 @@ function normalizeProcessDefinitionName(processName: string) {
   return processName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
 }
 
+function formatLongTextPreview(value?: string | null, maxLength = 36, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function processDefinitionRemarkPreview(definition: ProcessDefinition) {
+  return formatLongTextPreview(definition.remark, 36, '暂无备注');
+}
+
 function toggleMobileDefinitionCard(definitionId: string) {
   if (expandedMobileDefinitionIds.value.includes(definitionId)) {
     expandedMobileDefinitionIds.value = expandedMobileDefinitionIds.value.filter((id) => id !== definitionId);
@@ -303,6 +424,43 @@ function toggleMobileDefinitionCard(definitionId: string) {
 
 function isMobileDefinitionExpanded(definitionId: string) {
   return expandedMobileDefinitionIds.value.includes(definitionId);
+}
+
+function clampProcessDefinitionListHeight(value: number) {
+  return Math.min(processDefinitionListHeightLimits.max, Math.max(processDefinitionListHeightLimits.min, value));
+}
+
+function adjustProcessDefinitionListHeight(delta: number) {
+  processDefinitionListHeight.value = clampProcessDefinitionListHeight(processDefinitionListHeight.value + delta);
+}
+
+function resetProcessDefinitionListHeight() {
+  processDefinitionListHeight.value = processDefinitionListDefaultHeight;
+}
+
+function restoreProcessDefinitionListHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const savedHeight = Number(window.localStorage.getItem(processDefinitionListHeightStorageKey));
+    if (Number.isFinite(savedHeight)) {
+      processDefinitionListHeight.value = clampProcessDefinitionListHeight(savedHeight);
+    }
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响标准工序维护。
+  }
+}
+
+function saveProcessDefinitionListHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(processDefinitionListHeightStorageKey, String(processDefinitionListHeight.value));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断标准工序查询、编辑或停用。
+  }
 }
 
 function openDeleteDialog(definition: ProcessDefinition) {
@@ -384,14 +542,20 @@ async function restoreDefinition(definition: ProcessDefinition) {
 }
 
 onMounted(() => {
+  restoreProcessDefinitionListHeight();
   void loadDefinitions();
 });
 
 watch(keyword, () => {
   window.clearTimeout(searchTimer.value);
   searchTimer.value = window.setTimeout(() => {
+    definitionPagination.page = 1;
     void loadDefinitions();
   }, 250);
+});
+
+watch(processDefinitionListHeight, () => {
+  saveProcessDefinitionListHeight();
 });
 
 onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
@@ -432,6 +596,35 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 10px;
   min-height: 64px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable both-edges;
+}
+
+.process-definition-list-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.process-definition-list-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.process-definition-list-height-label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.process-definition-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .process-definition-card {
@@ -454,9 +647,14 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 }
 
 .process-definition-card small {
+  display: -webkit-box;
+  overflow: hidden;
   margin-top: 6px;
   color: #64748b;
   font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .process-definition-actions {

@@ -7,6 +7,7 @@
       </div>
       <div class="page-actions">
         <el-button v-if="!isMobileLayout" :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate">下载导入模板</el-button>
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="materialExporting" @click="exportMaterialsExcel">导出 Excel</el-button>
         <el-button v-if="!isMobileLayout" type="success" plain @click="openImportDialog">导入零件库</el-button>
         <el-button @click="router.push('/materials')">返回零件管理</el-button>
         <el-button @click="openDesktopMaintenancePage('/inventory/model-boms', '机型零件包维护')">机型零件包</el-button>
@@ -92,13 +93,53 @@
           <strong>零件基础资料</strong>
           <span>库存数量从 InventoryBatch 实时汇总；停用只影响后续搜索和推荐，不删除历史订单、库存批次、库存数量或生产记录。</span>
         </div>
+        <div v-if="!isMobileLayout" class="material-library-table-height-actions" aria-label="零件基础资料表格高度">
+          <span class="material-library-table-height-label">表格高度</span>
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="materialLibraryWorkTableHeights.materials <= materialLibraryWorkTableHeightLimits.min"
+              aria-label="降低零件基础资料表格高度"
+              @click="adjustMaterialLibraryWorkTableHeight('materials', -materialLibraryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="materialLibraryWorkTableHeights.materials >= materialLibraryWorkTableHeightLimits.max"
+              aria-label="提高零件基础资料表格高度"
+              @click="adjustMaterialLibraryWorkTableHeight('materials', materialLibraryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="materialLibraryWorkTableHeights.materials === materialLibraryWorkTableDefaultHeights.materials"
+              aria-label="恢复零件基础资料表格默认高度"
+              @click="resetMaterialLibraryWorkTableHeight('materials')"
+            />
+          </el-tooltip>
+        </div>
       </div>
-      <el-table v-loading="loading" :data="materials" max-height="620">
+      <el-table v-loading="loading" :data="materials" :max-height="materialLibraryWorkTableHeights.materials">
         <el-table-column prop="partCode" label="零件编码" min-width="160" />
         <el-table-column prop="partName" label="零件名称" min-width="180" />
         <el-table-column prop="unit" label="单位" width="90" />
         <el-table-column prop="partSpecification" label="成品规格" min-width="180">
           <template #default="{ row }">{{ row.partSpecification || '-' }}</template>
+        </el-table-column>
+        <el-table-column prop="defaultProcessRoute" label="默认工艺" min-width="180">
+          <template #default="{ row }">
+            <el-tooltip :content="processRouteTooltipText(row.defaultProcessRoute)" placement="top" :disabled="!row.defaultProcessRoute">
+              <span>{{ formatProcessRoutePreview(row.defaultProcessRoute) }}</span>
+            </el-tooltip>
+          </template>
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
@@ -130,9 +171,6 @@
               最近 {{ row.lastOrderNo }} / {{ row.lastCustomerName || '-' }} / {{ row.lastOrderDate || '-' }}
             </div>
           </template>
-        </el-table-column>
-        <el-table-column label="更新时间" width="150">
-          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
@@ -237,6 +275,18 @@
         <el-form-item label="成品规格">
           <el-input v-model="form.partSpecification" placeholder="例如 200mm x 300mm；可留空" />
         </el-form-item>
+        <el-form-item label="默认工艺">
+          <el-select
+            v-model="form.defaultProcessRouteSteps"
+            multiple
+            filterable
+            clearable
+            placeholder="选择标准工序，按选择顺序保存"
+            style="width: 100%"
+          >
+            <el-option v-for="item in processDefinitions" :key="item.id" :label="item.processName" :value="item.processName" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="库存报警">
           <el-radio-group v-model="form.stockAlertEnabled">
             <el-radio-button :value="false">不启用</el-radio-button>
@@ -257,7 +307,7 @@
         </el-form-item>
       </el-form>
       <p class="dialog-hint">
-        这里只维护 `Material` 搜索记忆。编辑已有零件时状态请使用列表里的启用/停用动作；保存不会改写历史订单、库存批次、BOM、默认图纸或来源加工关系。库存报警配置只写入 `Material`，不改变库存数量。
+        这里只维护 `Material` 搜索记忆。编辑已有零件时状态请使用列表里的启用/停用动作；保存不会改写历史订单、库存批次、BOM、默认图纸或来源加工关系。默认工艺只作为后续下单初始建议，库存报警配置只写入 `Material`，不改变库存数量。
       </p>
       <template #footer>
         <el-button :disabled="saving" @click="closeMaterialDialog">取消</el-button>
@@ -366,11 +416,49 @@
         </div>
       </div>
 
+      <div v-if="materialImportSession && !isMobileLayout" class="material-library-import-height-toolbar">
+        <div class="material-library-table-height-actions" aria-label="零件库导入预览表格高度">
+          <span class="material-library-table-height-label">预览表格高度</span>
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="materialLibraryWorkTableHeights.importPreview <= materialLibraryWorkTableHeightLimits.min"
+              aria-label="降低零件库导入预览表格高度"
+              @click="adjustMaterialLibraryWorkTableHeight('importPreview', -materialLibraryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="materialLibraryWorkTableHeights.importPreview >= materialLibraryWorkTableHeightLimits.max"
+              aria-label="提高零件库导入预览表格高度"
+              @click="adjustMaterialLibraryWorkTableHeight('importPreview', materialLibraryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="materialLibraryWorkTableHeights.importPreview === materialLibraryWorkTableDefaultHeights.importPreview"
+              aria-label="恢复零件库导入预览表格默认高度"
+              @click="resetMaterialLibraryWorkTableHeight('importPreview')"
+            />
+          </el-tooltip>
+        </div>
+      </div>
       <el-tabs v-if="materialImportSession" v-model="materialImportActiveTab" class="import-preview-tabs">
         <el-tab-pane :label="`零件基础库 ${materialImportSession.rows.length}/${materialImportSession.summary.materialRowCount ?? 0}`" name="materials">
-          <el-table v-loading="importUploading" :data="materialImportSession.rows" max-height="420">
-            <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
-              <template #default="{ row }">{{ displayMaterialImportFileName(row.sourceFileName) }}</template>
+          <el-table v-loading="importUploading" :data="materialImportSession.rows" :max-height="materialLibraryWorkTableHeights.importPreview">
+            <el-table-column label="来源文件" min-width="180">
+              <template #default="{ row }">
+                <div :title="materialImportSourceFileTitle(row)">{{ materialImportSourceFilePreview(row) }}</div>
+                <div class="cell-subtext" :title="materialImportSourceFileTitle(row)">{{ materialImportSourceSheetPreview(row) }}</div>
+              </template>
             </el-table-column>
             <el-table-column prop="sourceRowNo" label="Excel 行" width="90" />
             <el-table-column prop="partCode" label="零件编码" min-width="160" />
@@ -379,8 +467,17 @@
             <el-table-column prop="partSpecification" label="规格" min-width="140">
               <template #default="{ row }">{{ row.partSpecification || '-' }}</template>
             </el-table-column>
-            <el-table-column prop="drawingNo" label="图号" min-width="160">
-              <template #default="{ row }">{{ row.drawingNo || '-' }}</template>
+            <el-table-column prop="defaultProcessRoute" label="默认工艺" min-width="160">
+              <template #default="{ row }">
+                <el-tooltip :content="processRouteTooltipText(row.defaultProcessRoute)" placement="top" :disabled="!row.defaultProcessRoute">
+                  <span>{{ formatProcessRoutePreview(row.defaultProcessRoute) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column prop="drawingNo" label="图纸" min-width="210">
+              <template #default="{ row }">
+                <div>{{ formatMaterialDrawingSnapshot(row) }}</div>
+              </template>
             </el-table-column>
             <el-table-column prop="partThickness" label="厚度" width="90">
               <template #default="{ row }">{{ row.partThickness ?? '-' }}</template>
@@ -388,11 +485,21 @@
             <el-table-column prop="projectModel" label="项目型号" min-width="120">
               <template #default="{ row }">{{ row.projectModel || '-' }}</template>
             </el-table-column>
+            <el-table-column label="备注" min-width="220">
+              <template #default="{ row }">
+                <span :title="longTextTooltipText(row.remark)">{{ formatLongTextPreview(row.remark) }}</span>
+              </template>
+            </el-table-column>
             <el-table-column label="库存报警" min-width="130">
               <template #default="{ row }">
                 <el-tag v-if="row.stockAlertEnabled === true" type="warning" effect="plain">启用 {{ row.stockAlertQuantity ?? '-' }}</el-tag>
                 <el-tag v-else-if="row.stockAlertEnabled === false" type="info" effect="plain">停用</el-tag>
                 <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="追溯" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openMaterialImportTrace(row, 'material')">查看</el-button>
               </template>
             </el-table-column>
             <el-table-column label="校验" min-width="260" fixed="right">
@@ -403,9 +510,12 @@
           </el-table>
         </el-tab-pane>
         <el-tab-pane :label="`适用范围 ${(materialImportSession.applicabilityRows ?? []).length}/${materialImportSession.summary.applicabilityRowCount ?? 0}`" name="applicabilities">
-          <el-table v-loading="importUploading" :data="materialImportSession.applicabilityRows ?? []" max-height="420">
-            <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
-              <template #default="{ row }">{{ displayMaterialImportFileName(row.sourceFileName) }}</template>
+          <el-table v-loading="importUploading" :data="materialImportSession.applicabilityRows ?? []" :max-height="materialLibraryWorkTableHeights.importPreview">
+            <el-table-column label="来源文件" min-width="180">
+              <template #default="{ row }">
+                <div :title="materialImportSourceFileTitle(row)">{{ materialImportSourceFilePreview(row) }}</div>
+                <div class="cell-subtext" :title="materialImportSourceFileTitle(row)">{{ materialImportSourceSheetPreview(row) }}</div>
+              </template>
             </el-table-column>
             <el-table-column prop="sourceRowNo" label="Excel 行" width="90" />
             <el-table-column prop="partCode" label="零件编码" min-width="160" />
@@ -422,7 +532,16 @@
               <template #default="{ row }">{{ row.status === 'ENABLED' ? '启用' : '停用' }}</template>
             </el-table-column>
             <el-table-column prop="remark" label="备注" min-width="180">
-              <template #default="{ row }">{{ row.remark || '-' }}</template>
+              <template #default="{ row }">
+                <el-tooltip :content="longTextTooltipText(row.remark)" placement="top" :disabled="!row.remark">
+                  <span>{{ formatLongTextPreview(row.remark) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="追溯" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openMaterialImportTrace(row, 'applicability')">查看</el-button>
+              </template>
             </el-table-column>
             <el-table-column label="校验" min-width="260" fixed="right">
               <template #default="{ row }">
@@ -432,9 +551,12 @@
           </el-table>
         </el-tab-pane>
         <el-tab-pane :label="`来源加工关系 ${(materialImportSession.transformRows ?? []).length}/${materialImportSession.summary.transformRowCount ?? 0}`" name="transforms">
-          <el-table v-loading="importUploading" :data="materialImportSession.transformRows ?? []" max-height="420">
-            <el-table-column label="来源文件" min-width="180" show-overflow-tooltip>
-              <template #default="{ row }">{{ displayMaterialImportFileName(row.sourceFileName) }}</template>
+          <el-table v-loading="importUploading" :data="materialImportSession.transformRows ?? []" :max-height="materialLibraryWorkTableHeights.importPreview">
+            <el-table-column label="来源文件" min-width="180">
+              <template #default="{ row }">
+                <div :title="materialImportSourceFileTitle(row)">{{ materialImportSourceFilePreview(row) }}</div>
+                <div class="cell-subtext" :title="materialImportSourceFileTitle(row)">{{ materialImportSourceSheetPreview(row) }}</div>
+              </template>
             </el-table-column>
             <el-table-column prop="sourceRowNo" label="Excel 行" width="90" />
             <el-table-column prop="sourcePartCode" label="来源零件" min-width="160" />
@@ -452,7 +574,23 @@
               <template #default="{ row }">{{ row.lossRate ?? 0 }}</template>
             </el-table-column>
             <el-table-column prop="defaultProcessRoute" label="默认工艺" min-width="180">
-              <template #default="{ row }">{{ row.defaultProcessRoute || '-' }}</template>
+              <template #default="{ row }">
+                <el-tooltip :content="processRouteTooltipText(row.defaultProcessRoute)" placement="top" :disabled="!row.defaultProcessRoute">
+                  <span>{{ formatProcessRoutePreview(row.defaultProcessRoute) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column prop="remark" label="备注" min-width="180">
+              <template #default="{ row }">
+                <el-tooltip :content="longTextTooltipText(row.remark)" placement="top" :disabled="!row.remark">
+                  <span>{{ formatLongTextPreview(row.remark) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="追溯" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openMaterialImportTrace(row, 'transform')">查看</el-button>
+              </template>
             </el-table-column>
             <el-table-column label="校验" min-width="260" fixed="right">
               <template #default="{ row }">
@@ -488,6 +626,49 @@
         >
           确认写入零件库
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="materialImportTraceDialogVisible" class="responsive-dialog" title="导入行追溯" width="760px" append-to-body>
+      <div v-if="activeMaterialImportTraceRow" class="material-import-trace">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="追溯信息只用于人工核对"
+          description="这里展示来源文件、来源工作表、来源行和原始字段；不会新增、覆盖或停用任何零件、BOM、订单、生产任务或库存。"
+        />
+        <div class="trace-summary-grid">
+          <div>
+            <span>来源文件</span>
+            <strong>{{ displayMaterialImportFileName(activeMaterialImportTraceRow.sourceFileName) }}</strong>
+          </div>
+          <div>
+            <span>来源工作表</span>
+            <strong>{{ activeMaterialImportTraceRow.sourceSheetName || '-' }}</strong>
+          </div>
+          <div>
+            <span>来源行</span>
+            <strong>{{ activeMaterialImportTraceRow.sourceRowNo }}</strong>
+          </div>
+          <div>
+            <span>预览类型</span>
+            <strong>{{ materialImportTraceKindLabel }}</strong>
+          </div>
+        </div>
+        <el-descriptions :column="1" border class="trace-descriptions">
+          <el-descriptions-item v-for="entry in materialImportTraceEntries" :key="entry.label" :label="entry.label">
+            {{ entry.value }}
+          </el-descriptions-item>
+        </el-descriptions>
+        <div v-if="activeMaterialImportTraceRow.remark" class="trace-remark">
+          <strong>备注</strong>
+          <p :title="materialImportTraceRemarkTitle(activeMaterialImportTraceRow)">{{ materialImportTraceRemarkPreview(activeMaterialImportTraceRow) }}</p>
+        </div>
+        <ImportIssueList :issues="activeMaterialImportTraceRow.issues" />
+      </div>
+      <template #footer>
+        <el-button @click="materialImportTraceDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -658,9 +839,62 @@
         </div>
 
         <div class="applicability-list">
-          <h3>已维护范围</h3>
-          <el-table v-loading="applicabilityLoading" :data="applicabilities" max-height="420">
-            <el-table-column prop="scopeLabel" label="适用范围" min-width="220" />
+          <div class="material-library-dialog-table-header">
+            <div class="material-library-dialog-title-actions">
+              <h3>已维护范围</h3>
+              <el-button
+                v-if="!isMobileLayout"
+                size="small"
+                :icon="Download"
+                :loading="applicabilityExporting"
+                :disabled="!activeMaterial || applicabilityLoading"
+                @click="exportApplicabilitiesExcel"
+              >
+                导出 Excel
+              </el-button>
+            </div>
+            <div v-if="!isMobileLayout" class="material-library-table-height-actions" aria-label="适用范围维护表格高度">
+              <span class="material-library-table-height-label">表格高度</span>
+              <el-tooltip content="降低表格高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Minus"
+                  :disabled="materialLibraryWorkTableHeights.applicability <= materialLibraryWorkTableHeightLimits.min"
+                  aria-label="降低适用范围维护表格高度"
+                  @click="adjustMaterialLibraryWorkTableHeight('applicability', -materialLibraryWorkTableHeightLimits.step)"
+                />
+              </el-tooltip>
+              <el-tooltip content="提高表格高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Plus"
+                  :disabled="materialLibraryWorkTableHeights.applicability >= materialLibraryWorkTableHeightLimits.max"
+                  aria-label="提高适用范围维护表格高度"
+                  @click="adjustMaterialLibraryWorkTableHeight('applicability', materialLibraryWorkTableHeightLimits.step)"
+                />
+              </el-tooltip>
+              <el-tooltip content="恢复默认高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="RefreshLeft"
+                  :disabled="materialLibraryWorkTableHeights.applicability === materialLibraryWorkTableDefaultHeights.applicability"
+                  aria-label="恢复适用范围维护表格默认高度"
+                  @click="resetMaterialLibraryWorkTableHeight('applicability')"
+                />
+              </el-tooltip>
+            </div>
+          </div>
+          <el-table v-loading="applicabilityLoading" :data="applicabilities" :max-height="materialLibraryWorkTableHeights.applicability">
+            <el-table-column label="适用范围" min-width="220">
+              <template #default="{ row }">
+                <el-tooltip :content="materialApplicabilityScopeTitle(row)" placement="top">
+                  <span class="material-scope-cell">{{ materialApplicabilityScopePreview(row) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
                 <el-tag :type="row.status === 'ENABLED' ? 'success' : 'info'" effect="plain">
@@ -669,7 +903,11 @@
               </template>
             </el-table-column>
             <el-table-column prop="remark" label="备注" min-width="180">
-              <template #default="{ row }">{{ row.remark || '-' }}</template>
+              <template #default="{ row }">
+                <el-tooltip :content="longTextTooltipText(row.remark)" placement="top" :disabled="!row.remark">
+                  <span>{{ formatLongTextPreview(row.remark) }}</span>
+                </el-tooltip>
+              </template>
             </el-table-column>
             <el-table-column label="操作" width="150" fixed="right">
               <template #default="{ row }">
@@ -709,8 +947,8 @@
       class="responsive-dialog"
       :title="drawingDialogTitle"
       width="980px"
-      :close-on-click-modal="!drawingSaving"
-      :close-on-press-escape="!drawingSaving"
+      :close-on-click-modal="!drawingSaving && !drawingUploading"
+      :close-on-press-escape="!drawingSaving && !drawingUploading"
       :before-close="handleDrawingDialogClose"
     >
       <div class="applicability-layout">
@@ -728,6 +966,27 @@
             </el-form-item>
             <el-form-item label="图纸状态">
               <el-input v-model="drawingForm.drawingStatus" placeholder="旧图 / 新图 / 图纸变更" />
+            </el-form-item>
+            <el-form-item label="图纸文件">
+              <div class="drawing-file-maintenance">
+                <el-upload
+                  :show-file-list="false"
+                  :http-request="uploadMaterialDrawingFile"
+                  accept=".pdf,.png,.jpg,.jpeg,.webp,.dwg,.dxf"
+                  :disabled="drawingSaving || drawingUploading"
+                >
+                  <el-button type="primary" plain :loading="drawingUploading" :disabled="drawingSaving || drawingUploading">
+                    上传图纸文件
+                  </el-button>
+                </el-upload>
+                <DrawingPreviewLink
+                  v-if="drawingForm.drawingFileUrl"
+                  :file-name="drawingForm.drawingFileName"
+                  :file-url="drawingForm.drawingFileUrl"
+                  :title="`${activeMaterial?.partName || activeMaterial?.partCode || '零件'} 图纸预览`"
+                />
+                <span v-else class="cell-subtext">支持 PDF、图片、DWG、DXF；上传后自动回填文件名和地址。</span>
+              </div>
             </el-form-item>
             <el-form-item label="图纸文件名">
               <el-input v-model="drawingForm.drawingFileName" placeholder="例如 DRW-4101-A.pdf" />
@@ -752,20 +1011,66 @@
             </el-form-item>
           </el-form>
           <div class="applicability-actions">
-            <el-button :disabled="drawingSaving" @click="resetDrawingForm">清空</el-button>
-            <el-button type="primary" :loading="drawingSaving" :disabled="drawingSaving" @click="saveDrawingRevision">
+            <el-button :disabled="drawingSaving || drawingUploading" @click="resetDrawingForm">清空</el-button>
+            <el-button type="primary" :loading="drawingSaving" :disabled="drawingSaving || drawingUploading" @click="saveDrawingRevision">
               {{ drawingForm.id ? '保存图纸' : '新增图纸' }}
             </el-button>
           </div>
         </div>
 
         <div class="applicability-list">
-          <h3>已维护图纸</h3>
-          <el-table v-loading="drawingLoading" :data="drawingRevisions" max-height="520">
+          <div class="material-library-dialog-table-header">
+            <div class="material-library-dialog-title-actions">
+              <h3>已维护图纸</h3>
+              <el-button
+                v-if="!isMobileLayout"
+                size="small"
+                :icon="Download"
+                :loading="drawingExporting"
+                :disabled="!activeMaterial || drawingLoading"
+                @click="exportDrawingRevisionsExcel"
+              >
+                导出 Excel
+              </el-button>
+            </div>
+            <div v-if="!isMobileLayout" class="material-library-table-height-actions" aria-label="图纸版本维护表格高度">
+              <span class="material-library-table-height-label">表格高度</span>
+              <el-tooltip content="降低表格高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Minus"
+                  :disabled="materialLibraryWorkTableHeights.drawing <= materialLibraryWorkTableHeightLimits.min"
+                  aria-label="降低图纸版本维护表格高度"
+                  @click="adjustMaterialLibraryWorkTableHeight('drawing', -materialLibraryWorkTableHeightLimits.step)"
+                />
+              </el-tooltip>
+              <el-tooltip content="提高表格高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Plus"
+                  :disabled="materialLibraryWorkTableHeights.drawing >= materialLibraryWorkTableHeightLimits.max"
+                  aria-label="提高图纸版本维护表格高度"
+                  @click="adjustMaterialLibraryWorkTableHeight('drawing', materialLibraryWorkTableHeightLimits.step)"
+                />
+              </el-tooltip>
+              <el-tooltip content="恢复默认高度" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="RefreshLeft"
+                  :disabled="materialLibraryWorkTableHeights.drawing === materialLibraryWorkTableDefaultHeights.drawing"
+                  aria-label="恢复图纸版本维护表格默认高度"
+                  @click="resetMaterialLibraryWorkTableHeight('drawing')"
+                />
+              </el-tooltip>
+            </div>
+          </div>
+          <el-table v-loading="drawingLoading" :data="drawingRevisions" :max-height="materialLibraryWorkTableHeights.drawing">
             <el-table-column label="图纸" min-width="220">
               <template #default="{ row }">
-                <div>{{ row.drawingNo }} / {{ row.drawingVersion }}</div>
-                <div class="cell-subtext">{{ [row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ') || '-' }}</div>
+                <div>{{ formatMaterialDrawingSnapshot(row) }}</div>
               </template>
             </el-table-column>
             <el-table-column label="默认" width="90">
@@ -775,7 +1080,15 @@
               </template>
             </el-table-column>
             <el-table-column label="文件" min-width="180">
-              <template #default="{ row }">{{ row.drawingFileName || row.drawingFileUrl || '-' }}</template>
+              <template #default="{ row }">
+                <DrawingPreviewLink
+                  v-if="row.drawingFileUrl"
+                  :file-name="row.drawingFileName"
+                  :file-url="row.drawingFileUrl"
+                  :title="`${formatMaterialDrawingSnapshot(row)} 图纸预览`"
+                />
+                <span v-else>{{ row.drawingFileName || '-' }}</span>
+              </template>
             </el-table-column>
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
@@ -838,7 +1151,7 @@
     >
       <div v-if="activeDefaultDrawingRevision" class="status-dialog-content">
         <p>
-          将 {{ activeDefaultDrawingRevision.drawingNo }} / {{ activeDefaultDrawingRevision.drawingVersion }} 设置为当前零件默认下单图纸。
+          将 {{ formatMaterialDrawingSnapshot(activeDefaultDrawingRevision) }} 设置为当前零件默认下单图纸。
           历史订单图纸快照不会被覆盖。
         </p>
         <el-form label-width="110px">
@@ -859,21 +1172,26 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, reactive, ref, type PropType } from 'vue';
+import { computed, defineComponent, h, onMounted, reactive, ref, watch, type PropType } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, type UploadRequestOptions } from 'element-plus';
+import { Download } from '@element-plus/icons-vue';
+import { Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';
 import { erpApi, type StockAlertFilter, type UpdateMaterialDrawingRevisionPayload } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
+import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
 import { useDeviceProfile } from '../composables/useDeviceProfile';
 import { normalizeDisplayFileName } from '../utils/fileNames';
-import { formatDateTime, formatNumber, formatQuantity } from '../utils/format';
+import { formatNumber, formatQuantity } from '../utils/format';
+import { formatFileDateTime } from '../utils/tableExport';
 import type {
   CommonStatus,
   MaterialApplicability,
   MaterialDrawingRevision,
   MaterialImportIssue,
   MaterialImportSessionPreview,
-  MaterialMemory
+  MaterialMemory,
+  ProcessDefinition
 } from '../types/erp';
 
 const router = useRouter();
@@ -887,23 +1205,23 @@ const ImportIssueList = defineComponent({
     }
   },
   setup(props) {
-    return () =>
-      props.issues.length
-        ? h(
-            'div',
-            { class: 'issue-list' },
-            props.issues.map((issue) =>
-              h(
-                'span',
-                {
-                  class: ['issue-pill', issue.severity === 'ERROR' ? 'is-error' : 'is-warning'],
-                  title: issue.code
-                },
-                issue.message
-              )
-            )
-          )
-        : h('div', { class: 'check-ok' }, '可写入');
+    return () => {
+      const issues = props.issues || [];
+      if (!issues.length) {
+        return h('div', { class: 'check-ok' }, '可写入');
+      }
+      const hasError = issues.some((issue) => issue.severity === 'ERROR');
+      return h('div', { class: 'issue-list' }, [
+        h(
+          'span',
+          {
+            class: ['issue-pill', hasError ? 'is-error' : 'is-warning'],
+            title: formatMaterialImportIssueTitle(issues)
+          },
+          formatMaterialImportIssuePreview(issues)
+        )
+      ]);
+    };
   }
 });
 
@@ -915,6 +1233,12 @@ type MaterialMaintenanceStatusTarget = {
   actionLabel: string;
   warning: string;
 };
+type MaterialImportTraceKind = 'material' | 'applicability' | 'transform';
+type MaterialImportTraceRow =
+  | MaterialImportSessionPreview['rows'][number]
+  | NonNullable<MaterialImportSessionPreview['applicabilityRows']>[number]
+  | NonNullable<MaterialImportSessionPreview['transformRows']>[number];
+type MaterialLibraryWorkTableKey = 'materials' | 'importPreview' | 'applicability' | 'drawing';
 
 const loading = ref(false);
 const saving = ref(false);
@@ -928,6 +1252,7 @@ const importDiscarding = ref(false);
 const importDeletingFileId = ref('');
 const importIssueReportDownloading = ref(false);
 const importLoadingMore = ref(false);
+const materialExporting = ref(false);
 const materialImportTemplateDownloading = ref(false);
 const materialImportDragging = ref(false);
 const materialImportActiveTab = ref('materials');
@@ -936,6 +1261,9 @@ const materialImportConfirmAction = ref<'commit' | 'discard' | 'deleteFile'>('co
 const materialImportDeleteFileTarget = ref<MaterialImportSessionPreview['files'][number]>();
 const materialImportInput = ref<HTMLInputElement>();
 const materialImportSession = ref<MaterialImportSessionPreview>();
+const materialImportTraceDialogVisible = ref(false);
+const materialImportTraceKind = ref<MaterialImportTraceKind>('material');
+const activeMaterialImportTraceRow = ref<MaterialImportTraceRow>();
 const materialStatusDialogVisible = ref(false);
 const materialStatusSaving = ref(false);
 const materialStatusAction = ref<'enable' | 'disable'>('disable');
@@ -949,14 +1277,18 @@ const applicabilityOperationSavingId = ref('');
 const drawingDialogVisible = ref(false);
 const drawingLoading = ref(false);
 const drawingSaving = ref(false);
+const drawingUploading = ref(false);
+const drawingExporting = ref(false);
 const drawingOperationSavingId = ref('');
 const defaultDrawingDialogVisible = ref(false);
 const activeDefaultDrawingRevision = ref<MaterialDrawingRevision | null>(null);
 const editingMaterialId = ref('');
 const activeMaterial = ref<MaterialMemory>();
 const materials = ref<MaterialMemory[]>([]);
+const processDefinitions = ref<ProcessDefinition[]>([]);
 const triggeredStockAlertTotal = ref(0);
 const applicabilities = ref<MaterialApplicability[]>([]);
+const applicabilityExporting = ref(false);
 const drawingRevisions = ref<MaterialDrawingRevision[]>([]);
 const routeActionApplied = ref(false);
 
@@ -973,12 +1305,29 @@ const materialPagination = reactive({
   limit: Number(20),
   total: Number(0)
 });
+const materialLibraryWorkTableHeightLimits = {
+  min: 300,
+  max: 860,
+  step: 80
+};
+const materialLibraryWorkTableDefaultHeights: Record<MaterialLibraryWorkTableKey, number> = {
+  materials: 620,
+  importPreview: 420,
+  applicability: 420,
+  drawing: 520
+};
+const materialLibraryWorkTableHeightStorageKey = 'baisheng.erp.materialLibraryWorkTableHeights.v1';
+// 零件基础库表格高度只保存为本机 UI 偏好，不写入 Material、适用范围、图纸版本、导入或库存业务数据。
+const materialLibraryWorkTableHeights = reactive<Record<MaterialLibraryWorkTableKey, number>>({
+  ...materialLibraryWorkTableDefaultHeights
+});
 
 const form = reactive<{
   partCode: string;
   partName: string;
   unit: string;
   partSpecification: string;
+  defaultProcessRouteSteps: string[];
   stockAlertEnabled: boolean;
   stockAlertQuantity: number | null;
   status: CommonStatus;
@@ -987,6 +1336,7 @@ const form = reactive<{
   partName: '',
   unit: '件',
   partSpecification: '',
+  defaultProcessRouteSteps: [],
   stockAlertEnabled: false,
   stockAlertQuantity: null,
   status: 'ENABLED'
@@ -1122,6 +1472,31 @@ const materialImportCommitSummaryText = computed(() => {
   }
   return `确认写入零件库吗？将新增或更新 ${summary.materialUpsertCount} 个零件、${summary.drawingRevisionUpsertCount ?? 0} 条图纸版本、${summary.applicabilityUpsertCount ?? 0} 条适用范围、${summary.transformRuleUpsertCount ?? 0} 条来源加工关系。`;
 });
+const materialImportTraceKindLabel = computed(() => {
+  const labels: Record<MaterialImportTraceKind, string> = {
+    material: '零件基础库',
+    applicability: '适用范围',
+    transform: '来源加工关系'
+  };
+  return labels[materialImportTraceKind.value];
+});
+const materialImportTraceEntries = computed(() => {
+  const row = activeMaterialImportTraceRow.value;
+  if (!row) {
+    return [];
+  }
+  const entries = Object.entries(row.raw || {})
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map(([label, value]) => ({ label, value: materialImportTraceValueText(value) }));
+  if (entries.length > 0) {
+    return entries;
+  }
+  return [
+    { label: '来源文件', value: displayMaterialImportFileName(row.sourceFileName) },
+    { label: '来源工作表', value: row.sourceSheetName || '-' },
+    { label: '来源行', value: String(row.sourceRowNo) }
+  ];
+});
 const materialImportBusy = computed(() =>
   Boolean(
     importUploading.value ||
@@ -1141,10 +1516,82 @@ const currentAvailableText = computed(() => {
   return text || '0';
 });
 
+function clampMaterialLibraryWorkTableHeight(value: number) {
+  return Math.min(materialLibraryWorkTableHeightLimits.max, Math.max(materialLibraryWorkTableHeightLimits.min, value));
+}
+
+function adjustMaterialLibraryWorkTableHeight(key: MaterialLibraryWorkTableKey, delta: number) {
+  materialLibraryWorkTableHeights[key] = clampMaterialLibraryWorkTableHeight(materialLibraryWorkTableHeights[key] + delta);
+}
+
+function resetMaterialLibraryWorkTableHeight(key: MaterialLibraryWorkTableKey) {
+  materialLibraryWorkTableHeights[key] = materialLibraryWorkTableDefaultHeights[key];
+}
+
+function restoreMaterialLibraryWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(materialLibraryWorkTableHeightStorageKey);
+    const savedHeights = rawValue ? JSON.parse(rawValue) as Partial<Record<MaterialLibraryWorkTableKey, number>> : {};
+    for (const key of Object.keys(materialLibraryWorkTableDefaultHeights) as MaterialLibraryWorkTableKey[]) {
+      const savedHeight = Number(savedHeights[key]);
+      if (Number.isFinite(savedHeight)) {
+        materialLibraryWorkTableHeights[key] = clampMaterialLibraryWorkTableHeight(savedHeight);
+      }
+    }
+  } catch {
+    materialLibraryWorkTableHeights.materials = materialLibraryWorkTableDefaultHeights.materials;
+    materialLibraryWorkTableHeights.importPreview = materialLibraryWorkTableDefaultHeights.importPreview;
+    materialLibraryWorkTableHeights.applicability = materialLibraryWorkTableDefaultHeights.applicability;
+    materialLibraryWorkTableHeights.drawing = materialLibraryWorkTableDefaultHeights.drawing;
+  }
+}
+
+function saveMaterialLibraryWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      materialLibraryWorkTableHeightStorageKey,
+      JSON.stringify({
+        materials: materialLibraryWorkTableHeights.materials,
+        importPreview: materialLibraryWorkTableHeights.importPreview,
+        applicability: materialLibraryWorkTableHeights.applicability,
+        drawing: materialLibraryWorkTableHeights.drawing
+      })
+    );
+  } catch {
+    // 本机 UI 偏好写入失败不阻断零件基础库、适用范围、图纸版本或导入预览。
+  }
+}
+
 onMounted(() => {
+  restoreMaterialLibraryWorkTableHeights();
   applyRouteQueryFilters();
+  void loadProcessDefinitions();
   void loadMaterials();
+  void openMaterialImportSessionFromRoute();
 });
+
+watch(
+  () => route.query.materialImportSessionId,
+  () => {
+    void openMaterialImportSessionFromRoute();
+  }
+);
+
+watch(
+  () => [
+    materialLibraryWorkTableHeights.materials,
+    materialLibraryWorkTableHeights.importPreview,
+    materialLibraryWorkTableHeights.applicability,
+    materialLibraryWorkTableHeights.drawing
+  ],
+  () => saveMaterialLibraryWorkTableHeights()
+);
 
 function routeQueryText(value: unknown) {
   if (Array.isArray(value)) {
@@ -1168,8 +1615,151 @@ function applyRouteQueryFilters() {
   }
 }
 
+async function openMaterialImportSessionFromRoute() {
+  const materialImportSessionId = routeQueryText(route.query.materialImportSessionId);
+  if (!materialImportSessionId) {
+    return;
+  }
+  if (materialImportSession.value?.id === materialImportSessionId) {
+    if (!guardDesktopOperation('打开零件库导入草稿')) {
+      materialImportActiveTab.value = 'materials';
+      importDialogVisible.value = true;
+    }
+    return;
+  }
+  if (guardDesktopOperation('打开零件库导入草稿')) {
+    return;
+  }
+  importRefreshing.value = true;
+  try {
+    materialImportSession.value = await erpApi.materialImportSession(materialImportSessionId);
+    materialImportActiveTab.value = 'materials';
+    importDialogVisible.value = true;
+    ElMessage.success('已打开从订单净表提取的零件库导入草稿，请预览确认后再写入');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件库导入草稿加载失败，请确认导入会话状态');
+  } finally {
+    importRefreshing.value = false;
+  }
+}
+
 function displayMaterialImportFileName(fileName?: string | null) {
   return normalizeDisplayFileName(fileName) || '上传文件';
+}
+
+function materialImportSourceFilePreview(row: { sourceFileName?: string | null }) {
+  return formatLongTextPreview(displayMaterialImportFileName(row.sourceFileName), 28, '上传文件');
+}
+
+function materialImportSourceSheetPreview(row: { sourceSheetName?: string | null }) {
+  return formatLongTextPreview(row.sourceSheetName, 18, '-');
+}
+
+function materialImportSourceFileTitle(row: { sourceFileName?: string | null; sourceSheetName?: string | null }) {
+  const fileName = displayMaterialImportFileName(row.sourceFileName);
+  const sheetName = String(row.sourceSheetName || '').trim();
+  return sheetName ? `${fileName} / ${sheetName}` : fileName;
+}
+
+function formatMaterialDrawingSnapshot(row: {
+  drawingNo?: string | null;
+  drawingVersion?: string | null;
+  drawingDate?: string | null;
+  drawingStatus?: string | null;
+}) {
+  return [row.drawingNo, row.drawingVersion, row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ') || '-';
+}
+
+function formatProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const routeText = String(value || '').trim();
+  if (!routeText) {
+    return emptyText;
+  }
+  const steps = splitDefaultProcessRoute(routeText);
+  if (steps.length <= 1) {
+    return routeText;
+  }
+  const preview = steps.filter((_, index) => index < 3).join('、');
+  return steps.length > 3 ? `${preview} 等 ${steps.length} 个工序` : preview;
+}
+
+function processRouteTooltipText(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
+function materialImportIssueSeverityText(issue: MaterialImportIssue) {
+  return issue.severity === 'ERROR' ? '错误' : '警告';
+}
+
+function formatMaterialImportIssuePreview(issues?: MaterialImportIssue[]) {
+  const visibleIssues = issues || [];
+  if (!visibleIssues.length) {
+    return '可写入';
+  }
+  if (visibleIssues.length === 1) {
+    return formatLongTextPreview(visibleIssues[0].message, 36, materialImportIssueSeverityText(visibleIssues[0]));
+  }
+  const errorCount = visibleIssues.filter((issue) => issue.severity === 'ERROR').length;
+  const warningCount = visibleIssues.length - errorCount;
+  return [
+    errorCount > 0 ? `错误 ${errorCount}` : '',
+    warningCount > 0 ? `警告 ${warningCount}` : ''
+  ]
+    .filter(Boolean)
+    .join(' / ');
+}
+
+function formatMaterialImportIssueTitle(issues?: MaterialImportIssue[]) {
+  const visibleIssues = issues || [];
+  return visibleIssues.length
+    ? visibleIssues
+        .map((issue) => `${materialImportIssueSeverityText(issue)} ${issue.code || '-'}：${issue.message || '-'}`)
+        .join('；')
+    : '可写入';
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function longTextTooltipText(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
+function materialImportTraceRemarkPreview(row: MaterialImportTraceRow) {
+  return formatLongTextPreview(row.remark, 48, '-');
+}
+
+function materialImportTraceRemarkTitle(row: MaterialImportTraceRow) {
+  return longTextTooltipText(row.remark);
+}
+
+function materialApplicabilityScopePreview(row: MaterialApplicability) {
+  return formatLongTextPreview(row.scopeLabel, 32, '-');
+}
+
+function materialApplicabilityScopeTitle(row: MaterialApplicability) {
+  return `适用范围：${materialApplicabilityScopePreview(row)}。完整范围请进入适用范围详情核对；该范围只影响后续搜索和推荐，不会修改历史订单、BOM、生产任务或库存。`;
+}
+
+function materialImportTraceValueText(value: string | number | boolean | null) {
+  if (value === null || value === undefined || String(value).trim() === '') {
+    return '-';
+  }
+  if (typeof value === 'boolean') {
+    return value ? '是' : '否';
+  }
+  return String(value);
+}
+
+function openMaterialImportTrace(row: MaterialImportTraceRow, kind: MaterialImportTraceKind) {
+  activeMaterialImportTraceRow.value = row;
+  materialImportTraceKind.value = kind;
+  materialImportTraceDialogVisible.value = true;
 }
 
 async function loadMaterials() {
@@ -1182,20 +1772,22 @@ async function loadMaterials() {
       keyword: filters.keyword.trim() || undefined,
       status: filters.status
     };
-    const [initialResult, triggeredRows] = await Promise.all([
+    const [initialResult, triggeredResult] = await Promise.all([
       erpApi.inventoryMaterialsPage({
         ...baseFilters,
         stockAlert: filters.stockAlert,
         limit: requestLimit,
         offset: requestOffset
       }),
-      erpApi.inventoryMaterials({
+      erpApi.inventoryMaterialsPage({
         ...baseFilters,
-        stockAlert: 'TRIGGERED'
+        stockAlert: 'TRIGGERED',
+        limit: Number(1),
+        offset: Number(0)
       })
     ]);
     let result = initialResult;
-    triggeredStockAlertTotal.value = triggeredRows.length;
+    triggeredStockAlertTotal.value = triggeredResult.totalCount;
     if (result.totalCount > 0 && result.items.length === 0 && requestPage > 1) {
       materialPagination.page = Math.max(Math.ceil(result.totalCount / requestLimit), 1);
       result = await erpApi.inventoryMaterialsPage({
@@ -1216,6 +1808,45 @@ async function loadMaterials() {
   } finally {
     loading.value = false;
   }
+}
+
+function materialRequestFilters() {
+  return {
+    keyword: filters.keyword.trim() || undefined,
+    status: filters.status,
+    stockAlert: filters.stockAlert
+  };
+}
+
+async function exportMaterialsExcel() {
+  if (materialExporting.value) {
+    return;
+  }
+  materialExporting.value = true;
+  try {
+    await erpApi.downloadInventoryMaterialsExport(materialRequestFilters(), `零件基础库_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('零件基础库 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件基础库导出失败，请稍后重试');
+  } finally {
+    materialExporting.value = false;
+  }
+}
+
+async function loadProcessDefinitions() {
+  try {
+    processDefinitions.value = await erpApi.processDefinitions(undefined, 'ENABLED');
+  } catch {
+    processDefinitions.value = [];
+    ElMessage.error('标准工序加载失败，零件默认工艺暂不可选');
+  }
+}
+
+function splitDefaultProcessRoute(value: string) {
+  return String(value || '')
+    .split(/(?:->|→|[、,，;；\n\r]+)/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function searchMaterials() {
@@ -1271,6 +1902,7 @@ function resetForm() {
   form.partName = '';
   form.unit = '件';
   form.partSpecification = '';
+  form.defaultProcessRouteSteps = [];
   form.stockAlertEnabled = false;
   form.stockAlertQuantity = null;
   form.status = 'ENABLED';
@@ -1402,6 +2034,7 @@ function openEditDialog(row: MaterialMemory) {
   form.partName = row.partName;
   form.unit = row.unit;
   form.partSpecification = row.partSpecification || '';
+  form.defaultProcessRouteSteps = splitDefaultProcessRoute(row.defaultProcessRoute || '');
   form.stockAlertEnabled = Boolean(row.stockAlertEnabled);
   form.stockAlertQuantity = row.stockAlertQuantity === null || row.stockAlertQuantity === undefined ? null : Number(row.stockAlertQuantity);
   form.status = row.status;
@@ -1437,12 +2070,13 @@ async function saveMaterial() {
 
   saving.value = true;
   try {
-    // 库存报警只属于 Material 基础资料，不创建订单、生产任务或库存流水。
+    // 默认工艺和库存报警只属于 Material 基础资料，不创建订单、生产任务或库存流水。
     const payload = {
       partCode,
       partName,
       unit,
       partSpecification: form.partSpecification.trim() || undefined,
+      defaultProcessRoute: form.defaultProcessRouteSteps.join('、') || undefined,
       stockAlertEnabled: form.stockAlertEnabled,
       stockAlertQuantity: form.stockAlertEnabled ? Number(form.stockAlertQuantity) : null
     };
@@ -1623,6 +2257,12 @@ async function loadMoreMaterialImportRows() {
 }
 
 async function downloadMaterialImportIssueReport() {
+  if (guardDesktopOperation('下载零件库导入问题明细')) {
+    return;
+  }
+  if (importIssueReportDownloading.value) {
+    return;
+  }
   if (!materialImportSession.value?.id) {
     ElMessage.warning('请先上传 Excel 并生成导入预览');
     return;
@@ -1735,6 +2375,9 @@ async function executeCommitMaterialImport() {
   if (!materialImportSession.value?.previewToken || importCommitting.value) {
     return;
   }
+  const returnToOrders = routeQueryText(route.query.returnTo) === '/orders';
+  const orderImportSessionId = routeQueryText(route.query.orderImportSessionId);
+  const previewBomDraft = routeQueryText(route.query.previewBomDraft) || '1';
   importCommitting.value = true;
   try {
     const result = await erpApi.commitMaterialImportSession(materialImportSession.value.id, materialImportSession.value.previewToken);
@@ -1744,6 +2387,16 @@ async function executeCommitMaterialImport() {
     materialImportSession.value = undefined;
     materialImportConfirmDialogVisible.value = false;
     importDialogVisible.value = false;
+    if (returnToOrders && orderImportSessionId) {
+      await router.push({
+        path: '/orders',
+        query: {
+          orderImportSessionId,
+          previewBomDraft
+        }
+      });
+      return;
+    }
     await loadMaterials();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '零件库导入写入失败');
@@ -1775,6 +2428,24 @@ async function loadApplicabilities() {
     ElMessage.error(error instanceof Error ? error.message : '零件适用范围加载失败，请确认后端服务和当前零件状态');
   } finally {
     applicabilityLoading.value = false;
+  }
+}
+
+async function exportApplicabilitiesExcel() {
+  if (applicabilityExporting.value || !activeMaterial.value) {
+    return;
+  }
+  applicabilityExporting.value = true;
+  try {
+    await erpApi.downloadMaterialApplicabilitiesExport(
+      activeMaterial.value.id,
+      `零件适用范围_${activeMaterial.value.partCode}_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('零件适用范围 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件适用范围导出失败，请稍后重试');
+  } finally {
+    applicabilityExporting.value = false;
   }
 }
 
@@ -1877,7 +2548,7 @@ function disableApplicability(row: MaterialApplicability) {
   openMaterialMaintenanceStatusDialog({
     type: 'applicability',
     id: row.id,
-    name: row.scopeLabel,
+    name: materialApplicabilityScopePreview(row),
     nextStatus: 'DISABLED',
     actionLabel: '停用适用范围',
     warning: '停用适用范围只影响后续推荐和下单选择，不会改写历史订单或已维护 BOM。'
@@ -1897,7 +2568,7 @@ function enableApplicability(row: MaterialApplicability) {
   openMaterialMaintenanceStatusDialog({
     type: 'applicability',
     id: row.id,
-    name: row.scopeLabel,
+    name: materialApplicabilityScopePreview(row),
     nextStatus: 'ENABLED',
     actionLabel: '启用适用范围',
     warning: '启用适用范围只恢复后续推荐入口，不会重写原客户范围、机型范围或备注。'
@@ -1931,6 +2602,24 @@ async function loadDrawingRevisions() {
   }
 }
 
+async function exportDrawingRevisionsExcel() {
+  if (drawingExporting.value || !activeMaterial.value) {
+    return;
+  }
+  drawingExporting.value = true;
+  try {
+    await erpApi.downloadMaterialDrawingRevisionsExport(
+      activeMaterial.value.id,
+      `零件图纸版本_${activeMaterial.value.partCode}_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('零件图纸版本 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '零件图纸版本导出失败，请稍后重试');
+  } finally {
+    drawingExporting.value = false;
+  }
+}
+
 function resetDrawingForm() {
   drawingForm.id = '';
   drawingForm.drawingNo = '';
@@ -1950,7 +2639,34 @@ function handleDrawingDialogClose(done: () => void) {
     warnMaterialMaintenanceSavingClose('图纸版本正在保存，请等待保存完成');
     return;
   }
+  if (drawingUploading.value) {
+    warnMaterialMaintenanceSavingClose('图纸文件正在上传，请等待上传完成');
+    return;
+  }
   done();
+}
+
+async function uploadMaterialDrawingFile(options: UploadRequestOptions) {
+  if (guardDesktopOperation('上传图纸文件')) {
+    return;
+  }
+  if (drawingSaving.value || drawingUploading.value) {
+    return;
+  }
+  drawingUploading.value = true;
+  try {
+    const file = options.file as File;
+    const result = await erpApi.uploadMaterialDrawing(file);
+    // 零件基础库只记录图纸文件地址和文件名；订单保存时会把当前选用图纸写入订单零件快照。
+    drawingForm.drawingFileName = result.fileName;
+    drawingForm.drawingFileUrl = result.fileUrl;
+    options.onSuccess?.(result);
+    ElMessage.success('图纸文件已上传');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '图纸文件上传失败');
+  } finally {
+    drawingUploading.value = false;
+  }
 }
 
 function editDrawingRevision(row: MaterialDrawingRevision) {
@@ -1990,6 +2706,10 @@ async function saveDrawingRevision() {
     return;
   }
   if (drawingSaving.value) {
+    return;
+  }
+  if (drawingUploading.value) {
+    ElMessage.warning('图纸文件正在上传，请等待上传完成后再保存');
     return;
   }
   if (!activeMaterial.value) {
@@ -2099,7 +2819,7 @@ function disableDrawingRevision(row: MaterialDrawingRevision) {
   openMaterialMaintenanceStatusDialog({
     type: 'drawing',
     id: row.id,
-    name: `${row.drawingNo} / ${row.drawingVersion}${row.drawingDate ? ` / ${row.drawingDate}` : ''}`,
+    name: formatMaterialDrawingSnapshot(row),
     nextStatus: 'DISABLED',
     actionLabel: '停用图纸版本',
     warning: '停用图纸版本只影响后续 BOM 和订单选择，不会覆盖历史订单图纸快照。'
@@ -2119,7 +2839,7 @@ function enableDrawingRevision(row: MaterialDrawingRevision) {
   openMaterialMaintenanceStatusDialog({
     type: 'drawing',
     id: row.id,
-    name: `${row.drawingNo} / ${row.drawingVersion}${row.drawingDate ? ` / ${row.drawingDate}` : ''}`,
+    name: formatMaterialDrawingSnapshot(row),
     nextStatus: 'ENABLED',
     actionLabel: '启用图纸版本',
     warning: '启用图纸版本只恢复可选状态，不会自动设为默认，也不会覆盖历史订单图纸快照。'
@@ -2264,6 +2984,44 @@ async function confirmMaterialStatusChange() {
   margin-bottom: 16px;
 }
 
+.material-library-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.material-library-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.material-library-import-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 10px 0 0;
+}
+
+.material-library-dialog-table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.material-library-dialog-table-header h3 {
+  margin: 0;
+}
+
+.material-library-dialog-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .stock-alert-form-row {
   display: inline-flex;
   align-items: center;
@@ -2402,6 +3160,56 @@ async function confirmMaterialStatusChange() {
   color: #64748b;
 }
 
+.material-import-trace {
+  display: grid;
+  gap: 14px;
+}
+
+.trace-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.trace-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.trace-summary-grid span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.trace-summary-grid strong {
+  color: #0f172a;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.trace-descriptions {
+  word-break: break-word;
+}
+
+.trace-remark {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.trace-remark p {
+  margin: 0;
+  color: #475569;
+  line-height: 1.6;
+}
+
 .issue-list {
   display: flex;
   flex-wrap: wrap;
@@ -2411,7 +3219,7 @@ async function confirmMaterialStatusChange() {
 .issue-pill {
   display: inline-flex;
   align-items: center;
-  max-width: 100%;
+  max-width: min(240px, 100%);
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid #fed7aa;
@@ -2419,12 +3227,24 @@ async function confirmMaterialStatusChange() {
   color: #c2410c;
   font-size: 12px;
   line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .issue-pill.is-error {
   border-color: #fecaca;
   background: #fef2f2;
   color: #dc2626;
+}
+
+.material-scope-cell {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  color: #334155;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .import-preview-tabs {
@@ -2472,6 +3292,14 @@ async function confirmMaterialStatusChange() {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.drawing-file-maintenance {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 @media (max-width: 900px) {

@@ -160,7 +160,7 @@ async function checkModelBomData() {
     orderBy: { bomName: 'asc' }
   });
 
-  const bomsByScope = new Map<string, (typeof boms)[number]>();
+  const bomsByNameAndScope = new Map<string, (typeof boms)[number]>();
 
   for (const bom of boms) {
     const actualCustomerScopeKey = stringValue(bom.customerScopeKey) || 'ALL';
@@ -239,17 +239,17 @@ async function checkModelBomData() {
       );
     }
 
-    // BOM 范围必须唯一，避免同一客户 / 机型出现多套可变清单互相覆盖。
-    const bomScopeKey = `${actualCustomerScopeKey}|${actualProjectModelScopeKey.toLocaleUpperCase()}`;
-    const existingScopeBom = bomsByScope.get(bomScopeKey);
+    // 同一客户和同一机型允许多个 BOM；只有同名 + 同范围重复才会让下单推荐和维护记录混淆。
+    const bomNameScopeKey = `${stringValue(bom.bomName).toLocaleUpperCase()}|${actualCustomerScopeKey}|${actualProjectModelScopeKey.toLocaleUpperCase()}`;
+    const existingScopeBom = bomsByNameAndScope.get(bomNameScopeKey);
     if (existingScopeBom) {
       addIssue(
         'ERROR',
-        'MODEL_BOM_SCOPE_DUPLICATE',
-        `BOM ${existingScopeBom.bomName} 和 ${bom.bomName} 使用相同客户 / 机型范围 ${bomScopeKey}，请合并后保留一套独立清单`
+        'MODEL_BOM_NAME_SCOPE_DUPLICATE',
+        `BOM ${existingScopeBom.bomName} 和 ${bom.bomName} 使用相同名称、客户范围和机型/项目范围 ${bomNameScopeKey}，请修改名称或合并重复记录`
       );
     } else {
-      bomsByScope.set(bomScopeKey, bom);
+      bomsByNameAndScope.set(bomNameScopeKey, bom);
     }
 
     const enabledComponentsByNo = new Map<string, (typeof bom.lines)[number]>();
@@ -443,6 +443,97 @@ async function checkModelBomData() {
     }
     if (!stringValue(review.diffFingerprint)) {
       addIssue('ERROR', 'MODEL_BOM_DIFF_REVIEW_FINGERPRINT_MISSING', `${label} 缺少 diffFingerprint，无法判断后续差异是否已经变化`);
+    }
+  }
+
+  const scopeApprovalRequests = await prisma.modelBomScopeApprovalRequest.findMany({
+    select: {
+      id: true,
+      requestNo: true,
+      bomId: true,
+      status: true,
+      requestedBomName: true,
+      requestedCustomerScopeMode: true,
+      requestedScopeKey: true,
+      requestedProjectModel: true,
+      requestedProjectModelScopeKey: true,
+      reason: true,
+      requestedBy: true,
+      approvedAt: true,
+      rejectedAt: true,
+      usedAt: true,
+      bom: { select: { bomName: true } }
+    },
+    orderBy: [{ bomId: 'asc' }, { createdAt: 'asc' }]
+  });
+  const openScopeApprovalsByKey = new Map<string, (typeof scopeApprovalRequests)[number]>();
+  const allowedApprovalStatuses = new Set(['PENDING', 'APPROVED', 'REJECTED', 'USED']);
+
+  for (const request of scopeApprovalRequests) {
+    const label = `BOM 范围审批 ${request.requestNo || request.id}`;
+    const missingApprovalFields = [
+      ['requestNo', request.requestNo],
+      ['bomId', request.bomId],
+      ['requestedBomName', request.requestedBomName],
+      ['requestedCustomerScopeMode', request.requestedCustomerScopeMode],
+      ['requestedScopeKey', request.requestedScopeKey],
+      ['requestedProjectModelScopeKey', request.requestedProjectModelScopeKey],
+      ['requestedBy', request.requestedBy],
+      ['reason', request.reason]
+    ].filter(([, value]) => !String(value || '').trim());
+    if (missingApprovalFields.length > 0) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_IDENTITY_MISSING', `${label} 缺少审批字段：${missingApprovalFields.map(([field]) => field).join(', ')}`);
+    }
+    if (!allowedApprovalStatuses.has(request.status)) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_STATUS_INVALID', `${label} status=${request.status} 不在允许范围内`);
+    }
+    if (!['ALL', 'PRIVATE', 'SELECTED'].includes(request.requestedCustomerScopeMode)) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_MODE_INVALID', `${label} requestedCustomerScopeMode=${request.requestedCustomerScopeMode} 不在允许范围内`);
+    }
+    if (request.requestedCustomerScopeMode === 'ALL' && request.requestedScopeKey !== 'ALL') {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_SCOPE_KEY_MISMATCH', `${label} 全部客户审批必须 requestedScopeKey=ALL`);
+    }
+    if (request.requestedCustomerScopeMode === 'SELECTED' && !request.requestedScopeKey.startsWith('SELECTED:')) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_SCOPE_KEY_MISMATCH', `${label} 指定客户审批 requestedScopeKey 必须以 SELECTED: 开头`);
+    }
+    const expectedProjectScopeKey = stringValue(request.requestedProjectModel).toLocaleUpperCase() || 'ALL';
+    if (request.requestedProjectModelScopeKey !== expectedProjectScopeKey) {
+      addIssue(
+        'ERROR',
+        'MODEL_BOM_SCOPE_APPROVAL_PROJECT_SCOPE_KEY_MISMATCH',
+        `${label} requestedProjectModelScopeKey=${request.requestedProjectModelScopeKey} 与 requestedProjectModel=${expectedProjectScopeKey} 不一致`
+      );
+    }
+    if (request.status === 'APPROVED' && !request.approvedAt) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_APPROVED_AT_MISSING', `${label} 已批准但缺少 approvedAt`);
+    }
+    if (request.status === 'REJECTED' && !request.rejectedAt) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_REJECTED_AT_MISSING', `${label} 已驳回但缺少 rejectedAt`);
+    }
+    if (request.status === 'USED' && !request.usedAt) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_USED_AT_MISSING', `${label} 已使用但缺少 usedAt`);
+    }
+    if (request.status !== 'USED' && request.usedAt) {
+      addIssue('ERROR', 'MODEL_BOM_SCOPE_APPROVAL_USED_STATUS_MISMATCH', `${label} status=${request.status} 但已经写入 usedAt`);
+    }
+
+    if ((request.status === 'PENDING' || request.status === 'APPROVED') && !request.usedAt) {
+      const openScopeKey = [
+        request.bomId,
+        request.requestedCustomerScopeMode,
+        request.requestedScopeKey,
+        request.requestedProjectModelScopeKey
+      ].join('|');
+      const previous = openScopeApprovalsByKey.get(openScopeKey);
+      if (previous) {
+        addIssue(
+          'ERROR',
+          'MODEL_BOM_SCOPE_APPROVAL_OPEN_DUPLICATE',
+          `BOM ${request.bom?.bomName || request.requestedBomName} 的同一目标范围存在多个未使用审批：${previous.requestNo} / ${request.requestNo}，请先驳回或使用其中一个`
+        );
+      } else {
+        openScopeApprovalsByKey.set(openScopeKey, request);
+      }
     }
   }
 }
@@ -1067,18 +1158,17 @@ async function checkMaterialImportData() {
   });
 
   const countStoredImportIssues = (value: Prisma.JsonValue | null | undefined) => {
-    const rows = Array.isArray(value) ? value : [];
+    const rows = jsonObjectRows(value);
     return {
-      errorCount: rows.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'ERROR').length,
-      warningCount: rows.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'WARNING').length
+      errorCount: rows.filter((issue) => issue['severity'] === 'ERROR').length,
+      warningCount: rows.filter((issue) => issue['severity'] === 'WARNING').length
     };
   };
   const storedImportIssueCodes = (value: Prisma.JsonValue | null | undefined) => {
-    const rows = Array.isArray(value) ? value : [];
     return new Set(
-      rows
-        .filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && typeof issue.code === 'string')
-        .map((issue) => String((issue as Prisma.JsonObject).code))
+      jsonObjectRows(value)
+        .filter((issue) => typeof issue['code'] === 'string')
+        .map((issue) => String(issue['code']))
     );
   };
 
@@ -1453,6 +1543,7 @@ async function checkOrderImportData() {
           parentComponentNo: true,
           partCode: true,
           drawingNo: true,
+          drawingVersion: true,
           partName: true,
           partSpecification: true,
           partThickness: true,
@@ -1568,9 +1659,9 @@ async function checkOrderImportData() {
       if (row.issues !== null && !Array.isArray(row.issues)) {
         addIssue('ERROR', 'ORDER_IMPORT_ROW_ISSUES_INVALID', `${rowLabel} issues 必须为空或数组`);
       }
-      const storedIssues = Array.isArray(row.issues) ? row.issues : [];
-      const storedErrorCount = storedIssues.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'ERROR').length;
-      const storedWarningCount = storedIssues.filter((issue) => isJsonRecord(issue as Prisma.JsonValue) && issue.severity === 'WARNING').length;
+      const storedIssues = jsonObjectRows(row.issues);
+      const storedErrorCount = storedIssues.filter((issue) => issue['severity'] === 'ERROR').length;
+      const storedWarningCount = storedIssues.filter((issue) => issue['severity'] === 'WARNING').length;
       if (row.errorCount !== storedErrorCount || row.warningCount !== storedWarningCount) {
         addIssue(
           'ERROR',
@@ -1605,6 +1696,7 @@ async function checkOrderImportData() {
         ['componentNo', row.componentNo],
         ['parentComponentNo', row.parentComponentNo],
         ['drawingNo', row.drawingNo],
+        ['drawingVersion', row.drawingVersion],
         ['partSpecification', row.partSpecification],
         ['processRoute', row.processRoute],
         ['processRemark', row.processRemark],
@@ -1979,6 +2071,10 @@ function isJsonRecord(value: Prisma.JsonValue | null | undefined): value is Pris
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function jsonObjectRows(value: Prisma.JsonValue | null | undefined): Prisma.JsonObject[] {
+  return Array.isArray(value) ? value.filter(isJsonRecord) : [];
+}
+
 function selectedStockSourceQuantity(stockSourceSelections: Prisma.JsonValue | null | undefined) {
   return normalizeStockSourceSelections(stockSourceSelections).reduce((sum, source) => sum + source.quantity, 0);
 }
@@ -2326,7 +2422,7 @@ function assertCaseInsensitiveUnique(
 }
 
 async function checkProcessMemoryData() {
-  const [definitions, templates, bomLines, transformRules] = await Promise.all([
+  const [definitions, templates, materials, bomLines, transformRules] = await Promise.all([
     prisma.processDefinition.findMany({
       select: {
         id: true,
@@ -2349,6 +2445,14 @@ async function checkProcessMemoryData() {
         status: true
       },
       orderBy: { templateName: 'asc' }
+    }),
+    prisma.material.findMany({
+      where: { defaultProcessRoute: { not: null } },
+      select: {
+        partCode: true,
+        defaultProcessRoute: true
+      },
+      orderBy: { partCode: 'asc' }
     }),
     prisma.modelBomLine.findMany({
       where: { defaultProcessRoute: { not: null } },
@@ -2410,10 +2514,10 @@ async function checkProcessMemoryData() {
     if (definition.remark !== null && definition.remark.trim() === '') {
       addIssue('ERROR', 'PROCESS_DEFINITION_OPTIONAL_TEXT_BLANK', `${label} 的 remark 只能为 null，不能保存空白字符串`);
     }
-    if (!definition.searchText.trim()) {
+    if (definition.status === CommonStatus.ENABLED && !definition.searchText.trim()) {
       addIssue('ERROR', 'PROCESS_DEFINITION_SEARCH_TEXT_EMPTY', `${label} 的 searchText 为空，无法支持拼音搜索`);
     }
-    if (definition.searchText !== definition.searchText.trim()) {
+    if (definition.status === CommonStatus.ENABLED && definition.searchText !== definition.searchText.trim()) {
       addIssue('ERROR', 'PROCESS_DEFINITION_SEARCH_TEXT_HAS_SPACES', `${label} 的 searchText 存在首尾空格`);
     }
     if (definition.processNameNormalized !== normalizedKey) {
@@ -2423,7 +2527,7 @@ async function checkProcessMemoryData() {
         `${label} 的 processNameNormalized=${definition.processNameNormalized}，应为 ${normalizedKey}`
       );
     }
-    if (definition.searchText !== expectedSearchText) {
+    if (definition.status === CommonStatus.ENABLED && definition.searchText !== expectedSearchText) {
       addIssue('ERROR', 'PROCESS_DEFINITION_SEARCH_TEXT_STALE', `${label} 的 searchText 未按当前拼音规则生成`);
     }
   }
@@ -2503,6 +2607,21 @@ async function checkProcessMemoryData() {
       stepKeys.add(stepKey);
       if (!enabledDefinitionNames.has(stepKey)) {
         addIssue('ERROR', 'PROCESS_TEMPLATE_STEP_DEFINITION_MISSING', `${stepLabel} 没有对应的启用标准工序`);
+      }
+    }
+  }
+
+  for (const material of materials) {
+    const label = `Material ${material.partCode}`;
+    const processKeys = new Set<string>();
+    for (const processName of splitDefaultProcessRoute(material.defaultProcessRoute)) {
+      const processKey = normalizeSearchKeyword(processName);
+      if (processKeys.has(processKey)) {
+        addIssue('ERROR', 'MATERIAL_DEFAULT_PROCESS_DUPLICATE', `${label} 默认工艺 ${processName} 在同一零件中重复`);
+      }
+      processKeys.add(processKey);
+      if (!enabledDefinitionNames.has(processKey)) {
+        addIssue('ERROR', 'MATERIAL_DEFAULT_PROCESS_DEFINITION_MISSING', `${label} 默认工艺 ${processName} 没有对应的启用标准工序`);
       }
     }
   }
@@ -3001,8 +3120,11 @@ async function checkOrderLinePlans() {
     if (line.lineNo <= 0) {
       addIssue('ERROR', 'ORDER_LINE_LINE_NO_INVALID', `${label} lineNo 必须大于 0`);
     }
-    if (orderQuantity <= 0) {
-      addIssue('ERROR', 'ORDER_LINE_QUANTITY_INVALID', `${label} quantity 必须大于 0`);
+    if (orderQuantity < 0) {
+      addIssue('ERROR', 'ORDER_LINE_QUANTITY_INVALID', `${label} quantity 不能小于 0`);
+    }
+    if (orderQuantity <= 0 && line.order.status !== OrderStatus.CANCELLED) {
+      addIssue('ERROR', 'ORDER_LINE_QUANTITY_INVALID', `${label} 非取消订单 quantity 必须大于 0`);
     }
     if (planQuantity < 0) {
       addIssue('ERROR', 'ORDER_LINE_PLAN_NEGATIVE', `${label} productionPlanQuantity 不能为负数`);

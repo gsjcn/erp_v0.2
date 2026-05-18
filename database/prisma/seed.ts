@@ -7,12 +7,31 @@ import { decimalToNumber } from '../../backend/src/common/serializers';
 
 const prisma = new PrismaClient();
 
+function isLocalSeedDatabaseUrl(databaseUrl = process.env.DATABASE_URL) {
+  if (!databaseUrl) {
+    return false;
+  }
+  try {
+    const host = new URL(databaseUrl).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
 function assertSeedResetAllowed() {
   const isProduction = process.env.NODE_ENV === 'production';
   const allowDestructiveSeed = process.env.ALLOW_DESTRUCTIVE_SEED === 'true';
+  const backupConfirmed = process.env.SEED_BACKUP_CONFIRMED === 'true';
   if (isProduction && !allowDestructiveSeed) {
     throw new Error('Seed reset is blocked in production. Set ALLOW_DESTRUCTIVE_SEED=true only when you intentionally reset test data.');
   }
+  if (allowDestructiveSeed || backupConfirmed || (!isProduction && isLocalSeedDatabaseUrl())) {
+    return;
+  }
+  throw new Error(
+    'Seed reset is blocked. Use a local DATABASE_URL, run npm run docker:db:seed so backup confirmation is passed, or set ALLOW_DESTRUCTIVE_SEED=true only for intentional test resets.'
+  );
 }
 
 type SeedOrderLine = {

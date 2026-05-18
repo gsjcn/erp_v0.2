@@ -3,6 +3,7 @@
     <div class="page-header">
       <h2 class="page-title">订单明细</h2>
       <div v-if="!isMobileLayout" class="page-actions order-detail-page-actions">
+        <el-button :icon="Download" :loading="orderExporting" :disabled="!order" @click="exportOrderDetailExcel">导出 Excel</el-button>
         <el-button :disabled="!order || order.status !== 'DRAFT'" @click="openEdit">编辑订单</el-button>
         <el-tooltip :content="additionalMaterialDisabledReason" :disabled="canAddAdditionalMaterial" placement="bottom">
           <span class="action-tooltip-wrap">
@@ -114,7 +115,7 @@
               <strong>{{ line.partName }}</strong>
               <span>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
             </div>
-            <p>{{ formatLineShortageText(line) }}</p>
+            <p :title="formatLineShortageTitle(line)">{{ formatLineShortagePreview(line) }}</p>
             <div class="pending-shortage-actions">
               <el-button size="small" plain @click="scrollToShortageLine(line)">定位</el-button>
               <el-button
@@ -144,7 +145,7 @@
               <strong>{{ line.partName }}</strong>
               <span>{{ line.partCode }} / 订单 {{ formatQuantity(line.quantity, line.unit) }}</span>
             </div>
-            <p>{{ formatLineShortageText(line) }}</p>
+            <p :title="formatLineShortageTitle(line)">{{ formatLineShortagePreview(line) }}</p>
             <div class="pending-shortage-actions">
               <el-tag type="success" effect="light" round>已处理</el-tag>
               <el-button size="small" plain @click="scrollToShortageLine(line)">定位</el-button>
@@ -241,8 +242,13 @@
             <StatusTag :value="line.warehouseStage" compact />
             <span class="muted">{{ formatLineWarehouseText(line) }}</span>
           </div>
-          <div v-if="formatLineShortageText(line)" :id="lineShortageAnchorId(line)" class="line-shortage">
-            {{ formatLineShortageText(line) }}
+          <div
+            v-if="formatLineShortageText(line)"
+            :id="lineShortageAnchorId(line)"
+            class="line-shortage"
+            :title="formatLineShortageTitle(line)"
+          >
+            {{ formatLineShortagePreview(line, 64) }}
           </div>
           <div v-if="lineNeedsReplenishmentAction(line)" :id="`shortage-line-${line.id}`" class="line-replenishment-warning">
               <strong>{{ formatLineReplenishmentActionText(line) }}</strong>
@@ -250,14 +256,14 @@
           </div>
           <div v-show="showOrderDetailLineDetails(line.id)" class="order-detail-line-body">
             <div class="muted">来源 {{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</div>
-            <div v-if="stockSourceSummary(line)" class="stock-source-summary">
-              库存来源：{{ stockSourceSummary(line) }}
+            <div v-if="stockSourceSummary(line)" class="stock-source-summary" :title="stockSourceSummaryTitle(line)">
+              库存来源：{{ stockSourceSummaryPreview(line) }}
             </div>
             <div v-if="stockFulfillmentHint(line)" class="stock-fulfillment-hint">
               {{ stockFulfillmentHint(line) }}
             </div>
             <div class="muted">交期 {{ formatDate(line.deliveryDate || order.deliveryDate) }}</div>
-            <div class="muted">{{ line.partCode }} / {{ line.drawingNo || '-' }} / 版本 {{ line.drawingVersion || '-' }}</div>
+            <div class="muted">{{ line.partCode }} / 图纸 {{ formatOrderDetailLineDrawingText(line) }}</div>
             <div class="muted">厚度 {{ formatOrderLineThickness(line) }} / 成品规格 {{ line.partSpecification || '-' }}</div>
             <div v-if="importTraceText(line)" class="import-source-trace">
               <span>{{ importTraceText(line) }}</span>
@@ -274,7 +280,9 @@
             <div class="line-progress">{{ formatLineProductionProgressText(line) }}</div>
             <DrawingPreviewLink :file-name="line.drawingFileName" :file-url="line.drawingFileUrl" :title="`${line.partName} 图纸预览`" />
             <div class="process-chain mt-16">
-              <span v-for="step in line.processSteps" :key="step" class="process-pill">{{ processStepDisplay(line, step) }}</span>
+              <span v-for="step in line.processSteps" :key="step" class="process-pill" :title="processStepTitle(line, step)">
+                {{ processStepDisplay(line, step) }}
+              </span>
               <span v-if="line.processSteps.length === 0" class="muted">
                 {{ lineRequiresProductionProcess(line) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
               </span>
@@ -315,7 +323,32 @@
       </div>
 
       <div class="table-card mt-24 desktop-table">
-        <el-table :data="order.lines" max-height="max(260px, calc(100vh - 520px))">
+        <div class="order-detail-table-height-toolbar">
+          <div class="order-detail-table-height-actions" aria-label="订单详情零件明细表格高度">
+            <span class="order-detail-table-height-label">订单详情零件明细表格高度</span>
+            <el-button-group>
+              <el-button
+                :icon="Minus"
+                :disabled="orderDetailWorkTableHeights.lines <= orderDetailWorkTableHeightLimits.min"
+                aria-label="降低订单详情零件明细表格高度"
+                @click="adjustOrderDetailWorkTableHeight('lines', -orderDetailWorkTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="Plus"
+                :disabled="orderDetailWorkTableHeights.lines >= orderDetailWorkTableHeightLimits.max"
+                aria-label="提高订单详情零件明细表格高度"
+                @click="adjustOrderDetailWorkTableHeight('lines', orderDetailWorkTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="RefreshLeft"
+                :disabled="orderDetailWorkTableHeights.lines === orderDetailWorkTableDefaultHeights.lines"
+                aria-label="恢复订单详情零件明细表格默认高度"
+                @click="resetOrderDetailWorkTableHeight('lines')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <el-table :data="order.lines" :max-height="orderDetailWorkTableHeights.lines">
           <el-table-column prop="lineNo" label="序号" width="80" />
           <el-table-column label="组件结构" min-width="185">
             <template #default="{ row }">
@@ -344,6 +377,8 @@
           </el-table-column>
           <el-table-column prop="drawingNo" label="图号" width="150" />
           <el-table-column prop="drawingVersion" label="图纸版本" width="100" />
+          <el-table-column prop="drawingDate" label="图纸日期" width="120" />
+          <el-table-column prop="drawingStatus" label="图纸状态" width="110" />
           <el-table-column label="厚度(mm)" width="110">
             <template #default="{ row }">{{ formatOrderLineThickness(row) }}</template>
           </el-table-column>
@@ -397,7 +432,7 @@
           <el-table-column label="已选库存来源" min-width="260">
             <template #default="{ row }">
               <span v-if="stockSourceSummary(row)" class="stock-source-summary-inline">
-                {{ stockSourceSummary(row) }}
+                <span :title="stockSourceSummaryTitle(row)">{{ stockSourceSummaryPreview(row, 42) }}</span>
               </span>
               <span v-else class="muted">-</span>
             </template>
@@ -410,7 +445,7 @@
           <el-table-column label="短缺 / 补单" min-width="220">
             <template #default="{ row }">
               <span :class="{ 'line-shortage-inline': formatLineShortageText(row) }">
-                {{ formatLineShortageText(row) || '-' }}
+                <span :title="formatLineShortageTitle(row)">{{ formatLineShortagePreview(row, 42) }}</span>
               </span>
               <div v-if="lineNeedsReplenishmentAction(row)" class="line-replenishment-warning table-warning">
                 <span>{{ formatLineReplenishmentActionText(row) }}</span>
@@ -432,7 +467,9 @@
           <el-table-column label="生产流程" min-width="360">
             <template #default="{ row }">
               <div class="process-chain">
-                <span v-for="step in row.processSteps" :key="step" class="process-pill">{{ processStepDisplay(row, step) }}</span>
+                <span v-for="step in row.processSteps" :key="step" class="process-pill" :title="processStepTitle(row, step)">
+                  {{ processStepDisplay(row, step) }}
+                </span>
                 <span v-if="row.processSteps.length === 0" class="muted">
                   {{ lineRequiresProductionProcess(row) ? '未选择生产流程' : '当前生产计划为 0，无生产流程' }}
                 </span>
@@ -824,13 +861,41 @@
             <strong>{{ formatOrderQuantity(order, 'totalProductionPlanQuantity') }}</strong>
           </p>
         </div>
-        <div class="submit-order-lines">
+        <div class="order-detail-table-height-toolbar">
+          <div class="order-detail-table-height-actions" aria-label="提交生产订单零件列表高度">
+            <span class="order-detail-table-height-label">提交生产订单零件列表高度</span>
+            <el-button-group>
+              <el-button
+                size="small"
+                :icon="Minus"
+                :disabled="orderDetailWorkTableHeights.submitOrderLines <= orderDetailWorkTableHeightLimits.min"
+                aria-label="降低提交生产订单零件列表高度"
+                @click="adjustOrderDetailWorkTableHeight('submitOrderLines', -orderDetailWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="orderDetailWorkTableHeights.submitOrderLines >= orderDetailWorkTableHeightLimits.max"
+                aria-label="提高提交生产订单零件列表高度"
+                @click="adjustOrderDetailWorkTableHeight('submitOrderLines', orderDetailWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="orderDetailWorkTableHeights.submitOrderLines === orderDetailWorkTableDefaultHeights.submitOrderLines"
+                aria-label="恢复提交生产订单零件列表默认高度"
+                @click="resetOrderDetailWorkTableHeight('submitOrderLines')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <div class="submit-order-lines" :style="{ maxHeight: orderDetailWorkTableHeightStyle('submitOrderLines') }">
           <article v-for="line in order.lines" :key="line.id" class="submit-order-line">
             <div>
               <strong>{{ line.partCode }} / {{ line.partName }}</strong>
               <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}，订单 {{ formatQuantity(line.quantity, line.unit) }}，生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
             </div>
-            <small v-if="stockSourceSummary(line)">库存来源：{{ stockSourceSummary(line) }}</small>
+            <small v-if="stockSourceSummary(line)" :title="stockSourceSummaryTitle(line)">库存来源：{{ stockSourceSummaryPreview(line) }}</small>
             <small v-if="submitOrderLineWarning(line)" class="submit-order-line-warning">
               {{ submitOrderLineWarning(line) }}
             </small>
@@ -887,7 +952,9 @@
               短缺 {{ formatQuantity(record.shortageQuantity, record.unit || activeLine.unit) }}，
               报废 {{ formatQuantity(record.scrapQuantity ?? 0, record.unit || activeLine.unit) }}
             </span>
-            <small>{{ record.managerName || '-' }}确认：{{ record.shortageReason || '-' }}</small>
+            <small :title="shortageRecordReasonTitle(record)">
+              {{ record.managerName || '-' }}确认：{{ shortageRecordReasonPreview(record) }}
+            </small>
           </article>
         </div>
         <div class="shortage-resolution-actions">
@@ -1151,11 +1218,36 @@
                 原文件 {{ importSourcePreview.file.rowCount }} 行
               </span>
             </div>
-            <el-button v-if="importSourcePreview.file.fileUrl" @click="openImportSourceFile(importSourcePreview.file.fileUrl)">
-              打开原 Excel
-            </el-button>
+              <el-button v-if="importSourcePreview.file.fileUrl" @click="openImportSourceFile(importSourcePreview.file.fileUrl)">
+                打开原 Excel
+              </el-button>
+            </div>
+          <div v-if="!isMobileLayout" class="order-detail-table-height-toolbar import-preview-height-toolbar">
+            <div class="order-detail-table-height-actions" aria-label="来源 Excel 预览表格高度">
+              <span class="order-detail-table-height-label">来源 Excel 预览表格高度</span>
+              <el-button-group>
+                <el-button
+                  :icon="Minus"
+                  :disabled="orderDetailWorkTableHeights.importSourcePreview <= orderDetailWorkTableHeightLimits.min"
+                  aria-label="降低来源 Excel 预览表格高度"
+                  @click="adjustOrderDetailWorkTableHeight('importSourcePreview', -orderDetailWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  :icon="Plus"
+                  :disabled="orderDetailWorkTableHeights.importSourcePreview >= orderDetailWorkTableHeightLimits.max"
+                  aria-label="提高来源 Excel 预览表格高度"
+                  @click="adjustOrderDetailWorkTableHeight('importSourcePreview', orderDetailWorkTableHeightLimits.step)"
+                />
+                <el-button
+                  :icon="RefreshLeft"
+                  :disabled="orderDetailWorkTableHeights.importSourcePreview === orderDetailWorkTableDefaultHeights.importSourcePreview"
+                  aria-label="恢复来源 Excel 预览表格默认高度"
+                  @click="resetOrderDetailWorkTableHeight('importSourcePreview')"
+                />
+              </el-button-group>
+            </div>
           </div>
-          <el-table :data="importSourcePreview.rows" max-height="520" size="small">
+          <el-table :data="importSourcePreview.rows" :max-height="orderDetailWorkTableHeights.importSourcePreview" size="small">
             <el-table-column prop="sourceRowNo" label="Excel行" width="82" />
             <el-table-column prop="importSequence" label="序号" width="82" />
             <el-table-column label="结构" min-width="150">
@@ -1186,8 +1278,20 @@
                 {{ formatQuantity(row.demandQuantity, row.unit) }}
               </template>
             </el-table-column>
-            <el-table-column prop="processRoute" label="工艺路线" min-width="180" />
-            <el-table-column prop="processRemark" label="工艺备注" min-width="220" />
+            <el-table-column prop="processRoute" label="工艺路线" min-width="180">
+              <template #default="{ row }">
+                <el-tooltip :content="formatOrderDetailFullText(row.processRoute)" placement="top" :disabled="!row.processRoute">
+                  <span>{{ formatOrderDetailProcessRoutePreview(row.processRoute) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column prop="processRemark" label="工艺备注" min-width="220">
+              <template #default="{ row }">
+                <el-tooltip :content="formatOrderDetailFullText(row.processRemark)" placement="top" :disabled="!row.processRemark">
+                  <span>{{ formatOrderDetailLongTextPreview(row.processRemark) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column label="图纸状态" min-width="150">
               <template #default="{ row }">
                 {{ row.drawingDate || '-' }} / {{ row.drawingStatus || '-' }}
@@ -1195,7 +1299,13 @@
             </el-table-column>
             <el-table-column label="校验" min-width="220">
               <template #default="{ row }">
-                <span v-if="formatImportSourcePreviewIssues(row)">{{ formatImportSourcePreviewIssues(row) }}</span>
+                <el-tooltip
+                  v-if="formatImportSourcePreviewIssues(row)"
+                  :content="formatImportSourcePreviewIssuesTitle(row)"
+                  placement="top"
+                >
+                  <span>{{ formatImportSourcePreviewIssues(row) }}</span>
+                </el-tooltip>
                 <span v-else class="muted">无错误</span>
               </template>
             </el-table-column>
@@ -1221,7 +1331,8 @@
 import type { CreateOrderLinePayload, OrderImportSourceFilePreview } from '../api/erp';
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Rank, WarningFilled } from '@element-plus/icons-vue';
+import { Download } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft, WarningFilled } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
@@ -1239,6 +1350,7 @@ import type {
 } from '../types/erp';
 import { formatDate, formatDateInputText, formatDateTime, formatQuantity } from '../utils/format';
 import { orderDisplayStatus } from '../utils/orderStatus';
+import { formatFileDateTime } from '../utils/tableExport';
 import {
   confirmDuplicateDrawingFiles,
   confirmDuplicateDrawingNos,
@@ -1272,6 +1384,7 @@ const order = ref<OrderDetail>();
 const inventorySummary = ref<InventorySummaryRow[]>([]);
 const loading = ref(false);
 const saving = ref(false);
+const orderExporting = ref(false);
 const editVisible = ref(false);
 const deleteDraftVisible = ref(false);
 const additionalMaterialVisible = ref(false);
@@ -1300,6 +1413,25 @@ const orderNoAvailable = ref(false);
 const orderNoCheckText = ref('');
 let editOrderNoCheckTimer: ReturnType<typeof window.setTimeout> | undefined;
 let editOrderNoCheckSequence = 0;
+
+type OrderDetailWorkTableKey = 'lines' | 'importSourcePreview' | 'submitOrderLines';
+
+const orderDetailWorkTableHeightLimits = {
+  min: 300,
+  max: 860,
+  step: 80
+};
+
+const orderDetailWorkTableDefaultHeights: Record<OrderDetailWorkTableKey, number> = {
+  lines: 520,
+  importSourcePreview: 520,
+  submitOrderLines: 360
+};
+
+const orderDetailWorkTableHeightStorageKey = 'baisheng.erp.orderDetailWorkTableHeights.v1';
+// 订单详情表格和提交生产核对列表高度只保存为本机 UI 偏好，不写入订单明细、导入追溯、生产或库存业务数据。
+const orderDetailWorkTableHeights = reactive<Record<OrderDetailWorkTableKey, number>>({ ...orderDetailWorkTableDefaultHeights });
+
 const editForm = ref<{
   orderNo: string;
   deliveryDate?: string;
@@ -1563,6 +1695,62 @@ const quantityChangePlanHint = computed(() => {
   return `建议生产 ${formatQuantity(suggested, unit)}。`;
 });
 
+function clampOrderDetailWorkTableHeight(value: number) {
+  return Math.min(orderDetailWorkTableHeightLimits.max, Math.max(orderDetailWorkTableHeightLimits.min, value));
+}
+
+function adjustOrderDetailWorkTableHeight(key: OrderDetailWorkTableKey, delta: number) {
+  orderDetailWorkTableHeights[key] = clampOrderDetailWorkTableHeight(orderDetailWorkTableHeights[key] + delta);
+}
+
+function resetOrderDetailWorkTableHeight(key: OrderDetailWorkTableKey) {
+  orderDetailWorkTableHeights[key] = orderDetailWorkTableDefaultHeights[key];
+}
+
+function orderDetailWorkTableHeightStyle(key: OrderDetailWorkTableKey) {
+  return `${orderDetailWorkTableHeights[key]}px`;
+}
+
+function restoreOrderDetailWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(orderDetailWorkTableHeightStorageKey);
+    const savedHeights = rawValue ? JSON.parse(rawValue) as Partial<Record<OrderDetailWorkTableKey, number>> : {};
+    for (const key of Object.keys(orderDetailWorkTableDefaultHeights) as OrderDetailWorkTableKey[]) {
+      const savedHeight = Number(savedHeights[key]);
+      if (Number.isFinite(savedHeight)) {
+        orderDetailWorkTableHeights[key] = clampOrderDetailWorkTableHeight(savedHeight);
+      }
+    }
+  } catch {
+    orderDetailWorkTableHeights.lines = orderDetailWorkTableDefaultHeights.lines;
+    orderDetailWorkTableHeights.importSourcePreview = orderDetailWorkTableDefaultHeights.importSourcePreview;
+    orderDetailWorkTableHeights.submitOrderLines = orderDetailWorkTableDefaultHeights.submitOrderLines;
+  }
+}
+
+function saveOrderDetailWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      orderDetailWorkTableHeightStorageKey,
+      JSON.stringify({
+        lines: orderDetailWorkTableHeights.lines,
+        importSourcePreview: orderDetailWorkTableHeights.importSourcePreview,
+        submitOrderLines: orderDetailWorkTableHeights.submitOrderLines
+      })
+    );
+  } catch {
+    // 本机 UI 偏好写入失败不阻断订单明细、来源 Excel 预览或提交生产核对。
+  }
+}
+
 async function loadOrder() {
   const orderNo = String(route.params.orderNo);
   loading.value = true;
@@ -1582,6 +1770,21 @@ async function loadOrder() {
     ElMessage.error(error instanceof Error ? error.message : '订单明细加载失败，请确认订单状态和后端服务');
   } finally {
     loading.value = false;
+  }
+}
+
+async function exportOrderDetailExcel() {
+  if (!order.value || orderExporting.value) {
+    return;
+  }
+  orderExporting.value = true;
+  try {
+    await erpApi.downloadOrderDetailExport(order.value.orderNo, `订单明细_${order.value.orderNo}_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('订单明细 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '订单明细导出失败，请稍后重试');
+  } finally {
+    orderExporting.value = false;
   }
 }
 
@@ -1748,8 +1951,17 @@ function productionChangeDisabledReason(line: OrderLine) {
 }
 
 function processStepDisplay(line: OrderLine, processName: string) {
-  const remark = line.processStepDetails?.find((item) => item.processName === processName)?.processRemark?.trim();
-  return remark ? `${processName}（${remark}）` : processName;
+  const remark = processStepRemark(line, processName);
+  return remark ? `${processName}（${formatOrderDetailLongTextPreview(remark, 12, '')}）` : processName;
+}
+
+function processStepTitle(line: OrderLine, processName: string) {
+  const remark = processStepRemark(line, processName);
+  return remark ? `${processName}：${remark}` : processName;
+}
+
+function processStepRemark(line: OrderLine, processName: string) {
+  return line.processStepDetails?.find((item) => item.processName === processName)?.processRemark?.trim() || '';
 }
 
 async function openAdditionalMaterial() {
@@ -1845,7 +2057,7 @@ function normalizeAdditionalMaterialProcesses() {
   additionalMaterialProcessSteps.value = normalizeAdditionalMaterialProcessSteps(additionalMaterialProcessSteps.value);
   const duplicates = duplicateAdditionalMaterialProcessNames(additionalMaterialProcessSteps.value);
   if (duplicates.length > 0) {
-    ElMessage.warning(`新增零件流程存在重复工序：${duplicates.join('、')}，请把次数或特殊要求写入参数备注`);
+    ElMessage.warning(`新增零件流程存在重复工序：${formatOrderDetailListPreview(duplicates, '工序')}，请把次数或特殊要求写入参数备注`);
   }
 }
 
@@ -2493,7 +2705,7 @@ async function saveAdditionalMaterial() {
   additionalMaterialProcessSteps.value = processSteps;
   const duplicateProcesses = duplicateAdditionalMaterialProcessNames(processSteps);
   if (duplicateProcesses.length > 0) {
-    ElMessage.warning(`新增零件流程存在重复工序：${duplicateProcesses.join('、')}，请删除重复项或写入参数备注`);
+    ElMessage.warning(`新增零件流程存在重复工序：${formatOrderDetailListPreview(duplicateProcesses, '工序')}，请删除重复项或写入参数备注`);
     return;
   }
   if (!additionalMaterialForm.value.reason.trim()) {
@@ -2829,8 +3041,12 @@ function formatOrderStructureCore(line: OrderLine) {
 function formatOrderStructureMeta(line: OrderLine) {
   const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
   const deliveryText = formatDate(line.deliveryDate || order.value?.deliveryDate);
-  const processText = line.processSteps?.length ? line.processSteps.join('、') : '-';
+  const processText = line.processSteps?.length ? formatOrderDetailListPreview(line.processSteps, '工序') : '-';
   return `计划 ${formatQuantity(line.productionPlanQuantity, line.unit)} | 图纸 ${drawingText} | 交期 ${deliveryText} | 工艺 ${processText}`;
+}
+
+function formatOrderDetailLineDrawingText(line: OrderLine) {
+  return [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
 }
 
 function orderLineRequiresThickness(line: Pick<OrderLine | CreateOrderLinePayload, 'lineType'>) {
@@ -2851,7 +3067,7 @@ function formatOrderLineThickness(line: OrderLine | CreateOrderLinePayload) {
 
 function formatOrderStructureTextLine(line: OrderLine, prefix: string) {
   const drawingText = [line.drawingNo, line.drawingVersion, line.drawingDate, line.drawingStatus].filter(Boolean).join(' / ') || '-';
-  const processText = line.processSteps?.length ? line.processSteps.join('、') : '-';
+  const processText = line.processSteps?.length ? formatOrderDetailListPreview(line.processSteps, '工序') : '-';
   const deliveryText = formatDate(line.deliveryDate || order.value?.deliveryDate);
   return [
     prefix,
@@ -2923,13 +3139,40 @@ function materialIdentityConflictText(line: OrderLine | CreateOrderLinePayload) 
     return '';
   }
   const fields = detailLine.materialIdentityConflictFields?.length
-    ? detailLine.materialIdentityConflictFields.join('、')
+    ? formatOrderDetailListPreview(detailLine.materialIdentityConflictFields, '字段')
     : '图号/规格/厚度';
   return `同编码 ${detailLine.materialIdentityVariantCount || '多'} 套历史资料，核对${fields}`;
 }
 
 function formatImportSourcePreviewIssues(row: OrderImportSourceFilePreview['rows'][number]) {
-  return row.issues?.map((issue) => issue.message).filter(Boolean).join('；') || '';
+  return formatOrderDetailListPreview(row.issues?.map((issue) => issue.message) || [], '问题', '');
+}
+
+function formatImportSourcePreviewIssuesTitle(row: OrderImportSourceFilePreview['rows'][number]) {
+  return (row.issues?.map((issue) => issue.message).filter(Boolean) || []).join('；') || '-';
+}
+
+function formatOrderDetailProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const steps = String(value || '')
+    .split(/(?:->|→|[、,，;；\n\r]+)/)
+    .map((step) => step.trim())
+    .filter(Boolean);
+  if (steps.length === 0) {
+    return emptyText;
+  }
+  return formatOrderDetailListPreview(steps, '工序', emptyText);
+}
+
+function formatOrderDetailLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function formatOrderDetailFullText(value?: string | null) {
+  return String(value || '').trim() || '-';
 }
 
 function displayImportSourceFileName(fileName?: string | null) {
@@ -3038,6 +3281,14 @@ function stockSourceSummary(line: OrderLine | CreateOrderLinePayload) {
     .join('；');
 }
 
+function stockSourceSummaryPreview(line: OrderLine | CreateOrderLinePayload, maxLength = 56) {
+  return formatOrderDetailLongTextPreview(stockSourceSummary(line), maxLength, '-');
+}
+
+function stockSourceSummaryTitle(line: OrderLine | CreateOrderLinePayload) {
+  return formatOrderDetailFullText(stockSourceSummary(line));
+}
+
 function stockFulfillmentHint(line: OrderLine | CreateOrderLinePayload) {
   if (line.fulfillmentMode !== 'STOCK') {
     return '';
@@ -3134,11 +3385,11 @@ function formatLineShortageText(line: OrderLine) {
   const scrap = formatQuantity(line.productionScrapQuantity ?? 0, line.unit);
   const completedReplenishmentText = lineCompletedReplenishmentText(line);
   if (line.productionShortageMode === 'REPLENISHMENT_REQUEST') {
-    const requestNos = line.productionReplenishmentRequestNos?.length ? line.productionReplenishmentRequestNos.join('、') : '-';
+    const requestNos = formatOrderDetailListPreview(line.productionReplenishmentRequestNos || [], '补单申请');
     return `短缺 ${shortage}，报废 ${scrap}，生产报废补单申请待主管确认 ${requestNos}`;
   }
   if (line.productionShortageMode === 'REPLENISHMENT') {
-    const taskNos = line.productionReplenishmentTaskNos?.length ? line.productionReplenishmentTaskNos.join('、') : '-';
+    const taskNos = formatOrderDetailListPreview(line.productionReplenishmentTaskNos || [], '补单任务');
     return `短缺 ${shortage}，报废 ${scrap}，${completedReplenishmentText || `补单 ${taskNos}`}`;
   }
 
@@ -3148,6 +3399,24 @@ function formatLineShortageText(line: OrderLine) {
         .join('；')
     : '管理确认缺货完成';
   return `短缺 ${shortage}，报废 ${scrap}，${reasonText}${completedReplenishmentText ? `；${completedReplenishmentText}` : ''}`;
+}
+
+function formatLineShortagePreview(line: OrderLine, maxLength = 52) {
+  return formatOrderDetailLongTextPreview(formatLineShortageText(line), maxLength, '-');
+}
+
+function formatLineShortageTitle(line: OrderLine) {
+  return formatOrderDetailFullText(formatLineShortageText(line));
+}
+
+function shortageRecordReasonPreview(record: { shortageReason?: string }) {
+  return formatOrderDetailLongTextPreview(record.shortageReason, 30, '-');
+}
+
+function shortageRecordReasonTitle(record: { managerName?: string; shortageReason?: string }) {
+  const managerName = String(record.managerName || '-').trim() || '-';
+  const reason = formatOrderDetailFullText(record.shortageReason);
+  return `${managerName}确认：${reason}`;
 }
 
 function lineCompletedReplenishmentText(line: OrderLine) {
@@ -3164,12 +3433,23 @@ function lineCompletedReplenishmentText(line: OrderLine) {
     (sum, task) => sum + Number(task.completedQuantity ?? task.plannedQuantity ?? 0),
     0
   );
-  const taskNos = completedTasks.map((task) => task.productionTaskNo).join('、');
-  return `补单已完成 ${formatQuantity(quantity, line.unit)}：${taskNos}`;
+  return `补单已完成 ${formatQuantity(quantity, line.unit)}：${formatOrderDetailListPreview(
+    completedTasks.map((task) => task.productionTaskNo),
+    '补单任务'
+  )}`;
 }
 
 function lineNeedsReplenishmentAction(line: OrderLine) {
   return Boolean(line.unresolvedShortageQuantity && line.unresolvedShortageQuantity > 0);
+}
+
+function formatOrderDetailListPreview(values: Array<string | null | undefined>, unitLabel: string, emptyText = '-') {
+  const filtered = values.map((value) => String(value || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  return filtered.length > 3 ? `${preview} 等 ${filtered.length} 个${unitLabel}` : preview;
 }
 
 function formatLineReplenishmentActionText(line: OrderLine) {
@@ -3182,7 +3462,7 @@ function formatShortageQuantityByUnit(
   fallbackUnit = '件'
 ) {
   if (rows?.length) {
-    return rows.map((row) => formatQuantity(row.quantity, row.unit)).join('、');
+    return formatOrderDetailListPreview(rows.map((row) => formatQuantity(row.quantity, row.unit)), '单位');
   }
   return formatQuantity(fallbackQuantity ?? 0, fallbackUnit);
 }
@@ -3634,7 +3914,16 @@ async function loadSubmitPlanOperators(keyword = '') {
 
 watch(() => route.params.orderNo, loadOrder);
 watch(() => quantityChangeForm.value.quantity, syncQuantityChangePlanWithSuggestion);
+watch(
+  () => [
+    orderDetailWorkTableHeights.lines,
+    orderDetailWorkTableHeights.importSourcePreview,
+    orderDetailWorkTableHeights.submitOrderLines
+  ],
+  () => saveOrderDetailWorkTableHeights()
+);
 onMounted(async () => {
+  restoreOrderDetailWorkTableHeights();
   await loadProcessDefinitions();
   await loadOrder();
 });
@@ -3816,8 +4105,8 @@ onBeforeUnmount(() => {
 .submit-order-lines {
   display: grid;
   gap: 8px;
-  max-height: 280px;
   overflow: auto;
+  padding-right: 4px;
 }
 
 .submit-order-line {
@@ -3969,6 +4258,29 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.order-detail-table-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.import-preview-height-toolbar {
+  margin-top: -4px;
+}
+
+.order-detail-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.order-detail-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .import-source-preview {

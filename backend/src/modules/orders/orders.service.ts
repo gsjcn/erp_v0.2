@@ -85,6 +85,15 @@ type StockReservationPriorityOrder = {
   createdAt: Date;
 };
 
+type StockSourceCompatibilityStatus = 'MATCHED' | 'NEEDS_CONFIRMATION' | 'INCOMPLETE' | 'UNKNOWN';
+
+const stockSourceCompatibilityRank: Record<StockSourceCompatibilityStatus, number> = {
+  MATCHED: 0,
+  NEEDS_CONFIRMATION: 1,
+  INCOMPLETE: 2,
+  UNKNOWN: 3
+};
+
 type OrderImportIssue = {
   severity: 'ERROR' | 'WARNING';
   code: string;
@@ -106,6 +115,7 @@ type ParsedOrderImportRow = {
   parentComponentNo?: string;
   partCode: string;
   drawingNo?: string;
+  drawingVersion?: string;
   partName: string;
   partSpecification?: string;
   partThickness: number;
@@ -163,6 +173,7 @@ const orderImportRowPreviewSelect = {
   parentComponentNo: true,
   partCode: true,
   drawingNo: true,
+  drawingVersion: true,
   partName: true,
   partSpecification: true,
   partThickness: true,
@@ -221,6 +232,8 @@ const orderProductionFilterStatuses = [
 
 type OrderProductionFilterStatus = (typeof orderProductionFilterStatuses)[number];
 
+const ORDER_TEST_FIXTURE_PREFIXES = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
+
 @Injectable()
 export class OrdersService {
   private readonly importCommitCreatedOrdersPreviewLimit = 50;
@@ -230,6 +243,22 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly processDefinitionsService: ProcessDefinitionsService
   ) {}
+
+  private hasOrderTestFixturePrefix(...values: Array<string | null | undefined>) {
+    return values.some((value) => {
+      const text = String(value || '').trim();
+      return ORDER_TEST_FIXTURE_PREFIXES.some((prefix) => text.startsWith(prefix));
+    });
+  }
+
+  private isOrderTestFixture(
+    order: Pick<Prisma.CustomerOrderGetPayload<{ include: { lines: true } }>, 'orderNo' | 'customerCode' | 'customerName' | 'lines'>
+  ) {
+    return (
+      this.hasOrderTestFixturePrefix(order.orderNo, order.customerCode, order.customerName) ||
+      order.lines.some((line) => this.hasOrderTestFixturePrefix(line.partCode, line.partName, line.projectModel))
+    );
+  }
 
   private async readOrderImportTemplateWorkbookFile(): Promise<Uint8Array | null> {
     const relativePath = ['outputs', 'component-order-template', this.orderImportTemplateFileName];
@@ -273,6 +302,10 @@ export class OrdersService {
 
     if (query.customerId) {
       where.customerId = query.customerId;
+    }
+
+    if (query.orderNo?.trim()) {
+      where.orderNo = { equals: this.normalizeOrderNo(query.orderNo), mode: 'insensitive' };
     }
 
     if (orderStatuses.length > 0) {
@@ -327,12 +360,507 @@ export class OrdersService {
       orderBy: [{ orderDate: 'desc' }, { orderNo: 'desc' }]
     });
 
-    const summaries = orders.map((order) => this.toSummary(order));
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const visibleOrders = includeTestFixtures ? orders : orders.filter((order) => !this.isOrderTestFixture(order));
+    const summaries = visibleOrders.map((order) => this.toSummary(order));
     if (productionStatuses.length === 0) {
       return summaries;
     }
 
     return summaries.filter((order) => this.orderMatchesProductionFilter(order, productionStatuses));
+  }
+
+  async buildOrdersExport(query: OrderQueryDto): Promise<Uint8Array> {
+    // 订单导出只读取筛选结果和订单行快照，不提交生产、不扣库存、不修改订单状态。
+    const summaries = await this.findAll(query);
+    const orderNos = summaries.map((order) => order.orderNo);
+    const orderNoIndex = new Map(orderNos.map((orderNo, index) => [orderNo, index]));
+    const orders = orderNos.length
+      ? await this.prisma.customerOrder.findMany({
+          where: { orderNo: { in: orderNos } },
+          include: {
+            customer: true,
+            lines: {
+              include: {
+                processSteps: { orderBy: { stepNo: 'asc' } }
+              },
+              orderBy: { lineNo: 'asc' }
+            }
+          }
+        })
+      : [];
+    orders.sort((left, right) => (orderNoIndex.get(left.orderNo) ?? 0) - (orderNoIndex.get(right.orderNo) ?? 0));
+    const ordersByNo = new Map(orders.map((order) => [order.orderNo, order]));
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const border = {
+      top: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      bottom: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      left: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      right: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } }
+    };
+    const headerFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF24435F' } };
+    const titleFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFEAF4F8' } };
+    const setValues = (worksheet: ExcelJS.Worksheet, rowNo: number, values: Array<string | number | null | undefined>) => {
+      values.forEach((value, index) => {
+        worksheet.getCell(rowNo, index + 1).value = value ?? '';
+      });
+    };
+    const styleTitle = (worksheet: ExcelJS.Worksheet, columnCount: number) => {
+      worksheet.mergeCells(1, 1, 1, columnCount);
+      const titleCell = worksheet.getCell(1, 1);
+      titleCell.font = { bold: true, size: 16, color: { argb: 'FF183247' } };
+      titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
+      titleCell.fill = titleFill;
+      worksheet.getRow(1).height = 28;
+    };
+    const styleHeader = (worksheet: ExcelJS.Worksheet, rowNo: number) => {
+      worksheet.getRow(rowNo).eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = border;
+      });
+      worksheet.getRow(rowNo).height = 26;
+    };
+    const styleBody = (worksheet: ExcelJS.Worksheet, startRow: number) => {
+      for (let rowNo = startRow; rowNo <= worksheet.rowCount; rowNo += 1) {
+        worksheet.getRow(rowNo).eachCell((cell) => {
+          cell.alignment = { vertical: 'top', wrapText: true };
+          cell.border = border;
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowNo % 2 === 0 ? 'FFF4FBFD' : 'FFFFFFFF' } };
+        });
+      }
+    };
+
+    const scopeText = this.orderExportScopeText(query);
+    const listHeaders = [
+      '序号',
+      '订单号',
+      '客户ID',
+      '客户名称',
+      '订单日期',
+      '交期',
+      '订单状态',
+      '生产状态',
+      '零件行数',
+      '客户订单数量',
+      '生产计划数量',
+      '单位',
+      '备注'
+    ];
+    const listSheet = workbook.addWorksheet('订单列表');
+    listSheet.views = [{ state: 'frozen', ySplit: 4 }];
+    listSheet.columns = [
+      { width: 8 },
+      { width: 18 },
+      { width: 18 },
+      { width: 24 },
+      { width: 14 },
+      { width: 14 },
+      { width: 16 },
+      { width: 18 },
+      { width: 10 },
+      { width: 22 },
+      { width: 22 },
+      { width: 12 },
+      { width: 40 }
+    ];
+    setValues(listSheet, 1, ['订单筛选结果导出']);
+    setValues(listSheet, 2, [scopeText]);
+    setValues(listSheet, 4, listHeaders);
+    styleTitle(listSheet, listHeaders.length);
+    styleHeader(listSheet, 4);
+    summaries.forEach((order, index) => {
+      setValues(listSheet, index + 5, [
+        index + 1,
+        order.orderNo,
+        order.customerCode,
+        order.customerName,
+        this.formatDateOnly(order.orderDate),
+        this.formatDateOnly(order.deliveryDate),
+        this.orderStatusText(order.status),
+        this.orderProductionFilterStatusText(this.toOrderProductionFilterStatus(order)),
+        order.partCount,
+        this.quantityByUnitText(order.quantityByUnit, 'totalQuantity'),
+        this.quantityByUnitText(order.quantityByUnit, 'totalProductionPlanQuantity'),
+        order.quantityByUnit?.length === 1 ? order.quantityByUnit[0].unit : order.quantityByUnit?.length ? '多单位' : order.unit || '件',
+        order.remark
+      ]);
+    });
+    listSheet.autoFilter = { from: 'A4', to: 'M4' };
+    styleBody(listSheet, 5);
+
+    const lineHeaders = [
+      '序号',
+      '订单号',
+      '客户名称',
+      '订单日期',
+      '订单状态',
+      '生产状态',
+      '行号',
+      '行类型',
+      '组件编号',
+      '所属组件',
+      '零件编码',
+      '零件名称',
+      '零件类型',
+      '图号',
+      '版本',
+      '图纸日期',
+      '图纸状态',
+      '厚度',
+      '规格',
+      '机型/项目',
+      '客户订单数量',
+      '生产计划数量',
+      '单位',
+      '交期',
+      '履约方式',
+      '工艺路线',
+      '工艺备注',
+      '来源文件',
+      '来源行',
+      '备注'
+    ];
+    const lineSheet = workbook.addWorksheet('订单明细');
+    lineSheet.views = [{ state: 'frozen', ySplit: 4 }];
+    lineSheet.columns = [
+      { width: 8 },
+      { width: 18 },
+      { width: 24 },
+      { width: 14 },
+      { width: 16 },
+      { width: 18 },
+      { width: 8 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 18 },
+      { width: 28 },
+      { width: 16 },
+      { width: 18 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 10 },
+      { width: 26 },
+      { width: 18 },
+      { width: 14 },
+      { width: 14 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 36 },
+      { width: 36 },
+      { width: 30 },
+      { width: 10 },
+      { width: 40 }
+    ];
+    setValues(lineSheet, 1, ['订单明细快照导出']);
+    setValues(lineSheet, 2, [scopeText]);
+    setValues(lineSheet, 4, lineHeaders);
+    styleTitle(lineSheet, lineHeaders.length);
+    styleHeader(lineSheet, 4);
+
+    let lineRowNo = 5;
+    let lineIndex = 1;
+    for (const summary of summaries) {
+      const order = ordersByNo.get(summary.orderNo);
+      for (const line of order?.lines || []) {
+        setValues(lineSheet, lineRowNo, [
+          lineIndex,
+          summary.orderNo,
+          summary.customerName,
+          this.formatDateOnly(summary.orderDate),
+          this.orderStatusText(summary.status),
+          this.orderProductionFilterStatusText(this.toOrderProductionFilterStatus(summary)),
+          line.lineNo,
+          this.orderLineTypeText(line.lineType),
+          line.componentNo,
+          line.parentComponentNo,
+          line.partCode,
+          line.partName,
+          line.partCategory,
+          line.drawingNo,
+          line.drawingVersion,
+          this.formatDateOnly(line.drawingDate),
+          line.drawingStatus,
+          decimalToNumber(line.partThickness),
+          line.partSpecification,
+          line.projectModel,
+          decimalToNumber(line.quantity),
+          decimalToNumber(line.productionPlanQuantity ?? line.quantity),
+          line.unit,
+          this.formatDateOnly(line.deliveryDate),
+          this.orderLineFulfillmentModeText(line.fulfillmentMode),
+          this.orderProcessRouteText(line.processSteps),
+          this.orderProcessRemarkText(line.processSteps),
+          this.importDisplayFileName(line.sourceImportFileName),
+          line.sourceImportRowNo,
+          line.remark
+        ]);
+        lineRowNo += 1;
+        lineIndex += 1;
+      }
+    }
+    if (lineIndex === 1) {
+      setValues(lineSheet, lineRowNo, ['', '', '', '', '', '', '', '', '', '', '', '当前筛选范围没有订单明细', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+    }
+    lineSheet.autoFilter = { from: 'A4', to: 'AD4' };
+    styleBody(lineSheet, 5);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
+  }
+
+  async buildOrderDetailExport(orderNo: string): Promise<Uint8Array> {
+    // 订单详情导出只读取订单、零件、工艺、库存来源和生产任务快照，不修改订单或库存。
+    const order = await this.findOne(orderNo) as any;
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Baisheng ERP';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const border = {
+      top: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      bottom: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      left: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } },
+      right: { style: 'thin' as const, color: { argb: 'FFD9E5EF' } }
+    };
+    const headerFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF24435F' } };
+    const titleFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFEAF4F8' } };
+    const setValues = (worksheet: ExcelJS.Worksheet, rowNo: number, values: Array<string | number | null | undefined>) => {
+      values.forEach((value, index) => {
+        worksheet.getCell(rowNo, index + 1).value = value ?? '';
+      });
+    };
+    const styleTitle = (worksheet: ExcelJS.Worksheet, columnCount: number) => {
+      worksheet.mergeCells(1, 1, 1, columnCount);
+      const titleCell = worksheet.getCell(1, 1);
+      titleCell.font = { bold: true, size: 16, color: { argb: 'FF183247' } };
+      titleCell.alignment = { vertical: 'middle', horizontal: 'center' };
+      titleCell.fill = titleFill;
+      worksheet.getRow(1).height = 28;
+    };
+    const styleHeader = (worksheet: ExcelJS.Worksheet, rowNo: number) => {
+      worksheet.getRow(rowNo).eachCell((cell) => {
+        cell.fill = headerFill;
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = border;
+      });
+      worksheet.getRow(rowNo).height = 26;
+    };
+    const styleBody = (worksheet: ExcelJS.Worksheet, startRow: number) => {
+      for (let rowNo = startRow; rowNo <= worksheet.rowCount; rowNo += 1) {
+        worksheet.getRow(rowNo).eachCell((cell) => {
+          cell.alignment = { vertical: 'top', wrapText: true };
+          cell.border = border;
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rowNo % 2 === 0 ? 'FFF4FBFD' : 'FFFFFFFF' } };
+        });
+      }
+    };
+
+    const overviewSheet = workbook.addWorksheet('订单概览');
+    overviewSheet.columns = [{ width: 22 }, { width: 36 }, { width: 22 }, { width: 36 }];
+    setValues(overviewSheet, 1, [`订单详情导出：${order.orderNo}`]);
+    styleTitle(overviewSheet, 4);
+    setValues(overviewSheet, 3, ['项目', '内容', '项目', '内容']);
+    styleHeader(overviewSheet, 3);
+    const overviewRows: Array<Array<string | number | undefined>> = [
+      ['订单号', order.orderNo, '生成时间', this.businessDateTimeText()],
+      ['客户ID', order.customerCode, '客户名称', order.customerName],
+      ['订单日期', this.formatDateOnly(order.orderDate), '交期', this.formatDateOnly(order.deliveryDate)],
+      ['订单状态', this.orderStatusText(order.status), '生产状态', this.orderProductionFilterStatusText(this.toOrderProductionFilterStatus(order))],
+      ['库存/发货状态', order.warehouseStage || '', '零件行数', order.partCount],
+      ['客户订单数量', this.quantityByUnitText(order.quantityByUnit, 'totalQuantity'), '生产计划数量', this.quantityByUnitText(order.quantityByUnit, 'totalProductionPlanQuantity')],
+      ['备注', order.remark || '', '说明', '只读导出，不提交生产、不扣库存、不修改订单状态']
+    ];
+    overviewRows.forEach((row, index) => setValues(overviewSheet, index + 4, row));
+    styleBody(overviewSheet, 4);
+
+    const lineHeaders = [
+      '行号',
+      '行类型',
+      '组件编号',
+      '所属组件',
+      '零件编码',
+      '零件名称',
+      '零件类型',
+      '图号',
+      '版本',
+      '图纸日期',
+      '图纸状态',
+      '图纸文件',
+      '厚度',
+      '规格',
+      '机型/项目',
+      '客户订单数量',
+      '生产计划数量',
+      '单位',
+      '交期',
+      '履约方式',
+      '库存来源',
+      '工艺路线',
+      '工艺备注',
+      '生产任务',
+      '生产完成',
+      '仓库/库位',
+      '库存批次',
+      '来源 Excel',
+      '备注'
+    ];
+    const lineSheet = workbook.addWorksheet('订单零件');
+    lineSheet.views = [{ state: 'frozen', ySplit: 4 }];
+    lineSheet.columns = [
+      { width: 8 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 18 },
+      { width: 28 },
+      { width: 16 },
+      { width: 18 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 24 },
+      { width: 10 },
+      { width: 26 },
+      { width: 18 },
+      { width: 14 },
+      { width: 14 },
+      { width: 10 },
+      { width: 14 },
+      { width: 14 },
+      { width: 42 },
+      { width: 36 },
+      { width: 36 },
+      { width: 36 },
+      { width: 16 },
+      { width: 22 },
+      { width: 18 },
+      { width: 32 },
+      { width: 40 }
+    ];
+    setValues(lineSheet, 1, [`订单零件快照：${order.orderNo}`]);
+    setValues(lineSheet, 2, [`客户：${order.customerName}；生成时间：${this.businessDateTimeText()}`]);
+    setValues(lineSheet, 4, lineHeaders);
+    styleTitle(lineSheet, lineHeaders.length);
+    styleHeader(lineSheet, 4);
+    (order.lines || []).forEach((line: any, index: number) => {
+      setValues(lineSheet, index + 5, [
+        line.lineNo,
+        this.orderLineTypeText(line.lineType),
+        line.componentNo,
+        line.parentComponentNo,
+        line.partCode,
+        line.partName,
+        line.partCategory,
+        line.drawingNo,
+        line.drawingVersion,
+        this.formatDateOnly(line.drawingDate),
+        line.drawingStatus,
+        line.drawingFileName,
+        Number(line.partThickness ?? 0),
+        line.partSpecification,
+        line.projectModel,
+        Number(line.quantity ?? 0),
+        Number(line.productionPlanQuantity ?? 0),
+        line.unit,
+        this.formatDateOnly(line.deliveryDate || order.deliveryDate),
+        this.orderLineFulfillmentModeText(line.fulfillmentMode),
+        this.orderStockSourceText(line),
+        this.orderProcessRouteText(line.processStepDetails || []),
+        this.orderProcessRemarkText(line.processStepDetails || []),
+        this.orderLineProductionTasksText(line),
+        line.completedQuantity === null || line.completedQuantity === undefined ? '' : Number(line.completedQuantity),
+        [line.warehouseName, line.locationName].filter(Boolean).join(' / '),
+        line.inventoryBatchNo,
+        this.orderLineImportSourceText(line),
+        line.remark
+      ]);
+    });
+    if ((order.lines || []).length === 0) {
+      setValues(lineSheet, 5, ['', '', '', '', '', '当前订单没有零件明细', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+    }
+    lineSheet.autoFilter = { from: 'A4', to: 'AC4' };
+    styleBody(lineSheet, 5);
+
+    const taskHeaders = [
+      '生产任务号',
+      '订单行号',
+      '零件编码',
+      '零件名称',
+      '任务类型',
+      '计划数量',
+      '完成数量',
+      '单位',
+      '状态',
+      '来源任务',
+      '补单来源',
+      '可取消补单'
+    ];
+    const taskSheet = workbook.addWorksheet('生产任务');
+    taskSheet.views = [{ state: 'frozen', ySplit: 4 }];
+    taskSheet.columns = [
+      { width: 22 },
+      { width: 10 },
+      { width: 18 },
+      { width: 28 },
+      { width: 12 },
+      { width: 12 },
+      { width: 12 },
+      { width: 10 },
+      { width: 16 },
+      { width: 22 },
+      { width: 28 },
+      { width: 12 }
+    ];
+    setValues(taskSheet, 1, [`订单生产任务快照：${order.orderNo}`]);
+    setValues(taskSheet, 2, ['生产任务只用于核对，不作为入库或库存扣减依据']);
+    setValues(taskSheet, 4, taskHeaders);
+    styleTitle(taskSheet, taskHeaders.length);
+    styleHeader(taskSheet, 4);
+    let taskRowNo = 5;
+    for (const line of order.lines || []) {
+      for (const task of line.productionTasks || []) {
+        setValues(taskSheet, taskRowNo, [
+          task.productionTaskNo,
+          line.lineNo,
+          line.partCode,
+          line.partName,
+          task.isReplenishment ? '补单' : '正常',
+          Number(task.plannedQuantity ?? 0),
+          Number(task.completedQuantity ?? 0),
+          line.unit || order.unit || '件',
+          this.orderProductionFilterStatusText(task.status),
+          task.sourceProductionTaskNo,
+          task.replenishmentSourceLabel || task.replenishmentSourceRequestNo,
+          task.canCancelReplenishment ? '是' : ''
+        ]);
+        taskRowNo += 1;
+      }
+    }
+    if (taskRowNo === 5) {
+      setValues(taskSheet, taskRowNo, ['', '', '', '当前订单暂无生产任务', '', '', '', '', '', '', '', '']);
+    }
+    taskSheet.autoFilter = { from: 'A4', to: 'L4' };
+    styleBody(taskSheet, 5);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    if (buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buffer);
+    }
+    return new Uint8Array(buffer as unknown as ArrayLike<number>);
   }
 
   async findOne(orderNo: string) {
@@ -491,6 +1019,7 @@ export class OrdersService {
           parentComponentNo: true,
           partCode: true,
           drawingNo: true,
+          drawingVersion: true,
           partName: true,
           partSpecification: true,
           partThickness: true,
@@ -537,6 +1066,7 @@ export class OrdersService {
         parentComponentNo: row.parentComponentNo,
         partCode: row.partCode,
         drawingNo: row.drawingNo,
+        drawingVersion: row.drawingVersion,
         partName: row.partName,
         partSpecification: row.partSpecification,
         partThickness: decimalToNumber(row.partThickness),
@@ -959,9 +1489,10 @@ export class OrdersService {
       '工艺路线',
       '工艺备注',
       '图纸日期',
-      '图纸状态'
+      '图纸状态',
+      '版本'
     ];
-    const widths = [12, 22, 14, 28, 14, 10, 10, 12, 16, 22, 20, 26, 24, 14, 10, 10, 10, 16, 8, 24, 42, 14, 12];
+    const widths = [12, 22, 14, 28, 14, 10, 10, 12, 16, 22, 20, 26, 24, 14, 10, 10, 10, 16, 8, 24, 42, 14, 12, 10];
     const lineTypes = ['零件', '组件'];
     const partCategories = ['通用件', '定制件', '数控件', '外协件'];
     const units = ['件', '套', '张', '个', '根', '米'];
@@ -1085,7 +1616,7 @@ export class OrdersService {
     headers.forEach((_, index) => {
       uploadSheet.getColumn(index + 1).width = widths[index];
     });
-    uploadSheet.autoFilter = { from: 'A4', to: 'W4' };
+    uploadSheet.autoFilter = { from: 'A4', to: 'X4' };
     styleDataArea(uploadSheet, 5, 104);
     addValidations(uploadSheet, 5, 20000);
 
@@ -1101,6 +1632,7 @@ export class OrdersService {
       ['组件编号(自动)', '组件行会自动生成 C001-C9999，也可手工改成同订单内唯一编号。', '下拉只是辅助选择；每个订单内部独立编号，新的订单可以重新从 C001 开始。'],
       ['所属组件编号(自动/可改)', '组件子零件填写单套用量后，会优先沿用同订单上方组件编号；普通零件请保持为空。', '下拉只是辅助选择；必须能在同一个订单内找到对应组件。'],
       ['物料号', '每行必填真实物料号。', '不能用空白物料号创建正式订单。'],
+      ['版本', '可填写图纸版本，例如 A、B、C。', '导入后会进入订单行图纸快照，并用于零件库和 BOM 草稿核对。'],
       ['订单数', '普通零件填订单数；组件行填组件本体订单数。', '组件子零件可以留空。'],
       ['单套用量', '组件子零件必须填写。', '需求数量=所属组件需求数量×单套用量。'],
       ['需求数量(自动)', '普通零件=订单数×单套用量；组件子零件=父组件需求数量×单套用量。', '后端导入时会重新计算缺失值；不要填写库存、备库、手工计划等 ERP 内部决策字段。'],
@@ -1117,10 +1649,10 @@ export class OrdersService {
     setRowValues(exampleSheet, 1, headers);
     styleHeaderRow(exampleSheet, 1);
     const exampleRows = [
-      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', 1, '通用件', '', '', 'RS1001', 'B5-10-50-01', '顶盖', '', '1mm', 16, '', 16, '件', '', '普通零件', '', '旧图'],
-      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '组件', 2, '定制件', 'C001', '', 'RS2001', 'B5-10-30', '风机支架组件', '', '2mm', 90, 2, 180, '套', '装配', '组件本体 90 套，每套用量 2', '', '旧图'],
-      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', '2.1', '定制件', '', 'C001', 'RS2001-A', 'B5-10-30-A', '支架主板', '', '2mm', '', 2, 360, '件', '激光切割>折弯', '按父组件需求数量×2', '', '旧图'],
-      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', '2.2', '定制件', '', 'C001', 'RS2001-B', 'B5-10-30-B', '支架加强片', '', '1.5mm', '', 1, 180, '件', '激光切割', '按父组件需求数量×1', '', '旧图']
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', 1, '通用件', '', '', 'RS1001', 'B5-10-50-01', '顶盖', '', '1mm', 16, '', 16, '件', '', '普通零件', '', '旧图', 'A'],
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '组件', 2, '定制件', 'C001', '', 'RS2001', 'B5-10-30', '风机支架组件', '', '2mm', 90, 2, 180, '套', '装配', '组件本体 90 套，每套用量 2', '', '旧图', 'A'],
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', '2.1', '定制件', '', 'C001', 'RS2001-A', 'B5-10-30-A', '支架主板', '', '2mm', '', 2, 360, '件', '激光切割>折弯', '按父组件需求数量×2', '', '旧图', 'B'],
+      [1, 'RSD-20260601-001', '2026/6/1', '示例客户', 'B型5P', '零件', '2.2', '定制件', '', 'C001', 'RS2001-B', 'B5-10-30-B', '支架加强片', '', '1.5mm', '', 1, 180, '件', '激光切割', '按父组件需求数量×1', '', '旧图', 'A']
     ];
     exampleRows.forEach((row, index) => setRowValues(exampleSheet, index + 2, row));
     headers.forEach((_, index) => {
@@ -1197,7 +1729,7 @@ export class OrdersService {
       ['订单数', preview.summary.orderCount, '可导入订单', preview.summary.selectableOrderCount],
       ['不可导入订单', preview.summary.blockedOrderCount, '重复行', preview.summary.duplicateRowCount],
       ['错误数', preview.summary.errorCount, '警告数', preview.summary.warningCount],
-      ['涉及零件编码', preview.summary.materialSyncCount, '零件编码示例', (preview.summary.materialSyncPreview || []).join('、')],
+      ['涉及零件编码', preview.summary.materialSyncCount, '零件编码示例', this.formatLimitedList(preview.summary.materialSyncPreview || [], 5)],
       ['生成时间', this.businessDateTimeText(), '说明', '仅用于修正 Excel；创建草稿前后端仍会重新校验']
     ];
     overviewRows.forEach((row, index) => setValues(overviewSheet, index + 2, row));
@@ -1232,6 +1764,8 @@ export class OrdersService {
       { width: 14 },
       { width: 16 },
       { width: 18 },
+      { width: 10 },
+      { width: 14 },
       { width: 26 },
       { width: 12 },
       { width: 24 },
@@ -1250,6 +1784,8 @@ export class OrdersService {
       '所属组件',
       '物料号',
       '图号',
+      '版本',
+      '图纸日期',
       '产品名称',
       '严重程度',
       '问题代码',
@@ -1270,6 +1806,8 @@ export class OrdersService {
           '',
           '',
           '订单',
+          '',
+          '',
           '',
           '',
           '',
@@ -1296,6 +1834,8 @@ export class OrdersService {
             row.parentComponentNo,
             row.partCode,
             row.drawingNo,
+            row.drawingVersion,
+            row.drawingDate,
             row.partName,
             issue.severity === 'ERROR' ? '错误' : '警告',
             issue.code,
@@ -1308,9 +1848,9 @@ export class OrdersService {
       }
     }
     if (issueRowNo === 2) {
-      setValues(issueSheet, issueRowNo, ['', '通过', '', '', '', '', '', '', '', '', '', '', '', '当前导入预览没有错误或警告', '', '']);
+      setValues(issueSheet, issueRowNo, ['', '通过', '', '', '', '', '', '', '', '', '', '', '', '', '', '当前导入预览没有错误或警告', '', '']);
     }
-    issueSheet.autoFilter = { from: 'A1', to: 'P1' };
+    issueSheet.autoFilter = { from: 'A1', to: 'R1' };
     styleBody(issueSheet, 2);
 
     const buffer = await workbook.xlsx.writeBuffer();
@@ -1409,6 +1949,7 @@ export class OrdersService {
               parentComponentNo: row.parentComponentNo || null,
               partCode: row.partCode,
               drawingNo: row.drawingNo || null,
+              drawingVersion: row.drawingVersion || null,
               partName: row.partName,
               partSpecification: row.partSpecification || null,
               partThickness: row.lineType === 'COMPONENT' ? 0 : row.partThickness && row.partThickness > 0 ? row.partThickness : 0,
@@ -1921,11 +2462,11 @@ export class OrdersService {
     });
   }
 
-  private formatLimitedList(values: string[], limit = 20) {
+  private formatLimitedList(values: string[], limit = 20, delimiter = '、') {
     const cleanedValues = values.map((value) => String(value || '').trim()).filter(Boolean);
     const visibleValues = cleanedValues.slice(0, limit);
     const suffix = cleanedValues.length > visibleValues.length ? ` 等 ${cleanedValues.length} 项` : '';
-    return `${visibleValues.join('、')}${suffix}`;
+    return `${visibleValues.join(delimiter)}${suffix}`;
   }
 
   private firstValues(values: string[], limit: number) {
@@ -2127,7 +2668,7 @@ export class OrdersService {
         break;
       }
       const info = infoByPartCode.get(this.normalizedPartCodeKey(line.partCode));
-      const fields = info?.conflictFields.length ? info.conflictFields.join('、') : '图号、规格、厚度';
+      const fields = info?.conflictFields.length ? this.formatLimitedList(info.conflictFields, 5) : '图号、规格、厚度';
       previewRows.push(`第 ${line.lineNo} 行 ${line.partCode} / ${line.partName}（核对${fields}）`);
     }
     const preview = previewRows.join('；');
@@ -3159,7 +3700,7 @@ export class OrdersService {
           submitOperator,
           dto.materialIdentityConfirmed
         );
-        await this.syncOrderInventoryReservations(tx, order.id);
+        // 提交生产必须消费订单保存时形成的 ACTIVE 预占，不能先释放再重建，否则库存预占审计会断链。
         const missingStockSourceLine = order.lines.find(
           (line) =>
             (this.normalizeFulfillmentMode(line.fulfillmentMode) === OrderLineFulfillmentMode.STOCK ||
@@ -3628,9 +4169,9 @@ export class OrdersService {
       if (completedNames.length === 0) {
         return `${task.partCode} 已开始生产，下一工序 ${nextStep || '待确认'}`;
       }
-      return `${task.partCode} 已完成 ${completedNames.join('、')}，下一工序 ${nextStep || '待最终确认'}`;
+      return `${task.partCode} 已完成 ${this.formatLimitedList(completedNames, 5)}，下一工序 ${nextStep || '待最终确认'}`;
     });
-    return `当前订单生产进度：${summaries.join('；')}`;
+    return `当前订单生产进度：${this.formatLimitedList(summaries, 5, '；')}`;
   }
 
   private normalizeCancelHandlingPlan(
@@ -3908,7 +4449,7 @@ export class OrdersService {
       },
       orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
     });
-    const usageCandidateBatches = await this.findAvailableStockUsageCandidateBatches(tx, stockBatches, order.id);
+    const usageCandidateBatches = await this.findAvailableStockUsageCandidateBatches(tx, stockBatches, order);
     const sourceTaskMap = await this.findStockSourceTaskMap(tx, usageCandidateBatches);
     const selectedSourceMap = new Map(selectedSources.map((source) => [source.batchId, source]));
     const foundBatchIds = new Set(stockBatches.map((batch) => batch.id));
@@ -3946,6 +4487,12 @@ export class OrdersService {
       : purpose === 'STOCK'
         ? sortedStockBatches.filter((batch) => this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap))
         : sortedStockBatches;
+    const orderSelectedSources = (order.lines || [])
+      .filter((orderLine: any) => {
+        const mode = this.normalizeFulfillmentMode(orderLine.fulfillmentMode);
+        return mode === OrderLineFulfillmentMode.STOCK || mode === OrderLineFulfillmentMode.REWORK;
+      })
+      .flatMap((orderLine: any) => this.jsonToStockSourceSelections(orderLine.stockSourceSelections));
 
     for (const batch of candidateBatches) {
       if (batch.unit !== line.unit) {
@@ -3965,17 +4512,37 @@ export class OrdersService {
           sourceTaskMap,
           selectedSources,
           usageCandidateBatches,
-          order.id
+          order.id,
+          orderSelectedSources
         );
         const needsManualConfirmation =
           purpose === 'STOCK'
-            ? this.stockSourceSelectionNeedsManualConfirmation(line, batch, sourceTaskMap, selectedSources, usageCandidateBatches, order.id)
-            : !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) ||
+            ? this.stockSourceSelectionNeedsManualConfirmation(
+                line,
+                batch,
+                sourceTaskMap,
+                selectedSources,
+                usageCandidateBatches,
+                order.id,
+                orderSelectedSources
+              )
+            : this.stockSourceMissingOrderInfo(line).length > 0 ||
+              !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) ||
               Boolean(usageOrderIssue);
-        if (needsManualConfirmation && !this.stockSourceManualConfirmationComplete(selectedSource)) {
+        if (
+          needsManualConfirmation &&
+          (!this.stockSourceManualConfirmationComplete(selectedSource) ||
+            !this.stockSourceManualConfirmationCoversUsageOrderIssue(selectedSource, usageOrderIssue))
+        ) {
           // 后端必须按真实库存来源重新核对，不能只相信前端提交的 compatibilityStatus。
+          const manualConfirmationReason = this.stockSourceManualConfirmationReason(
+            line,
+            batch,
+            sourceTaskMap,
+            usageOrderIssue
+          );
           throw new BadRequestException(
-            `已选库存批次 ${batch.batchNo} 需要填写人工确认记录${usageOrderIssue ? `：${usageOrderIssue}` : ''}`
+            `已选库存批次 ${batch.batchNo} 需要填写人工确认记录${manualConfirmationReason ? `：${manualConfirmationReason}` : ''}`
           );
         }
       }
@@ -4119,6 +4686,11 @@ export class OrdersService {
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }]
     });
+    if (reservations.length === 0) {
+      throw new BadRequestException(
+        `库存批次 ${batch.batchNo} 缺少草稿库存预占记录，请重新保存订单库存来源后再提交生产。`
+      );
+    }
     const reservedQuantity = this.roundQuantity(
       reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0)
     );
@@ -4128,11 +4700,6 @@ export class OrdersService {
       throw new BadRequestException(
         `库存批次 ${batch.batchNo} 的草稿预占数量异常：本次应消费 ${usedQuantity}${batch.unit}，` +
           `实际 ACTIVE 预占 ${reservedQuantity}${batch.unit}。请重新保存订单库存来源后再提交生产。`
-      );
-    }
-    if (reservations.length === 0) {
-      throw new BadRequestException(
-        `库存批次 ${batch.batchNo} 缺少草稿库存预占记录，请重新保存订单库存来源后再提交生产。`
       );
     }
 
@@ -4213,6 +4780,20 @@ export class OrdersService {
     );
   }
 
+  private stockSourceManualConfirmationCoversUsageOrderIssue(
+    source: ReturnType<OrdersService['jsonToStockSourceSelections']>[number] | undefined,
+    usageOrderIssue?: string
+  ) {
+    const issue = usageOrderIssue?.trim();
+    if (!issue) {
+      return true;
+    }
+    // 使用顺序风险会随其它草稿预占变化，旧确认不能覆盖新的小批次优先风险。
+    const compatibilityReason = source?.compatibilityReason?.trim() || '';
+    const manualRemark = source?.manualConfirmRemark?.trim() || '';
+    return compatibilityReason.includes(issue) || manualRemark.includes(issue);
+  }
+
   private async findStockSourceTaskMap(tx: Prisma.TransactionClient, batches: any[]) {
     const taskNos = [...new Set(batches.map((batch) => batch.sourceProductionTaskNo).filter(Boolean))] as string[];
     if (taskNos.length === 0) {
@@ -4227,9 +4808,13 @@ export class OrdersService {
   }
 
   private async findAvailableStockUsageCandidateBatches(
-    client: { inventoryBatch: { findMany: (args: any) => Promise<any[]> } },
+    client: {
+      inventoryBatch: { findMany: (args: any) => Promise<any[]> };
+      inventoryReservation: { findMany: (args: any) => Promise<any[]> };
+      customerOrder?: { findUnique: (args: any) => Promise<any> };
+    },
     selectedBatches: any[],
-    excludeOrderId?: string
+    currentOrder?: StockReservationPriorityOrder
   ) {
     const keys = new Map<string, { partCode: string; unit: string }>();
     for (const batch of selectedBatches) {
@@ -4258,10 +4843,7 @@ export class OrdersService {
         sourceOrderLine: true,
         productionTask: { include: { orderLine: true } },
         reservations: {
-          where: {
-            status: InventoryReservationStatus.ACTIVE,
-            ...(excludeOrderId ? { orderId: { not: excludeOrderId } } : {})
-          }
+          where: { status: InventoryReservationStatus.ACTIVE }
         }
       },
       orderBy: [{ createdAt: 'asc' }, { batchNo: 'asc' }]
@@ -4275,7 +4857,22 @@ export class OrdersService {
     for (const batch of selectedBatches) {
       rows.set(batch.id, batch);
     }
-    return [...rows.values()];
+    const mergedBatches = [...rows.values()];
+    const reservedQuantityByBatchId = await this.activeReservationQuantityByBatchId(
+      client,
+      mergedBatches.map((batch) => batch.id),
+      currentOrder
+    );
+    // 候选批次也必须按当前草稿优先级计算预占，避免较晚草稿隐藏较小批次。
+    return mergedBatches.map((batch) => {
+      const reservedQuantity = reservedQuantityByBatchId.get(batch.id) ?? 0;
+      return {
+        ...batch,
+        reservations: [],
+        reservedByOtherOrders: reservedQuantity,
+        availableQuantity: Math.max(this.roundQuantity(decimalToNumber(batch.quantity) - reservedQuantity), 0)
+      };
+    });
   }
 
   private resolveStockBatchSourceLine(batch: any, sourceTaskMap: Map<string, any>) {
@@ -4340,12 +4937,30 @@ export class OrdersService {
 
     return (
       this.sourceLineHasDirectStockDrawingInfo(sourceLine) &&
+      this.normalizeEditableLineType(line.lineType) === this.normalizeEditableLineType(sourceLine.lineType) &&
+      this.stockSourceStructureKind(line) === this.stockSourceStructureKind(sourceLine) &&
+      this.requiredTextMatches(line.partCategory, sourceLine.partCategory) &&
+      this.requiredTextMatches(line.projectModel, sourceLine.projectModel) &&
       this.requiredTextMatches(line.partCode, batch.partCode) &&
+      this.requiredTextMatches(line.partName, sourceLine.partName || batch.partName) &&
+      this.requiredTextMatches(line.unit, batch.unit) &&
       this.requiredTextMatches(line.drawingNo, sourceLine.drawingNo) &&
       this.requiredTextMatches(line.drawingVersion, sourceLine.drawingVersion) &&
+      this.requiredDateMatches(line.drawingDate, sourceLine.drawingDate) &&
+      this.requiredTextMatches(line.drawingStatus, sourceLine.drawingStatus) &&
+      this.requiredTextMatches(line.drawingFileName, sourceLine.drawingFileName) &&
+      this.requiredTextMatches(line.drawingFileUrl, sourceLine.drawingFileUrl) &&
       this.requiredTextMatches(line.partSpecification, sourceLine.partSpecification) &&
       this.requiredNumberMatches(line.partThickness, sourceLine.partThickness)
     );
+  }
+
+  private stockSourceStructureKind(row: any) {
+    const lineType = this.normalizeEditableLineType(row?.lineType);
+    if (lineType === 'COMPONENT') {
+      return 'COMPONENT';
+    }
+    return String(row?.parentComponentNo || '').trim() ? 'CHILD_PART' : 'STANDALONE_PART';
   }
 
   private stockSourceSelectionNeedsManualConfirmation(
@@ -4354,14 +4969,60 @@ export class OrdersService {
     sourceTaskMap: Map<string, any>,
     selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>,
     availableBatches: any[],
-    currentOrderId?: string
+    currentOrderId?: string,
+    allSelectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']> = selectedSources
   ) {
     return (
       this.stockSourceMissingOrderInfo(line).length > 0 ||
       this.directStockSourceMissingDrawingInfo(batch, sourceTaskMap).length > 0 ||
       !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) ||
-      Boolean(this.stockSourceUsageOrderIssue(line, batch, sourceTaskMap, selectedSources, availableBatches, currentOrderId))
+      Boolean(this.stockSourceUsageOrderIssue(line, batch, sourceTaskMap, selectedSources, availableBatches, currentOrderId, allSelectedSources))
     );
+  }
+
+  private stockSourceManualConfirmationReason(line: any, batch: any, sourceTaskMap: Map<string, any>, usageOrderIssue?: string) {
+    const reasons: string[] = [];
+    const missingOrderInfo = this.stockSourceMissingOrderInfo(line);
+    if (missingOrderInfo.length > 0) {
+      reasons.push(`本次订单资料不完整：${this.formatLimitedList(missingOrderInfo, 5)}`);
+    }
+
+    const missingSourceInfo = this.directStockSourceMissingDrawingInfo(batch, sourceTaskMap);
+    if (missingSourceInfo.length > 0) {
+      reasons.push(`库存来源资料不完整：${this.formatLimitedList(missingSourceInfo, 5)}`);
+    }
+
+    // 人工确认原因必须基于数据库库存来源重新计算，不能直接信任前端 compatibilityReason。
+    if (missingOrderInfo.length === 0 && missingSourceInfo.length === 0) {
+      const sourceLine = this.resolveStockBatchSourceLine(batch, sourceTaskMap);
+      const mismatchReasons = sourceLine
+        ? [
+            this.normalizeEditableLineType(line.lineType) === this.normalizeEditableLineType(sourceLine.lineType) ? '' : '行类型不同',
+            this.stockSourceStructureKind(line) === this.stockSourceStructureKind(sourceLine) ? '' : '组件结构不同',
+            this.requiredTextMatches(line.partCategory, sourceLine.partCategory) ? '' : '零件类型不同',
+            this.requiredTextMatches(line.projectModel, sourceLine.projectModel) ? '' : '项目型号不同',
+            this.requiredTextMatches(line.partCode, batch.partCode) ? '' : '零件编码不同',
+            this.requiredTextMatches(line.partName, sourceLine.partName || batch.partName) ? '' : '零件名称不同',
+            this.requiredTextMatches(line.unit, batch.unit) ? '' : '单位不同',
+            this.requiredTextMatches(line.drawingNo, sourceLine.drawingNo) ? '' : '图号不同',
+            this.requiredTextMatches(line.drawingVersion, sourceLine.drawingVersion) ? '' : '图纸版本不同',
+            this.requiredDateMatches(line.drawingDate, sourceLine.drawingDate) ? '' : '图纸日期不同',
+            this.requiredTextMatches(line.drawingStatus, sourceLine.drawingStatus) ? '' : '图纸状态不同',
+            this.requiredTextMatches(line.drawingFileName, sourceLine.drawingFileName) ? '' : '图纸文件名不同',
+            this.requiredTextMatches(line.drawingFileUrl, sourceLine.drawingFileUrl) ? '' : '图纸文件不同',
+            this.requiredTextMatches(line.partSpecification, sourceLine.partSpecification) ? '' : '成品规格不同',
+            this.requiredNumberMatches(line.partThickness, sourceLine.partThickness) ? '' : '零件厚度不同'
+          ].filter(Boolean)
+        : ['库存来源缺少订单行快照'];
+      if (mismatchReasons.length > 0) {
+        reasons.push(`库存来源与订单不一致：${this.formatLimitedList(mismatchReasons, 5)}`);
+      }
+    }
+
+    if (usageOrderIssue) {
+      reasons.push(usageOrderIssue);
+    }
+    return reasons.join('；');
   }
 
   private stockSourceUsageOrderIssue(
@@ -4370,9 +5031,14 @@ export class OrdersService {
     sourceTaskMap: Map<string, any>,
     selectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']>,
     availableBatches: any[],
-    currentOrderId?: string
+    currentOrderId?: string,
+    allSelectedSources: ReturnType<OrdersService['jsonToStockSourceSelections']> = selectedSources
   ) {
-    const selectedQuantityMap = new Map(selectedSources.map((source) => [source.batchId, source.quantity]));
+    // 同一张草稿订单的其它零件行可能已经占用了小批次；使用顺序校验必须按整单已选数量扣减。
+    const selectedQuantityMap = new Map<string, number>();
+    for (const source of allSelectedSources) {
+      selectedQuantityMap.set(source.batchId, this.roundQuantity((selectedQuantityMap.get(source.batchId) ?? 0) + source.quantity));
+    }
     const selectedOrderIndexMap = new Map(selectedSources.map((source, index) => [source.batchId, index]));
     const currentSelectedIndex = selectedOrderIndexMap.get(batch.id);
     const currentQuantity = this.stockBatchAvailableQuantity(batch, currentOrderId);
@@ -4410,6 +5076,10 @@ export class OrdersService {
     return [
       !String(line.drawingNo || '').trim() ? '图号' : '',
       !String(line.drawingVersion || '').trim() ? '图纸版本' : '',
+      !this.formatDateOnly(line.drawingDate) ? '图纸日期' : '',
+      !String(line.drawingStatus || '').trim() ? '图纸状态' : '',
+      !String(line.drawingFileName || '').trim() ? '图纸文件名' : '',
+      !String(line.drawingFileUrl || '').trim() ? '图纸文件' : '',
       !String(line.partSpecification || '').trim() ? '成品规格' : '',
       line.lineType !== 'COMPONENT' && decimalToNumber(line.partThickness) <= 0 ? '零件厚度' : ''
     ].filter(Boolean);
@@ -4423,6 +5093,9 @@ export class OrdersService {
     return [
       !String(sourceLine.drawingNo || '').trim() ? '图号' : '',
       !String(sourceLine.drawingVersion || '').trim() ? '图纸版本' : '',
+      !this.formatDateOnly(sourceLine.drawingDate) ? '图纸日期' : '',
+      !String(sourceLine.drawingStatus || '').trim() ? '图纸状态' : '',
+      !String(sourceLine.drawingFileName || '').trim() ? '图纸文件名' : '',
       !String(sourceLine.drawingFileUrl || '').trim() ? '图纸文件' : ''
     ].filter(Boolean);
   }
@@ -4431,6 +5104,9 @@ export class OrdersService {
     return Boolean(
       String(sourceLine.drawingNo || '').trim() &&
         String(sourceLine.drawingVersion || '').trim() &&
+        this.formatDateOnly(sourceLine.drawingDate) &&
+        String(sourceLine.drawingStatus || '').trim() &&
+        String(sourceLine.drawingFileName || '').trim() &&
         String(sourceLine.drawingFileUrl || '').trim()
     );
   }
@@ -4441,6 +5117,14 @@ export class OrdersService {
       return true;
     }
     return normalizedRequired === String(actual ?? '').trim().toLocaleLowerCase();
+  }
+
+  private requiredDateMatches(required?: Date | string | null, actual?: Date | string | null) {
+    const normalizedRequired = this.formatDateOnly(required);
+    if (!normalizedRequired) {
+      return true;
+    }
+    return normalizedRequired === this.formatDateOnly(actual);
   }
 
   private requiredNumberMatches(required?: number | Prisma.Decimal | null, actual?: number | Prisma.Decimal | null) {
@@ -4565,6 +5249,7 @@ export class OrdersService {
       parentComponentNo: this.importColumn(header.columns, '所属组件编号(自动/可改)', '所属组件编号'),
       partCode: this.importColumn(header.columns, '物料号'),
       drawingNo: this.importColumn(header.columns, '图号'),
+      drawingVersion: this.importColumn(header.columns, '版本', '图纸版本', '图纸版本号'),
       partName: this.importColumn(header.columns, '产品名称'),
       partSpecification: this.importColumn(header.columns, '展开尺寸'),
       partThickness: this.importColumn(header.columns, '厚度'),
@@ -4642,6 +5327,7 @@ export class OrdersService {
         parentComponentNo: this.cellText(row, columns.parentComponentNo),
         partCode: this.cellText(row, columns.partCode),
         drawingNo: this.cellText(row, columns.drawingNo),
+        drawingVersion: this.cellText(row, columns.drawingVersion),
         partName: this.cellText(row, columns.partName),
         partSpecification: this.cellText(row, columns.partSpecification),
         partThickness: lineType === 'COMPONENT' ? 0 : partThickness && partThickness > 0 ? partThickness : 0,
@@ -5005,6 +5691,7 @@ export class OrdersService {
           parentComponentNo: row.parentComponentNo,
           partCode: row.partCode,
           drawingNo: row.drawingNo,
+          drawingVersion: row.drawingVersion,
           partName: row.partName,
           partSpecification: row.partSpecification,
           partThickness: row.partThickness,
@@ -5582,7 +6269,7 @@ export class OrdersService {
         issues.push({
           severity: 'WARNING',
           code: 'PROCESS_DEFINITION_MISSING',
-          message: `工序未维护：${missingProcessNames.join('、')}；导入草稿会保留备注，正式工序需在 ERP 中确认`
+          message: `工序未维护：${this.formatLimitedList(missingProcessNames, 5)}；导入草稿会保留备注，正式工序需在 ERP 中确认`
         });
       }
       const counts = this.countImportIssues(issues);
@@ -5604,6 +6291,7 @@ export class OrdersService {
           parentComponentNo: row.parentComponentNo,
           partCode: row.partCode,
           drawingNo: row.drawingNo,
+          drawingVersion: row.drawingVersion,
           partName: row.partName,
           partSpecification: row.partSpecification,
           partThickness: decimalToNumber(row.partThickness),
@@ -5641,6 +6329,7 @@ export class OrdersService {
       row.lineType || '',
       String(row.partCode || '').trim().toLocaleUpperCase(),
       String(row.drawingNo || '').trim().toLocaleUpperCase(),
+      String(row.drawingVersion || '').trim().toLocaleUpperCase(),
       String(row.partName || '').trim()
     ].join('|');
   }
@@ -5809,6 +6498,7 @@ export class OrdersService {
       partCode: row.partCode,
       partName: row.partName,
       drawingNo: row.drawingNo || undefined,
+      drawingVersion: row.drawingVersion || undefined,
       partThickness: row.lineType === 'COMPONENT' ? 0 : partThickness > 0 ? partThickness : 0,
       partSpecification: row.partSpecification || undefined,
       quantity: row.demandQuantity,
@@ -5850,6 +6540,150 @@ export class OrdersService {
       return '';
     }
     return this.formatDateOnly(date);
+  }
+
+  private orderExportScopeText(query: OrderQueryDto) {
+    const parts = [
+      `生成时间：${this.businessDateTimeText()}`,
+      query.customerId ? `客户ID：${query.customerId}` : '客户：全部',
+      query.orderNo?.trim() ? `订单号：${this.normalizeOrderNo(query.orderNo)}` : '订单：全部',
+      query.dateFrom || query.dateTo ? `订单日期：${query.dateFrom || '不限'} 至 ${query.dateTo || '不限'}` : '订单日期：全部',
+      query.status ? `订单状态：${this.orderStatusText(query.status)}` : undefined,
+      query.statuses ? `订单状态范围：${this.orderStatusListText(query.statuses)}` : undefined,
+      query.productionStatuses ? `生产状态范围：${this.orderProductionStatusListText(query.productionStatuses)}` : undefined
+    ].filter(Boolean);
+    return parts.join('；');
+  }
+
+  private orderStatusListText(value: string) {
+    return value
+      .split(',')
+      .map((item) => this.orderStatusText(item.trim()))
+      .filter(Boolean)
+      .join('、');
+  }
+
+  private orderProductionStatusListText(value: string) {
+    return value
+      .split(',')
+      .map((item) => this.orderProductionFilterStatusText(item.trim()))
+      .filter(Boolean)
+      .join('、');
+  }
+
+  private orderStatusText(status?: string | null) {
+    const statusMap: Record<string, string> = {
+      DRAFT: '待提交生产',
+      PENDING_PRODUCTION: '待确认生产',
+      IN_PRODUCTION: '生产中',
+      COMPLETED: '已完成',
+      CANCELLED: '已取消'
+    };
+    return status ? statusMap[status] || status : '';
+  }
+
+  private orderProductionFilterStatusText(status?: string | null) {
+    const statusMap: Record<string, string> = {
+      ORDER_DRAFT: '待提交生产',
+      WAITING_PRODUCTION: '待确认生产',
+      ORDER_IN_PRODUCTION: '生产中',
+      ORDER_COMPLETED_UNSHIPPED: '已完成未发货',
+      PARTIAL_SHIPPED: '部分发货',
+      ORDER_SHIPPED_COMPLETED: '已完成发货',
+      ORDER_CANCELLED: '已取消',
+      PENDING: '待生产',
+      IN_PROGRESS: '生产中',
+      WAITING_CONFIRMATION: '待确认完成',
+      COMPLETED: '生产完成',
+      STORED: '已入库',
+      CANCELLED: '已取消'
+    };
+    return status ? statusMap[status] || status : '';
+  }
+
+  private orderLineTypeText(lineType?: string | null) {
+    const value = String(lineType || 'PART').toUpperCase();
+    if (value === 'COMPONENT') {
+      return '组件';
+    }
+    if (value === 'PART') {
+      return '零件';
+    }
+    return lineType || '';
+  }
+
+  private orderLineFulfillmentModeText(mode?: string | null) {
+    const modeMap: Record<string, string> = {
+      PRODUCTION: '重新生产',
+      STOCK: '使用备货库存',
+      REWORK: '库存再加工'
+    };
+    return mode ? modeMap[mode] || mode : '';
+  }
+
+  private quantityByUnitText(
+    rows: Array<{ unit?: string; totalQuantity?: number; totalProductionPlanQuantity?: number }> | undefined,
+    field: 'totalQuantity' | 'totalProductionPlanQuantity'
+  ) {
+    if (!rows?.length) {
+      return '';
+    }
+    return rows.map((row) => `${this.roundQuantity(Number(row[field] ?? 0))} ${row.unit || '件'}`).join(' / ');
+  }
+
+  private orderProcessRouteText(steps?: Array<{ processName?: string | null; stepNo?: number | null }> | null) {
+    return [...(steps || [])]
+      .sort((left, right) => Number(left.stepNo ?? 0) - Number(right.stepNo ?? 0))
+      .map((step) => String(step.processName || '').trim())
+      .filter(Boolean)
+      .join(' > ');
+  }
+
+  private orderProcessRemarkText(steps?: Array<{ processName?: string | null; processRemark?: string | null; stepNo?: number | null }> | null) {
+    return [...(steps || [])]
+      .sort((left, right) => Number(left.stepNo ?? 0) - Number(right.stepNo ?? 0))
+      .map((step) => {
+        const remark = String(step.processRemark || '').trim();
+        return remark ? `${step.processName || '工序'}：${remark}` : '';
+      })
+      .filter(Boolean)
+      .join('；');
+  }
+
+  private orderStockSourceText(line: any) {
+    return (line.selectedStockSources || [])
+      .map((source: any) => {
+        const sourcePart = [source.partCode, source.partName].filter(Boolean).join(' / ');
+        const sourceText = [
+          source.batchNo || source.batchId,
+          sourcePart,
+          `${this.roundQuantity(Number(source.quantity ?? 0))} ${source.unit || line.unit || '件'}`,
+          source.replenishmentSourceLabel,
+          source.manualConfirmedBy ? `人工确认：${source.manualConfirmedBy}` : '',
+          source.compatibilityReason
+        ].filter(Boolean);
+        return sourceText.join('，');
+      })
+      .join('；');
+  }
+
+  private orderLineProductionTasksText(line: any) {
+    return (line.productionTasks || [])
+      .map((task: any) => {
+        const quantityText = `${this.roundQuantity(Number(task.completedQuantity ?? 0))}/${this.roundQuantity(Number(task.plannedQuantity ?? 0))}${line.unit || '件'}`;
+        const typeText = task.isReplenishment ? '补单' : '正常';
+        return `${task.productionTaskNo} ${typeText} ${this.orderProductionFilterStatusText(task.status)} ${quantityText}`;
+      })
+      .join('；');
+  }
+
+  private orderLineImportSourceText(line: any) {
+    const fileName = this.importDisplayFileName(line.sourceImportFileName);
+    if (!fileName && !line.sourceImportRowNo) {
+      return '';
+    }
+    const rowText = line.sourceImportRowNo ? `第 ${line.sourceImportRowNo} 行` : '';
+    return [fileName, rowText].filter(Boolean).join(' / ');
   }
 
   private async upsertMaterials(tx: Prisma.TransactionClient, lines: CreateOrderDto['lines']) {
@@ -6109,7 +6943,7 @@ export class OrdersService {
     });
 
     if (duplicateNos.size > 0) {
-      throw new BadRequestException(`同一订单内组件编号重复：${Array.from(duplicateNos).join('、')}`);
+      throw new BadRequestException(`同一订单内组件编号重复：${this.formatLimitedList(Array.from(duplicateNos), 10)}`);
     }
 
     lines.forEach((line, index) => {
@@ -6332,8 +7166,9 @@ export class OrdersService {
         );
       }
     }
-    const usageCandidateBatches = await this.findAvailableStockUsageCandidateBatches(client, batches, currentOrder?.id);
+    const usageCandidateBatches = await this.findAvailableStockUsageCandidateBatches(client, batches, currentOrder);
     const sourceTaskMap = await this.findStockSourceTaskMapByBatches(client, usageCandidateBatches);
+    const allSelectedSources = selectedRows.map((row) => row.source);
 
     for (const { line, lineIndex, source } of selectedRows) {
       const label = `第 ${lineIndex + 1} 个零件`;
@@ -6363,26 +7198,53 @@ export class OrdersService {
         sourceTaskMap,
         lineSources,
         usageCandidateBatches,
-        currentOrder?.id
+        currentOrder?.id,
+        allSelectedSources
       );
       if (fulfillmentMode === OrderLineFulfillmentMode.STOCK) {
         if (
-          this.stockSourceSelectionNeedsManualConfirmation(line, batch, sourceTaskMap, lineSources, usageCandidateBatches, currentOrder?.id) &&
-          !this.stockSourceManualConfirmationComplete(source)
+          this.stockSourceSelectionNeedsManualConfirmation(
+            line,
+            batch,
+            sourceTaskMap,
+            lineSources,
+            usageCandidateBatches,
+            currentOrder?.id,
+            allSelectedSources
+        ) &&
+          (!this.stockSourceManualConfirmationComplete(source) ||
+            !this.stockSourceManualConfirmationCoversUsageOrderIssue(source, usageOrderIssue))
         ) {
+          const manualConfirmationReason = this.stockSourceManualConfirmationReason(
+            line,
+            batch,
+            sourceTaskMap,
+            usageOrderIssue
+          );
           throw new BadRequestException(
-            `${label}已选库存批次 ${batch.batchNo} 需要填写人工确认记录${usageOrderIssue ? `：${usageOrderIssue}` : ''}`
+            `${label}已选库存批次 ${batch.batchNo} 需要填写人工确认记录${manualConfirmationReason ? `：${manualConfirmationReason}` : ''}`
           );
         }
         continue;
       }
 
       const needsReworkManualConfirmation =
+        this.stockSourceMissingOrderInfo(line).length > 0 ||
         !this.stockBatchMatchesOrderLine(line, batch, sourceTaskMap) ||
         Boolean(usageOrderIssue);
-      if (needsReworkManualConfirmation && !this.stockSourceManualConfirmationComplete(source)) {
+      if (
+        needsReworkManualConfirmation &&
+        (!this.stockSourceManualConfirmationComplete(source) ||
+          !this.stockSourceManualConfirmationCoversUsageOrderIssue(source, usageOrderIssue))
+      ) {
+        const manualConfirmationReason = this.stockSourceManualConfirmationReason(
+          line,
+          batch,
+          sourceTaskMap,
+          usageOrderIssue
+        );
         throw new BadRequestException(
-          `${label}已选库存批次 ${batch.batchNo} 需要填写人工确认记录${usageOrderIssue ? `：${usageOrderIssue}` : ''}`
+          `${label}已选库存批次 ${batch.batchNo} 需要填写人工确认记录${manualConfirmationReason ? `：${manualConfirmationReason}` : ''}`
         );
       }
     }
@@ -6873,6 +7735,51 @@ export class OrdersService {
     })) as Prisma.InputJsonValue;
   }
 
+  private stricterStockSourceCompatibilityStatus(
+    incoming?: StockSourceCompatibilityStatus,
+    current?: StockSourceCompatibilityStatus,
+    hasCurrent = false
+  ) {
+    if (!hasCurrent) {
+      return incoming;
+    }
+    if (!incoming || !current) {
+      return undefined;
+    }
+    return stockSourceCompatibilityRank[incoming] > stockSourceCompatibilityRank[current] ? incoming : current;
+  }
+
+  private mergeStockSourceCompatibilityReason(incoming?: string, current?: string) {
+    const reasons = [current, incoming].map((reason) => reason?.trim()).filter(Boolean);
+    return [...new Set(reasons)].join('；') || undefined;
+  }
+
+  private stockSourceCompatibilityReasonText(reason?: string) {
+    return reason?.trim() || undefined;
+  }
+
+  private stockSourceManualConfirmationSource<
+    T extends {
+      compatibilityStatus?: StockSourceCompatibilityStatus;
+      compatibilityReason?: string;
+      manualConfirmedBy?: string;
+      manualConfirmedAt?: string;
+      manualConfirmRemark?: string;
+    }
+  >(incoming: T, current: T | undefined, mergedStatus?: StockSourceCompatibilityStatus, mergedReason?: string) {
+    const normalizedMergedReason = this.stockSourceCompatibilityReasonText(mergedReason);
+    const sourceMatchesMerged =
+      incoming.compatibilityStatus === mergedStatus &&
+      this.stockSourceCompatibilityReasonText(incoming.compatibilityReason) === normalizedMergedReason;
+    if (sourceMatchesMerged) {
+      return incoming;
+    }
+    const currentMatchesMerged =
+      current?.compatibilityStatus === mergedStatus &&
+      this.stockSourceCompatibilityReasonText(current?.compatibilityReason) === normalizedMergedReason;
+    return currentMatchesMerged ? current : undefined;
+  }
+
   private normalizeStockSourceSelections(selections: CreateOrderLineDto['selectedStockSources'] | undefined) {
     const normalized = new Map<
       string,
@@ -6886,7 +7793,7 @@ export class OrdersService {
         replenishmentSourceType?: string;
         replenishmentSourceRequestNo?: string;
         replenishmentSourceLabel?: string;
-        compatibilityStatus?: 'MATCHED' | 'NEEDS_CONFIRMATION' | 'INCOMPLETE' | 'UNKNOWN';
+        compatibilityStatus?: StockSourceCompatibilityStatus;
         compatibilityReason?: string;
         manualConfirmedBy?: string;
         manualConfirmedAt?: string;
@@ -6900,6 +7807,18 @@ export class OrdersService {
         continue;
       }
       const current = normalized.get(batchId);
+      const compatibilityStatus = this.stricterStockSourceCompatibilityStatus(
+        selection.compatibilityStatus,
+        current?.compatibilityStatus,
+        Boolean(current)
+      );
+      const compatibilityReason = this.mergeStockSourceCompatibilityReason(selection.compatibilityReason, current?.compatibilityReason);
+      const manualConfirmationSource = this.stockSourceManualConfirmationSource(
+        selection,
+        current,
+        compatibilityStatus,
+        compatibilityReason
+      );
       normalized.set(batchId, {
         batchId,
         batchNo: selection.batchNo?.trim() || current?.batchNo,
@@ -6910,11 +7829,11 @@ export class OrdersService {
         replenishmentSourceType: selection.replenishmentSourceType?.trim() || current?.replenishmentSourceType,
         replenishmentSourceRequestNo: selection.replenishmentSourceRequestNo?.trim() || current?.replenishmentSourceRequestNo,
         replenishmentSourceLabel: selection.replenishmentSourceLabel?.trim() || current?.replenishmentSourceLabel,
-        compatibilityStatus: selection.compatibilityStatus || current?.compatibilityStatus,
-        compatibilityReason: selection.compatibilityReason?.trim() || current?.compatibilityReason,
-        manualConfirmedBy: selection.manualConfirmedBy?.trim() || current?.manualConfirmedBy,
-        manualConfirmedAt: selection.manualConfirmedAt?.trim() || current?.manualConfirmedAt,
-        manualConfirmRemark: selection.manualConfirmRemark?.trim() || current?.manualConfirmRemark
+        compatibilityStatus,
+        compatibilityReason,
+        manualConfirmedBy: manualConfirmationSource?.manualConfirmedBy?.trim(),
+        manualConfirmedAt: manualConfirmationSource?.manualConfirmedAt?.trim(),
+        manualConfirmRemark: manualConfirmationSource?.manualConfirmRemark?.trim()
       });
     }
     return [...normalized.values()];
@@ -6952,7 +7871,7 @@ export class OrdersService {
     );
   }
 
-  private normalizeStockCompatibilityStatus(value: unknown) {
+  private normalizeStockCompatibilityStatus(value: unknown): StockSourceCompatibilityStatus | undefined {
     if (value === 'MATCHED' || value === 'NEEDS_CONFIRMATION' || value === 'INCOMPLETE' || value === 'UNKNOWN') {
       return value;
     }
@@ -7473,7 +8392,7 @@ export class OrdersService {
     );
     const invalidValues = values.filter((item) => !allowedValues.includes(item as T));
     if (invalidValues.length > 0) {
-      throw new BadRequestException(`${fieldName}不正确：${invalidValues.join('、')}`);
+      throw new BadRequestException(`${fieldName}不正确：${this.formatLimitedList(invalidValues, 10)}`);
     }
 
     return values as T[];
@@ -7624,10 +8543,10 @@ export class OrdersService {
       if (completedNames.length === 0) {
         return `${taskNo} 已开始，下一道 ${nextStep || '待确认完成'}`;
       }
-      return `${taskNo} 已完成 ${completedNames.join('、')}，下一道 ${nextStep || '待确认完成'}`;
+      return `${taskNo} 已完成 ${this.formatLimitedList(completedNames, 5)}，下一道 ${nextStep || '待确认完成'}`;
     });
 
-    return summaries.join('；');
+    return this.formatLimitedList(summaries, 5, '；');
   }
 
   private isTaskOrderBatchAvailable(task: any) {

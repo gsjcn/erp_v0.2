@@ -7,6 +7,7 @@ import {
   IsDateString,
   IsEnum,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -59,6 +60,20 @@ export class UpdateWarehouseLocationDto {
   @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
+}
+
+export class WarehouseConfigQueryDto {
+  @IsOptional()
+  @IsIn(['ALL', 'ENABLED', 'DISABLED'])
+  status?: 'ALL' | CommonStatus;
+
+  @IsOptional()
+  @IsIn(['ALL', 'ENABLED', 'DISABLED'])
+  locationStatus?: 'ALL' | CommonStatus;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class ConfirmReceiptDto {
@@ -177,6 +192,22 @@ export class WarehouseTransactionQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
 }
 
 export class WarehouseNoticeQueryDto {
@@ -219,6 +250,26 @@ export class WarehouseNoticeQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
+
+  @IsOptional()
+  @IsString()
+  withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class AcknowledgeWarehouseNoticeDto {

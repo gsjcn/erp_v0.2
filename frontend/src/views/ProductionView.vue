@@ -15,7 +15,14 @@
         <el-button :icon="Document" @click="openReplenishmentRequests">生产报废补单</el-button>
         </el-badge>
         <el-button :icon="Document" @click="openScrapRecords">报废统计</el-button>
-        <el-button :icon="Download" :disabled="printableRowCount === 0" @click="exportExcel">导出 Excel</el-button>
+        <el-button
+          :icon="Download"
+          :loading="productionExporting"
+          :disabled="printableRowCount === 0"
+          @click="exportExcel"
+        >
+          导出 Excel
+        </el-button>
         <el-button :icon="Printer" :disabled="printableRowCount === 0" @click="openPrintPreview">打印预览</el-button>
         <el-button :icon="Refresh" :loading="loading" @click="queryTasks">刷新</el-button>
       </div>
@@ -70,6 +77,32 @@
         <el-radio-button value="ORDER_SUMMARY">订单汇总</el-radio-button>
         <el-radio-button value="TASK_DETAIL">零件任务明细</el-radio-button>
       </el-radio-group>
+      <div v-if="!isMobileLayout" class="production-table-height-actions" :aria-label="productionWorkTableHeightLabel">
+        <span class="production-table-height-label">{{ productionWorkTableHeightLabel }}</span>
+        <el-button-group>
+          <el-button
+            size="small"
+            :icon="Minus"
+            :disabled="activeProductionWorkTableHeight <= productionWorkTableHeightLimits.min"
+            :aria-label="`降低${productionWorkTableHeightLabel}`"
+            @click="adjustActiveProductionWorkTableHeight(-productionWorkTableHeightLimits.step)"
+          />
+          <el-button
+            size="small"
+            :icon="Plus"
+            :disabled="activeProductionWorkTableHeight >= productionWorkTableHeightLimits.max"
+            :aria-label="`提高${productionWorkTableHeightLabel}`"
+            @click="adjustActiveProductionWorkTableHeight(productionWorkTableHeightLimits.step)"
+          />
+          <el-button
+            size="small"
+            :icon="RefreshLeft"
+            :disabled="activeProductionWorkTableHeight === activeProductionWorkTableDefaultHeight"
+            :aria-label="productionWorkTableResetLabel"
+            @click="resetActiveProductionWorkTableHeight"
+          />
+        </el-button-group>
+      </div>
       <div v-if="selectedProductionOrderNo" class="detail-scope">
         <span class="current-order-text">
           当前订单：
@@ -121,7 +154,7 @@
         </div>
         <div>
           <span>当前进度</span>
-          <strong>{{ orderSummaryProgressItems(selectedOrderOverview).join('、') || '-' }}</strong>
+          <strong>{{ orderSummaryProgressText(selectedOrderOverview) }}</strong>
         </div>
       </div>
       <div class="order-overview-progress">
@@ -137,7 +170,7 @@
     </section>
 
     <template v-if="viewMode === 'ORDER_SUMMARY'">
-      <el-tabs v-model="activeOrderStatus" class="mt-16">
+      <el-tabs v-model="activeOrderStatus" class="mt-16" @tab-change="handleOrderStatusTabChange">
         <el-tab-pane label="全部" name="ALL" />
         <el-tab-pane label="待处理" name="ACTIVE" />
         <el-tab-pane label="待确认生产" name="PENDING" />
@@ -148,7 +181,7 @@
       </el-tabs>
 
       <div class="table-card desktop-table">
-        <el-table v-loading="loading" :data="filteredOrderSummaries" max-height="max(300px, calc(100vh - 430px))">
+        <el-table v-loading="loading" :data="filteredOrderSummaries" :max-height="productionWorkTableHeights.orderSummary">
           <el-table-column label="订单号" min-width="170">
             <template #default="{ row }">
               <OrderNoLink :order-no="row.orderNo" />
@@ -175,7 +208,7 @@
           <el-table-column label="当前进度" min-width="220">
             <template #default="{ row }">
               <div class="summary-status-chain">
-                <span v-for="item in orderSummaryProgressItems(row)" :key="item">{{ item }}</span>
+                <span v-for="item in orderSummaryProgressPreviewItems(row)" :key="item">{{ item }}</span>
               </div>
             </template>
           </el-table-column>
@@ -268,7 +301,7 @@
             </div>
             <div class="mobile-field mobile-full">
               <label>当前进度</label>
-              <span>{{ orderSummaryProgressItems(summary).join('、') || '-' }}</span>
+              <span>{{ orderSummaryProgressText(summary) }}</span>
             </div>
             <div v-if="orderSummaryNeedsShortageAttention(summary)" class="mobile-field mobile-full warning">
               <label>待补单</label>
@@ -287,10 +320,21 @@
         </article>
         <div v-if="!filteredOrderSummaries.length && !loading" class="mobile-empty">暂无生产订单</div>
       </div>
+      <div class="production-list-pagination">
+        <span>共 {{ orderSummaryPagination.totalCount }} 条，当前第 {{ orderSummaryPagination.page }} 页</span>
+        <el-pagination
+          background
+          layout="prev, pager, next, jumper"
+          :current-page="orderSummaryPagination.page"
+          :page-size="orderSummaryPagination.limit"
+          :total="orderSummaryPagination.totalCount"
+          @current-change="handleOrderSummaryPageChange"
+        />
+      </div>
     </template>
 
     <template v-else>
-      <el-tabs v-model="activeStatus" class="mt-16">
+      <el-tabs v-model="activeStatus" class="mt-16" @tab-change="handleTaskStatusTabChange">
         <el-tab-pane label="全部" name="ALL" />
         <el-tab-pane label="待确认生产" name="PENDING" />
         <el-tab-pane label="生产中" name="IN_PROGRESS" />
@@ -326,7 +370,7 @@
       <el-table
         v-loading="loading"
         :data="filteredTasks"
-        max-height="max(300px, calc(100vh - 430px))"
+        :max-height="productionWorkTableHeights.taskDetail"
         @selection-change="handleTaskSelectionChange"
       >
         <el-table-column
@@ -570,6 +614,17 @@
       </article>
       <div v-if="!filteredTasks.length && !loading" class="mobile-empty">暂无生产任务</div>
     </div>
+    <div class="production-list-pagination">
+      <span>共 {{ taskPagination.totalCount }} 条，当前第 {{ taskPagination.page }} 页</span>
+      <el-pagination
+        background
+        layout="prev, pager, next, jumper"
+        :current-page="taskPagination.page"
+        :page-size="taskPagination.limit"
+        :total="taskPagination.totalCount"
+        @current-change="handleTaskPageChange"
+      />
+    </div>
     </template>
 
     <el-dialog
@@ -717,13 +772,45 @@
             </el-button>
           </div>
         </div>
-        <el-checkbox-group v-model="batchStartSelectedTaskIds" class="batch-task-list">
+        <div class="batch-start-height-toolbar">
+          <div class="production-table-height-actions" aria-label="批量开始生产任务列表高度">
+            <span class="production-table-height-label">任务列表高度</span>
+            <el-button-group>
+              <el-button
+                size="small"
+                :icon="Minus"
+                :disabled="productionWorkTableHeights.batchStartTasks <= productionWorkTableHeightLimits.min"
+                aria-label="降低批量开始生产任务列表高度"
+                @click="adjustProductionWorkTableHeight('batchStartTasks', -productionWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="productionWorkTableHeights.batchStartTasks >= productionWorkTableHeightLimits.max"
+                aria-label="提高批量开始生产任务列表高度"
+                @click="adjustProductionWorkTableHeight('batchStartTasks', productionWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="productionWorkTableHeights.batchStartTasks === productionWorkTableDefaultHeights.batchStartTasks"
+                aria-label="恢复批量开始生产任务列表默认高度"
+                @click="resetProductionWorkTableHeight('batchStartTasks')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <el-checkbox-group
+          v-model="batchStartSelectedTaskIds"
+          class="batch-task-list"
+          :style="{ maxHeight: productionWorkTableHeightStyle('batchStartTasks') }"
+        >
           <el-checkbox v-for="task in batchStartTasks" :key="task.id" :value="task.id" class="batch-task-item">
             <div>
               <strong>{{ task.partName }}</strong>
               <span>{{ task.productionTaskNo }} / {{ formatQuantity(task.plannedQuantity, task.unit) }}</span>
             </div>
-            <small>{{ task.processSteps.map((step) => processStepDisplay(task, step)).join(' → ') || '未配置生产流程' }}</small>
+            <small>{{ formatProductionProcessSteps(task, '未配置生产流程', ' → ') }}</small>
           </el-checkbox>
         </el-checkbox-group>
       </div>
@@ -743,45 +830,87 @@
     <el-dialog v-model="noticeVisible" title="生产通知" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div v-loading="noticeLoading" class="notice-list">
         <div class="notice-toolbar">
-          <el-radio-group v-model="productionNoticeStatusFilter" size="small">
+          <el-radio-group v-model="productionNoticeStatusFilter" size="small" @change="reloadProductionNoticesFromFirstPage">
             <el-radio-button value="PENDING">待处理 {{ productionNoticeCounts.PENDING }}</el-radio-button>
             <el-radio-button value="ACKNOWLEDGED">历史 {{ productionNoticeCounts.ACKNOWLEDGED }}</el-radio-button>
             <el-radio-button value="ALL">全部 {{ productionNoticeCounts.ALL }}</el-radio-button>
           </el-radio-group>
         </div>
         <div class="notice-filter-grid">
-          <CustomerSelect v-model="productionNoticeFilters.customerId" placeholder="通知客户" width="180px" @change="loadProductionNotices" />
-          <el-input v-model="productionNoticeFilters.orderNo" clearable placeholder="订单号" @keyup.enter="loadProductionNotices" />
-          <el-input v-model="productionNoticeFilters.partCode" clearable placeholder="零件编码" @keyup.enter="loadProductionNotices" />
+          <CustomerSelect v-model="productionNoticeFilters.customerId" placeholder="通知客户" width="180px" @change="reloadProductionNoticesFromFirstPage" />
+          <el-input v-model="productionNoticeFilters.orderNo" clearable placeholder="订单号" @keyup.enter="reloadProductionNoticesFromFirstPage" />
+          <el-input v-model="productionNoticeFilters.partCode" clearable placeholder="零件编码" @keyup.enter="reloadProductionNoticesFromFirstPage" />
           <el-select v-model="productionNoticeFilters.noticeType" placeholder="通知类型">
             <el-option label="全部类型" value="ALL" />
             <el-option v-for="item in productionNoticeTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
           <DateRangeFilter v-model="productionNoticeDateRange" start-placeholder="通知开始" end-placeholder="通知结束" width="220px" />
-          <el-input v-model="productionNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="loadProductionNotices" />
-          <el-button type="primary" @click="loadProductionNotices">查询</el-button>
+          <el-input v-model="productionNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="reloadProductionNoticesFromFirstPage" />
+          <el-button type="primary" @click="reloadProductionNoticesFromFirstPage">查询</el-button>
           <el-button @click="resetProductionNoticeFilters">重置</el-button>
+          <el-button :icon="Download" :loading="productionNoticeExporting" @click="exportProductionNoticesExcel">导出 Excel</el-button>
         </div>
-        <div v-if="filteredProductionNotices.length === 0" class="muted">暂无生产通知</div>
-        <article v-for="notice in filteredProductionNotices" :key="notice.id" class="notice-item">
-          <div>
-            <strong>{{ productionNoticeTitle(notice) }}</strong>
-            <p>{{ notice.reason }}</p>
-            <small>通知时间：{{ formatDateTime(notice.createdAt) }}</small>
-            <small v-if="notice.status === 'ACKNOWLEDGED'" class="notice-ack-text">
-              确认：{{ notice.acknowledgedBy || '-' }} / {{ formatDateTime(notice.acknowledgedAt) }}
-            </small>
+        <div class="production-dialog-list-toolbar">
+          <div class="production-table-height-actions" aria-label="生产通知列表高度">
+            <span class="production-table-height-label">通知列表高度</span>
+            <el-button-group>
+              <el-button
+                size="small"
+                :icon="Minus"
+                :disabled="productionWorkTableHeights.productionNotices <= productionWorkTableHeightLimits.min"
+                aria-label="降低生产通知列表高度"
+                @click="adjustProductionWorkTableHeight('productionNotices', -productionWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="Plus"
+                :disabled="productionWorkTableHeights.productionNotices >= productionWorkTableHeightLimits.max"
+                aria-label="提高生产通知列表高度"
+                @click="adjustProductionWorkTableHeight('productionNotices', productionWorkTableHeightLimits.step)"
+              />
+              <el-button
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="productionWorkTableHeights.productionNotices === productionWorkTableDefaultHeights.productionNotices"
+                aria-label="恢复生产通知列表默认高度"
+                @click="resetProductionWorkTableHeight('productionNotices')"
+              />
+            </el-button-group>
           </div>
-          <el-button
-            v-if="notice.status === 'PENDING'"
-            size="small"
-            type="primary"
-            @click="acknowledgeNotice(notice)"
-          >
-            确认已知晓
-          </el-button>
-          <StatusTag v-else value="ACKNOWLEDGED" compact />
-        </article>
+        </div>
+        <div class="notice-scroll-list" :style="{ maxHeight: productionWorkTableHeightStyle('productionNotices') }">
+          <div v-if="filteredProductionNotices.length === 0" class="muted">暂无生产通知</div>
+          <article v-for="notice in filteredProductionNotices" :key="notice.id" class="notice-item">
+            <div>
+              <strong>{{ productionNoticeTitle(notice) }}</strong>
+              <p :title="productionNoticeReasonTitle(notice)">{{ productionNoticeReasonPreview(notice) }}</p>
+              <small>通知时间：{{ formatDateTime(notice.createdAt) }}</small>
+              <small v-if="notice.status === 'ACKNOWLEDGED'" class="notice-ack-text">
+                确认：{{ notice.acknowledgedBy || '-' }} / {{ formatDateTime(notice.acknowledgedAt) }}
+              </small>
+            </div>
+            <el-button
+              v-if="notice.status === 'PENDING'"
+              size="small"
+              type="primary"
+              @click="acknowledgeNotice(notice)"
+            >
+              确认已知晓
+            </el-button>
+            <StatusTag v-else value="ACKNOWLEDGED" compact />
+          </article>
+        </div>
+        <div class="production-notice-pagination">
+          <span>共 {{ productionNoticePagination.totalCount }} 条，当前第 {{ productionNoticePagination.page }} 页</span>
+          <el-pagination
+            background
+            layout="prev, pager, next, jumper"
+            :current-page="productionNoticePagination.page"
+            :page-size="productionNoticePagination.limit"
+            :total="productionNoticePagination.totalCount"
+            @current-change="handleProductionNoticePageChange"
+          />
+        </div>
       </div>
       <template #footer>
         <el-button @click="noticeVisible = false">关闭</el-button>
@@ -802,8 +931,8 @@
 
     <el-dialog v-model="replenishmentRequestVisible" title="生产报废补单申请" width="min(980px, calc(100vw - 32px))" class="responsive-dialog">
       <div class="replenishment-request-toolbar">
-        <el-radio-group v-model="replenishmentRequestStatusFilter" size="small">
-          <el-radio-button value="ALL">全部 {{ productionReplenishmentRequests.length }}</el-radio-button>
+        <el-radio-group v-model="replenishmentRequestStatusFilter" size="small" @change="reloadReplenishmentRequestsFromFirstPage">
+          <el-radio-button value="ALL">全部 {{ replenishmentRequestCounts.ALL }}</el-radio-button>
           <el-radio-button value="PENDING">待确认 {{ replenishmentRequestCounts.PENDING }}</el-radio-button>
           <el-radio-button value="APPROVED">已生成报废补单 {{ replenishmentRequestCounts.APPROVED }}</el-radio-button>
           <el-radio-button value="REJECTED">已驳回 {{ replenishmentRequestCounts.REJECTED }}</el-radio-button>
@@ -817,8 +946,43 @@
         />
         <el-button type="primary" size="small" @click="queryReplenishmentRequests">查询</el-button>
         <el-button size="small" @click="resetReplenishmentRequestFilters">重置</el-button>
+        <el-button size="small" :icon="Download" :loading="replenishmentRequestExporting" @click="exportReplenishmentRequestsExcel">
+          导出 Excel
+        </el-button>
       </div>
-      <div v-loading="replenishmentRequestLoading" class="replenishment-request-list">
+      <div class="production-dialog-list-toolbar">
+        <div class="production-table-height-actions" aria-label="生产报废补单申请列表高度">
+          <span class="production-table-height-label">申请列表高度</span>
+          <el-button-group>
+            <el-button
+              size="small"
+              :icon="Minus"
+              :disabled="productionWorkTableHeights.replenishmentRequests <= productionWorkTableHeightLimits.min"
+              aria-label="降低生产报废补单申请列表高度"
+              @click="adjustProductionWorkTableHeight('replenishmentRequests', -productionWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="Plus"
+              :disabled="productionWorkTableHeights.replenishmentRequests >= productionWorkTableHeightLimits.max"
+              aria-label="提高生产报废补单申请列表高度"
+              @click="adjustProductionWorkTableHeight('replenishmentRequests', productionWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="productionWorkTableHeights.replenishmentRequests === productionWorkTableDefaultHeights.replenishmentRequests"
+              aria-label="恢复生产报废补单申请列表默认高度"
+              @click="resetProductionWorkTableHeight('replenishmentRequests')"
+            />
+          </el-button-group>
+        </div>
+      </div>
+      <div
+        v-loading="replenishmentRequestLoading"
+        class="replenishment-request-list"
+        :style="{ maxHeight: productionWorkTableHeightStyle('replenishmentRequests') }"
+      >
         <div v-if="filteredProductionReplenishmentRequests.length === 0" class="muted">暂无生产报废补单申请</div>
         <article
           v-for="request in filteredProductionReplenishmentRequests"
@@ -842,13 +1006,17 @@
               <p><span>申请补齐</span>{{ formatQuantity(request.requestQuantity, request.unit) }}</p>
               <p><span>申请人员</span>{{ request.requestedByName || request.requestedByCode || '-' }}</p>
             </div>
-            <p class="replenishment-request-reason">{{ request.reason }}</p>
+            <p class="replenishment-request-reason" :title="replenishmentRequestReasonTitle(request)">
+              {{ replenishmentRequestReasonPreview(request) }}
+            </p>
             <small>
               来源：{{ replenishmentSourceTypeText(request.sourceType) }} / 创建时间：{{ formatDateTime(request.createdAt) }}
               <template v-if="request.reviewedAt"> / 审核时间：{{ formatDateTime(request.reviewedAt) }}</template>
               <template v-if="request.replenishmentTaskNo"> / 报废补单任务：{{ request.replenishmentTaskNo }}</template>
               <template v-if="request.supervisorName"> / 主管：{{ request.supervisorName }}</template>
-              <template v-if="request.supervisorRemark"> / 审核说明：{{ request.supervisorRemark }}</template>
+              <template v-if="request.supervisorRemark">
+                / 审核说明：<span :title="replenishmentSupervisorRemarkTitle(request)">{{ replenishmentSupervisorRemarkPreview(request) }}</span>
+              </template>
             </small>
           </div>
           <div class="replenishment-request-actions">
@@ -876,6 +1044,17 @@
             <span v-else class="muted">{{ replenishmentRequestStatusText(request.status) }}</span>
           </div>
         </article>
+      </div>
+      <div class="production-list-pagination">
+        <span>共 {{ replenishmentRequestPagination.totalCount }} 条，当前第 {{ replenishmentRequestPagination.page }} 页</span>
+        <el-pagination
+          background
+          layout="prev, pager, next, jumper"
+          :current-page="replenishmentRequestPagination.page"
+          :page-size="replenishmentRequestPagination.limit"
+          :total="replenishmentRequestPagination.totalCount"
+          @current-change="handleReplenishmentRequestPageChange"
+        />
       </div>
       <template #footer>
         <el-button @click="replenishmentRequestVisible = false">关闭</el-button>
@@ -962,12 +1141,41 @@
         </div>
         <div class="filter-field compact">
           <label>订单</label>
-          <OrderSelect v-model="scrapFilters.orderNo" :orders="scrapOrderOptions" placeholder="全部订单" width="260px" @change="loadScrapRecords" />
+          <OrderSelect v-model="scrapFilters.orderNo" :orders="scrapOrderOptions" placeholder="全部订单" width="260px" @change="reloadScrapRecordsFromFirstPage" />
         </div>
-        <el-button type="primary" :loading="scrapLoading" @click="loadScrapRecords">查询</el-button>
+        <el-button type="primary" :loading="scrapLoading" @click="reloadScrapRecordsFromFirstPage">查询</el-button>
         <el-button @click="resetScrapFilters">重置</el-button>
+        <el-button :icon="Download" :loading="scrapExporting" @click="exportScrapRecordsExcel">导出 Excel</el-button>
       </div>
-      <el-table v-loading="scrapLoading" :data="scrapRecords" max-height="520px">
+      <div class="production-dialog-table-toolbar">
+        <div class="production-table-height-actions" aria-label="生产报废统计表格高度">
+          <span class="production-table-height-label">生产报废统计表格高度</span>
+          <el-button-group>
+            <el-button
+              size="small"
+              :icon="Minus"
+              :disabled="productionWorkTableHeights.scrapRecords <= productionWorkTableHeightLimits.min"
+              aria-label="降低生产报废统计表格高度"
+              @click="adjustProductionWorkTableHeight('scrapRecords', -productionWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="Plus"
+              :disabled="productionWorkTableHeights.scrapRecords >= productionWorkTableHeightLimits.max"
+              aria-label="提高生产报废统计表格高度"
+              @click="adjustProductionWorkTableHeight('scrapRecords', productionWorkTableHeightLimits.step)"
+            />
+            <el-button
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="productionWorkTableHeights.scrapRecords === productionWorkTableDefaultHeights.scrapRecords"
+              aria-label="恢复生产报废统计表格默认高度"
+              @click="resetProductionWorkTableHeight('scrapRecords')"
+            />
+          </el-button-group>
+        </div>
+      </div>
+      <el-table v-loading="scrapLoading" :data="scrapRecords" :max-height="productionWorkTableHeights.scrapRecords">
         <el-table-column prop="scrapNo" label="报废记录号" min-width="180" />
         <el-table-column label="订单号" min-width="150">
           <template #default="{ row }">
@@ -980,11 +1188,26 @@
         <el-table-column label="报废数量" min-width="110">
           <template #default="{ row }">{{ formatQuantity(row.quantity, row.unit) }}</template>
         </el-table-column>
-        <el-table-column prop="reason" label="报废原因" min-width="260" show-overflow-tooltip />
+        <el-table-column label="报废原因" min-width="260">
+          <template #default="{ row }">
+            <span :title="scrapRecordReasonTitle(row)">{{ scrapRecordReasonPreview(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="日期" min-width="170">
           <template #default="{ row }">{{ formatDateTime(row.recordDate) }}</template>
         </el-table-column>
       </el-table>
+      <div class="production-list-pagination">
+        <span>共 {{ scrapRecordPagination.totalCount }} 条，当前第 {{ scrapRecordPagination.page }} 页</span>
+        <el-pagination
+          background
+          layout="prev, pager, next, jumper"
+          :current-page="scrapRecordPagination.page"
+          :page-size="scrapRecordPagination.limit"
+          :total="scrapRecordPagination.totalCount"
+          @current-change="handleScrapRecordPageChange"
+        />
+      </div>
       <template #footer>
         <el-button @click="scrapVisible = false">关闭</el-button>
       </template>
@@ -1024,6 +1247,14 @@
           <div>
             <label>图纸版本</label>
             <strong>{{ activeTask.drawingVersion || '-' }}</strong>
+          </div>
+          <div>
+            <label>图纸日期</label>
+            <strong>{{ activeTask.drawingDate || '-' }}</strong>
+          </div>
+          <div>
+            <label>图纸状态</label>
+            <strong>{{ activeTask.drawingStatus || '-' }}</strong>
           </div>
           <div>
             <label>零件厚度</label>
@@ -1072,7 +1303,7 @@
           <div v-else class="drawing-sheet">
             <div class="drawing-sheet-part">{{ activeTask.partName }}</div>
             <div class="drawing-sheet-code">
-              {{ activeTask.partCode }} / {{ activeTask.drawingNo || '未上传图纸' }} / 版本 {{ activeTask.drawingVersion || '-' }}
+              {{ activeTask.partCode }} / {{ formatProductionTaskDrawingText(activeTask) }}
             </div>
             <div class="drawing-sheet-lines">
               <span></span>
@@ -1240,10 +1471,16 @@
               <small>{{ formatDateTime(log.createdAt) }}</small>
             </div>
             <div v-if="log.beforeSnapshot" class="process-log-change">
-              <p><span>修改前</span>{{ formatProcessLog(log.beforeSnapshot) }}</p>
-              <p><span>修改后</span>{{ formatProcessLog(log.afterSnapshot) }}</p>
+              <p>
+                <span class="process-log-label">修改前</span>
+                <span class="process-log-text" :title="formatProcessLogTitle(log.beforeSnapshot)">{{ formatProcessLogPreview(log.beforeSnapshot) }}</span>
+              </p>
+              <p>
+                <span class="process-log-label">修改后</span>
+                <span class="process-log-text" :title="formatProcessLogTitle(log.afterSnapshot)">{{ formatProcessLogPreview(log.afterSnapshot) }}</span>
+              </p>
             </div>
-            <p v-else class="process-log-single">{{ formatProcessLog(log.afterSnapshot) }}</p>
+            <p v-else class="process-log-single" :title="formatProcessLogTitle(log.afterSnapshot)">{{ formatProcessLogPreview(log.afterSnapshot) }}</p>
           </div>
         </div>
       </div>
@@ -1273,7 +1510,7 @@
         <el-alert :title="processQuantityWarningText" type="warning" :closable="false" show-icon />
         <p>
           <span>填写原因</span>
-          <strong>{{ processForm.quantityOverrideReason }}</strong>
+          <strong :title="quantityOverrideReasonTitle">{{ quantityOverrideReasonPreview }}</strong>
         </p>
       </div>
       <template #footer>
@@ -1702,7 +1939,7 @@
                 <td>{{ row.partCount }} / {{ row.taskCount }}</td>
                 <td>{{ orderSummaryQuantityText(row) }}</td>
                 <td>{{ row.progressPercent }}%</td>
-                <td>{{ orderSummaryProgressItems(row).join('、') || '-' }}</td>
+                <td>{{ orderSummaryProgressText(row) }}</td>
                 <td>{{ productionStatusLabel(row.status) }}</td>
               </tr>
             </tbody>
@@ -1779,7 +2016,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { Bell, Camera, Document, Download, Printer, Refresh } from '@element-plus/icons-vue';
+import { Bell, Camera, Document, Download, Minus, Plus, Printer, Refresh, RefreshLeft } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DateRangeFilter from '../components/DateRangeFilter.vue';
@@ -1806,12 +2043,19 @@ import type {
 } from '../types/erp';
 import { normalizeDisplayFileName } from '../utils/fileNames';
 import { formatDate, formatDateTime, formatQuantity } from '../utils/format';
-import { downloadHtmlAsExcel, escapeHtml, formatFileDateTime, openPrintHtml } from '../utils/tableExport';
+import { escapeHtml, formatFileDateTime, openPrintHtml } from '../utils/tableExport';
 
 type ProductionDisplayStatus = ProductionOrderSummaryStatus;
 type ProductionViewMode = 'ORDER_SUMMARY' | 'TASK_DETAIL';
 type ProductionOrderStatusFilter = ProductionDisplayStatus | 'ACTIVE' | 'ALL';
 type ProductionStatCardKey = ProductionDisplayStatus | 'ACTIVE' | 'ALL';
+type ProductionWorkTableKey =
+  | 'orderSummary'
+  | 'taskDetail'
+  | 'scrapRecords'
+  | 'batchStartTasks'
+  | 'productionNotices'
+  | 'replenishmentRequests';
 type BatchStartTask = ProductionOrderSummaryTask &
   Partial<Pick<ProductionTask, 'status' | 'orderStatus' | 'inventoryBatchNo' | 'processCompletions'>>;
 
@@ -1824,8 +2068,10 @@ const orderSummaries = ref<ProductionOrderSummary[]>([]);
 const dateRange = ref<string[]>([]);
 const selectedCustomerName = ref('');
 const loading = ref(false);
+const productionExporting = ref(false);
 const noticeVisible = ref(false);
 const noticeLoading = ref(false);
+const productionNoticeExporting = ref(false);
 const acknowledgeVisible = ref(false);
 const acknowledgeSaving = ref(false);
 const startConfirmVisible = ref(false);
@@ -1835,18 +2081,87 @@ const batchStartSaving = ref(false);
 const productionNotices = ref<ProductionNotice[]>([]);
 const productionNoticeStatusFilter = ref<ProductionNoticeStatus | 'ALL'>('PENDING');
 const productionNoticeDateRange = ref<string[]>([]);
+const productionNoticeDefaultLimit = Number(20);
+const productionNoticePagination = reactive({
+  page: 1,
+  limit: productionNoticeDefaultLimit,
+  totalCount: 0
+});
+const productionNoticeServerCounts = reactive({
+  ALL: 0,
+  PENDING: 0,
+  ACKNOWLEDGED: 0
+});
 const activeProductionNotice = ref<ProductionNotice>();
 const replenishmentRequestVisible = ref(false);
 const replenishmentRequestLoading = ref(false);
+const replenishmentRequestExporting = ref(false);
 const productionReplenishmentRequests = ref<ProductionReplenishmentRequest[]>([]);
 const replenishmentRequestStatusFilter = ref<ProductionReplenishmentRequest['status'] | 'ALL'>('PENDING');
 const replenishmentRequestKeyword = ref('');
+const replenishmentRequestDefaultLimit = Number(20);
+const replenishmentRequestPagination = reactive({
+  page: 1,
+  limit: replenishmentRequestDefaultLimit,
+  totalCount: 0
+});
+const replenishmentRequestServerCounts = reactive({
+  ALL: 0,
+  PENDING: 0,
+  APPROVED: 0,
+  REJECTED: 0
+});
 const replenishmentRejectVisible = ref(false);
 const replenishmentRejectSaving = ref(false);
 const activeReplenishmentRejectRequest = ref<ProductionReplenishmentRequest>();
 const scrapVisible = ref(false);
 const scrapLoading = ref(false);
+const scrapExporting = ref(false);
 const scrapRecords = ref<ProductionScrapRecord[]>([]);
+const scrapRecordDefaultLimit = Number(20);
+const scrapRecordPagination = reactive({
+  page: 1,
+  limit: scrapRecordDefaultLimit,
+  totalCount: 0
+});
+const productionMainDefaultLimit = Number(20);
+const orderSummaryPagination = reactive({
+  page: 1,
+  limit: productionMainDefaultLimit,
+  totalCount: 0
+});
+const taskPagination = reactive({
+  page: 1,
+  limit: productionMainDefaultLimit,
+  totalCount: 0
+});
+const productionTaskServerCounts = reactive<Record<ProductionDisplayStatus, number>>({
+  PENDING: 0,
+  IN_PROGRESS: 0,
+  WAITING_CONFIRMATION: 0,
+  READY_TO_COMPLETE: 0,
+  COMPLETED: 0,
+  RECEIVED: 0,
+  STORED: 0,
+  CANCELLED: 0
+});
+const productionOrderSummaryServerCounts = reactive<Record<ProductionDisplayStatus, number>>({
+  PENDING: 0,
+  IN_PROGRESS: 0,
+  WAITING_CONFIRMATION: 0,
+  READY_TO_COMPLETE: 0,
+  COMPLETED: 0,
+  RECEIVED: 0,
+  STORED: 0,
+  CANCELLED: 0
+});
+const productionStatusCountKeys: ProductionDisplayStatus[] = [
+  'PENDING',
+  'IN_PROGRESS',
+  'READY_TO_COMPLETE',
+  'COMPLETED',
+  'RECEIVED'
+];
 const scrapOrderOptions = ref<OrderSummary[]>([]);
 const scrapDateRange = ref<string[]>([]);
 const expandedMobileProductionOrderIds = ref<string[]>([]);
@@ -1888,6 +2203,24 @@ const activeOrderStatus = ref<ProductionOrderStatusFilter>('ALL');
 const viewMode = ref<ProductionViewMode>('ORDER_SUMMARY');
 const selectedProductionOrderNo = ref('');
 const printDateTime = ref('');
+const productionWorkTableHeightLimits = {
+  min: 320,
+  max: 860,
+  step: 80
+};
+const productionWorkTableDefaultHeights = {
+  orderSummary: 520,
+  taskDetail: 560,
+  scrapRecords: 520,
+  batchStartTasks: 320,
+  productionNotices: 560,
+  replenishmentRequests: 560
+} satisfies Record<ProductionWorkTableKey, number>;
+const productionWorkTableHeightStorageKey = 'baisheng.erp.productionWorkTableHeights.v1';
+// 生产页面表格、通知和现场任务列表高度只保存为本机 UI 偏好，不写入订单、生产任务、通知状态或库存业务数据。
+const productionWorkTableHeights = reactive<Record<ProductionWorkTableKey, number>>({
+  ...productionWorkTableDefaultHeights
+});
 let operatorSearchRequestSequence = 0;
 let quantityOverrideResolver: ((confirmed: boolean) => void) | undefined;
 const operatorSearchRequestByScope = reactive<Record<string, number>>({});
@@ -1923,6 +2256,78 @@ const scrapFilters = reactive<{
   customerId?: string;
   orderNo?: string;
 }>({});
+
+const activeProductionWorkTableKey = computed<ProductionWorkTableKey>(() =>
+  viewMode.value === 'ORDER_SUMMARY' ? 'orderSummary' : 'taskDetail'
+);
+const activeProductionWorkTableHeight = computed(() => productionWorkTableHeights[activeProductionWorkTableKey.value]);
+const activeProductionWorkTableDefaultHeight = computed(
+  () => productionWorkTableDefaultHeights[activeProductionWorkTableKey.value]
+);
+const productionWorkTableHeightLabel = computed(() =>
+  viewMode.value === 'ORDER_SUMMARY' ? '订单汇总表格高度' : '零件任务明细表格高度'
+);
+const productionWorkTableResetLabel = computed(() =>
+  viewMode.value === 'ORDER_SUMMARY' ? '恢复订单汇总表格默认高度' : '恢复零件任务明细表格默认高度'
+);
+
+function clampProductionWorkTableHeight(value: number) {
+  return Math.min(productionWorkTableHeightLimits.max, Math.max(productionWorkTableHeightLimits.min, value));
+}
+
+function adjustProductionWorkTableHeight(key: ProductionWorkTableKey, delta: number) {
+  productionWorkTableHeights[key] = clampProductionWorkTableHeight(productionWorkTableHeights[key] + delta);
+}
+
+function adjustActiveProductionWorkTableHeight(delta: number) {
+  adjustProductionWorkTableHeight(activeProductionWorkTableKey.value, delta);
+}
+
+function resetProductionWorkTableHeight(key: ProductionWorkTableKey) {
+  productionWorkTableHeights[key] = productionWorkTableDefaultHeights[key];
+}
+
+function resetActiveProductionWorkTableHeight() {
+  resetProductionWorkTableHeight(activeProductionWorkTableKey.value);
+}
+
+function productionWorkTableHeightStyle(key: ProductionWorkTableKey) {
+  return `${productionWorkTableHeights[key]}px`;
+}
+
+function restoreProductionWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(productionWorkTableHeightStorageKey);
+    const savedValue = rawValue ? JSON.parse(rawValue) : {};
+    for (const key of Object.keys(productionWorkTableDefaultHeights) as ProductionWorkTableKey[]) {
+      const savedHeight = Number(savedValue[key]);
+      if (Number.isFinite(savedHeight)) {
+        productionWorkTableHeights[key] = clampProductionWorkTableHeight(savedHeight);
+      }
+    }
+  } catch {
+    productionWorkTableHeights.orderSummary = productionWorkTableDefaultHeights.orderSummary;
+    productionWorkTableHeights.taskDetail = productionWorkTableDefaultHeights.taskDetail;
+    productionWorkTableHeights.scrapRecords = productionWorkTableDefaultHeights.scrapRecords;
+    productionWorkTableHeights.batchStartTasks = productionWorkTableDefaultHeights.batchStartTasks;
+    productionWorkTableHeights.productionNotices = productionWorkTableDefaultHeights.productionNotices;
+    productionWorkTableHeights.replenishmentRequests = productionWorkTableDefaultHeights.replenishmentRequests;
+  }
+}
+
+function saveProductionWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(productionWorkTableHeightStorageKey, JSON.stringify(productionWorkTableHeights));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断开始生产、工序确认、完成确认、通知或补单处理。
+  }
+}
 
 const processForm = reactive({
   isCompleted: true,
@@ -1980,62 +2385,32 @@ const withdrawHandlingQuantityMax = computed(() =>
   activeWithdrawTask.value ? defaultWithdrawHandlingQuantity(activeWithdrawTask.value) : 0
 );
 
-const counts = computed(() => productionTaskStatusCounts(scopedTasks.value));
+const counts = computed(() => ({
+  PENDING: productionTaskServerCounts.PENDING,
+  IN_PROGRESS: productionTaskServerCounts.IN_PROGRESS,
+  WAITING_CONFIRMATION: productionTaskServerCounts.WAITING_CONFIRMATION,
+  READY_TO_COMPLETE: productionTaskServerCounts.READY_TO_COMPLETE,
+  COMPLETED: productionTaskServerCounts.COMPLETED,
+  RECEIVED: productionTaskServerCounts.RECEIVED,
+  STORED: productionTaskServerCounts.STORED,
+  CANCELLED: productionTaskServerCounts.CANCELLED
+}));
 const orderCounts = computed(() => ({
-  PENDING: orderSummaries.value.filter((summary) => summary.status === 'PENDING').length,
-  IN_PROGRESS: orderSummaries.value.filter((summary) => summary.status === 'IN_PROGRESS').length,
-  WAITING_CONFIRMATION: orderSummaries.value.filter((summary) => summary.status === 'WAITING_CONFIRMATION').length,
-  READY_TO_COMPLETE: orderSummaries.value.filter((summary) => summary.status === 'READY_TO_COMPLETE').length,
-  COMPLETED: orderSummaries.value.filter((summary) => summary.status === 'COMPLETED').length,
-  RECEIVED: orderSummaries.value.filter((summary) => summary.status === 'RECEIVED').length,
-  STORED: orderSummaries.value.filter((summary) => summary.status === 'STORED').length,
-  CANCELLED: orderSummaries.value.filter((summary) => summary.status === 'CANCELLED').length
+  PENDING: productionOrderSummaryServerCounts.PENDING,
+  IN_PROGRESS: productionOrderSummaryServerCounts.IN_PROGRESS,
+  WAITING_CONFIRMATION: productionOrderSummaryServerCounts.WAITING_CONFIRMATION,
+  READY_TO_COMPLETE: productionOrderSummaryServerCounts.READY_TO_COMPLETE,
+  COMPLETED: productionOrderSummaryServerCounts.COMPLETED,
+  RECEIVED: productionOrderSummaryServerCounts.RECEIVED,
+  STORED: productionOrderSummaryServerCounts.STORED,
+  CANCELLED: productionOrderSummaryServerCounts.CANCELLED
 }));
-const pendingNoticeCount = computed(() => productionNotices.value.filter((notice) => notice.status === 'PENDING').length);
-const productionNoticeCounts = computed(() => {
-  const pending = productionNotices.value.filter((notice) => notice.status === 'PENDING').length;
-  const acknowledged = productionNotices.value.filter((notice) => notice.status === 'ACKNOWLEDGED').length;
-  return { ALL: productionNotices.value.length, PENDING: pending, ACKNOWLEDGED: acknowledged };
-});
-const filteredProductionNotices = computed(() =>
-  productionNoticeStatusFilter.value === 'ALL'
-    ? productionNotices.value
-    : productionNotices.value.filter((notice) => notice.status === productionNoticeStatusFilter.value)
-);
-const pendingReplenishmentRequestCount = computed(
-  () => productionReplenishmentRequests.value.filter((request) => request.status === 'PENDING').length
-);
-const replenishmentRequestCounts = computed(() => ({
-  PENDING: productionReplenishmentRequests.value.filter((request) => request.status === 'PENDING').length,
-  APPROVED: productionReplenishmentRequests.value.filter((request) => request.status === 'APPROVED').length,
-  REJECTED: productionReplenishmentRequests.value.filter((request) => request.status === 'REJECTED').length
-}));
-const filteredProductionReplenishmentRequests = computed(() => {
-  const keyword = replenishmentRequestKeyword.value.trim().toLowerCase();
-  return productionReplenishmentRequests.value.filter((request) => {
-    if (replenishmentRequestStatusFilter.value !== 'ALL' && request.status !== replenishmentRequestStatusFilter.value) {
-      return false;
-    }
-    if (!keyword) {
-      return true;
-    }
-    return [
-      request.requestNo,
-      request.orderNo,
-      request.productionTaskNo,
-      request.partCode,
-      request.partName,
-      request.reason,
-      request.requestedByCode,
-      request.requestedByName,
-      request.supervisorName,
-      request.supervisorRemark,
-      request.replenishmentTaskNo
-    ]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(keyword));
-  });
-});
+const pendingNoticeCount = computed(() => productionNoticeServerCounts.PENDING);
+const productionNoticeCounts = computed(() => productionNoticeServerCounts);
+const filteredProductionNotices = computed(() => productionNotices.value);
+const pendingReplenishmentRequestCount = computed(() => replenishmentRequestServerCounts.PENDING);
+const replenishmentRequestCounts = computed(() => replenishmentRequestServerCounts);
+const filteredProductionReplenishmentRequests = computed(() => productionReplenishmentRequests.value);
 
 const filteredTasks = computed(() => {
   const rows = scopedTasks.value;
@@ -2127,12 +2502,68 @@ function isProductionStatActive(status: ProductionStatCardKey) {
 function handleProductionStatClick(status: ProductionStatCardKey) {
   if (viewMode.value === 'ORDER_SUMMARY') {
     activeOrderStatus.value = status;
+    void reloadOrderSummariesFromFirstPage();
     return;
   }
   if (status === 'ACTIVE') {
     return;
   }
   activeStatus.value = status;
+  void reloadTasksFromFirstPage();
+}
+
+async function reloadOrderSummariesFromFirstPage() {
+  loading.value = true;
+  try {
+    orderSummaryPagination.page = 1;
+    expandedMobileProductionOrderIds.value = [];
+    await loadOrderSummaries();
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function reloadTasksFromFirstPage() {
+  loading.value = true;
+  try {
+    taskPagination.page = 1;
+    selectedTaskRows.value = [];
+    expandedMobileProductionTaskIds.value = [];
+    await loadTasks();
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function handleOrderStatusTabChange() {
+  await reloadOrderSummariesFromFirstPage();
+}
+
+async function handleTaskStatusTabChange() {
+  await reloadTasksFromFirstPage();
+}
+
+async function handleOrderSummaryPageChange(page: number) {
+  loading.value = true;
+  try {
+    orderSummaryPagination.page = page;
+    expandedMobileProductionOrderIds.value = [];
+    await loadOrderSummaries();
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function handleTaskPageChange(page: number) {
+  loading.value = true;
+  try {
+    taskPagination.page = page;
+    selectedTaskRows.value = [];
+    expandedMobileProductionTaskIds.value = [];
+    await loadTasks();
+  } finally {
+    loading.value = false;
+  }
 }
 
 function isMobileProductionOrderExpanded(orderId: string) {
@@ -2221,7 +2652,7 @@ const startProcessText = computed(() => {
   if (task.processSteps.length === 0) {
     return '未配置生产流程';
   }
-  return task.processSteps.map((step) => processStepDisplay(task, step)).join('、');
+  return formatProductionProcessSteps(task);
 });
 
 const finalOperatorOptionRows = computed(() => operatorOptionRowsWithSelectedCodes(finalForm.operatorCodes, finalOperatorScope));
@@ -2325,6 +2756,9 @@ const processQuantityWarningText = computed(() => {
   return `此工序应该是 ${expectedText}，因为${previousText}少了 ${shortageText}，请与前一道工序确认实际数量。`;
 });
 
+const quantityOverrideReasonPreview = computed(() => formatLongTextPreview(processForm.quantityOverrideReason, 42, '-'));
+const quantityOverrideReasonTitle = computed(() => String(processForm.quantityOverrideReason || '').trim() || '-');
+
 const isFinalProcessSelected = computed(() => {
   if (!activeTask.value || !processForm.isCompleted) {
     return false;
@@ -2381,6 +2815,31 @@ function taskQueryParams() {
   };
 }
 
+function productionTaskDisplayStatusFilter() {
+  return activeStatus.value === 'ALL' ? undefined : activeStatus.value;
+}
+
+function productionOrderSummaryDisplayStatusFilter() {
+  return activeOrderStatus.value === 'ALL' ? undefined : activeOrderStatus.value;
+}
+
+function resetProductionTaskCounts() {
+  for (const key of Object.keys(productionTaskServerCounts) as ProductionDisplayStatus[]) {
+    productionTaskServerCounts[key] = 0;
+  }
+}
+
+function resetProductionOrderSummaryCounts() {
+  for (const key of Object.keys(productionOrderSummaryServerCounts) as ProductionDisplayStatus[]) {
+    productionOrderSummaryServerCounts[key] = 0;
+  }
+}
+
+function resetProductionMainPagination() {
+  orderSummaryPagination.page = 1;
+  taskPagination.page = 1;
+}
+
 let selectedCustomerNameRequestSeq = 0;
 async function loadSelectedCustomerName() {
   const customerId = filters.customerId;
@@ -2433,9 +2892,37 @@ async function loadOrderOptions() {
 async function loadTasks() {
   try {
     // 生产任务按客户、订单日期和订单号过滤，避免任务列表混在一起难以操作。
-    tasks.value = await erpApi.productionTasks(taskQueryParams());
+    const offset = (taskPagination.page - 1) * taskPagination.limit;
+    const baseFilters = taskQueryParams();
+    const [result, ...countResults] = await Promise.all([
+      erpApi.productionTasksPage({
+        ...baseFilters,
+        displayStatus: productionTaskDisplayStatusFilter(),
+        limit: taskPagination.limit,
+        offset
+      }),
+      ...productionStatusCountKeys.map((displayStatus) =>
+        erpApi.productionTasksPage({ ...baseFilters, displayStatus, limit: Number(1), offset: Number(0) })
+      )
+    ]);
+    // 生产主列表只加载当前页；状态卡数量通过后端分页 totalCount 计算，避免当前页统计误导车间处理。
+    tasks.value = result.items;
+    taskPagination.totalCount = result.totalCount;
+    taskPagination.limit = result.limit;
+    taskPagination.page = Math.floor(result.offset / result.limit) + 1;
+    resetProductionTaskCounts();
+    productionStatusCountKeys.forEach((displayStatus, index) => {
+      productionTaskServerCounts[displayStatus] = countResults[index]?.totalCount || 0;
+    });
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && taskPagination.page > maxPage) {
+      taskPagination.page = maxPage;
+      await loadTasks();
+    }
   } catch (error) {
     tasks.value = [];
+    taskPagination.totalCount = 0;
+    resetProductionTaskCounts();
     selectedTaskRows.value = [];
     expandedMobileProductionTaskIds.value = [];
     ElMessage.error(error instanceof Error ? error.message : '生产任务加载失败，请确认后端服务和筛选条件');
@@ -2444,9 +2931,36 @@ async function loadTasks() {
 
 async function loadOrderSummaries() {
   try {
-    orderSummaries.value = await erpApi.productionOrderSummaries(taskQueryParams());
+    const offset = (orderSummaryPagination.page - 1) * orderSummaryPagination.limit;
+    const baseFilters = taskQueryParams();
+    const [result, ...countResults] = await Promise.all([
+      erpApi.productionOrderSummariesPage({
+        ...baseFilters,
+        displayStatus: productionOrderSummaryDisplayStatusFilter(),
+        limit: orderSummaryPagination.limit,
+        offset
+      }),
+      ...productionStatusCountKeys.map((displayStatus) =>
+        erpApi.productionOrderSummariesPage({ ...baseFilters, displayStatus, limit: Number(1), offset: Number(0) })
+      )
+    ]);
+    orderSummaries.value = result.items;
+    orderSummaryPagination.totalCount = result.totalCount;
+    orderSummaryPagination.limit = result.limit;
+    orderSummaryPagination.page = Math.floor(result.offset / result.limit) + 1;
+    resetProductionOrderSummaryCounts();
+    productionStatusCountKeys.forEach((displayStatus, index) => {
+      productionOrderSummaryServerCounts[displayStatus] = countResults[index]?.totalCount || 0;
+    });
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && orderSummaryPagination.page > maxPage) {
+      orderSummaryPagination.page = maxPage;
+      await loadOrderSummaries();
+    }
   } catch (error) {
     orderSummaries.value = [];
+    orderSummaryPagination.totalCount = 0;
+    resetProductionOrderSummaryCounts();
     selectedProductionOrderNo.value = '';
     selectedTaskRows.value = [];
     expandedMobileProductionOrderIds.value = [];
@@ -2457,21 +2971,80 @@ async function loadOrderSummaries() {
 async function loadProductionNotices() {
   noticeLoading.value = true;
   try {
-    productionNotices.value = await erpApi.productionNotices(undefined, 'PRODUCTION', {
-      target: 'PRODUCTION',
-      customerId: productionNoticeFilters.customerId,
-      orderNo: productionNoticeFilters.orderNo,
-      partCode: productionNoticeFilters.partCode,
-      keyword: productionNoticeFilters.keyword,
-      noticeType: productionNoticeFilters.noticeType === 'ALL' ? undefined : productionNoticeFilters.noticeType,
-      dateFrom: productionNoticeDateRange.value[0],
-      dateTo: productionNoticeDateRange.value[1]
-    });
+    const status = productionNoticeStatusFilter.value === 'ALL' ? undefined : productionNoticeStatusFilter.value;
+    const offset = (productionNoticePagination.page - 1) * productionNoticePagination.limit;
+    const baseFilters = productionNoticeBaseFilters();
+    const [result, allCount, pendingCount, acknowledgedCount] = await Promise.all([
+      erpApi.productionNoticesPage(status, 'PRODUCTION', {
+        ...baseFilters,
+        limit: productionNoticePagination.limit,
+        offset
+      }),
+      erpApi.productionNoticesPage(undefined, 'PRODUCTION', { ...baseFilters, limit: Number(1), offset: Number(0) }),
+      erpApi.productionNoticesPage('PENDING', 'PRODUCTION', { ...baseFilters, limit: Number(1), offset: Number(0) }),
+      erpApi.productionNoticesPage('ACKNOWLEDGED', 'PRODUCTION', { ...baseFilters, limit: Number(1), offset: Number(0) })
+    ]);
+    productionNotices.value = result.items;
+    productionNoticePagination.totalCount = result.totalCount;
+    productionNoticePagination.limit = result.limit;
+    productionNoticePagination.page = Math.floor(result.offset / result.limit) + 1;
+    productionNoticeServerCounts.ALL = allCount.totalCount;
+    productionNoticeServerCounts.PENDING = pendingCount.totalCount;
+    productionNoticeServerCounts.ACKNOWLEDGED = acknowledgedCount.totalCount;
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && productionNoticePagination.page > maxPage) {
+      productionNoticePagination.page = maxPage;
+      await loadProductionNotices();
+    }
   } catch (error) {
     productionNotices.value = [];
+    productionNoticePagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '生产通知加载失败，请确认后端服务');
   } finally {
     noticeLoading.value = false;
+  }
+}
+
+function productionNoticeBaseFilters() {
+  return {
+    target: 'PRODUCTION' as const,
+    customerId: productionNoticeFilters.customerId,
+    orderNo: productionNoticeFilters.orderNo,
+    partCode: productionNoticeFilters.partCode,
+    keyword: productionNoticeFilters.keyword,
+    noticeType: productionNoticeFilters.noticeType === 'ALL' ? undefined : productionNoticeFilters.noticeType,
+    dateFrom: productionNoticeDateRange.value[0],
+    dateTo: productionNoticeDateRange.value[1]
+  };
+}
+
+function productionNoticeExportFilters() {
+  return {
+    target: 'PRODUCTION' as const,
+    status: productionNoticeStatusFilter.value === 'ALL' ? undefined : productionNoticeStatusFilter.value,
+    customerId: productionNoticeFilters.customerId,
+    orderNo: productionNoticeFilters.orderNo,
+    partCode: productionNoticeFilters.partCode,
+    keyword: productionNoticeFilters.keyword,
+    noticeType: productionNoticeFilters.noticeType === 'ALL' ? undefined : productionNoticeFilters.noticeType,
+    dateFrom: productionNoticeDateRange.value[0],
+    dateTo: productionNoticeDateRange.value[1]
+  };
+}
+
+async function exportProductionNoticesExcel() {
+  if (productionNoticeExporting.value) {
+    return;
+  }
+  productionNoticeExporting.value = true;
+  try {
+    // 生产通知导出只复用当前筛选条件，不确认通知、不改变生产状态。
+    await erpApi.downloadProductionNoticesExport(productionNoticeExportFilters(), `生产通知_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('生产通知 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产通知 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    productionNoticeExporting.value = false;
   }
 }
 
@@ -2479,9 +3052,20 @@ async function openNotices() {
   productionNoticeFilters.customerId = filters.customerId;
   productionNoticeFilters.orderNo = filters.orderNo || '';
   productionNoticeDateRange.value = [...dateRange.value];
+  productionNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+  productionNoticePagination.page = 1;
   noticeVisible.value = true;
   await loadProductionNotices();
-  productionNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+}
+
+async function reloadProductionNoticesFromFirstPage() {
+  productionNoticePagination.page = 1;
+  await loadProductionNotices();
+}
+
+async function handleProductionNoticePageChange(page: number) {
+  productionNoticePagination.page = page;
+  await loadProductionNotices();
 }
 
 async function resetProductionNoticeFilters() {
@@ -2491,8 +3075,9 @@ async function resetProductionNoticeFilters() {
   productionNoticeFilters.keyword = '';
   productionNoticeFilters.noticeType = 'ALL';
   productionNoticeDateRange.value = [];
-  await loadProductionNotices();
+  productionNoticePagination.page = 1;
   productionNoticeStatusFilter.value = pendingNoticeCount.value > 0 ? 'PENDING' : 'ALL';
+  await loadProductionNotices();
 }
 
 async function loadProductionReplenishmentRequests(showLoading = false, useServerKeyword = false) {
@@ -2500,11 +3085,37 @@ async function loadProductionReplenishmentRequests(showLoading = false, useServe
     replenishmentRequestLoading.value = true;
   }
   try {
-    productionReplenishmentRequests.value = await erpApi.productionReplenishmentRequests({
-      keyword: useServerKeyword ? replenishmentRequestKeyword.value : undefined
-    });
+    const status = replenishmentRequestStatusFilter.value === 'ALL' ? undefined : replenishmentRequestStatusFilter.value;
+    const offset = (replenishmentRequestPagination.page - 1) * replenishmentRequestPagination.limit;
+    const baseFilters = replenishmentRequestBaseFilters(useServerKeyword);
+    const [result, allCount, pendingCount, approvedCount, rejectedCount] = await Promise.all([
+      erpApi.productionReplenishmentRequestsPage({
+        ...baseFilters,
+        status,
+        limit: replenishmentRequestPagination.limit,
+        offset
+      }),
+      erpApi.productionReplenishmentRequestsPage({ ...baseFilters, limit: Number(1), offset: Number(0) }),
+      erpApi.productionReplenishmentRequestsPage({ ...baseFilters, status: 'PENDING', limit: Number(1), offset: Number(0) }),
+      erpApi.productionReplenishmentRequestsPage({ ...baseFilters, status: 'APPROVED', limit: Number(1), offset: Number(0) }),
+      erpApi.productionReplenishmentRequestsPage({ ...baseFilters, status: 'REJECTED', limit: Number(1), offset: Number(0) })
+    ]);
+    productionReplenishmentRequests.value = result.items;
+    replenishmentRequestPagination.totalCount = result.totalCount;
+    replenishmentRequestPagination.limit = result.limit;
+    replenishmentRequestPagination.page = Math.floor(result.offset / result.limit) + 1;
+    replenishmentRequestServerCounts.ALL = allCount.totalCount;
+    replenishmentRequestServerCounts.PENDING = pendingCount.totalCount;
+    replenishmentRequestServerCounts.APPROVED = approvedCount.totalCount;
+    replenishmentRequestServerCounts.REJECTED = rejectedCount.totalCount;
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && replenishmentRequestPagination.page > maxPage) {
+      replenishmentRequestPagination.page = maxPage;
+      await loadProductionReplenishmentRequests(showLoading, useServerKeyword);
+    }
   } catch (error) {
     productionReplenishmentRequests.value = [];
+    replenishmentRequestPagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '生产报废补单申请加载失败，请确认后端服务和筛选条件');
   } finally {
     if (showLoading) {
@@ -2513,44 +3124,124 @@ async function loadProductionReplenishmentRequests(showLoading = false, useServe
   }
 }
 
+function replenishmentRequestBaseFilters(useServerKeyword = false) {
+  return {
+    keyword: useServerKeyword ? replenishmentRequestKeyword.value : undefined
+  };
+}
+
+function replenishmentRequestExportFilters() {
+  return {
+    status: replenishmentRequestStatusFilter.value === 'ALL' ? undefined : replenishmentRequestStatusFilter.value,
+    keyword: replenishmentRequestKeyword.value
+  };
+}
+
+async function exportReplenishmentRequestsExcel() {
+  if (replenishmentRequestExporting.value) {
+    return;
+  }
+  replenishmentRequestExporting.value = true;
+  try {
+    // 生产报废补单申请导出只复用当前筛选条件，不确认补单、不驳回补单、不生成补单任务。
+    await erpApi.downloadProductionReplenishmentRequestsExport(
+      replenishmentRequestExportFilters(),
+      `生产报废补单申请_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('生产报废补单申请 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产报废补单申请 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    replenishmentRequestExporting.value = false;
+  }
+}
+
 async function openReplenishmentRequests() {
   replenishmentRequestStatusFilter.value = pendingReplenishmentRequestCount.value > 0 ? 'PENDING' : 'ALL';
   replenishmentRequestKeyword.value = '';
+  replenishmentRequestPagination.page = 1;
   replenishmentRequestVisible.value = true;
   await loadProductionReplenishmentRequests(true);
 }
 
 async function queryReplenishmentRequests() {
+  replenishmentRequestPagination.page = 1;
+  await loadProductionReplenishmentRequests(true, true);
+}
+
+async function reloadReplenishmentRequestsFromFirstPage() {
+  replenishmentRequestPagination.page = 1;
+  await loadProductionReplenishmentRequests(true, true);
+}
+
+async function handleReplenishmentRequestPageChange(page: number) {
+  replenishmentRequestPagination.page = page;
   await loadProductionReplenishmentRequests(true, true);
 }
 
 async function resetReplenishmentRequestFilters() {
   replenishmentRequestStatusFilter.value = pendingReplenishmentRequestCount.value > 0 ? 'PENDING' : 'ALL';
   replenishmentRequestKeyword.value = '';
+  replenishmentRequestPagination.page = 1;
   await loadProductionReplenishmentRequests(true);
 }
 
 async function loadScrapRecords() {
   scrapLoading.value = true;
   try {
-    scrapRecords.value = await erpApi.productionScrapRecords({
-      customerId: scrapFilters.customerId,
-      orderNo: scrapFilters.orderNo?.trim() || undefined,
-      dateFrom: scrapDateRange.value[0],
-      dateTo: scrapDateRange.value[1]
+    const offset = (scrapRecordPagination.page - 1) * scrapRecordPagination.limit;
+    const result = await erpApi.productionScrapRecordsPage({
+      ...scrapRecordFilters(),
+      limit: scrapRecordPagination.limit,
+      offset
     });
+    scrapRecords.value = result.items;
+    scrapRecordPagination.totalCount = result.totalCount;
+    scrapRecordPagination.limit = result.limit;
+    scrapRecordPagination.page = Math.floor(result.offset / result.limit) + 1;
+    const maxPage = Math.max(Math.ceil(result.totalCount / result.limit), 1);
+    if (result.items.length === 0 && result.totalCount > 0 && scrapRecordPagination.page > maxPage) {
+      scrapRecordPagination.page = maxPage;
+      await loadScrapRecords();
+    }
   } catch (error) {
     scrapRecords.value = [];
+    scrapRecordPagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '报废统计加载失败，请确认后端服务和筛选条件');
   } finally {
     scrapLoading.value = false;
   }
 }
 
+function scrapRecordFilters() {
+  return {
+    customerId: scrapFilters.customerId,
+    orderNo: scrapFilters.orderNo?.trim() || undefined,
+    dateFrom: scrapDateRange.value[0],
+    dateTo: scrapDateRange.value[1]
+  };
+}
+
+async function exportScrapRecordsExcel() {
+  if (scrapExporting.value) {
+    return;
+  }
+  scrapExporting.value = true;
+  try {
+    // 生产报废统计导出只读取当前筛选结果，不修改报废记录、不触发补单。
+    await erpApi.downloadProductionScrapRecordsExport(scrapRecordFilters(), `生产报废统计_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('生产报废统计 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '生产报废统计 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    scrapExporting.value = false;
+  }
+}
+
 async function loadScrapOrderOptions() {
   try {
     const [records, orders] = await Promise.all([
-      erpApi.productionScrapRecords({
+      erpApi.productionScrapRecordsAllPages({
         customerId: scrapFilters.customerId,
         dateFrom: scrapDateRange.value[0],
         dateTo: scrapDateRange.value[1]
@@ -2573,6 +3264,7 @@ async function loadScrapOrderOptions() {
 
 async function openScrapRecords() {
   scrapVisible.value = true;
+  scrapRecordPagination.page = 1;
   await loadScrapOrderOptions();
   await loadScrapRecords();
 }
@@ -2581,13 +3273,25 @@ async function resetScrapFilters() {
   scrapFilters.customerId = undefined;
   scrapFilters.orderNo = undefined;
   scrapDateRange.value = [];
+  scrapRecordPagination.page = 1;
   await loadScrapOrderOptions();
   await loadScrapRecords();
 }
 
 async function handleScrapScopeChange() {
   scrapFilters.orderNo = undefined;
+  scrapRecordPagination.page = 1;
   await loadScrapOrderOptions();
+  await loadScrapRecords();
+}
+
+async function reloadScrapRecordsFromFirstPage() {
+  scrapRecordPagination.page = 1;
+  await loadScrapRecords();
+}
+
+async function handleScrapRecordPageChange(page: number) {
+  scrapRecordPagination.page = page;
   await loadScrapRecords();
 }
 
@@ -2615,12 +3319,14 @@ function applyProductionRouteScope() {
     selectedProductionOrderNo.value = orderNo;
     selectedTaskRows.value = [];
     activeStatus.value = 'ALL';
+    resetProductionMainPagination();
     viewMode.value = 'TASK_DETAIL';
     return;
   }
 
   selectedProductionOrderNo.value = '';
   selectedTaskRows.value = [];
+  resetProductionMainPagination();
   viewMode.value = productionRouteView() === 'tasks' ? 'TASK_DETAIL' : 'ORDER_SUMMARY';
 }
 
@@ -2686,6 +3392,7 @@ async function handleOrderFilterChange() {
   selectedProductionOrderNo.value = '';
   selectedTaskRows.value = [];
   viewMode.value = 'ORDER_SUMMARY';
+  resetProductionMainPagination();
   normalizeOrderSummaryStatusFilter();
   if (productionRouteOrderNo() || productionRouteView()) {
     pushProductionRouteForSummary();
@@ -2698,6 +3405,7 @@ async function handleScopeChange() {
   selectedProductionOrderNo.value = '';
   selectedTaskRows.value = [];
   viewMode.value = 'ORDER_SUMMARY';
+  resetProductionMainPagination();
   await loadSelectedCustomerName();
   if (productionRouteOrderNo() || productionRouteView()) {
     pushProductionRouteForSummary();
@@ -2714,6 +3422,7 @@ async function resetFilters() {
   activeOrderStatus.value = 'ALL';
   selectedProductionOrderNo.value = '';
   selectedTaskRows.value = [];
+  resetProductionMainPagination();
   viewMode.value = 'ORDER_SUMMARY';
   if (productionRouteOrderNo() || productionRouteView()) {
     pushProductionRouteForSummary();
@@ -3141,8 +3850,17 @@ function getProcessCompletion(row: ProductionTask, processName: string): Product
 }
 
 function processStepDisplay(row: { processStepDetails?: ProductionTask['processStepDetails'] }, processName: string) {
-  const remark = row.processStepDetails?.find((item) => item.processName === processName)?.processRemark?.trim();
-  return remark ? `${processName}（${remark}）` : processName;
+  const remark = processStepRemark(row, processName);
+  return remark ? `${processName}（${formatLongTextPreview(remark, 12, '')}）` : processName;
+}
+
+function processStepTitle(row: { processStepDetails?: ProductionTask['processStepDetails'] }, processName: string) {
+  const remark = processStepRemark(row, processName);
+  return remark ? `${processName}：${remark}` : processName;
+}
+
+function processStepRemark(row: { processStepDetails?: ProductionTask['processStepDetails'] }, processName: string) {
+  return row.processStepDetails?.find((item) => item.processName === processName)?.processRemark?.trim() || '';
 }
 
 function processProgressText(row: ProductionTask) {
@@ -3294,29 +4012,30 @@ function canOpenProcess(row: ProductionTask, processName: string) {
 }
 
 function processButtonTitle(row: ProductionTask, processName: string) {
+  const stepTitle = processStepTitle(row, processName);
   const status = effectiveProductionStatus(row);
   if (row.orderStatus === 'CANCELLED') {
-    return '订单已取消，只能做管理撤回或查看通知';
+    return `${stepTitle}；订单已取消，只能做管理撤回或查看通知`;
   }
   if (status === 'CANCELLED') {
-    return '生产任务已取消，只能查看历史记录';
+    return `${stepTitle}；生产任务已取消，只能查看历史记录`;
   }
   if (row.orderStatus === 'COMPLETED') {
-    return isProcessCompleted(row, processName) ? '订单已完成发货，只能查看工序记录' : '订单已完成发货，不能新增工序记录';
+    return isProcessCompleted(row, processName) ? `${stepTitle}；订单已完成发货，只能查看工序记录` : `${stepTitle}；订单已完成发货，不能新增工序记录`;
   }
   if (row.inventoryBatchNo) {
-    return isProcessCompleted(row, processName) ? '已入库，只能查看工序记录' : '已入库，不能新增工序记录';
+    return isProcessCompleted(row, processName) ? `${stepTitle}；已入库，只能查看工序记录` : `${stepTitle}；已入库，不能新增工序记录`;
   }
   if (status === 'RECEIVED') {
-    return isProcessCompleted(row, processName) ? '已入库，只能查看工序记录' : '已入库，不能新增工序记录';
+    return isProcessCompleted(row, processName) ? `${stepTitle}；已入库，只能查看工序记录` : `${stepTitle}；已入库，不能新增工序记录`;
   }
   if (status === 'PENDING') {
-    return '请先开始生产';
+    return `${stepTitle}；请先开始生产`;
   }
   if (!canOpenProcess(row, processName)) {
-    return '请先完成上一道工序';
+    return `${stepTitle}；请先完成上一道工序`;
   }
-  return isProcessCompleted(row, processName) ? '查看或修改工序完成记录' : '填写当前工序完成表';
+  return isProcessCompleted(row, processName) ? `${stepTitle}；查看或修改工序完成记录` : `${stepTitle}；填写当前工序完成表`;
 }
 
 function openNextProcess(row: ProductionTask) {
@@ -3405,6 +4124,55 @@ function selectedProcessNamesForSave() {
   normalizeBatchProcessNames();
   syncProcessOperatorRows();
   return batchProcessNames.value.length > 0 ? batchProcessNames.value : [activeProcessName.value];
+}
+
+function formatProductionListPreview(values: Array<string | null | undefined>, unitLabel: string, emptyText = '-', delimiter = '、') {
+  const filtered = values.map((value) => String(value || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join(delimiter);
+  return filtered.length > 3 ? `${preview} 等 ${filtered.length} 个${unitLabel}` : preview;
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function productionNoticeReasonPreview(notice: ProductionNotice) {
+  return formatLongTextPreview(notice.reason, 42, '-');
+}
+
+function productionNoticeReasonTitle(notice: ProductionNotice) {
+  return String(notice.reason || '').trim() || '-';
+}
+
+function scrapRecordReasonPreview(record: ProductionScrapRecord) {
+  return formatLongTextPreview(record.reason, 42, '-');
+}
+
+function scrapRecordReasonTitle(record: ProductionScrapRecord) {
+  return String(record.reason || '').trim() || '-';
+}
+
+function replenishmentRequestReasonPreview(request: ProductionReplenishmentRequest) {
+  return formatLongTextPreview(request.reason, 42, '-');
+}
+
+function replenishmentRequestReasonTitle(request: ProductionReplenishmentRequest) {
+  return String(request.reason || '').trim() || '-';
+}
+
+function replenishmentSupervisorRemarkPreview(request: ProductionReplenishmentRequest) {
+  return formatLongTextPreview(request.supervisorRemark, 28, '-');
+}
+
+function replenishmentSupervisorRemarkTitle(request: ProductionReplenishmentRequest) {
+  return String(request.supervisorRemark || '').trim() || '-';
 }
 
 function resetProcessOperatorCodes() {
@@ -3885,7 +4653,7 @@ async function saveProcessCompletion() {
   if (processForm.isCompleted) {
     const missingOperatorProcessNames = selectedProcessNames.filter((processName) => operatorCodesForProcess(processName).length === 0);
     if (missingOperatorProcessNames.length > 0) {
-      ElMessage.warning(`请选择${missingOperatorProcessNames.join('、')}的操作人员`);
+      ElMessage.warning(`请选择${formatProductionListPreview(missingOperatorProcessNames, '工序')}的操作人员`);
       return;
     }
   }
@@ -3909,7 +4677,7 @@ async function saveProcessCompletion() {
         ...buildProcessQuantityPayload(),
         remark: processForm.remark
       });
-      ElMessage.success(`${selectedProcessNames.join('、')}已保存`);
+      ElMessage.success(`${formatProductionListPreview(selectedProcessNames, '工序')}已保存`);
     } else {
       await erpApi.completeProcessStep(activeTask.value.id, {
         processName: activeProcessName.value,
@@ -3964,7 +4732,11 @@ function productionStatusTagType(status: ProductionDisplayStatus) {
 }
 
 function formatProcessSteps(row: ProductionTask) {
-  return row.processSteps.length > 0 ? row.processSteps.map((step) => processStepDisplay(row, step)).join('、') : '-';
+  return formatProductionProcessSteps(row);
+}
+
+function formatProductionProcessSteps(row: { processSteps: string[]; processStepDetails?: ProductionTask['processStepDetails'] }, emptyText = '-', delimiter = '、') {
+  return formatProductionListPreview(row.processSteps.map((step) => processStepDisplay(row, step)), '工序', emptyText, delimiter);
 }
 
 function roundQuantity(value: number) {
@@ -3989,6 +4761,10 @@ function formatProductionTaskThickness(row: ProductionTask) {
     return '不适用（父级组件由子零件维护）';
   }
   return row.partThickness ? `${row.partThickness} mm` : '-';
+}
+
+function formatProductionTaskDrawingText(row: Pick<ProductionTask, 'drawingNo' | 'drawingVersion' | 'drawingDate' | 'drawingStatus'>) {
+  return [row.drawingNo, row.drawingVersion, row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ') || '未上传图纸';
 }
 
 function formatCompletedPlan(row: ProductionTask) {
@@ -4031,14 +4807,23 @@ function orderSummaryQuantityText(row: ProductionOrderSummary) {
 function orderSummaryShortageActionText(row: ProductionOrderSummary) {
   if (row.needsProductionReplenishmentReview && !row.needsReplenishmentAction) {
     const quantityText = row.pendingProductionReplenishmentQuantityByUnit?.length
-      ? row.pendingProductionReplenishmentQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join('、')
+      ? formatQuantityByUnitPreview(row.pendingProductionReplenishmentQuantityByUnit)
       : formatQuantity(row.pendingProductionReplenishmentQuantity ?? 0, row.pendingProductionReplenishmentUnit || row.unit || '件');
     return `生产报废补单待确认 ${row.pendingProductionReplenishmentLineCount ?? 0} 个零件 / ${quantityText}`;
   }
   const quantityText = row.unresolvedShortageQuantityByUnit?.length
-    ? row.unresolvedShortageQuantityByUnit.map((item) => formatQuantity(item.quantity, item.unit)).join('、')
+    ? formatQuantityByUnitPreview(row.unresolvedShortageQuantityByUnit)
     : formatQuantity(row.unresolvedShortageQuantity ?? 0, row.unresolvedShortageUnit || row.unit || '件');
   return `需补单 ${row.unresolvedShortageLineCount ?? 0} 个零件 / ${quantityText}`;
+}
+
+function formatQuantityByUnitPreview(rows?: Array<{ quantity: number; unit: string }>) {
+  const values = (rows || []).map((row) => formatQuantity(row.quantity, row.unit)).filter(Boolean);
+  if (values.length === 0) {
+    return '-';
+  }
+  const preview = values.filter((_, index) => index < 3).join('、');
+  return values.length > 3 ? `${preview} 等 ${values.length} 个单位` : preview;
 }
 
 function orderSummaryNeedsShortageAttention(row: ProductionOrderSummary) {
@@ -4270,6 +5055,18 @@ function orderSummaryProgressItems(row: ProductionOrderSummary) {
   return Array.from(buckets.entries()).map(([label, count]) => `${label} ${count}`);
 }
 
+function orderSummaryProgressPreviewItems(row: ProductionOrderSummary) {
+  const items = orderSummaryProgressItems(row);
+  if (items.length <= 3) {
+    return items;
+  }
+  return [...items.filter((_, index) => index < 3), `等 ${items.length} 项`];
+}
+
+function orderSummaryProgressText(row: ProductionOrderSummary) {
+  return formatProductionListPreview(orderSummaryProgressItems(row), '进度');
+}
+
 function finalProcessCompletion(row: ProductionTask) {
   const finalProcessName = row.processSteps[row.processSteps.length - 1];
   return finalProcessName ? getProcessCompletion(row, finalProcessName) : undefined;
@@ -4345,6 +5142,24 @@ function openReplenishmentApproval(row: ProductionTask) {
   replenishmentApprovalVisible.value = true;
 }
 
+async function findProductionTaskForReplenishmentRequest(request: ProductionReplenishmentRequest) {
+  const pageLimit = 100;
+  let offset = 0;
+  while (true) {
+    // 补单确认只按订单分页查找目标生产任务，不允许为了单个补单申请一次性拉取整单全量任务。
+    const result = await erpApi.productionTasksPage({
+      orderNo: request.orderNo,
+      limit: pageLimit,
+      offset
+    });
+    const task = result.items.find((item) => item.productionTaskNo === request.productionTaskNo);
+    if (task || !result.hasMore || result.items.length === 0) {
+      return task;
+    }
+    offset += pageLimit;
+  }
+}
+
 function closeReplenishmentApprovalDialog() {
   if (replenishmentApprovalSaving.value) {
     warnProductionSavingClose('生产报废补单确认正在保存，请等待保存完成');
@@ -4380,8 +5195,7 @@ async function openReplenishmentApprovalFromRequest(request: ProductionReplenish
   let task = tasks.value.find((item) => item.productionTaskNo === request.productionTaskNo);
   if (!task) {
     try {
-      const relatedTasks = await erpApi.productionTasks({ orderNo: request.orderNo });
-      task = relatedTasks.find((item) => item.productionTaskNo === request.productionTaskNo);
+      task = await findProductionTaskForReplenishmentRequest(request);
     } catch (error) {
       activeReplenishmentApprovalTask.value = undefined;
       activeReplenishmentApprovalCompletion.value = undefined;
@@ -4625,6 +5439,14 @@ function formatProcessLog(snapshot?: Record<string, unknown> | null) {
   return `${status}，数量 ${quantity}，操作人员 ${snapshot.operatorName || '-'}${role}${completedAt}${shortage}${quantityOverrideReason}${remark}`;
 }
 
+function formatProcessLogPreview(snapshot?: Record<string, unknown> | null) {
+  return formatLongTextPreview(formatProcessLog(snapshot), 96, '-');
+}
+
+function formatProcessLogTitle(snapshot?: Record<string, unknown> | null) {
+  return formatProcessLog(snapshot);
+}
+
 function refreshPrintDateTime() {
   printDateTime.value = formatDateTime(new Date());
 }
@@ -4659,7 +5481,7 @@ function productionOrderSummaryRows() {
     partTaskText: `${summary.partCount} / ${summary.taskCount}`,
     quantityText: orderSummaryQuantityText(summary),
     progressText: `${summary.progressPercent}%`,
-    currentProgressText: orderSummaryProgressItems(summary).join('、') || '-',
+    currentProgressText: orderSummaryProgressText(summary),
     status: productionStatusLabel(summary.status)
   }));
 }
@@ -4893,15 +5715,33 @@ function buildProductionPlanDocument() {
 </html>`;
 }
 
-function exportExcel() {
+async function exportExcel() {
+  if (productionExporting.value) {
+    return;
+  }
   if (printableRowCount.value === 0) {
     ElMessage.warning(`当前没有可导出的生产${printRecordLabel.value}`);
     return;
   }
 
   refreshPrintDateTime();
-  const documentHtml = buildProductionPlanDocument();
-  downloadHtmlAsExcel(documentHtml, `${printDocumentTitle.value}_${formatFileDateTime()}.xls`);
+  productionExporting.value = true;
+  try {
+    await erpApi.downloadProductionExport(
+      {
+        ...taskQueryParams(),
+        orderNo: viewMode.value === 'TASK_DETAIL' ? selectedProductionOrderNo.value || filters.orderNo : filters.orderNo
+      },
+      viewMode.value,
+      viewMode.value === 'ORDER_SUMMARY' ? activeOrderStatus.value : activeStatus.value,
+      `${printDocumentTitle.value}_${formatFileDateTime()}.xlsx`
+    );
+  } catch (error) {
+    console.error(error);
+    ElMessage.error(error instanceof Error ? error.message : '生产 Excel 导出失败，请稍后重试');
+  } finally {
+    productionExporting.value = false;
+  }
 }
 
 function openPrintPreview() {
@@ -4933,7 +5773,20 @@ watch(
   }
 );
 
+watch(
+  () => [
+    productionWorkTableHeights.orderSummary,
+    productionWorkTableHeights.taskDetail,
+    productionWorkTableHeights.scrapRecords,
+    productionWorkTableHeights.batchStartTasks,
+    productionWorkTableHeights.productionNotices,
+    productionWorkTableHeights.replenishmentRequests
+  ],
+  () => saveProductionWorkTableHeights()
+);
+
 onMounted(async () => {
+  restoreProductionWorkTableHeights();
   applyProductionRouteScope();
   await loadSelectedCustomerName();
   await loadOperators();
@@ -4999,6 +5852,30 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   margin-top: 16px;
+}
+
+.production-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.production-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.production-dialog-table-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 8px 0;
+}
+
+.production-dialog-list-toolbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .detail-scope {
@@ -5132,10 +6009,14 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.batch-start-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .batch-task-list {
   display: grid;
   gap: 8px;
-  max-height: 320px;
   overflow: auto;
   padding-right: 4px;
 }
@@ -5213,6 +6094,13 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.notice-scroll-list {
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .notice-toolbar {
   display: flex;
   align-items: center;
@@ -5232,6 +6120,28 @@ onMounted(async () => {
 .notice-filter-grid :deep(.el-select),
 .notice-filter-grid :deep(.date-range-filter) {
   width: 100%;
+}
+
+.production-notice-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.production-list-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .start-confirm-panel {
@@ -5667,9 +6577,16 @@ onMounted(async () => {
   line-height: 20px;
 }
 
-.process-log-change span {
+.process-log-label {
   color: #334155;
   font-weight: 700;
+}
+
+.process-log-text {
+  min-width: 0;
+  color: #64748b;
+  font-weight: 400;
+  overflow-wrap: anywhere;
 }
 
 .replenishment-request-toolbar {
@@ -5689,8 +6606,8 @@ onMounted(async () => {
 .replenishment-request-list {
   display: grid;
   gap: 12px;
-  max-height: calc(100vh - 220px);
   overflow: auto;
+  padding-right: 4px;
 }
 
 .replenishment-request-item {

@@ -7,7 +7,7 @@
     <small v-if="drawingText" class="material-suggestion-identity">{{ drawingText }}</small>
     <small v-if="identityWarningText" class="material-suggestion-warning">{{ identityWarningText }}</small>
     <small>{{ inventoryText }}</small>
-    <small v-if="baseInfoText">{{ baseInfoText }}</small>
+    <small v-if="baseInfoText" :title="baseInfoTooltipText">{{ baseInfoText }}</small>
     <small v-if="matchText">{{ matchText }}</small>
     <small v-if="historyText" :title="historyTooltipText">{{ historyText }}</small>
   </div>
@@ -43,6 +43,17 @@ const baseInfoText = computed(() => {
   const parts = [
     props.item.unit ? `单位 ${props.item.unit}` : '',
     props.item.partSpecification ? `规格 ${props.item.partSpecification}` : '',
+    props.item.defaultProcessRoute ? `默认工艺 ${formatProcessRoutePreview(props.item.defaultProcessRoute)}` : '',
+    props.item.historyUsageCount ? `历史使用 ${props.item.historyUsageCount} 次` : ''
+  ].filter(Boolean);
+  return parts.join(' / ');
+});
+
+const baseInfoTooltipText = computed(() => {
+  const parts = [
+    props.item.unit ? `单位 ${props.item.unit}` : '',
+    props.item.partSpecification ? `规格 ${props.item.partSpecification}` : '',
+    props.item.defaultProcessRoute ? `默认工艺 ${fullProcessRouteText(props.item.defaultProcessRoute)}` : '',
     props.item.historyUsageCount ? `历史使用 ${props.item.historyUsageCount} 次` : ''
   ].filter(Boolean);
   return parts.join(' / ');
@@ -74,23 +85,17 @@ const matchText = computed(() => {
 
 const historyCustomerText = computed(() => {
   const names = props.item.historyCustomerNames || [];
-  if (names.length === 0) {
+  const count = props.item.historyCustomerCount ?? names.length;
+  if (count === 0) {
     return '';
   }
-  const visibleNames: string[] = [];
-  for (const name of names) {
-    if (visibleNames.length >= 3) {
-      break;
-    }
-    visibleNames.push(name);
-  }
-  const suffix = names.length > visibleNames.length ? ` 等${names.length}个` : '';
-  return `历史客户 ${visibleNames.join('、')}${suffix}`;
+  return `历史客户 ${formatCustomerNamePreview(names, '-', count)}`;
 });
 
 const historyCustomerTitle = computed(() => {
   const names = props.item.historyCustomerNames || [];
-  return names.length ? `全部历史客户：${names.join('、')}` : '';
+  const count = props.item.historyCustomerCount ?? names.length;
+  return count ? `历史客户摘要：${formatCustomerNamePreview(names, '-', count)}。仅用于搜索记忆，不代表正式适用范围。` : '';
 });
 
 const historyText = computed(() => {
@@ -118,10 +123,44 @@ const drawingText = computed(() => {
     props.item.drawingVersion ? `版本 ${props.item.drawingVersion}` : '',
     props.item.partThickness ? `厚 ${formatQuantity(props.item.partThickness, 'mm')}` : '',
     props.item.drawingDate ? `日期 ${props.item.drawingDate}` : '',
-    props.item.drawingStatus ? `图纸 ${props.item.drawingStatus}` : ''
+    props.item.drawingStatus ? `图纸 ${props.item.drawingStatus}` : '',
+    props.item.drawingFileName ? `文件 ${props.item.drawingFileName}` : ''
   ].filter(Boolean);
   return parts.join(' / ');
 });
+
+function formatCustomerNamePreview(names: Array<string | null | undefined>, emptyText = '-', totalCount?: number) {
+  const filtered = names.map((name) => String(name || '').trim()).filter(Boolean);
+  const count = Math.max(totalCount ?? filtered.length, filtered.length);
+  if (count === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  if (!preview) {
+    return `${count} 个客户`;
+  }
+  return count > 3 ? `${preview} 等 ${count} 个客户` : preview;
+}
+
+function formatProcessRoutePreview(value?: string | null, emptyText = '-') {
+  const routeText = String(value || '').trim();
+  if (!routeText) {
+    return emptyText;
+  }
+  const steps = routeText
+    .split(/(?:->|→|[、,，;；\n\r]+)/)
+    .map((step) => step.trim())
+    .filter(Boolean);
+  if (steps.length === 0) {
+    return emptyText;
+  }
+  const preview = steps.filter((_, index) => index < 3).join('、');
+  return steps.length > 3 ? `${preview} 等 ${steps.length} 个工序` : preview;
+}
+
+function fullProcessRouteText(value?: string | null) {
+  return String(value || '').trim();
+}
 </script>
 
 <style scoped>

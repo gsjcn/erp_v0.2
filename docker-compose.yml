@@ -10,6 +10,8 @@ services:
     volumes:
       - ${POSTGRES_DATA_DIR:-./database/postgres-data}:/var/lib/postgresql/data
       - ${POSTGRES_BACKUP_DIR:-./database/backups}:/backups
+    ports:
+      - "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-55432}:5432"
     networks:
       - erp-net
     healthcheck:
@@ -32,6 +34,7 @@ services:
       EXPORT_DIR: /app/storage/exports
       API_BODY_LIMIT: ${API_BODY_LIMIT:-10mb}
       ORDER_IMPORT_UPLOAD_MAX_MB: ${ORDER_IMPORT_UPLOAD_MAX_MB:-100}
+      MATERIAL_IMPORT_UPLOAD_MAX_MB: ${MATERIAL_IMPORT_UPLOAD_MAX_MB:-100}
     volumes:
       - ${UPLOAD_DIR:-./storage/uploads}:/app/storage/uploads
       - ${EXPORT_DIR:-./storage/exports}:/app/storage/exports
@@ -61,7 +64,7 @@ services:
     container_name: baisheng-erp-frontend
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
+      - "${FRONTEND_PORT:-5176}:80"
     depends_on:
       backend:
         condition: service_healthy

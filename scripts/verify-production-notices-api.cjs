@@ -16,12 +16,17 @@ for (const envPath of [resolve('.env'), resolve('backend/.env')]) {
   }
 }
 
-const apiBaseUrl = (process.env.NOTICE_API_BASE_URL || process.env.ORDER_IMPORT_API_BASE_URL || 'http://127.0.0.1:3000/api').replace(
+const apiBaseUrl = (
+  process.env.NOTICE_API_BASE_URL ||
+  process.env.FIRST_STAGE_API_BASE_URL ||
+  process.env.ORDER_IMPORT_API_BASE_URL ||
+  'http://127.0.0.1:3000/api'
+).replace(
   /\/$/,
   ''
 );
-const runId = localDateTimeStamp();
-const testPrefix = `COD-NOTICE-${runId}`;
+const runId = 'STABLE';
+const testPrefix = 'COD-NOTICE-STABLE';
 const productionNoticeNo = `${testPrefix}-P`;
 const warehouseNoticeNo = `${testPrefix}-W`;
 const orderNo = `${testPrefix}-ORDER`;
@@ -36,19 +41,6 @@ const shortagePartCode = `${testPrefix}-PART-SHORTAGE`;
 const processStepShortagePartCode = `${testPrefix}-PART-PROCESS-SHORTAGE`;
 const customerName = `Notice Filter Customer ${runId}`;
 const prisma = new PrismaClient();
-
-function localDateTimeStamp() {
-  const date = new Date();
-  const pad = (value) => String(value).padStart(2, '0');
-  return [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-    pad(date.getHours()),
-    pad(date.getMinutes()),
-    pad(date.getSeconds())
-  ].join('');
-}
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
@@ -77,9 +69,27 @@ async function requestJson(path, options = {}) {
   return body;
 }
 
-function query(params) {
+async function expectRequestFailure(label, action, expectedMessage) {
+  let failed = false;
+  try {
+    await action();
+  } catch (error) {
+    failed = true;
+    assert(
+      String(error.message || '').includes(expectedMessage),
+      `${label} failure should include "${expectedMessage}", actual: ${error.message}`
+    );
+  }
+  assert(failed, `${label} should fail`);
+}
+
+function query(params, options = {}) {
   const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
+  const values = { ...params };
+  if (options.includeTestFixtures !== false) {
+    values.includeTestFixtures = 'true';
+  }
+  for (const [key, value] of Object.entries(values)) {
     if (value !== undefined && value !== null && String(value).trim()) {
       search.set(key, String(value));
     }
@@ -88,13 +98,44 @@ function query(params) {
   return text ? `?${text}` : '';
 }
 
-function assertNoticeListContainsOnly(list, noticeNo, label) {
-  assert(Array.isArray(list), `${label} must return an array`);
+function noticeListItems(payload, label) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  assert(payload && typeof payload === 'object', `${label} must return a paged response object`);
+  assert(Array.isArray(payload.items), `${label} paged response must include items array`);
+  assert(Number.isInteger(payload.totalCount), `${label} paged response must include totalCount`);
+  assert(Number.isInteger(payload.limit), `${label} paged response must include limit`);
+  assert(Number.isInteger(payload.offset), `${label} paged response must include offset`);
+  assert(typeof payload.hasMore === 'boolean', `${label} paged response must include hasMore`);
+  return payload.items;
+}
+
+function assertNoticeListContainsOnly(payload, noticeNo, label) {
+  const list = noticeListItems(payload, label);
   assert(list.some((notice) => notice.noticeNo === noticeNo), `${label} must include ${noticeNo}`);
   assert(
     list.every((notice) => notice.noticeNo === noticeNo),
     `${label} must not include unrelated notices: ${list.map((notice) => notice.noticeNo).join(', ')}`
   );
+}
+
+async function assertDefaultBusinessListsHideFixtures() {
+  const endpoints = [
+    '/production/tasks?displayStatus=ALL&withPage=true&limit=100&offset=0',
+    '/production/tasks/notices?withPage=true&limit=100&offset=0',
+    '/production/tasks/notices/admin?withPage=true&limit=100&offset=0',
+    '/production/tasks/replenishment-requests?withPage=true&limit=100&offset=0',
+    '/production/tasks/scrap-records?withPage=true&limit=100&offset=0',
+    '/warehouse/notices?withPage=true&limit=100&offset=0'
+  ];
+  for (const endpoint of endpoints) {
+    const payload = await requestJson(endpoint);
+    assert(
+      !JSON.stringify(payload).includes(testPrefix),
+      `${endpoint} must hide stable production notice test fixtures unless includeTestFixtures=true`
+    );
+  }
 }
 
 async function cleanup() {
@@ -103,24 +144,66 @@ async function cleanup() {
   await prisma.productionNotice.deleteMany({ where: { noticeNo: { startsWith: testPrefix } } });
   await prisma.productionTask.deleteMany({ where: { orderNo: { startsWith: testPrefix } } });
   await prisma.customerOrder.deleteMany({ where: { orderNo: { startsWith: testPrefix } } });
-  await prisma.customer.deleteMany({ where: { customerCode: { startsWith: testPrefix } } });
+  let customer = await prisma.customer.findUnique({ where: { customerCode } });
+  if (!customer) {
+    customer = await prisma.customer.findFirst({
+      where: {
+        OR: [
+          { customerCode: { startsWith: `${customerCode}__DISABLED__` } },
+          { customerName: { startsWith: `${customerName}__DISABLED__` } }
+        ]
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+  }
+  if (customer?.id) {
+    const archiveSuffix = `__DISABLED__${customer.id.slice(0, 8)}`;
+    await prisma.customerContact.updateMany({
+      where: { customerId: customer.id, status: 'ENABLED' },
+      data: { status: 'DISABLED', isPrimary: false }
+    });
+    await prisma.customer.update({
+      where: { id: customer.id },
+      data: {
+        customerCode: `${customerCode}${archiveSuffix}`,
+        customerName: `${customerName}${archiveSuffix}`,
+        contactName: null,
+        contactPhone: null,
+        status: 'DISABLED'
+      }
+    });
+  }
 }
 
 async function seedNotices() {
   await cleanup();
-  const customer = await prisma.customer.create({
-    data: {
-      customerCode,
-      customerName,
-      contactName: 'Notice Tester',
-      contactPhone: '13800000000',
-      regionType: 'CHINA',
-      country: 'China',
-      province: 'Jiangsu',
-      city: 'Suzhou',
-      detailAddress: 'Notice filter test address'
-    }
-  });
+  const customerData = {
+    customerCode,
+    customerName,
+    contactName: 'Notice Tester',
+    contactPhone: '13800000000',
+    regionType: 'CHINA',
+    country: 'China',
+    province: 'Jiangsu',
+    city: 'Suzhou',
+    detailAddress: 'Notice filter test address',
+    status: 'ENABLED'
+  };
+  let existingCustomer = await prisma.customer.findUnique({ where: { customerCode } });
+  if (!existingCustomer) {
+    existingCustomer = await prisma.customer.findFirst({
+      where: {
+        OR: [
+          { customerCode: { startsWith: `${customerCode}__DISABLED__` } },
+          { customerName: { startsWith: `${customerName}__DISABLED__` } }
+        ]
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+  }
+  const customer = existingCustomer
+    ? await prisma.customer.update({ where: { id: existingCustomer.id }, data: customerData })
+    : await prisma.customer.create({ data: customerData });
   const order = await prisma.customerOrder.create({
     data: {
       orderNo,
@@ -437,26 +520,33 @@ async function run() {
   const today = localDateKey();
   await assertFinalProcessStepShortageRequestCreatesPendingReview(customer);
   await assertProductionShortageCompletionRequiresHandling(customer);
+  await assertDefaultBusinessListsHideFixtures();
 
-  const productionByPart = await requestJson(
-    `/production/tasks/notices${query({
-      target: 'PRODUCTION',
-      partCode: productionPartCode,
-      noticeType: 'QUANTITY_INCREASE',
-      dateFrom: today,
-      dateTo: today
-    })}`
+  const productionByPart = noticeListItems(
+    await requestJson(
+      `/production/tasks/notices${query({
+        target: 'PRODUCTION',
+        partCode: productionPartCode,
+        noticeType: 'QUANTITY_INCREASE',
+        dateFrom: today,
+        dateTo: today
+      })}`
+    ),
+    'production notice part/type/date filter'
   );
   assertNoticeListContainsOnly(productionByPart, productionNoticeNo, 'production notice part/type/date filter');
   assert(productionByPart[0].customerName === customerName, 'production notice response must include customerName');
 
-  const productionByKeyword = await requestJson(
-    `/production/tasks/notices${query({
-      target: 'PRODUCTION',
-      keyword: runId,
-      customerId: customer.id,
-      orderNo
-    })}`
+  const productionByKeyword = noticeListItems(
+    await requestJson(
+      `/production/tasks/notices${query({
+        target: 'PRODUCTION',
+        keyword: runId,
+        customerId: customer.id,
+        orderNo
+      })}`
+    ),
+    'production notice keyword/customer/order filter'
   );
   assertNoticeListContainsOnly(productionByKeyword, productionNoticeNo, 'production notice keyword/customer/order filter');
 
@@ -465,40 +555,131 @@ async function run() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ acknowledgedBy: 'Notice API Tester' })
   });
-  const acknowledgedProduction = await requestJson(
-    `/production/tasks/notices${query({
-      target: 'PRODUCTION',
-      status: 'ACKNOWLEDGED',
-      keyword: productionPartCode
-    })}`
+  const acknowledgedProduction = noticeListItems(
+    await requestJson(
+      `/production/tasks/notices${query({
+        target: 'PRODUCTION',
+        status: 'ACKNOWLEDGED',
+        keyword: productionPartCode
+      })}`
+    ),
+    'production acknowledged history filter'
   );
   assertNoticeListContainsOnly(acknowledgedProduction, productionNoticeNo, 'production acknowledged history filter');
   assert(acknowledgedProduction[0].acknowledgedBy === 'Notice API Tester', 'acknowledged notice must keep acknowledgedBy');
+  await expectRequestFailure(
+    'repeat production notice acknowledgement',
+    () =>
+      requestJson(`/production/tasks/notices/${productionByPart[0].id}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acknowledgedBy: 'Notice API Rewriter' })
+      }),
+    '不能重复确认'
+  );
+  const repeatedAcknowledgedProduction = noticeListItems(
+    await requestJson(
+      `/production/tasks/notices${query({
+        target: 'PRODUCTION',
+        status: 'ACKNOWLEDGED',
+        keyword: productionPartCode
+      })}`
+    ),
+    'production acknowledged history after repeat attempt'
+  );
+  assertNoticeListContainsOnly(repeatedAcknowledgedProduction, productionNoticeNo, 'production acknowledged history after repeat attempt');
+  assert(
+    repeatedAcknowledgedProduction[0].acknowledgedBy === 'Notice API Tester',
+    'repeat acknowledgement must not overwrite acknowledgedBy'
+  );
 
-  const warehouseByCustomer = await requestJson(
-    `/warehouse/notices${query({
-      customerKeyword: customerName.slice(0, 12),
-      partCode: warehousePartCode,
-      noticeType: 'ORDER_CANCELLED',
-      dateFrom: today,
-      dateTo: today
-    })}`
+  const warehouseByCustomer = noticeListItems(
+    await requestJson(
+      `/warehouse/notices${query({
+        customerKeyword: customerName.slice(0, 12),
+        partCode: warehousePartCode,
+        noticeType: 'ORDER_CANCELLED',
+        dateFrom: today,
+        dateTo: today
+      })}`
+    ),
+    'warehouse notice customer/part/type/date filter'
   );
   assertNoticeListContainsOnly(warehouseByCustomer, warehouseNoticeNo, 'warehouse notice customer/part/type/date filter');
   assert(warehouseByCustomer[0].customerName === customerName, 'warehouse notice response must include customerName');
 
-  const warehouseByKeyword = await requestJson(`/warehouse/notices${query({ keyword: `warehouse notice filter reason ${runId}` })}`);
-  assertNoticeListContainsOnly(warehouseByKeyword, warehouseNoticeNo, 'warehouse notice keyword filter');
-
-  const adminAllByKeyword = await requestJson(
-    `/production/tasks/notices/admin${query({
-      keyword: runId,
-      customerId: customer.id,
-      dateFrom: today,
-      dateTo: today
-    })}`
+  const warehouseByKeyword = noticeListItems(
+    await requestJson(`/warehouse/notices${query({ keyword: `warehouse notice filter reason ${runId}` })}`),
+    'warehouse notice keyword filter'
   );
-  assert(Array.isArray(adminAllByKeyword), 'admin notice center must return an array');
+  assertNoticeListContainsOnly(warehouseByKeyword, warehouseNoticeNo, 'warehouse notice keyword filter');
+  await requestJson(`/warehouse/notices/${warehouseByCustomer[0].id}/acknowledge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      acknowledgedByCode: 'WH-001',
+      acknowledgedBy: 'WH-001',
+      handlingMode: 'NONE',
+      handlingQuantity: 0,
+      remark: 'No physical stock for warehouse notice API regression'
+    })
+  });
+  const acknowledgedWarehouse = noticeListItems(
+    await requestJson(
+      `/warehouse/notices${query({
+        status: 'ACKNOWLEDGED',
+        keyword: warehousePartCode
+      })}`
+    ),
+    'warehouse acknowledged history filter'
+  );
+  assertNoticeListContainsOnly(acknowledgedWarehouse, warehouseNoticeNo, 'warehouse acknowledged history filter');
+  assert(
+    String(acknowledgedWarehouse[0].acknowledgedBy || '').includes('WH-001'),
+    'warehouse acknowledged notice must keep warehouse operator snapshot'
+  );
+  await expectRequestFailure(
+    'repeat warehouse notice acknowledgement',
+    () =>
+      requestJson(`/warehouse/notices/${warehouseByCustomer[0].id}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          acknowledgedByCode: 'WH-001',
+          acknowledgedBy: 'Warehouse API Rewriter',
+          handlingMode: 'NONE',
+          handlingQuantity: 0,
+          remark: 'Repeat acknowledgement should not rewrite warehouse notice history'
+        })
+      }),
+    '不能重复确认'
+  );
+  const repeatedAcknowledgedWarehouse = noticeListItems(
+    await requestJson(
+      `/warehouse/notices${query({
+        status: 'ACKNOWLEDGED',
+        keyword: warehousePartCode
+      })}`
+    ),
+    'warehouse acknowledged history after repeat attempt'
+  );
+  assertNoticeListContainsOnly(repeatedAcknowledgedWarehouse, warehouseNoticeNo, 'warehouse acknowledged history after repeat attempt');
+  assert(
+    !String(repeatedAcknowledgedWarehouse[0].acknowledgedBy || '').includes('Warehouse API Rewriter'),
+    'repeat warehouse acknowledgement must not overwrite acknowledgedBy'
+  );
+
+  const adminAllByKeyword = noticeListItems(
+    await requestJson(
+      `/production/tasks/notices/admin${query({
+        keyword: runId,
+        customerId: customer.id,
+        dateFrom: today,
+        dateTo: today
+      })}`
+    ),
+    'admin notice center keyword/customer/date filter'
+  );
   assert(adminAllByKeyword.some((notice) => notice.noticeNo === productionNoticeNo), 'admin notice center must include production notice');
   assert(adminAllByKeyword.some((notice) => notice.noticeNo === warehouseNoticeNo), 'admin notice center must include warehouse notice');
   assert(
@@ -506,11 +687,14 @@ async function run() {
     `admin notice center must not include unrelated notices: ${adminAllByKeyword.map((notice) => notice.noticeNo).join(', ')}`
   );
 
-  const adminWarehouseByTarget = await requestJson(
-    `/production/tasks/notices/admin${query({
-      target: 'WAREHOUSE',
-      keyword: warehousePartCode
-    })}`
+  const adminWarehouseByTarget = noticeListItems(
+    await requestJson(
+      `/production/tasks/notices/admin${query({
+        target: 'WAREHOUSE',
+        keyword: warehousePartCode
+      })}`
+    ),
+    'admin notice target filter'
   );
   assertNoticeListContainsOnly(adminWarehouseByTarget, warehouseNoticeNo, 'admin notice target filter');
 

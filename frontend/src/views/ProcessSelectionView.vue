@@ -68,7 +68,32 @@
       </div>
 
       <div class="table-card desktop-table">
-        <el-table :data="orders" max-height="calc(100vh - 330px)">
+        <div v-if="!isMobileLayout" class="process-table-height-toolbar">
+          <div class="process-table-height-actions" aria-label="生产流程订单列表表格高度">
+            <span class="process-table-height-label">生产流程订单列表表格高度</span>
+            <el-button-group>
+              <el-button
+                :icon="Minus"
+                :disabled="processOrderTableHeight <= processOrderTableHeightLimits.min"
+                aria-label="降低生产流程订单列表表格高度"
+                @click="adjustProcessOrderTableHeight(-processOrderTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="Plus"
+                :disabled="processOrderTableHeight >= processOrderTableHeightLimits.max"
+                aria-label="提高生产流程订单列表表格高度"
+                @click="adjustProcessOrderTableHeight(processOrderTableHeightLimits.step)"
+              />
+              <el-button
+                :icon="RefreshLeft"
+                :disabled="processOrderTableHeight === processOrderTableDefaultHeight"
+                aria-label="恢复生产流程订单列表表格默认高度"
+                @click="resetProcessOrderTableHeight"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <el-table :data="orders" :max-height="processOrderTableHeight">
           <el-table-column label="订单号" min-width="190">
             <template #default="{ row }">
               <OrderNoLink :order-no="row.orderNo" />
@@ -202,9 +227,9 @@
             <span class="summary-label">零件流程配置进度</span>
             <el-progress :percentage="processPercent" :stroke-width="8" />
           </div>
-          <p v-if="missingLineNames.length" class="missing-text">未配置：{{ missingLineNames.join('、') }}</p>
-          <p v-if="missingStockSourceLineNames.length" class="missing-text">库存未核对：{{ missingStockSourceLineNames.join('、') }}</p>
-          <p v-if="insufficientReworkSourceLineNames.length" class="missing-text">库存再加工未补齐：{{ insufficientReworkSourceLineNames.join('、') }}</p>
+          <p v-if="missingLineNames.length" class="missing-text">未配置：{{ formatProcessLineNamePreview(missingLineNames) }}</p>
+          <p v-if="missingStockSourceLineNames.length" class="missing-text">库存未核对：{{ formatProcessLineNamePreview(missingStockSourceLineNames) }}</p>
+          <p v-if="insufficientReworkSourceLineNames.length" class="missing-text">库存再加工未补齐：{{ formatProcessLineNamePreview(insufficientReworkSourceLineNames) }}</p>
           <p v-if="!missingLineNames.length && !missingStockSourceLineNames.length && !insufficientReworkSourceLineNames.length" class="ready-text">
             {{ processReadyText }}
           </p>
@@ -222,11 +247,37 @@
               <span>{{ processStructureGroups.length }} 组 / {{ order.lines.length }} 行</span>
             </div>
             <div class="process-structure-actions">
+              <div v-if="!isMobileLayout" class="process-list-height-actions" aria-label="流程固定格式清单高度">
+                <span class="process-list-height-label">清单高度</span>
+                <el-button-group>
+                  <el-button
+                    size="small"
+                    :icon="Minus"
+                    :disabled="processWorkListHeights.structure <= processWorkListHeightLimits.min"
+                    aria-label="降低流程固定格式清单高度"
+                    @click="adjustProcessWorkListHeight('structure', -processWorkListHeightLimits.step)"
+                  />
+                  <el-button
+                    size="small"
+                    :icon="Plus"
+                    :disabled="processWorkListHeights.structure >= processWorkListHeightLimits.max"
+                    aria-label="提高流程固定格式清单高度"
+                    @click="adjustProcessWorkListHeight('structure', processWorkListHeightLimits.step)"
+                  />
+                  <el-button
+                    size="small"
+                    :icon="RefreshLeft"
+                    :disabled="processWorkListHeights.structure === processWorkListDefaultHeights.structure"
+                    aria-label="恢复流程固定格式清单默认高度"
+                    @click="resetProcessWorkListHeight('structure')"
+                  />
+                </el-button-group>
+              </div>
               <el-button size="small" :disabled="order.lines.length === 0" @click="openProcessStructureTextDialog">查看固定格式</el-button>
               <el-button size="small" :disabled="order.lines.length === 0" @click="copyProcessStructureText">复制清单</el-button>
             </div>
           </div>
-          <div v-if="processStructureGroups.length" class="process-structure-list">
+          <div v-if="processStructureGroups.length" class="process-structure-list" :style="{ maxHeight: processWorkListHeightStyle('structure') }">
             <div v-for="(group, groupIndex) in processStructureGroups" :key="group.id" class="process-structure-group">
               <div class="process-structure-main">
                 <span>{{ groupIndex + 1 }}</span>
@@ -546,14 +597,39 @@
           <span>生产计划</span>
           <strong>{{ formatOrderQuantity(order, 'totalProductionPlanQuantity') }}</strong>
         </p>
-        <div v-if="order" class="submit-production-lines">
+        <div v-if="order && !isMobileLayout" class="process-list-height-toolbar">
+          <div class="process-list-height-actions" aria-label="提交生产零件明细高度">
+            <span class="process-list-height-label">零件明细高度</span>
+            <el-button-group>
+              <el-button
+                :icon="Minus"
+                :disabled="processWorkListHeights.submitLines <= processWorkListHeightLimits.min"
+                aria-label="降低提交生产零件明细高度"
+                @click="adjustProcessWorkListHeight('submitLines', -processWorkListHeightLimits.step)"
+              />
+              <el-button
+                :icon="Plus"
+                :disabled="processWorkListHeights.submitLines >= processWorkListHeightLimits.max"
+                aria-label="提高提交生产零件明细高度"
+                @click="adjustProcessWorkListHeight('submitLines', processWorkListHeightLimits.step)"
+              />
+              <el-button
+                :icon="RefreshLeft"
+                :disabled="processWorkListHeights.submitLines === processWorkListDefaultHeights.submitLines"
+                aria-label="恢复提交生产零件明细默认高度"
+                @click="resetProcessWorkListHeight('submitLines')"
+              />
+            </el-button-group>
+          </div>
+        </div>
+        <div v-if="order" class="submit-production-lines" :style="{ maxHeight: processWorkListHeightStyle('submitLines') }">
           <article v-for="line in order.lines" :key="line.id" class="submit-production-line">
             <div>
               <strong>{{ line.partCode }} / {{ line.partName }}</strong>
               <span>{{ fulfillmentModeLabel(line.fulfillmentMode) }}，订单 {{ formatQuantity(line.quantity, line.unit) }}，生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</span>
             </div>
             <small v-if="componentTraceText(line)">组件关系：{{ componentTraceText(line) }}</small>
-            <small v-if="lineRequiresProductionProcess(line)">流程：{{ line.processSteps.length ? line.processSteps.join('、') : '未配置' }}</small>
+            <small v-if="lineRequiresProductionProcess(line)">流程：{{ line.processSteps.length ? formatProcessNamePreview(line.processSteps) : '未配置' }}</small>
             <small v-if="stockSourceSummary(line)">库存来源：{{ stockSourceSummary(line) }}</small>
             <small v-if="submitOrderLineWarning(line)" class="submit-production-line-warning">{{ submitOrderLineWarning(line) }}</small>
           </article>
@@ -585,7 +661,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Rank } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
 import { useRoute, useRouter } from 'vue-router';
 import { erpApi } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
@@ -609,6 +685,8 @@ type ProcessStructureGroup = {
   line: OrderLine;
   children: OrderLine[];
 };
+
+type ProcessWorkListHeightKey = 'structure' | 'submitLines';
 
 const route = useRoute();
 const router = useRouter();
@@ -655,6 +733,29 @@ const expandedMobileOrderIds = ref<string[]>([]);
 let discardChangesResolver: ((confirmed: boolean) => void) | undefined;
 let restoringProcessRoute = false;
 
+const processOrderTableHeightLimits = {
+  min: 320,
+  max: 860,
+  step: 80
+};
+
+const processOrderTableDefaultHeight = 620;
+const processOrderTableHeightStorageKey = 'baisheng.erp.processSelectionOrderTableHeight.v1';
+// 生产流程选择页订单列表高度只保存为本机 UI 偏好，不写入订单、流程、生产或库存业务数据。
+const processOrderTableHeight = ref(processOrderTableDefaultHeight);
+const processWorkListHeightLimits = {
+  min: 220,
+  max: 780,
+  step: 60
+};
+const processWorkListDefaultHeights: Record<ProcessWorkListHeightKey, number> = {
+  structure: 300,
+  submitLines: 280
+};
+const processWorkListHeightStorageKey = 'baisheng.erp.processSelectionWorkListHeights.v1';
+// 生产流程结构和提交明细列表高度只保存为本机 UI 偏好，不写入订单流程、生产任务或库存业务数据。
+const processWorkListHeights = reactive<Record<ProcessWorkListHeightKey, number>>({ ...processWorkListDefaultHeights });
+
 const selectedLine = computed<OrderLine | undefined>(() => order.value?.lines.find((line) => line.id === selectedLineId.value));
 const selectedLineTemplateName = computed(() => (selectedLine.value?.partName ? `${selectedLine.value.partName}流程` : '当前流程'));
 const savedSteps = computed(() => selectedLineProcessDetails(selectedLine.value));
@@ -695,6 +796,24 @@ const insufficientReworkSourceLineNames = computed(() =>
     .filter((line) => reworkStockShortageQuantity(line) > 0)
     .map((line) => line.partName)
 );
+function formatProcessLineNamePreview(names: string[], emptyText = '-') {
+  const filtered = names.map((name) => String(name || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  return filtered.length > 3 ? `${preview} 等 ${filtered.length} 个零件` : preview;
+}
+
+function formatProcessNamePreview(names: string[], emptyText = '-') {
+  const filtered = names.map((name) => String(name || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  return filtered.length > 3 ? `${preview} 等 ${filtered.length} 个工序` : preview;
+}
+
 const processReadyText = computed(() =>
   totalLineCount.value === 0 ? '全部零件无生产任务，无需配置生产流程' : '全部零件已配置流程'
 );
@@ -756,13 +875,13 @@ const submitOrderDisabledReason = computed(() => {
     return '订单没有零件，不能提交生产。';
   }
   if (missingLineNames.value.length > 0) {
-    return `仍有零件未配置生产流程：${missingLineNames.value.join('、')}。`;
+    return `仍有零件未配置生产流程：${formatProcessLineNamePreview(missingLineNames.value)}。`;
   }
   if (missingStockSourceLineNames.value.length > 0) {
-    return `仍有库存来源未核对：${missingStockSourceLineNames.value.join('、')}。`;
+    return `仍有库存来源未核对：${formatProcessLineNamePreview(missingStockSourceLineNames.value)}。`;
   }
   if (insufficientReworkSourceLineNames.value.length > 0) {
-    return `库存再加工来源未补齐：${insufficientReworkSourceLineNames.value.join('、')}。`;
+    return `库存再加工来源未补齐：${formatProcessLineNamePreview(insufficientReworkSourceLineNames.value)}。`;
   }
   if (isDirty.value) {
     return '当前零件流程有未保存修改，请先保存。';
@@ -772,6 +891,95 @@ const submitOrderDisabledReason = computed(() => {
 const returnToPath = computed(() => normalizeReturnTo(route.query.returnTo));
 const filteredQuickProcessOptions = computed(() => filterPinyinSearchOptions(processOptions.value, quickProcessFilterKeyword.value));
 const filteredProcessOptions = computed(() => filterPinyinSearchOptions(processOptions.value, draftProcessFilterKeyword.value));
+
+function clampProcessOrderTableHeight(value: number) {
+  return Math.min(processOrderTableHeightLimits.max, Math.max(processOrderTableHeightLimits.min, value));
+}
+
+function adjustProcessOrderTableHeight(delta: number) {
+  processOrderTableHeight.value = clampProcessOrderTableHeight(processOrderTableHeight.value + delta);
+}
+
+function resetProcessOrderTableHeight() {
+  processOrderTableHeight.value = processOrderTableDefaultHeight;
+}
+
+function restoreProcessOrderTableHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(processOrderTableHeightStorageKey);
+    const savedHeight = Number(rawValue);
+    if (Number.isFinite(savedHeight)) {
+      processOrderTableHeight.value = clampProcessOrderTableHeight(savedHeight);
+    }
+  } catch {
+    processOrderTableHeight.value = processOrderTableDefaultHeight;
+  }
+}
+
+function saveProcessOrderTableHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(processOrderTableHeightStorageKey, String(processOrderTableHeight.value));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断生产流程订单列表查看。
+  }
+}
+
+function clampProcessWorkListHeight(value: number) {
+  return Math.min(processWorkListHeightLimits.max, Math.max(processWorkListHeightLimits.min, value));
+}
+
+function adjustProcessWorkListHeight(key: ProcessWorkListHeightKey, delta: number) {
+  processWorkListHeights[key] = clampProcessWorkListHeight(processWorkListHeights[key] + delta);
+}
+
+function resetProcessWorkListHeight(key: ProcessWorkListHeightKey) {
+  processWorkListHeights[key] = processWorkListDefaultHeights[key];
+}
+
+function processWorkListHeightStyle(key: ProcessWorkListHeightKey) {
+  return `${processWorkListHeights[key]}px`;
+}
+
+function restoreProcessWorkListHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(processWorkListHeightStorageKey);
+    const savedHeights = rawValue ? JSON.parse(rawValue) : {};
+    for (const key of Object.keys(processWorkListDefaultHeights) as ProcessWorkListHeightKey[]) {
+      const savedHeight = Number(savedHeights[key]);
+      processWorkListHeights[key] = Number.isFinite(savedHeight)
+        ? clampProcessWorkListHeight(savedHeight)
+        : processWorkListDefaultHeights[key];
+    }
+  } catch {
+    for (const key of Object.keys(processWorkListDefaultHeights) as ProcessWorkListHeightKey[]) {
+      processWorkListHeights[key] = processWorkListDefaultHeights[key];
+    }
+  }
+}
+
+function saveProcessWorkListHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(processWorkListHeightStorageKey, JSON.stringify(processWorkListHeights));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断流程结构查看或提交生产明细核对。
+  }
+}
 
 function lineRequiresProductionProcess(line: OrderLine) {
   return Number(line.productionPlanQuantity ?? 0) > 0;
@@ -865,7 +1073,7 @@ function processLineStructureTagType(line: OrderLine): 'success' | 'warning' | '
 }
 
 function processStepText(line: OrderLine) {
-  return line.processSteps.length ? line.processSteps.join('、') : lineRequiresProductionProcess(line) ? '未配置' : '无生产任务';
+  return line.processSteps.length ? formatProcessNamePreview(line.processSteps) : lineRequiresProductionProcess(line) ? '未配置' : '无生产任务';
 }
 
 function formatProcessLineThickness(line: OrderLine) {
@@ -1006,14 +1214,23 @@ function formatOrderQuantity(order: OrderSummary, field: 'totalQuantity' | 'tota
 function orderShortageActionText(order: OrderSummary) {
   if (order.needsProductionReplenishmentReview && !order.needsReplenishmentAction) {
     const quantityText = order.pendingProductionReplenishmentQuantityByUnit?.length
-      ? order.pendingProductionReplenishmentQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+      ? formatQuantityByUnitPreview(order.pendingProductionReplenishmentQuantityByUnit)
       : formatQuantity(order.pendingProductionReplenishmentQuantity ?? 0, order.pendingProductionReplenishmentUnit || order.unit || '件');
     return `生产报废补单待确认 ${order.pendingProductionReplenishmentLineCount ?? 0} 个 / ${quantityText}`;
   }
   const quantityText = order.unresolvedShortageQuantityByUnit?.length
-    ? order.unresolvedShortageQuantityByUnit.map((row) => formatQuantity(row.quantity, row.unit)).join('、')
+    ? formatQuantityByUnitPreview(order.unresolvedShortageQuantityByUnit)
     : formatQuantity(order.unresolvedShortageQuantity ?? 0, order.unresolvedShortageUnit || order.unit || '件');
   return `需补单 ${order.unresolvedShortageLineCount ?? 0} 个 / ${quantityText}`;
+}
+
+function formatQuantityByUnitPreview(rows?: Array<{ quantity: number; unit: string }>) {
+  const values = (rows || []).map((row) => formatQuantity(row.quantity, row.unit)).filter(Boolean);
+  if (values.length === 0) {
+    return '-';
+  }
+  const preview = values.filter((_, index) => index < 3).join('、');
+  return values.length > 3 ? `${preview} 等 ${values.length} 个单位` : preview;
 }
 
 function orderNeedsShortageAttention(order: OrderSummary) {
@@ -1470,7 +1687,7 @@ function applyTemplate(steps: ProcessStepDetail[]) {
   draftSteps.value = normalizeSteps(steps);
   const duplicates = duplicateStepNames(draftSteps.value);
   if (duplicates.length > 0) {
-    ElMessage.warning(`流程中存在重复工序：${duplicates.join('、')}，请调整后再保存`);
+    ElMessage.warning(`流程中存在重复工序：${formatProcessNamePreview(duplicates)}，请调整后再保存`);
   }
 }
 
@@ -1499,7 +1716,7 @@ function handleDraftStepChange() {
   draftProcessFilterKeyword.value = '';
   const duplicates = duplicateStepNames(draftSteps.value);
   if (duplicates.length > 0) {
-    ElMessage.warning(`当前零件流程存在重复工序：${duplicates.join('、')}，请确认后再保存`);
+    ElMessage.warning(`当前零件流程存在重复工序：${formatProcessNamePreview(duplicates)}，请确认后再保存`);
   }
 }
 
@@ -1679,7 +1896,7 @@ async function saveProcess() {
   }
   const duplicates = duplicateStepNames(normalizedSteps);
   if (duplicates.length > 0) {
-    ElMessage.warning(`当前零件流程存在重复工序：${duplicates.join('、')}，请删除或调整后再保存`);
+    ElMessage.warning(`当前零件流程存在重复工序：${formatProcessNamePreview(duplicates)}，请删除或调整后再保存`);
     return false;
   }
 
@@ -1740,15 +1957,15 @@ function validateSubmitOrderReady() {
     return false;
   }
   if (missingLineNames.value.length > 0) {
-    ElMessage.warning(`还有零件未配置流程：${missingLineNames.value.join('、')}`);
+    ElMessage.warning(`还有零件未配置流程：${formatProcessLineNamePreview(missingLineNames.value)}`);
     return false;
   }
   if (missingStockSourceLineNames.value.length > 0) {
-    ElMessage.warning(`还有零件未选择库存来源：${missingStockSourceLineNames.value.join('、')}`);
+    ElMessage.warning(`还有零件未选择库存来源：${formatProcessLineNamePreview(missingStockSourceLineNames.value)}`);
     return false;
   }
   if (insufficientReworkSourceLineNames.value.length > 0) {
-    ElMessage.warning(`库存再加工零件未补齐库存来源：${insufficientReworkSourceLineNames.value.join('、')}`);
+    ElMessage.warning(`库存再加工零件未补齐库存来源：${formatProcessLineNamePreview(insufficientReworkSourceLineNames.value)}`);
     return false;
   }
   return true;
@@ -1927,6 +2144,8 @@ async function loadProcessEditorOperators(keyword = '') {
 }
 
 async function loadInitialState() {
+  restoreProcessOrderTableHeight();
+  restoreProcessWorkListHeights();
   await loadProcessDefinitions();
   await loadProcessEditorOperators('');
   const initialOrderNo = String(route.query.orderNo || '');
@@ -1941,6 +2160,11 @@ async function loadInitialState() {
   await selectOrderFromList(initialOrderNo, false);
 }
 
+watch(
+  () => processOrderTableHeight.value,
+  () => saveProcessOrderTableHeight()
+);
+watch(processWorkListHeights, () => saveProcessWorkListHeights(), { deep: true });
 watch(() => route.query.orderNo, handleRouteOrderNoChange);
 onMounted(loadInitialState);
 </script>
@@ -1991,6 +2215,44 @@ onMounted(loadInitialState);
 .order-list-note strong {
   color: #0f172a;
   font-size: 15px;
+}
+
+.process-table-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.process-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.process-table-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.process-list-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.process-list-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.process-list-height-label {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .parts-panel,
@@ -2114,7 +2376,6 @@ onMounted(loadInitialState);
 .process-structure-list {
   display: grid;
   gap: 8px;
-  max-height: 300px;
   overflow: auto;
 }
 
@@ -2295,7 +2556,6 @@ onMounted(loadInitialState);
 .submit-production-lines {
   display: grid;
   gap: 8px;
-  max-height: 280px;
   overflow: auto;
 }
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Header, Query, StreamableFile } from '@nestjs/common';
 import { OrderStatisticsQueryDto } from './dto';
 import { StatisticsService } from './statistics.service';
 
@@ -9,5 +9,12 @@ export class StatisticsController {
   @Get('orders')
   orderStatistics(@Query() query: OrderStatisticsQueryDto) {
     return this.statisticsService.orderStatistics(query);
+  }
+
+  @Get('orders/export')
+  @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  @Header('Content-Disposition', 'attachment; filename="order-statistics-export.xlsx"')
+  async orderStatisticsExport(@Query() query: OrderStatisticsQueryDto) {
+    return new StreamableFile(await this.statisticsService.buildOrderStatisticsExport(query));
   }
 }

@@ -12,6 +12,9 @@
         <RouterLink to="/inventory/model-boms">
           <el-button>机型零件包</el-button>
         </RouterLink>
+        <el-button v-if="!isMobileLayout" :icon="Download" :loading="inventoryExporting" @click="exportInventoryExcel">
+          导出 Excel
+        </el-button>
         <el-button :loading="loading" @click="loadInventory">刷新</el-button>
       </div>
     </div>
@@ -19,7 +22,7 @@
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-label">库存批次</div>
-        <div class="stat-value">{{ inventory.length }} 批</div>
+        <div class="stat-value">{{ inventoryPagination.total }} 批</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">零件种类</div>
@@ -30,8 +33,34 @@
         <div class="stat-value">{{ averageInventoryUsageRateText }}</div>
       </div>
       <div class="stat-card">
+        <div class="stat-label">累计数量</div>
+        <div class="stat-value">{{ totalQuantityText }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">已出库 / 已使用</div>
+        <div class="stat-value">{{ usedQuantityText }}</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-label">可用数量</div>
         <div class="stat-value">{{ availableQuantityText }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">已预占数量</div>
+        <div class="stat-value">{{ reservedQuantityText }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">订单库存数量</div>
+        <div class="stat-value">{{ orderInventoryQuantityText }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">备货库存数量</div>
+        <div class="stat-value">{{ stockInventoryQuantityText }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">备货来源构成</div>
+        <div class="stat-value inventory-stat-value-compact" :title="stockSourceBreakdownTotalText">
+          {{ stockSourceBreakdownTotalText }}
+        </div>
       </div>
       <div class="stat-card">
         <div class="stat-label">有库存仓库</div>
@@ -100,7 +129,7 @@
           <el-option label="未启用" value="DISABLED" />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="loadInventory">查询</el-button>
+      <el-button type="primary" :loading="loading" @click="searchInventory">查询</el-button>
       <el-button @click="reset">重置</el-button>
     </div>
 
@@ -136,9 +165,41 @@
             <el-option label="未启用" value="DISABLED" />
           </el-select>
           <el-button :loading="materialMemoryLoading" @click="searchMaterialMemory">查询</el-button>
+          <div class="inventory-table-height-actions" aria-label="库存使用总览表格高度">
+            <el-tooltip content="降低表格高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="Minus"
+                :disabled="inventoryWorkTableHeights.materialMemory <= inventoryWorkTableHeightLimits.min"
+                aria-label="降低库存使用总览表格高度"
+                @click="adjustInventoryWorkTableHeight('materialMemory', -inventoryWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="提高表格高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="Plus"
+                :disabled="inventoryWorkTableHeights.materialMemory >= inventoryWorkTableHeightLimits.max"
+                aria-label="提高库存使用总览表格高度"
+                @click="adjustInventoryWorkTableHeight('materialMemory', inventoryWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="恢复默认高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="inventoryWorkTableHeights.materialMemory === inventoryWorkTableDefaultHeights.materialMemory"
+                aria-label="恢复库存使用总览表格默认高度"
+                @click="resetInventoryWorkTableHeight('materialMemory')"
+              />
+            </el-tooltip>
+          </div>
         </div>
       </div>
-      <el-table v-loading="materialMemoryLoading" :data="materialMemory" max-height="260">
+      <el-table v-loading="materialMemoryLoading" :data="materialMemory" :max-height="inventoryWorkTableHeights.materialMemory">
         <el-table-column prop="partCode" label="零件编码" min-width="160" />
         <el-table-column prop="partName" label="零件名称" min-width="180" />
         <el-table-column prop="unit" label="单位" width="80" />
@@ -215,10 +276,44 @@
 
     <div class="table-card desktop-table summary-table-card">
       <div class="section-heading">
-        <strong>零件库存汇总</strong>
-        <span>按零件汇总使用率、可用、预占、订单库存、备货库存和仓库分布。</span>
+        <div class="section-heading-copy">
+          <strong>零件库存汇总</strong>
+          <span>按零件汇总使用率、可用、预占、订单库存、备货库存和仓库分布。</span>
+        </div>
+        <div class="inventory-table-height-actions" aria-label="库存汇总表格高度">
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="inventoryWorkTableHeights.summary <= inventoryWorkTableHeightLimits.min"
+              aria-label="降低库存汇总表格高度"
+              @click="adjustInventoryWorkTableHeight('summary', -inventoryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="inventoryWorkTableHeights.summary >= inventoryWorkTableHeightLimits.max"
+              aria-label="提高库存汇总表格高度"
+              @click="adjustInventoryWorkTableHeight('summary', inventoryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="inventoryWorkTableHeights.summary === inventoryWorkTableDefaultHeights.summary"
+              aria-label="恢复库存汇总表格默认高度"
+              @click="resetInventoryWorkTableHeight('summary')"
+            />
+          </el-tooltip>
+        </div>
       </div>
-      <el-table v-loading="loading" :data="inventorySummary" max-height="260">
+      <el-table v-loading="loading" :data="inventorySummaryPageRows" :max-height="inventoryWorkTableHeights.summary">
         <el-table-column prop="partCode" label="零件编码" min-width="150" />
         <el-table-column label="零件名称" min-width="210">
           <template #default="{ row }">
@@ -298,11 +393,26 @@
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination-row">
+        <span>
+          第 {{ summaryPagination.page }} 页，已显示 {{ inventorySummaryPageRows.length }} /
+          {{ summaryPagination.total }} 种零件库存
+        </span>
+        <el-pagination
+          background
+          layout="prev, pager, next"
+          :current-page="summaryPagination.page"
+          :page-size="summaryPagination.limit"
+          :total="summaryPagination.total"
+          :disabled="loading"
+          @current-change="handleSummaryPageChange"
+        />
+      </div>
     </div>
 
     <div v-loading="loading" class="mobile-card-list summary-mobile-list">
       <article
-        v-for="row in inventorySummary"
+        v-for="row in inventorySummaryPageRows"
         :key="`${row.partCode}-${row.partName}-${row.unit}`"
         class="mobile-card mobile-order-card"
         :class="{ expanded: isMobileInventoryCardExpanded(summaryCardKey(row)) }"
@@ -380,14 +490,63 @@
           <el-button link type="primary" :disabled="!row.materialId" @click="openStockAlertDialog(row)">设置报警</el-button>
         </div>
       </article>
+      <div v-if="summaryPagination.total > 0" class="table-pagination-row mobile-pagination-row">
+        <span>
+          第 {{ summaryPagination.page }} 页，已显示 {{ inventorySummaryPageRows.length }} /
+          {{ summaryPagination.total }} 种零件库存
+        </span>
+        <el-pagination
+          background
+          layout="prev, pager, next"
+          :current-page="summaryPagination.page"
+          :page-size="summaryPagination.limit"
+          :total="summaryPagination.total"
+          :disabled="loading"
+          @current-change="handleSummaryPageChange"
+        />
+      </div>
     </div>
 
     <div class="table-card desktop-table">
       <div class="section-heading">
-        <strong>库存溯源</strong>
-        <span>逐批查看库存来源、占用记录、仓库库位，并进行盘点调整。</span>
+        <div class="section-heading-copy">
+          <strong>库存溯源</strong>
+          <span>逐批查看库存来源、占用记录、仓库库位，并进行盘点调整。</span>
+        </div>
+        <div class="inventory-table-height-actions" aria-label="库存溯源表格高度">
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="inventoryWorkTableHeights.batches <= inventoryWorkTableHeightLimits.min"
+              aria-label="降低库存溯源表格高度"
+              @click="adjustInventoryWorkTableHeight('batches', -inventoryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="inventoryWorkTableHeights.batches >= inventoryWorkTableHeightLimits.max"
+              aria-label="提高库存溯源表格高度"
+              @click="adjustInventoryWorkTableHeight('batches', inventoryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="inventoryWorkTableHeights.batches === inventoryWorkTableDefaultHeights.batches"
+              aria-label="恢复库存溯源表格默认高度"
+              @click="resetInventoryWorkTableHeight('batches')"
+            />
+          </el-tooltip>
+        </div>
       </div>
-      <el-table v-loading="loading" :data="inventory" max-height="max(300px, calc(100vh - 390px))">
+      <el-table v-loading="loading" :data="inventory" :max-height="inventoryWorkTableHeights.batches">
         <el-table-column label="批次号" min-width="230">
           <template #default="{ row }">
             <div class="cell-main">{{ row.batchNo }}</div>
@@ -468,6 +627,21 @@
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination-row">
+        <span>
+          第 {{ inventoryPagination.page }} 页，已显示 {{ inventory.length }} /
+          {{ inventoryPagination.total }} 批库存
+        </span>
+        <el-pagination
+          background
+          layout="prev, pager, next"
+          :current-page="inventoryPagination.page"
+          :page-size="inventoryPagination.limit"
+          :total="inventoryPagination.total"
+          :disabled="loading"
+          @current-change="handleInventoryPageChange"
+        />
+      </div>
     </div>
 
     <div v-loading="loading" class="mobile-card-list">
@@ -581,6 +755,21 @@
         </div>
       </article>
       <div v-if="!inventory.length && !loading" class="mobile-empty">暂无库存</div>
+      <div v-if="inventoryPagination.total > 0" class="table-pagination-row mobile-pagination-row">
+        <span>
+          第 {{ inventoryPagination.page }} 页，已显示 {{ inventory.length }} /
+          {{ inventoryPagination.total }} 批库存
+        </span>
+        <el-pagination
+          background
+          layout="prev, pager, next"
+          :current-page="inventoryPagination.page"
+          :page-size="inventoryPagination.limit"
+          :total="inventoryPagination.total"
+          :disabled="loading"
+          @current-change="handleInventoryPageChange"
+        />
+      </div>
     </div>
 
     <InventorySourceDetailsDialog
@@ -589,6 +778,7 @@
       :title="sourceDetailsTitle"
       :reference-only="sourceDetailsReferenceOnly"
       :detail="sourceDetails"
+      @source-page-change="handleSourceDetailsPageChange"
     />
 
     <el-dialog
@@ -604,7 +794,42 @@
         <span>账面 {{ formatQuantity(selectedReservationBatch.quantity, selectedReservationBatch.unit) }}</span>
         <span>预占 {{ formatQuantity(selectedReservationBatch.reservedQuantity ?? 0, selectedReservationBatch.unit) }}</span>
       </div>
-      <el-table v-loading="reservationHistoryLoading" :data="reservationHistory" max-height="420">
+      <div class="dialog-table-toolbar">
+        <strong>预占历史</strong>
+        <div class="inventory-table-height-actions" aria-label="库存预占记录表格高度">
+          <el-tooltip content="降低表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Minus"
+              :disabled="inventoryWorkTableHeights.reservationHistory <= inventoryWorkTableHeightLimits.min"
+              aria-label="降低库存预占记录表格高度"
+              @click="adjustInventoryWorkTableHeight('reservationHistory', -inventoryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="提高表格高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="Plus"
+              :disabled="inventoryWorkTableHeights.reservationHistory >= inventoryWorkTableHeightLimits.max"
+              aria-label="提高库存预占记录表格高度"
+              @click="adjustInventoryWorkTableHeight('reservationHistory', inventoryWorkTableHeightLimits.step)"
+            />
+          </el-tooltip>
+          <el-tooltip content="恢复默认高度" placement="top">
+            <el-button
+              circle
+              size="small"
+              :icon="RefreshLeft"
+              :disabled="inventoryWorkTableHeights.reservationHistory === inventoryWorkTableDefaultHeights.reservationHistory"
+              aria-label="恢复库存预占记录表格默认高度"
+              @click="resetInventoryWorkTableHeight('reservationHistory')"
+            />
+          </el-tooltip>
+        </div>
+      </div>
+      <el-table v-loading="reservationHistoryLoading" :data="reservationHistory" :max-height="inventoryWorkTableHeights.reservationHistory">
         <el-table-column label="状态" width="105">
           <template #default="{ row }">
             <el-tag :type="reservationStatusTagType(row.status)" effect="plain">
@@ -636,7 +861,9 @@
           </template>
         </el-table-column>
         <el-table-column label="说明" min-width="220">
-          <template #default="{ row }">{{ row.statusReason || '-' }}</template>
+          <template #default="{ row }">
+            <span :title="reservationStatusReasonTitle(row)">{{ reservationStatusReasonPreview(row) }}</span>
+          </template>
         </el-table-column>
       </el-table>
       <template #footer>
@@ -714,10 +941,44 @@
       </el-form>
       <div class="adjustment-history">
         <div class="section-heading compact-heading">
-          <strong>最近盘点记录</strong>
-          <span>按时间倒序显示全部记录</span>
+          <div class="section-heading-copy">
+            <strong>最近盘点记录</strong>
+            <span>按时间倒序显示全部记录</span>
+          </div>
+          <div class="inventory-table-height-actions" aria-label="库存盘点记录表格高度">
+            <el-tooltip content="降低表格高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="Minus"
+                :disabled="inventoryWorkTableHeights.adjustmentHistory <= inventoryWorkTableHeightLimits.min"
+                aria-label="降低库存盘点记录表格高度"
+                @click="adjustInventoryWorkTableHeight('adjustmentHistory', -inventoryWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="提高表格高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="Plus"
+                :disabled="inventoryWorkTableHeights.adjustmentHistory >= inventoryWorkTableHeightLimits.max"
+                aria-label="提高库存盘点记录表格高度"
+                @click="adjustInventoryWorkTableHeight('adjustmentHistory', inventoryWorkTableHeightLimits.step)"
+              />
+            </el-tooltip>
+            <el-tooltip content="恢复默认高度" placement="top">
+              <el-button
+                circle
+                size="small"
+                :icon="RefreshLeft"
+                :disabled="inventoryWorkTableHeights.adjustmentHistory === inventoryWorkTableDefaultHeights.adjustmentHistory"
+                aria-label="恢复库存盘点记录表格默认高度"
+                @click="resetInventoryWorkTableHeight('adjustmentHistory')"
+              />
+            </el-tooltip>
+          </div>
         </div>
-        <el-table v-loading="adjustmentHistoryLoading" :data="adjustmentHistory" max-height="180" size="small">
+        <el-table v-loading="adjustmentHistoryLoading" :data="adjustmentHistory" :max-height="inventoryWorkTableHeights.adjustmentHistory" size="small">
           <el-table-column prop="adjustmentNo" label="盘点号" min-width="170" />
           <el-table-column label="数量变化" min-width="130">
             <template #default="{ row }">
@@ -746,7 +1007,11 @@
             </template>
           </el-table-column>
           <el-table-column label="盘点备注" min-width="180">
-            <template #default="{ row }">{{ row.remark || '-' }}</template>
+            <template #default="{ row }">
+              <el-tooltip :content="longTextTooltipText(row.remark)" placement="top" :disabled="!row.remark">
+                <span>{{ formatLongTextPreview(row.remark) }}</span>
+              </el-tooltip>
+            </template>
           </el-table-column>
         </el-table>
       </div>
@@ -899,7 +1164,9 @@
 
 <script setup lang="ts">
 import { ElMessage } from 'element-plus';
-import { computed, onMounted, reactive, ref } from 'vue';
+import { Download } from '@element-plus/icons-vue';
+import { Minus, Plus, RefreshLeft } from '@element-plus/icons-vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { erpApi, type StockAlertFilter } from '../api/erp';
 import CustomerSelect from '../components/CustomerSelect.vue';
 import DrawingPreviewLink from '../components/DrawingPreviewLink.vue';
@@ -923,12 +1190,15 @@ import type {
 } from '../types/erp';
 import { normalizeDisplayFileName } from '../utils/fileNames';
 import { formatDate, formatDateTime, formatDateTimeInputValue, formatQuantity } from '../utils/format';
+import { formatFileDateTime } from '../utils/tableExport';
 
 const { isMobileLayout } = useDeviceProfile();
 const warehouses = ref<Warehouse[]>([]);
 const inventory = ref<InventoryBatch[]>([]);
 const inventorySummary = ref<InventorySummaryRow[]>([]);
+const inventorySummaryPageRows = ref<InventorySummaryRow[]>([]);
 const loading = ref(false);
+const inventoryExporting = ref(false);
 const adjustDialogVisible = ref(false);
 const adjustSaving = ref(false);
 const selectedBatch = ref<InventoryBatch>();
@@ -939,6 +1209,20 @@ const sourceDetails = ref<InventorySourceDetailResponse | null>(null);
 const sourceDetailsTitle = ref('库存来源详情');
 const sourceDetailsReferenceOnly = ref(false);
 const sourceDetailsRequestSeq = ref(0);
+const sourceDetailsContext = reactive<{
+  partCode: string;
+  unit?: string;
+  sourceType: 'ALL' | 'ORDER' | 'STOCK';
+}>({
+  partCode: '',
+  unit: undefined,
+  sourceType: 'ALL'
+});
+const sourceDetailsPagination = reactive({
+  rowsPerPage: 20,
+  offset: 0,
+  total: 0
+});
 const reservationDialogVisible = ref(false);
 const reservationHistory = ref<InventoryReservationAudit[]>([]);
 const reservationHistoryLoading = ref(false);
@@ -957,6 +1241,29 @@ const adjustmentFile = ref<File | null>(null);
 const adjustmentHistory = ref<InventoryAdjustment[]>([]);
 const adjustmentHistoryLoading = ref(false);
 const expandedMobileInventoryCardKeys = ref<string[]>([]);
+type InventoryWorkTableKey = 'materialMemory' | 'summary' | 'batches' | 'reservationHistory' | 'adjustmentHistory';
+const inventoryWorkTableKeys: InventoryWorkTableKey[] = [
+  'materialMemory',
+  'summary',
+  'batches',
+  'reservationHistory',
+  'adjustmentHistory'
+];
+const inventoryWorkTableHeightLimits = {
+  min: 260,
+  max: 760,
+  step: 80
+};
+const inventoryWorkTableDefaultHeights: Record<InventoryWorkTableKey, number> = {
+  materialMemory: 360,
+  summary: 400,
+  batches: 560,
+  reservationHistory: 420,
+  adjustmentHistory: 260
+};
+const inventoryWorkTableHeightStorageKey = 'baisheng.erp.inventoryWorkTableHeights.v1';
+// 库存页表格高度是本机 UI 偏好，不能写入库存批次、预占、盘点、订单、生产或库存流水业务数据。
+const inventoryWorkTableHeights = reactive<Record<InventoryWorkTableKey, number>>({ ...inventoryWorkTableDefaultHeights });
 const adjustForm = reactive({
   afterQuantity: 0,
   targetStatus: undefined as 'SCRAPPED' | undefined,
@@ -992,6 +1299,16 @@ const materialMemoryFilters = reactive<{
   status: 'ENABLED'
 });
 const materialMemoryPagination = reactive({
+  page: Number(1),
+  limit: Number(20),
+  total: Number(0)
+});
+const inventoryPagination = reactive({
+  page: Number(1),
+  limit: Number(50),
+  total: Number(0)
+});
+const summaryPagination = reactive({
   page: Number(1),
   limit: Number(20),
   total: Number(0)
@@ -1036,7 +1353,19 @@ const materialMemoryStatusPrimaryWarning = computed(() =>
     : '停用后不再作为后续订单选料、库存搜索和 0 库存零件展示的推荐项。'
 );
 
+const totalQuantityText = computed(() => formatInventoryTotalByUnit('totalQuantity'));
+const usedQuantityText = computed(() => formatInventoryTotalByUnit('usedQuantity'));
 const availableQuantityText = computed(() => formatInventoryTotalByUnit('availableQuantity'));
+const reservedQuantityText = computed(() => formatInventoryTotalByUnit('reservedQuantity'));
+const orderInventoryQuantityText = computed(() => formatInventoryTotalByUnit('orderInventoryQuantity'));
+const stockInventoryQuantityText = computed(() => formatInventoryTotalByUnit('stockInventoryQuantity'));
+const stockSourceBreakdownTotalText = computed(() =>
+  [
+    `正常 ${formatInventoryTotalByUnit('normalOrderStockQuantity')}`,
+    `取消 ${formatInventoryTotalByUnit('cancelledOrderStockQuantity')}`,
+    `变更 ${formatInventoryTotalByUnit('customerChangeStockQuantity')}`
+  ].join(' / ')
+);
 const averageInventoryUsageRateText = computed(() => {
   const rates = inventorySummary.value
     .map((row) => inventoryUsageRate(row))
@@ -1048,7 +1377,12 @@ const averageInventoryUsageRateText = computed(() => {
   return `${(averageRate * 100).toFixed(1)}%`;
 });
 const stockedWarehouseCount = computed(
-  () => new Set(inventory.value.filter((item) => item.status === 'AVAILABLE' && batchAvailableQuantity(item) > 0).map((item) => item.warehouseId)).size
+  () =>
+    new Set(
+      inventorySummary.value.flatMap((row) =>
+        row.warehouses.filter((warehouse) => Number(warehouse.availableQuantity ?? 0) > 0).map((warehouse) => warehouse.warehouseId)
+      )
+    ).size
 );
 const triggeredStockAlertRows = computed(() => inventorySummary.value.filter((row) => row.stockAlertTriggered));
 const triggeredStockAlertText = computed(() => `${triggeredStockAlertRows.value.length} 种`);
@@ -1068,7 +1402,71 @@ const inventorySummaryByPartCode = computed(() => {
   return new Map(inventorySummary.value.map((row) => [row.partCode.trim().toLocaleLowerCase(), row]));
 });
 
-function formatInventoryTotalByUnit(field: 'availableQuantity') {
+function clampInventoryWorkTableHeight(value: number) {
+  return Math.min(inventoryWorkTableHeightLimits.max, Math.max(inventoryWorkTableHeightLimits.min, value));
+}
+
+function adjustInventoryWorkTableHeight(key: InventoryWorkTableKey, delta: number) {
+  inventoryWorkTableHeights[key] = clampInventoryWorkTableHeight(inventoryWorkTableHeights[key] + delta);
+}
+
+function resetInventoryWorkTableHeight(key: InventoryWorkTableKey) {
+  inventoryWorkTableHeights[key] = inventoryWorkTableDefaultHeights[key];
+}
+
+function restoreInventoryWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const rawValue = window.localStorage.getItem(inventoryWorkTableHeightStorageKey);
+    if (!rawValue) {
+      return;
+    }
+    const savedHeights = JSON.parse(rawValue) as Partial<Record<InventoryWorkTableKey, number>>;
+    inventoryWorkTableKeys.forEach((key) => {
+      const savedHeight = Number(savedHeights[key]);
+      if (Number.isFinite(savedHeight)) {
+        inventoryWorkTableHeights[key] = clampInventoryWorkTableHeight(savedHeight);
+      }
+    });
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响库存查询和盘点。
+  }
+}
+
+function saveInventoryWorkTableHeights() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      inventoryWorkTableHeightStorageKey,
+      JSON.stringify({
+        materialMemory: inventoryWorkTableHeights.materialMemory,
+        summary: inventoryWorkTableHeights.summary,
+        batches: inventoryWorkTableHeights.batches,
+        reservationHistory: inventoryWorkTableHeights.reservationHistory,
+        adjustmentHistory: inventoryWorkTableHeights.adjustmentHistory
+      })
+    );
+  } catch {
+    // 本机 UI 偏好写入失败不阻断库存查看、溯源或盘点。
+  }
+}
+
+function formatInventoryTotalByUnit(
+  field:
+    | 'totalQuantity'
+    | 'usedQuantity'
+    | 'availableQuantity'
+    | 'reservedQuantity'
+    | 'orderInventoryQuantity'
+    | 'stockInventoryQuantity'
+    | 'normalOrderStockQuantity'
+    | 'cancelledOrderStockQuantity'
+    | 'customerChangeStockQuantity'
+) {
   // 库存汇总可能同时包含件、套、kg 等单位，顶部卡片必须按单位分别展示。
   const totalByUnit = new Map<string, number>();
   for (const row of inventorySummary.value) {
@@ -1095,16 +1493,96 @@ async function loadWarehouses() {
 async function loadInventory() {
   loading.value = true;
   try {
-    const [summaryRows, inventoryRows] = await Promise.all([erpApi.inventorySummary(filters), erpApi.inventory(filters)]);
+    const requestInventoryPage = Math.max(inventoryPagination.page, 1);
+    const requestInventoryLimit = inventoryPagination.limit;
+    const requestInventoryOffset = (requestInventoryPage - 1) * requestInventoryLimit;
+    const requestSummaryPage = Math.max(summaryPagination.page, 1);
+    const requestSummaryLimit = summaryPagination.limit;
+    const requestSummaryOffset = (requestSummaryPage - 1) * requestSummaryLimit;
+    const [summaryRows, summaryPage, inventoryPage] = await Promise.all([
+      erpApi.inventorySummary(filters),
+      erpApi.inventorySummaryPage({
+        ...filters,
+        limit: requestSummaryLimit,
+        offset: requestSummaryOffset
+      }),
+      erpApi.inventoryPage({
+        ...filters,
+        limit: requestInventoryLimit,
+        offset: requestInventoryOffset
+      })
+    ]);
+    let pagedSummaryRows = summaryPage.items;
+    summaryPagination.total = summaryPage.totalCount;
+    if (summaryPage.totalCount > 0 && pagedSummaryRows.length === 0 && requestSummaryPage > 1) {
+      summaryPagination.page = Math.max(Math.ceil(summaryPage.totalCount / requestSummaryLimit), 1);
+      const fallbackSummaryPage = await erpApi.inventorySummaryPage({
+        ...filters,
+        limit: requestSummaryLimit,
+        offset: (summaryPagination.page - 1) * requestSummaryLimit
+      });
+      pagedSummaryRows = fallbackSummaryPage.items;
+      summaryPagination.total = fallbackSummaryPage.totalCount;
+    }
+    let inventoryRows = inventoryPage.items;
+    inventoryPagination.total = inventoryPage.totalCount;
+    if (inventoryPage.totalCount > 0 && inventoryRows.length === 0 && requestInventoryPage > 1) {
+      inventoryPagination.page = Math.max(Math.ceil(inventoryPage.totalCount / requestInventoryLimit), 1);
+      const fallbackPage = await erpApi.inventoryPage({
+        ...filters,
+        limit: requestInventoryLimit,
+        offset: (inventoryPagination.page - 1) * requestInventoryLimit
+      });
+      inventoryRows = fallbackPage.items;
+      inventoryPagination.total = fallbackPage.totalCount;
+    }
     inventorySummary.value = summaryRows;
+    inventorySummaryPageRows.value = pagedSummaryRows;
     inventory.value = inventoryRows;
   } catch (error) {
     inventorySummary.value = [];
+    inventorySummaryPageRows.value = [];
     inventory.value = [];
+    summaryPagination.total = Number(0);
+    inventoryPagination.total = Number(0);
     expandedMobileInventoryCardKeys.value = [];
     ElMessage.error(error instanceof Error ? error.message : '库存数据加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
+  }
+}
+
+function searchInventory() {
+  summaryPagination.page = Number(1);
+  inventoryPagination.page = Number(1);
+  expandedMobileInventoryCardKeys.value = [];
+  void loadInventory();
+}
+
+function handleSummaryPageChange(page: number) {
+  summaryPagination.page = page;
+  void loadInventory();
+}
+
+function handleInventoryPageChange(page: number) {
+  inventoryPagination.page = page;
+  expandedMobileInventoryCardKeys.value = [];
+  void loadInventory();
+}
+
+async function exportInventoryExcel() {
+  if (inventoryExporting.value) {
+    return;
+  }
+  inventoryExporting.value = true;
+  try {
+    // 库存导出复用当前筛选条件，只读取库存汇总和批次明细，不调整库存数量或库存报警设置。
+    await erpApi.downloadInventoryExport(filters, `库存明细_${formatFileDateTime()}.xlsx`);
+    ElMessage.success('库存 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '库存 Excel 导出失败，请确认后端服务和筛选条件');
+  } finally {
+    inventoryExporting.value = false;
   }
 }
 
@@ -1408,7 +1886,7 @@ function reset() {
   filters.orderNo = undefined;
   filters.status = undefined;
   filters.stockAlert = undefined;
-  void loadInventory();
+  searchInventory();
 }
 
 function applyTriggeredStockAlertFilter() {
@@ -1416,7 +1894,7 @@ function applyTriggeredStockAlertFilter() {
   filters.stockAlert = nextFilter;
   materialMemoryFilters.stockAlert = nextFilter;
   // 库存报警只是提醒和筛选入口，不自动补单、下单、提交生产或扣库存。
-  void loadInventory();
+  searchInventory();
   searchMaterialMemory();
 }
 
@@ -1445,7 +1923,7 @@ async function queryMaterialSuggestions(keyword: string, callback: (items: Inven
 
 function selectMaterialSuggestion(item: InventoryMaterialSuggestion) {
   filters.keyword = item.partCode;
-  void loadInventory();
+  searchInventory();
 }
 
 function inventorySourceLabel(row: InventoryBatch) {
@@ -1541,9 +2019,7 @@ function inventorySourceOrderNo(row: InventoryBatch) {
 }
 
 function drawingInfoText(row: InventoryBatch) {
-  const drawingNo = row.drawingNo || '未记录图号';
-  const version = row.drawingVersion ? ` / ${row.drawingVersion}` : '';
-  return `${drawingNo}${version}`;
+  return [row.drawingNo || '未记录图号', row.drawingVersion, row.drawingDate, row.drawingStatus].filter(Boolean).join(' / ');
 }
 
 function taskRelationText(row: InventoryBatch) {
@@ -1657,20 +2133,45 @@ async function openSourceDetails(
   sourceDetailsVisible.value = true;
   sourceDetailsLoading.value = true;
   sourceDetails.value = null;
+  sourceDetailsContext.partCode = partCode.trim();
+  sourceDetailsContext.unit = unit;
+  sourceDetailsContext.sourceType = sourceType;
+  sourceDetailsPagination.offset = Number(0);
+  sourceDetailsPagination.total = Number(0);
+  await loadSourceDetails();
+}
+
+async function loadSourceDetails() {
+  if (!sourceDetailsContext.partCode.trim()) {
+    return;
+  }
+  sourceDetailsLoading.value = true;
   const requestId = ++sourceDetailsRequestSeq.value;
   try {
-    const detail = await erpApi.inventoryMaterialSourceDetails(partCode.trim(), {
-      unit,
+    const detail = await erpApi.inventoryMaterialSourceDetails(sourceDetailsContext.partCode.trim(), {
+      unit: sourceDetailsContext.unit,
       warehouseId: filters.warehouseId,
-      sourceType,
-      customerId: filters.customerId
+      sourceType: sourceDetailsContext.sourceType,
+      customerId: filters.customerId,
+      limit: sourceDetailsPagination.rowsPerPage,
+      offset: sourceDetailsPagination.offset,
+      withPage: true
     });
-    if (requestId === sourceDetailsRequestSeq.value) {
-      sourceDetails.value = detail;
+    if (requestId !== sourceDetailsRequestSeq.value) {
+      return;
     }
+    if (detail.totalSourceCount && detail.sources.length === 0 && sourceDetailsPagination.offset > 0) {
+      sourceDetailsPagination.offset =
+        Math.max(Math.ceil(detail.totalSourceCount / sourceDetailsPagination.rowsPerPage) - 1, 0) * sourceDetailsPagination.rowsPerPage;
+      await loadSourceDetails();
+      return;
+    }
+    sourceDetails.value = detail;
+    sourceDetailsPagination.total = Number(detail.totalSourceCount ?? detail.batchCount ?? detail.sources.length);
   } catch (error) {
     if (requestId === sourceDetailsRequestSeq.value) {
       sourceDetails.value = null;
+      sourceDetailsPagination.total = Number(0);
       ElMessage.error(error instanceof Error ? error.message : '库存来源查询失败，请确认零件和后端服务');
     }
   } finally {
@@ -1678,6 +2179,11 @@ async function openSourceDetails(
       sourceDetailsLoading.value = false;
     }
   }
+}
+
+function handleSourceDetailsPageChange(offset: number) {
+  sourceDetailsPagination.offset = offset;
+  void loadSourceDetails();
 }
 
 async function openSummarySourceDetails(row: InventorySummaryRow) {
@@ -1795,6 +2301,26 @@ function displayFileName(fileName?: string | null) {
   return normalizeDisplayFileName(fileName);
 }
 
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function longTextTooltipText(value?: string | null) {
+  return String(value || '').trim() || '-';
+}
+
+function reservationStatusReasonPreview(row: InventoryReservationAudit) {
+  return formatLongTextPreview(row.statusReason, 32, '-');
+}
+
+function reservationStatusReasonTitle(row: InventoryReservationAudit) {
+  return longTextTooltipText(row.statusReason);
+}
+
 function formatSignedQuantity(value: number, unit: string) {
   if (value === 0) {
     return `0 ${unit}`;
@@ -1869,7 +2395,13 @@ async function submitAdjustment() {
   }
 }
 
+watch(
+  () => inventoryWorkTableKeys.map((key) => inventoryWorkTableHeights[key]),
+  () => saveInventoryWorkTableHeights()
+);
+
 onMounted(async () => {
+  restoreInventoryWorkTableHeights();
   await loadWarehouses();
   await Promise.all([loadInventory(), loadMaterialMemory()]);
 });
@@ -2044,6 +2576,26 @@ onMounted(async () => {
   line-height: 18px;
 }
 
+.section-heading-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.inventory-table-height-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.inventory-stat-value-compact {
+  font-size: 16px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
 .warehouse-summary {
   display: flex;
   flex-wrap: wrap;
@@ -2091,6 +2643,18 @@ onMounted(async () => {
 }
 
 .reservation-summary strong {
+  color: #0f172a;
+}
+
+.dialog-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.dialog-table-toolbar strong {
   color: #0f172a;
 }
 

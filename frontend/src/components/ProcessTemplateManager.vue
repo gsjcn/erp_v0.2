@@ -11,16 +11,17 @@
           clearable
           placeholder="搜索流程名称 / 工序 / 备注 / 拼音 / 首字母"
           class="process-template-search"
-          @keyup.enter="loadTemplates"
-          @clear="loadTemplates"
+          @keyup.enter="reloadTemplatesFromFirstPage"
+          @clear="reloadTemplatesFromFirstPage"
         />
-        <el-button :loading="loading" @click="loadTemplates">搜索</el-button>
+        <el-button :loading="loading" @click="reloadTemplatesFromFirstPage">搜索</el-button>
+        <el-button v-if="!readOnly" :icon="Download" :loading="exporting" @click="exportTemplatesExcel">导出 Excel</el-button>
         <el-select
           v-if="showStatusFilter && !readOnly"
           v-model="statusFilter"
           class="process-template-status-filter"
           style="width: 118px"
-          @change="loadTemplates"
+          @change="reloadTemplatesFromFirstPage"
         >
           <el-option label="启用" value="ENABLED" />
           <el-option label="停用" value="DISABLED" />
@@ -32,7 +33,33 @@
       </div>
     </div>
 
-    <div v-loading="loading" class="process-template-list">
+    <div class="process-template-list-height-toolbar">
+      <div class="process-template-list-height-actions" aria-label="流程记忆列表高度">
+        <span class="process-template-list-height-label">流程记忆列表高度</span>
+        <el-button-group>
+          <el-button
+            :icon="Minus"
+            :disabled="processTemplateListHeight <= processTemplateListHeightLimits.min"
+            aria-label="降低流程记忆列表高度"
+            @click="adjustProcessTemplateListHeight(-processTemplateListHeightLimits.step)"
+          />
+          <el-button
+            :icon="Plus"
+            :disabled="processTemplateListHeight >= processTemplateListHeightLimits.max"
+            aria-label="提高流程记忆列表高度"
+            @click="adjustProcessTemplateListHeight(processTemplateListHeightLimits.step)"
+          />
+          <el-button
+            :icon="RefreshLeft"
+            :disabled="processTemplateListHeight === processTemplateListDefaultHeight"
+            aria-label="恢复流程记忆列表默认高度"
+            @click="resetProcessTemplateListHeight"
+          />
+        </el-button-group>
+      </div>
+    </div>
+
+    <div v-loading="loading" class="process-template-list" :style="{ maxHeight: `${processTemplateListHeight}px` }">
       <el-tooltip
         v-for="template in templates"
         :key="template.id"
@@ -46,10 +73,10 @@
             <strong>{{ template.templateName }}</strong>
             <ol>
               <li v-for="(step, index) in template.steps" :key="`${template.id}-${index}`">
-                {{ step.processName }}<span v-if="step.processRemark">：{{ step.processRemark }}</span>
+                {{ step.processName }}<span v-if="step.processRemark" :title="templateStepRemarkTitle(step)">：{{ templateStepRemarkPreview(step) }}</span>
               </li>
             </ol>
-            <p v-if="template.remark">备注：{{ template.remark }}</p>
+            <p v-if="template.remark" :title="template.remark">备注：{{ templateRemarkPreview(template) }}</p>
           </div>
         </template>
 
@@ -58,7 +85,7 @@
             <strong>{{ template.templateName }}</strong>
             <el-tag v-if="showStatusFilter && template.status === 'DISABLED'" size="small" type="info" effect="plain">已停用</el-tag>
             <small>{{ templateStepSummary(template.steps) }}</small>
-            <em v-if="template.remark">{{ template.remark }}</em>
+            <em v-if="template.remark" :title="template.remark">{{ templateRemarkPreview(template) }}</em>
           </button>
           <el-button class="process-template-detail-toggle" link type="primary" @click.stop="toggleMobileTemplateCard(template.id)">
             {{ isMobileTemplateExpanded(template.id) ? '收起' : '详情' }}
@@ -90,6 +117,22 @@
       </el-tooltip>
 
       <el-empty v-if="!loading && templates.length === 0" description="没有匹配的流程记忆" />
+    </div>
+
+    <div v-if="templatePagination.totalCount > 0" class="process-template-pagination">
+      <span>
+        第 {{ templatePagination.page }} 页，已显示 {{ templates.length }} / {{ templatePagination.totalCount }} 条
+      </span>
+      <el-pagination
+        v-model:current-page="templatePagination.page"
+        background
+        size="small"
+        layout="prev, pager, next"
+        :page-size="templatePagination.limit"
+        :total="templatePagination.totalCount"
+        :disabled="loading"
+        @current-change="handleTemplatePageChange"
+      />
     </div>
 
     <el-dialog
@@ -208,10 +251,10 @@
         <ol>
           <li v-for="(step, index) in previewTemplate.steps" :key="`preview-step-${index}`">
             <strong>{{ step.processName }}</strong>
-            <span v-if="step.processRemark">：{{ step.processRemark }}</span>
+            <span v-if="step.processRemark" :title="templateStepRemarkTitle(step)">：{{ templateStepRemarkPreview(step, 28) }}</span>
           </li>
         </ol>
-        <p v-if="previewTemplate.remark">备注：{{ previewTemplate.remark }}</p>
+        <p v-if="previewTemplate.remark" :title="previewTemplate.remark">备注：{{ templateRemarkPreview(previewTemplate) }}</p>
         <p v-else class="muted-text">暂无模板备注</p>
       </div>
       <template #footer>
@@ -249,10 +292,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { Rank } from '@element-plus/icons-vue';
+import { Minus, Plus, Rank, RefreshLeft } from '@element-plus/icons-vue';
+import { Download } from '@element-plus/icons-vue';
 import { erpApi } from '../api/erp';
 import type { ProcessStepDetail, ProcessTemplate } from '../types/erp';
 import { filterPinyinSearchOptions } from '../utils/pinyinSearch';
+import { formatFileDateTime } from '../utils/tableExport';
 
 const props = withDefaults(
   defineProps<{
@@ -290,6 +335,7 @@ const templates = ref<ProcessTemplate[]>([]);
 const keyword = ref('');
 const statusFilter = ref<'ENABLED' | 'DISABLED' | 'ALL'>('ENABLED');
 const loading = ref(false);
+const exporting = ref(false);
 const saving = ref(false);
 const deleting = ref(false);
 const restoringTemplateId = ref('');
@@ -308,6 +354,22 @@ const templateProcessFilterKeyword = ref('');
 const newStepProcessFilterKeyword = ref('');
 const templateStepKeys = new WeakMap<ProcessStepDetail, string>();
 let templateStepKeySeq = 0;
+const templatePagination = reactive({
+  page: 1,
+  limit: Number(24),
+  totalCount: 0
+});
+const processTemplateListHeightLimits = {
+  min: 240,
+  max: 760,
+  step: 80
+};
+const processTemplateListDefaultHeight = props.compact ? 320 : 420;
+const processTemplateListHeightStorageKey = props.compact
+  ? 'baisheng.erp.processTemplateListHeight.compact.v1'
+  : 'baisheng.erp.processTemplateListHeight.v1';
+// 流程记忆列表高度只保存为本机 UI 偏好，不写入流程记忆、标准工序、订单、BOM、生产或库存业务数据。
+const processTemplateListHeight = ref(processTemplateListDefaultHeight);
 const draggedTemplateStepIndex = ref<number | null>(null);
 const templateStepDragOverIndex = ref<number | null>(null);
 const templateStepDragInsertAfter = ref(false);
@@ -346,12 +408,60 @@ async function loadProcessDefinitions() {
 async function loadTemplates() {
   loading.value = true;
   try {
-    templates.value = await erpApi.processTemplates(keyword.value.trim() || undefined, props.showStatusFilter ? statusFilter.value : 'ENABLED');
+    const requestPage = Math.max(templatePagination.page, 1);
+    const requestLimit = templatePagination.limit;
+    let result = await erpApi.processTemplatesPage({
+      keyword: keyword.value.trim() || undefined,
+      status: props.showStatusFilter ? statusFilter.value : 'ENABLED',
+      limit: requestLimit,
+      offset: (requestPage - 1) * requestLimit
+    });
+    if (result.totalCount > 0 && result.items.length === 0 && requestPage > 1) {
+      templatePagination.page = Math.max(Math.ceil(result.totalCount / requestLimit), 1);
+      result = await erpApi.processTemplatesPage({
+        keyword: keyword.value.trim() || undefined,
+        status: props.showStatusFilter ? statusFilter.value : 'ENABLED',
+        limit: requestLimit,
+        offset: (templatePagination.page - 1) * requestLimit
+      });
+    }
+    templates.value = result.items;
+    templatePagination.totalCount = result.totalCount;
   } catch (error) {
     templates.value = [];
+    templatePagination.totalCount = 0;
     ElMessage.error(error instanceof Error ? error.message : '流程记忆加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;
+  }
+}
+
+function reloadTemplatesFromFirstPage() {
+  templatePagination.page = 1;
+  void loadTemplates();
+}
+
+function handleTemplatePageChange(page: number) {
+  templatePagination.page = page;
+  void loadTemplates();
+}
+
+async function exportTemplatesExcel() {
+  if (exporting.value) {
+    return;
+  }
+  exporting.value = true;
+  try {
+    await erpApi.downloadProcessTemplatesExport(
+      keyword.value.trim() || undefined,
+      props.showStatusFilter ? statusFilter.value : 'ENABLED',
+      `流程记忆_${formatFileDateTime()}.xlsx`
+    );
+    ElMessage.success('流程记忆 Excel 已生成');
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '流程记忆导出失败，请稍后重试');
+  } finally {
+    exporting.value = false;
   }
 }
 
@@ -414,6 +524,43 @@ function toggleMobileTemplateCard(templateId: string) {
 
 function isMobileTemplateExpanded(templateId: string) {
   return expandedMobileTemplateIds.value.includes(templateId);
+}
+
+function clampProcessTemplateListHeight(value: number) {
+  return Math.min(processTemplateListHeightLimits.max, Math.max(processTemplateListHeightLimits.min, value));
+}
+
+function adjustProcessTemplateListHeight(delta: number) {
+  processTemplateListHeight.value = clampProcessTemplateListHeight(processTemplateListHeight.value + delta);
+}
+
+function resetProcessTemplateListHeight() {
+  processTemplateListHeight.value = processTemplateListDefaultHeight;
+}
+
+function restoreProcessTemplateListHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const savedHeight = Number(window.localStorage.getItem(processTemplateListHeightStorageKey));
+    if (Number.isFinite(savedHeight)) {
+      processTemplateListHeight.value = clampProcessTemplateListHeight(savedHeight);
+    }
+  } catch {
+    // 本机 UI 偏好读取失败时使用默认高度，不影响流程记忆维护。
+  }
+}
+
+function saveProcessTemplateListHeight() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(processTemplateListHeightStorageKey, String(processTemplateListHeight.value));
+  } catch {
+    // 本机 UI 偏好写入失败不阻断流程记忆查询、编辑、复制或停用。
+  }
 }
 
 function applyTemplate(template: ProcessTemplate) {
@@ -577,7 +724,7 @@ function handleTemplateStepChange() {
   templateProcessFilterKeyword.value = '';
   const duplicates = duplicateTemplateStepNames();
   if (duplicates.length > 0) {
-    ElMessage.warning(`当前流程存在重复工序：${duplicates.join('、')}，请确认后再保存`);
+    ElMessage.warning(`当前流程存在重复工序：${formatProcessNamePreview(duplicates)}，请确认后再保存`);
   }
 }
 
@@ -771,6 +918,23 @@ function duplicateTemplateStepNames() {
   return [...duplicates];
 }
 
+function formatProcessNamePreview(names: string[], emptyText = '-') {
+  const filtered = names.map((name) => String(name || '').trim()).filter(Boolean);
+  if (filtered.length === 0) {
+    return emptyText;
+  }
+  const preview = filtered.filter((_, index) => index < 3).join('、');
+  return filtered.length > 3 ? `${preview} 等 ${filtered.length} 个工序` : preview;
+}
+
+function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText = '-') {
+  const text = String(value || '').trim();
+  if (!text) {
+    return emptyText;
+  }
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
 function normalizeProcessNameKey(processName: string) {
   return processName.trim().toLocaleLowerCase().replace(/[\s\-_./\\]+/g, '');
 }
@@ -802,7 +966,7 @@ async function saveTemplate() {
   }
   const duplicates = duplicateTemplateStepNames();
   if (duplicates.length > 0) {
-    ElMessage.warning(`当前流程存在重复工序：${duplicates.join('、')}，请删除或调整后再保存`);
+    ElMessage.warning(`当前流程存在重复工序：${formatProcessNamePreview(duplicates)}，请删除或调整后再保存`);
     return;
   }
 
@@ -938,19 +1102,44 @@ async function restoreTemplate(template: ProcessTemplate) {
 }
 
 function templateStepSummary(steps: ProcessStepDetail[]) {
-  return steps.map((step) => (step.processRemark ? `${step.processName}(${step.processRemark})` : step.processName)).join(' → ');
+  const previewSteps = steps
+    .filter((_, index) => index < 4)
+    .map((step) =>
+      step.processRemark ? `${step.processName}(${formatLongTextPreview(step.processRemark, 10, '')})` : step.processName
+    );
+  if (previewSteps.length === 0) {
+    return '未维护工序';
+  }
+  return steps.length > previewSteps.length ? `${previewSteps.join(' → ')} 等 ${steps.length} 道工序` : previewSteps.join(' → ');
+}
+
+function templateRemarkPreview(template: ProcessTemplate) {
+  return formatLongTextPreview(template.remark, 36, '');
+}
+
+function templateStepRemarkPreview(step: ProcessStepDetail, maxLength = 16) {
+  return formatLongTextPreview(step.processRemark, maxLength, '');
+}
+
+function templateStepRemarkTitle(step: ProcessStepDetail) {
+  return step.processRemark || '';
 }
 
 watch(keyword, () => {
   window.clearTimeout(searchTimer.value);
   searchTimer.value = window.setTimeout(() => {
+    templatePagination.page = 1;
     void loadTemplates();
   }, 250);
 });
 
 onMounted(() => {
+  restoreProcessTemplateListHeight();
   void loadProcessDefinitions();
   void loadTemplates();
+});
+watch(processTemplateListHeight, () => {
+  saveProcessTemplateListHeight();
 });
 onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 </script>
@@ -994,12 +1183,41 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: 10px;
   min-height: 64px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable both-edges;
 }
 
 .compact .process-template-list {
   display: flex;
   flex-wrap: wrap;
   align-items: stretch;
+}
+
+.process-template-list-height-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.process-template-list-height-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.process-template-list-height-label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.process-template-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .process-template-card {

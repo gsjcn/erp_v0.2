@@ -73,6 +73,18 @@ P0-P5 任务计划：
 - P4：图纸版本和工序关系。零件必须支持多图纸版本；BOM 行可指定默认生产图纸；默认下单使用当前启用最新图纸或 BOM 指定图纸；工序默认值可来自零件或 BOM 行，但下单后仍允许人工调整并留痕。
 - P5：体验优化和自动建议。桌面端优先做筛选、批量维护、复制 BOM、差异提示和导出；手机端订单保持只读，生产和仓库现场执行允许手机操作。自动建议排最后，只能生成待确认建议，不得自动保存正式规则。
 
+当前代码基线（2026-05-17）：
+
+- 导航主入口为 9 个：`/customers`、`/materials`、`/orders`、`/processes`、`/process-templates`、`/production`、`/statistics`、`/warehouses`、`/inventory`；`/notices` 是通知中心辅助路由，`/inventory/materials`、`/inventory/model-boms`、`/inventory/material-transforms` 是零件管理的维护子页面，不应加入左侧主导航。
+- Prisma 已包含 `Material`、`MaterialDrawingRevision`、`MaterialApplicability`、`ModelBom`、`ModelBomLine`、`ModelBomCustomerScope`、`ModelBomDiffReview`、`ModelBomRevision`、`ModelBomScopeApprovalRequest`、`MaterialTransformRule`、`InventoryReservation`、`InventoryAdjustment` 等第一阶段核心模型；继续开发要复用这些模型，不得另建平行表或 JSON 主数据。
+- `Material` 不保存库存数量；库存汇总来自 `InventoryBatch`，库存变动来自 `InventoryTransaction`，订单草稿预占来自 `InventoryReservation`。
+- `ModelBomRevision` 是 BOM 表头、明细、常用排序、停用等动作的版本快照；不要为了记录历史而给同一个客户/机型持续创建大量停用 BOM。
+- `ModelBomScopeApprovalRequest` 用于 BOM 适用范围扩大审批；扩大到全部客户、扩大客户范围、把客户私有 BOM 变成更大范围可见 BOM 等特殊动作必须先申请并由管理员同意，审批使用后要记录 `usedAt`。
+- 同一个客户、同一个机型 / 项目可以保存多个 BOM；系统不得按“同范围只能有一个当前 BOM”做限制。唯一约束只用于避免同名 + 同范围的重复 BOM，推荐优先级通过 `isCommon` 和 `commonSortOrder` 控制。
+- `isCommon` 只表示同一适用范围内的常用显示顺序和下单推荐优先级，不代表独占、覆盖、停用其他 BOM，也不修改 BOM 明细、订单、生产任务或库存。
+- 零件管理控制面板中，“适用客户”和“BOM 使用情况”列表必须显示摘要；大量历史客户、BOM 明细、结构说明放到 tooltip、弹窗、详情或导出中，避免表格行被撑高。
+- 当前验证脚本已经覆盖分页、导出、BOM 审批、BOM 差异、图纸版本、库存预占和通知导出等细节；新增业务规则时必须同步更新 `scripts/verify-first-stage-source.cjs` 或对应 API 回归脚本。
+
 ---
 
 ## 3. 技术和部署
@@ -122,6 +134,8 @@ NAS 部署：
 - 业务表格必须支持横向滚动，避免文字重叠。
 - 关键操作必须用 `el-dialog`，不得用 `window.prompt` / `window.confirm`。
 - 搜索、下拉、自动补全不得静默 `take`、`limit`、`pageSize` 或 `slice(0, n)` 截断；需要分页时 UI 必须明确显示总数或继续加载。
+- 控制面板、列表页和手机卡片都要优先显示业务摘要；历史明细、风险说明、BOM 结构、适用范围说明放入 tooltip、抽屉、弹窗、详情页或导出，不能在主列表里展开成多行长文本。
+- 表格高度、列显示、常用机型、常用 BOM 顺序等属于本机或当前业务范围 UI 偏好；除非已有专用表或字段，不得把这类偏好写入订单、库存、生产任务、BOM 明细或库存流水。
 
 ---
 
@@ -186,6 +200,12 @@ quantity, productionPlanQuantity, unit, deliveryDate, processRoute, processRemar
 - 组件行编号被修改时，仍指向旧组件编号的子零件必须自动同步到新组件编号。
 - 组件行切换为零件行时，仍指向该组件的子零件必须清空所属组件。
 - 如果组件行被切换为零件行，仍指向原组件编号的子零件必须自动清空所属组件。
+- 组件 / 子零件关系只保存在订单行、BOM 行和下单快照中，不得固定写入 `Material` 零件基础库；同一个 `Material` 可以在不同订单中作为不同组件的子零件，也可以作为独立零件下单。
+- 组件库存和子零件库存必须分开建账、分开统计、分开展示；子零件可先形成备货库存，后续再按订单或组件装配关系被消耗。
+- 组件行、子零件行和独立零件行都可以拥有自己的 `quantity` 与 `productionPlanQuantity`，超产数量必须按各自订单行分别转入备货库存，不得把父组件超产和子零件超产混算。
+- 客户发货口径默认只包含组件行和独立零件行；子零件行默认只参与生产、入库、备货、装配消耗和库存核对，不能作为客户发货项重复发货。
+- 后续补齐组件装配闭环时，推荐在组件入库时按组件结构消耗对应子零件库存，并追加 `InventoryTransaction OUT` 或等价装配消耗流水；发货组件时只扣组件库存，不再重复扣子零件库存。
+- 组件装配消耗必须可追溯到组件订单行、子零件库存批次、数量、操作人和原因；子零件库存不足时不得静默入库组件，必须提示人工确认补料、缺料或调整生产数量。
 
 Excel 导入规则：
 
@@ -203,6 +223,16 @@ Excel 导入规则：
 - 上传文件名、来源文件名、Excel 中文单元格内容必须按 UTF-8 / `exceljs` 正常处理，不得出现中文乱码。
 - 订单详情必须能查看来源 Excel 预览；删除导入记忆后，订单保留来源文字，但提示原文件不可预览。
 - 导入问题明细必须可导出 Excel，包含订单编号、来源文件、来源行、自动序号、物料号、组件关系、严重程度和问题说明。
+
+Excel 导出规则：
+
+- 所有新开发和已维护的 ERP Excel 导出必须生成真实 `.xlsx` 工作簿，不得把 HTML、CSV 或文本内容伪装成 `.xls` / `.xlsx`。
+- 导出文件名后缀必须与真实文件格式一致；`.xlsx` 文件必须使用 `.xlsx` 后缀，不得再生成 `.xls` 后缀。
+- 后端 Excel 导出必须使用 `exceljs` 的 `workbook.xlsx.writeBuffer()` 或等价真实 `.xlsx` 写法，`Content-Type` 必须使用 `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`。
+- 前端如需直接导出 Excel，也必须使用真实 `.xlsx` workbook 生成逻辑；不得使用 `application/vnd.ms-excel` + HTML 表格的伪 Excel 方式。
+- 生产计划表和生产订单汇总表导出必须走后端 `GET /production/tasks/export`，前端只负责下载真实 `.xlsx`；完成数量为 0 时必须明确显示 `0 + unit`，不能只显示单位。
+- 生产 Excel 导出修改后必须至少运行 `npm run verify:excel-export-format`，联调后运行 `npm run verify:production-export-api` 或 `npm run verify:first-stage:strict`。
+- 历史 `.xls` 文件仅作为历史兼容读取，不作为新导出格式；导入入口仍优先只接收 `.xlsx`。
 
 ---
 
@@ -241,6 +271,8 @@ Excel 导入规则：
 - 如果多个物料同名或多个结果精确命中，必须保留输入并要求操作员选择；多个结果精确命中时，自动带出必须优先按当前输入字段判断唯一命中。
 - 自动带出物料资料前必须确认当前输入值仍等于发起查询时的值。
 - 选中物料后自动带出资料时，只能在订单行尚未填写图纸资料的字段上补全。
+- 零件搜索建议从零件基础库带出默认或当前启用最新图纸时，必须同时带出 `drawingFileName` 和 `drawingFileUrl`；订单保存后生产端只能读取订单行图纸快照，不得直接展示零件库的全部历史图纸版本。
+- 订单新增 / 编辑页面选择到已维护的 `Material` 后，必须允许操作员从该零件当前启用的图纸版本中选择 A、B、C、D 或更多版本；选中后只把该版本写入订单行图纸快照，不能把全部版本传给生产端。
 - 选中物料后若手工修改 `partCode` 或 `partName`，必须清理本次自动带出的旧资料。
 - 选中历史物料后若操作员又手工修改 `partCode` 或 `partName`，前端必须清理旧物料资料。
 - 库存来源核对弹窗里的可替代物料搜索也必须接收当前 `customerId`。
@@ -284,6 +316,12 @@ Excel 导入规则：
 - 可以从百胜通用 BOM 复制生成客户 BOM；复制后客户 BOM 独立维护，不得反向修改百胜通用 BOM。
 - 复制关系需要保留来源 BOM，后续百胜通用 BOM 更新时只能提示差异，不能自动覆盖客户 BOM。
 - 客户 A 的通用 BOM、客户 A 的 B5 BOM、客户 B 的 B5 BOM 可以同时存在，互不覆盖。
+- 同一个客户、同一个机型 / 项目可以同时保存多个 BOM；不要用“同业务范围只保留一个当前可用 BOM”的规则限制操作员。需要推荐优先级时，用 `isCommon`、`commonSortOrder`、人工选择或明确的下单入口区分。
+- 同名 + 同范围 BOM 仍应查重，避免误点重复创建；不同名称的同客户同机型 BOM 允许共存，供不同订单、工艺、版本或客户临时方案人工选择。
+- 常用 BOM 只影响同一客户范围和同一机型 / 项目范围内的显示顺序、推荐优先级和快捷入口，不得自动停用其他 BOM、覆盖其他 BOM 或自动带入订单。
+- 扩大 BOM 适用范围属于特殊操作，例如把客户私有 BOM 改成全部客户可用、把指定客户 BOM 改成更大客户范围、把某机型 BOM 改成更泛用范围；必须先创建 `ModelBomScopeApprovalRequest`，管理员同意后才允许保存，审批记录只能使用一次。
+- BOM 表头、明细、常用状态、排序和停用等维护动作必须写入 `ModelBomRevision` 快照，方便回看历史；不要用“复制旧 BOM 后停用旧 BOM”的方式充当版本记录。
+- 百胜通用 BOM 更新后，只能通过 `ModelBomDiffReview` 或等价差异提示让操作员核对客户 BOM，不能自动覆盖客户 BOM；差异已确认也只表示人工核对，不表示系统自动改明细。
 - BOM 行删除只能软停用，不得删除历史订单引用。
 - 订单选择客户 + 机型 / 项目后，可以推荐适用零件包并一键带入 `DRAFT` 明细，但不得自动提交生产。
 
@@ -293,6 +331,7 @@ Excel 导入规则：
 - 图纸版本至少记录：零件、图号、图纸日期、图纸状态、版本、图纸文件、是否默认、启用状态、备注。
 - 默认下单图纸优先级：BOM 行指定默认图纸 > 零件当前启用默认图纸 > 零件当前启用最新图纸。
 - 图纸更新必须保留历史版本；旧订单继续指向下单时的图纸快照，不得被新图纸覆盖。
+- 零件基础库图纸版本维护必须支持通过 `POST /inventory/material-drawings/upload` 直接上传图纸文件，上传成功后自动回填 `drawingFileName` 和 `drawingFileUrl`；仍允许手工维护文件名和地址用于历史文件迁移。
 - 修改默认图纸必须记录操作时间和操作人；后续如增加权限，默认图纸修改应限制在电脑端操作。
 - 同一零件编码存在多套图纸、厚度、规格或项目型号时，订单新增和提交生产都必须提示风险。
 
@@ -320,6 +359,7 @@ Excel 导入规则：
 - 订单 `ERP上传净表` 可以作为“提取零件 / BOM 草稿”的来源，但不能直接当作零件管理正式导入模板。
 - 从 `ERP上传净表` 提取出的零件、图纸和 BOM 必须先进入草稿预览，展示与现有零件库、图纸版本和 BOM 的差异，再由人工确认写入。
 - 从订单净表提取 BOM 时，组件结构只能形成 BOM 草稿，不得自动创建订单、提交生产、占用库存或改动正式 BOM。
+- 从订单净表 BOM 草稿创建正式 BOM 时，如果当前客户 / 机型范围已有一个或多个正式 BOM，前端必须逐个打开差异核对，提交接口必须携带 `reviewedExistingBomIds`，后端必须重新校验这些已有 BOM 都已被人工核对；不得只依赖前端按钮禁用。提交事务内还必须重新查询当前同范围正式 BOM，发现预览后新增或已核对列表失效时必须要求刷新预览后重新核对。
 
 ---
 
@@ -384,8 +424,13 @@ Excel 导入规则：
 - 库位停用后不得作为新入库或转库存候选；如果库位下仍有可用库存，库存溯源仍必须展示并允许按业务规则盘点或发货处理。
 - 仓库入库必须从已完成生产任务进入，不能手工凭空增加正式库存。
 - 入库时必须选择入库数量去向：客户订单数量以内进入订单库存，超出客户订单数量转备货库存。
+- 生产完成待入库列表必须能清楚区分组件、子零件和独立零件；组件入库、子零件入库和独立零件入库不得合并成一条库存批次。
+- 后续实现组件装配入库时，组件入库前必须核对子零件库存来源和数量；组件入库成功后，组件库存增加，已消耗子零件库存减少并保留装配消耗流水。
 - 确认发货必须弹窗确认，展示库存批次、订单号、零件、数量、仓库 / 库位，并可填写 remark。
+- 待发货默认只显示客户实际发货项：组件行和独立零件行；子零件行默认不进入待发货列表，避免组件发货时重复扣减子零件。
+- 订单发货使用备货库存补发时，也必须按客户实际发货项匹配组件或独立零件，不得把所属组件下的子零件直接当成组件发货。
 - 发货只减少库存，不修改历史生产完成数量。
+- 仓库页面的“生产完成待入库”“待发货库存”等业务表格区域必须支持更高可视高度或可拖动调整高度，且表格列宽和横向滚动必须能让操作员查看更多列，不得因固定高度只显示少量行造成现场操作困难。
 
 库存规则：
 
@@ -421,19 +466,32 @@ Excel 导入规则：
 统计只做只读：
 
 - 年度、季度、月度订单数量
+- 年份、季度、月份可选择统计期间
 - 生产数量
 - 入库数量
 - 发货数量
+- 转库存数量
 - 当前库存数量
+- 报废数量
 - 订单取消、报废补单、客户数量变更等业务数量
+- 全部客户合计、单客户筛选、按客户分组汇总
 
 统计口径：
 
+- 统计期间不得只依赖手工输入年份；年度用年份选择，季度用年份 + 季度选择，月度用月份选择，必要时可补充自定义日期范围并明确真实起止日期。
+- 系统当前真实日期之后的未来期间不得被当作已发生数据；选择未来年、未来季度或未来月份时必须禁用或提示，选择当前年 / 季 / 月时必须提示统计截止到当前真实日期。
 - 客户订单数量和生产计划数量分开统计。
 - 订单发货数量和实际生产数量分开统计。
-- 当前库存按 `InventoryBatch.quantity` 计算。
-- 历史入库和转库存按 `InventoryTransaction IN` 计算。
-- 历史发货按 `InventoryTransaction OUT` 计算。
+- 各指标必须按自己的业务事件日期落入统计期间：订单数量按 `CustomerOrder.orderDate`，生产完成按 `ProductionTask.completedAt` 或生产入库流水兜底，入库、发货和转库存按 `InventoryTransaction.transactionTime`，报废按 `ProductionScrapRecord.recordDate`。
+- 当前库存数量是查询时点快照，按 `InventoryBatch.status = AVAILABLE` 且 `InventoryBatch.quantity > 0` 实时计算，不是所选期间发生量；如果后续需要期末库存，必须基于 `InventoryTransaction` 回算并在页面明确标注为期末库存。
+- 历史入库按 `InventoryTransaction IN` 计算，但普通订单入库和转库存必须分开统计。
+- 转库存数量只统计转入备货库存的 `InventoryTransaction IN`，至少包含 `sourceRecordType = ProductionTaskOverage`、`ProductionTaskWithdrawStock`、`CustomerChangeStockHandling`；不得把普通订单入库 `sourceRecordType = ProductionTask` 混入转库存。
+- 历史发货按客户订单发货产生的 `InventoryTransaction OUT` 计算，不得混入取消、盘点、报废或装配消耗流水。
+- 报废数量按 `ProductionScrapRecord.quantity` 统计，必须覆盖生产报废、客户变更仓库报废和库存报废 / 销毁；如果库存报废只产生 `InventoryAdjustment` 或库存状态变化，也必须补充等价 `ProductionScrapRecord` 或统一报废统计来源，避免统计漏数。
+- 统计汇总不得把不同 `unit` 强行相加；卡片和表格必须按单位分别展示。
+- 组件、子零件和独立零件必须按订单行类型分别统计；客户发货口径默认只统计组件和独立零件，子零件不得在组件发货时重复计发货。
+- 统计页面必须至少提供总汇总、客户汇总、零件明细和订单明细；总汇总展示所有客户合计，客户汇总展示所选期间内每个客户的订单、生产、发货、转库存和报废数量，以及查询时点当前库存。
+- 统计页面只读，不得在统计查询中触发提交生产、入库、出库、转库存、报废、补单或任何库存扣减。
 
 状态枚举：
 
@@ -443,7 +501,7 @@ ProductionTask.status = PENDING, IN_PROGRESS, WAITING_CONFIRMATION, COMPLETED, S
 InventoryBatch.status = AVAILABLE, RESERVED, USED, SCRAPPED
 ProductionNotice.status = PENDING, ACKNOWLEDGED
 ProductionNotice.target = PRODUCTION, WAREHOUSE
-ProductionScrapRecord.status = PENDING, APPROVED, REJECTED
+ProductionReplenishmentRequest.status = PENDING, APPROVED, REJECTED
 ProductionShortageHandling = REPLENISHMENT_REQUEST, REPLENISHMENT, MANAGER_APPROVED
 ```
 
@@ -460,22 +518,30 @@ ProductionShortageHandling = REPLENISHMENT_REQUEST, REPLENISHMENT, MANAGER_APPRO
 3. 来源加工关系不能自动扣库存，只能作为库存来源建议。
 4. 组件编号不能全局递增，必须按订单块从 `C001` 重算。
 5. 子零件需求数量必须按所属组件实际需求计算，不能只按订单总数量或 Excel 公式盲信。
-6. 客户特定通用件不能被全局通用件覆盖。
-7. 同编码不同图号 / 厚度 / 版本 / 项目型号必须提示冲突，不得静默覆盖。
-8. 搜索结果不能隐藏大量候选，不能因为 `limit` 截断导致误选。
-9. 中文文件名、来源文件、Excel 中文内容、导入追溯不得乱码。
-10. 草稿订单可编辑删除；已产生生产、库存或流水后不得按草稿方式删除。
-11. 手机端不得继续扩展订单编辑和上传能力，只保留查看和提示到电脑端操作。
-12. 自动建议必须排在最后，只能人工确认后保存为正式规则。
-13. 零件管理里的 BOM 复制必须生成客户独立副本，不能让客户 BOM 和百胜通用 BOM 共用同一组可变明细。
-14. 默认图纸修改不能覆盖历史订单图纸快照；旧订单必须保留下单时的图号、版本、日期和文件。
-15. 从订单 `ERP上传净表` 提取零件包只能生成草稿，不能直接覆盖正式零件库、图纸版本或 BOM。
-16. BOM 行默认工艺只能作为下单建议，不能替代订单零件自己的流程快照。
-17. 通知确认不得删除消息；生产、仓库和管理员历史消息必须能按归类入口查询。
-18. 仓库 / 库位已有库存批次或流水时不得物理删除，只能停用；停用不能影响历史记录显示。
-19. 库存报警只能提醒，不得触发自动订单、自动补单、自动生产或自动扣库存。
-20. 销毁或不再使用的库存不得直接删除流水；必须通过盘点清零、报废 / 销毁记录或等价流程留痕。
-21. 第一阶段不开发检验人员功能，但生产完成到仓库入库之间的数据结构和通知流转必须预留未来检验节点。
+6. 组件、子零件和独立零件的库存必须按订单行分别建账；组件入库不得静默合并或覆盖子零件库存。
+7. 组件发货不得重复发货或扣减所属子零件；子零件库存只应在组件装配消耗或独立零件发货时减少。
+8. 组件装配消耗必须有库存流水和人工可追溯信息，不得只改库存批次数量。
+9. 客户特定通用件不能被全局通用件覆盖。
+10. 同编码不同图号 / 厚度 / 版本 / 项目型号必须提示冲突，不得静默覆盖。
+11. 搜索结果不能隐藏大量候选，不能因为 `limit` 截断导致误选。
+12. 中文文件名、来源文件、Excel 中文内容、导入追溯不得乱码。
+13. 草稿订单可编辑删除；已产生生产、库存或流水后不得按草稿方式删除。
+14. 手机端不得继续扩展订单编辑和上传能力，只保留查看和提示到电脑端操作。
+15. 自动建议必须排在最后，只能人工确认后保存为正式规则。
+16. 零件管理里的 BOM 复制必须生成客户独立副本，不能让客户 BOM 和百胜通用 BOM 共用同一组可变明细。
+17. 默认图纸修改不能覆盖历史订单图纸快照；旧订单必须保留下单时的图号、版本、日期和文件。
+18. 从订单 `ERP上传净表` 提取零件包只能生成草稿，不能直接覆盖正式零件库、图纸版本或 BOM。
+19. BOM 行默认工艺只能作为下单建议，不能替代订单零件自己的流程快照。
+20. 通知确认不得删除消息；生产、仓库和管理员历史消息必须能按归类入口查询。
+21. 仓库 / 库位已有库存批次或流水时不得物理删除，只能停用；停用不能影响历史记录显示。
+22. 库存报警只能提醒，不得触发自动订单、自动补单、自动生产或自动扣库存。
+23. 销毁或不再使用的库存不得直接删除流水；必须通过盘点清零、报废 / 销毁记录或等价流程留痕。
+24. 第一阶段不开发检验人员功能，但生产完成到仓库入库之间的数据结构和通知流转必须预留未来检验节点。
+25. 同一客户同一机型允许多个 BOM；不得通过停用旧 BOM、强制唯一当前 BOM 或自动替换旧 BOM 来解决版本更新。
+26. 扩大 BOM 可见范围必须走 `ModelBomScopeApprovalRequest`，不能让普通操作员直接把客户私有资料扩散成全部客户通用资料。
+27. `ModelBomRevision` 只记录 BOM 维护快照，不代表订单、生产或库存变动；回看版本不得自动回滚正式 BOM，除非后续明确开发人工确认的恢复流程。
+28. 控制面板的“订单历史客户”只表示历史使用，不代表正式适用范围；“已进 BOM N 个”只表示 BOM 使用摘要，完整明细应在 tooltip、详情或导出中查看。
+29. 常用机型和常用 BOM 是推荐与显示优先级，不是业务唯一性规则，不得据此删除、停用或覆盖其他资料。
 
 ---
 
@@ -502,13 +568,20 @@ ProductionShortageHandling = REPLENISHMENT_REQUEST, REPLENISHMENT, MANAGER_APPRO
 17. 生产和仓库通知能查看待处理、已确认历史和全部记录；管理员入口能查看全部分类历史。
 18. 库存报警能按零件设置为“不报警”或“低库存报警”，报警只提示不自动执行业务动作。
 19. 库存销毁 / 不再使用能通过盘点清零或报废 / 销毁流程留痕，不删除库存流水。
-20. 统计页面能按只读口径展示数量。
+20. 统计页面能按年度、季度、月度选择期间，并按只读口径展示订单、生产、发货、转库存、当前库存和报废数量，支持全部客户合计、单客户筛选和按客户分组汇总。
 
 测试数据：
 
 - `seed.ts` 必须先清理第一阶段业务测试数据，再写入当前版本需要的数据。
 - 新增数据库表或改变业务关系后，必须重新执行 migration + seed。
 - 测试数据不能把旧数据库错误状态当作新功能逻辑继续兼容。
+- 本地测试阶段默认保持一个 PostgreSQL 数据库和一个 `baisheng-erp-postgres` 容器；不要因为测试失败反复创建新的 Docker project、container、volume 或新数据库。
+- 需要重置测试数据时，优先使用 `npm run cleanup:test-data` 或当前 `seed.ts` 的受控清理逻辑；`seed.ts` 只能直接作用于本地 `localhost` / `127.0.0.1` / `::1` 开发库，Docker 内执行必须由 `npm run docker:db:seed` 先备份并传入 `SEED_BACKUP_CONFIRMED=true`。
+- `cleanup:test-data -- --apply` 只允许默认作用于本地 `DATABASE_URL`；非本地测试库必须显式设置 `CLEANUP_TEST_DATA_CONFIRMED=true`，生产环境还必须设置 `ALLOW_TEST_DATA_CLEANUP=true`，避免误停用真实主数据。
+- `cleanup:test-data` dry-run 必须列出需要人工复核的活动业务记录；只要匹配到未取消订单、未关闭生产任务、待处理通知、有效库存预占或可用库存批次，`--apply` 必须先阻断，不能直接停用相关主数据。
+- 回归脚本创建临时客户、零件、BOM 或仓库时必须使用明确测试前缀；`cleanup:test-data` 必须覆盖 `VERIFY-`、`VERIFY_`、`COD-`、`MI-API-`、`MAT-STABLE`、`UPLOAD-FILENAME`、`CUST-SEARCH-`、`TEST-CUSTOMER` 等测试前缀；客户等主数据清理优先软停用，dry-run 必须显示 `total/enabled/disabled` 和需要人工复核的业务记录。
+- 任何可能清空、覆盖、恢复数据库的动作前，必须先运行或提示用户运行 `npm run docker:db:backup`，并可用 `npm run docker:db:status`、`npm run docker:db:verify-backups` 检查备份状态。
+- 只有旧库确实无法迁移或无法启动时，才允许启用新库；启用新库后必须补齐 migration、seed、测试数据说明和当前连接信息，避免用户误以为数据丢失。
 
 验证命令优先级：
 
@@ -516,11 +589,28 @@ ProductionShortageHandling = REPLENISHMENT_REQUEST, REPLENISHMENT, MANAGER_APPRO
 npm run verify:first-stage:source
 npm run verify:first-stage:config
 npm run verify:file-name-normalizers
+npm run verify:excel-export-format
+npm run verify:prisma-client-enums
+npm run verify:production-export-api
+npm run verify:model-bom-scope-approval-api
+npm run verify:model-boms-export-api
+npm run verify:material-dashboard-export-api
+npm run verify:inventory-summary-api
 npm run verify:order-import-workbooks
 npm run backend:verify:first-stage
 npm run backend:build
+npm run verify:first-stage:api:after-build
 npm run frontend:build
 ```
+
+完整回归优先使用：
+
+```text
+npm run verify:first-stage
+npm run verify:first-stage:strict
+```
+
+`verify:first-stage:strict` 会重新生成 Prisma client 并跑更严格的第一阶段组合校验；只改前端展示时可先跑 `npm run frontend:build` 和 `npm run verify:first-stage:source`，涉及数据库、API、导出、BOM 审批或库存规则时必须补跑对应专项脚本。
 
 ---
 

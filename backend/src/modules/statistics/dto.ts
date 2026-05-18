@@ -22,4 +22,18 @@ export class OrderStatisticsQueryDto {
   @IsOptional()
   @IsString()
   customerId?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  inventorySnapshotLimit?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  inventorySnapshotOffset?: number;
 }
