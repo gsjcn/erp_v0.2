@@ -60,7 +60,6 @@ const WAREHOUSE_TEST_FIXTURE_PREFIXES = [
   'COD-',
   'VERIFY-',
   'VERIFY_',
-  'TEST-',
   'MI-API-',
   'MAT-STABLE',
   'UPLOAD-FILENAME',
@@ -219,10 +218,19 @@ export class WarehousesService {
 
   private warehouseFixtureTextFilters(fields: Array<'warehouseCode' | 'warehouseName' | 'locationCode' | 'locationName'>) {
     return WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) =>
-      fields.map((field) => ({
-        [field]: { startsWith: prefix, mode: 'insensitive' as const }
-      }))
+      fields.map((field) => this.warehouseFixtureStartsWith(field, prefix))
     );
+  }
+
+  private warehouseFixtureStartsWith(field: string, prefix: string) {
+    return { [field]: { startsWith: prefix, mode: 'insensitive' as const } };
+  }
+
+  private nullableWarehouseFixtureStartsWith(field: string, prefix: string) {
+    // 可空字段在 NOT + OR 中必须先排除 null，避免正常仓库待办、库存批次或通知被误过滤。
+    return {
+      AND: [{ [field]: { not: null } }, this.warehouseFixtureStartsWith(field, prefix)]
+    };
   }
 
   private warehouseConfigWhere(status?: CommonStatus, includeTestFixtures = false): Prisma.WarehouseWhereInput {
@@ -250,13 +258,80 @@ export class WarehousesService {
   private warehouseNoticeFixtureWhere(): Prisma.ProductionNoticeWhereInput {
     return {
       OR: WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
-        { noticeNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
-        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
-        { managerName: { startsWith: prefix, mode: 'insensitive' as const } }
+        this.warehouseFixtureStartsWith('noticeNo', prefix),
+        this.warehouseFixtureStartsWith('orderNo', prefix),
+        this.nullableWarehouseFixtureStartsWith('productionTaskNo', prefix),
+        this.nullableWarehouseFixtureStartsWith('partCode', prefix),
+        this.nullableWarehouseFixtureStartsWith('partName', prefix),
+        this.warehouseFixtureStartsWith('reason', prefix),
+        this.nullableWarehouseFixtureStartsWith('managerName', prefix)
+      ])
+    };
+  }
+
+  private warehouseOrderFixtureScopes(): Prisma.CustomerOrderWhereInput[] {
+    return WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+      this.warehouseFixtureStartsWith('orderNo', prefix),
+      this.warehouseFixtureStartsWith('customerCode', prefix),
+      this.warehouseFixtureStartsWith('customerName', prefix),
+      {
+        lines: {
+          some: {
+            OR: [
+              this.warehouseFixtureStartsWith('partCode', prefix),
+              this.warehouseFixtureStartsWith('partName', prefix),
+              this.nullableWarehouseFixtureStartsWith('projectModel', prefix)
+            ]
+          }
+        }
+      }
+    ]);
+  }
+
+  private warehouseOrderFixtureWhere(): Prisma.CustomerOrderWhereInput {
+    return { OR: this.warehouseOrderFixtureScopes() };
+  }
+
+  private warehouseProductionTaskFixtureWhere(): Prisma.ProductionTaskWhereInput {
+    return {
+      OR: WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        this.warehouseFixtureStartsWith('productionTaskNo', prefix),
+        this.warehouseFixtureStartsWith('orderNo', prefix),
+        this.warehouseFixtureStartsWith('partCode', prefix),
+        this.warehouseFixtureStartsWith('partName', prefix),
+        this.warehouseFixtureStartsWith('customerName', prefix),
+        this.nullableWarehouseFixtureStartsWith('replenishmentSourceRequestNo', prefix),
+        { order: { is: this.warehouseOrderFixtureWhere() } }
+      ])
+    };
+  }
+
+  private warehouseInventoryBatchFixtureWhere(): Prisma.InventoryBatchWhereInput {
+    return {
+      OR: WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        this.warehouseFixtureStartsWith('batchNo', prefix),
+        this.warehouseFixtureStartsWith('partCode', prefix),
+        this.warehouseFixtureStartsWith('partName', prefix),
+        this.nullableWarehouseFixtureStartsWith('sourceOrderNo', prefix),
+        this.nullableWarehouseFixtureStartsWith('sourceCustomerName', prefix),
+        this.nullableWarehouseFixtureStartsWith('sourceProductionTaskNo', prefix),
+        this.nullableWarehouseFixtureStartsWith('replenishmentSourceRequestNo', prefix),
+        { sourceOrder: { is: this.warehouseOrderFixtureWhere() } },
+        { productionTask: { is: this.warehouseProductionTaskFixtureWhere() } }
+      ])
+    };
+  }
+
+  private warehouseInventoryTransactionFixtureWhere(): Prisma.InventoryTransactionWhereInput {
+    return {
+      OR: WAREHOUSE_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        this.warehouseFixtureStartsWith('transactionNo', prefix),
+        this.warehouseFixtureStartsWith('partCode', prefix),
+        this.warehouseFixtureStartsWith('partName', prefix),
+        this.nullableWarehouseFixtureStartsWith('orderNo', prefix),
+        this.nullableWarehouseFixtureStartsWith('productionTaskNo', prefix),
+        // 仓库流水主列表是高频分页查询，默认只按流水自身字段过滤测试夹具，避免关系 NOT 查询拖慢页面。
+        this.nullableWarehouseFixtureStartsWith('sourceRecordId', prefix)
       ])
     };
   }
@@ -928,6 +1003,9 @@ export class WarehousesService {
       status: ProductionStatus.COMPLETED,
       inventoryBatch: null
     };
+    if (query.includeTestFixtures !== 'true') {
+      where.NOT = this.warehouseProductionTaskFixtureWhere();
+    }
     const orderWhere = this.buildOrderWhere(query);
     if (Object.keys(orderWhere).length > 0) {
       // 待入库按订单关系筛选，避免仓库页面直接暴露不相关客户订单。
@@ -1113,6 +1191,9 @@ export class WarehousesService {
       sourceOrderId: { not: null },
       quantity: { gt: 0 }
     };
+    if (query.includeTestFixtures !== 'true') {
+      where.NOT = this.warehouseInventoryBatchFixtureWhere();
+    }
     const orderWhere: Prisma.CustomerOrderWhereInput = {
       ...this.buildOrderWhere(query),
       status: { notIn: [OrderStatus.DRAFT, OrderStatus.CANCELLED, OrderStatus.COMPLETED] }
@@ -1489,6 +1570,9 @@ export class WarehousesService {
 
   async findTransactions(query: WarehouseTransactionQueryDto) {
     const where: Prisma.InventoryTransactionWhereInput = {};
+    if (query.includeTestFixtures !== 'true') {
+      where.NOT = this.warehouseInventoryTransactionFixtureWhere();
+    }
     if (query.transactionType) {
       where.transactionType = query.transactionType;
     }
@@ -2098,6 +2182,9 @@ export class WarehousesService {
 
   private buildOrderWhere(query: WarehouseWorkQueryDto) {
     const orderWhere: Prisma.CustomerOrderWhereInput = {};
+    if (query.includeTestFixtures !== 'true') {
+      orderWhere.NOT = this.warehouseOrderFixtureWhere();
+    }
     if (query.customerId) {
       orderWhere.customerId = query.customerId;
     }

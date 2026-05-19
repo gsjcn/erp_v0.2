@@ -51,13 +51,22 @@ npm run cleanup:test-data -- --apply
 
 `cleanup:test-data` dry-run 会同时列出需要人工复核的活动业务记录；如果匹配到未取消订单、未关闭生产任务、待处理通知、有效库存预占或可用库存批次，`--apply` 必须先阻断，不能直接停用相关主数据。
 
-该命令默认 dry-run，只报告匹配 `VERIFY-`、`VERIFY_`、`COD-`、`MI-API-`、`MAT-STABLE`、`UPLOAD-FILENAME`、`CUST-SEARCH-`、`TEST-CUSTOMER` 前缀的测试客户、零件、BOM、仓库等主数据。`--apply` 只做软停用和测试客户编号归档；默认只允许本地 `DATABASE_URL`，非本地库必须先显式设置 `CLEANUP_TEST_DATA_CONFIRMED=true`，生产环境还必须设置 `ALLOW_TEST_DATA_CLEANUP=true`。
+该命令默认 dry-run，只报告匹配 `VERIFY-`、`VERIFY_`、`COD-`、`MI-API-`、`MAT-STABLE`、`UPLOAD-FILENAME`、`CUST-SEARCH-`、`TEST-CUSTOMER` 前缀的测试客户、零件、BOM、仓库等主数据。预览数量可用 `--preview-limit=20` 或 `CLEANUP_TEST_DATA_PREVIEW_LIMIT=20` 调整。`--apply` 只做软停用和测试客户编号归档；默认只允许当前项目 PostgreSQL 目标库，例如 `POSTGRES_HOST_PORT`、`POSTGRES_USER` 和 `POSTGRES_DB` 指向的 `baisheng_erp`，其他测试库必须先显式设置 `CLEANUP_TEST_DATA_CONFIRMED=true`，生产环境还必须设置 `ALLOW_TEST_DATA_CLEANUP=true`。
 
 非破坏性校验第一阶段关键数据：
 
 ```bash
 npm run backend:verify:first-stage
 ```
+
+查看当前第一阶段 P0-P5 源码 checklist 进度：
+
+```bash
+npm run project:progress
+npm run project:progress -- --json
+```
+
+该进度用于开发跟踪，不等同于最终业务验收。
 
 该命令只读取数据库，不会改数据；用于检查客户 / 仓库 / 库位大小写不敏感唯一、客户主联系人快照、`OrderNoReservation`、订单零件工序和 `ProductionTask` 一致性、`InventoryReservation`、草稿订单同批次库存预占先后顺序、`selectedStockSources`、库存流水余额、库存批次账实和来源一致性、生产 / 仓库通知确认记录、生产报废补单申请、报废记录、统计订单展示状态、生产计划偏差说明和盘点附件记录。
 
@@ -259,7 +268,10 @@ npm run docker:ps
 npm run docker:logs:backend
 npm run docker:logs:frontend
 npm run docker:db:status
+npm run verify:docker-runtime
 ```
+
+`verify:docker-runtime` 会校验当前 workspace 下只运行 `baisheng-erp-postgres`、`baisheng-erp-backend` 和 `baisheng-erp-frontend`，并确认当前项目只使用一个 PostgreSQL 容器。测试阶段如果 Docker Desktop 里还保留旧项目容器，应先用这个命令确认 ERP 没有误连旧库。
 
 `docker:db:status` 会先打印当前 ERP 项目实际使用的 PostgreSQL 目标：`baisheng-erp-postgres`、`127.0.0.1:55432`、`POSTGRES_DATA_DIR` 和 `POSTGRES_BACKUP_DIR`，并显示当前库匹配到的备份数量、最新 `.dump` 备份文件和 `.sha256` 校验状态。测试阶段只认这一套项目库；如果输出里出现其他 PostgreSQL 容器或旧 volume，它们只是旧环境提示，不是当前 ERP 正在使用的数据库。
 

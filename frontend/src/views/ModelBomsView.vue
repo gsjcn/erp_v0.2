@@ -8,7 +8,7 @@
       <div class="page-actions">
         <el-button @click="returnFromModelBom">{{ modelBomReturnButtonText }}</el-button>
         <el-button v-if="!isMobileLayout" :loading="bomScopeApprovalLoading" @click="openBomScopeApprovalDialog">范围审批</el-button>
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="modelBomExporting" @click="exportModelBomsExcel">导出 Excel</el-button>
+        <el-button title="导出Excel" v-if="!isMobileLayout" :icon="Download" :loading="modelBomExporting" @click="exportModelBomsExcel">导出 Excel</el-button>
         <el-button v-if="!isMobileLayout" type="primary" @click="openBomCreateDialog">新增零件包</el-button>
       </div>
     </div>
@@ -69,8 +69,8 @@
         <label>常用</label>
         <el-checkbox v-model="filters.commonOnly" @change="searchModelBoms">只看常用 BOM</el-checkbox>
       </div>
-      <el-button type="primary" :loading="loading" @click="searchModelBoms">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="searchModelBoms">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
     </div>
     <div v-if="modelBomFilterSummaryVisible" class="model-bom-filter-summary">
       当前筛选：关键字 {{ modelBomKeywordFilterLabel() }}；客户 {{ selectedCustomerFilterLabel() }}；机型 {{ filters.projectModel || '全部' }}；BOM 范围 {{ modelBomScopeFilterLabel() }}；泛用包 {{ modelBomGlobalAllProjectFilterLabel() }}；常用 {{ modelBomCommonFilterLabel() }}；状态 {{ modelBomStatusFilterLabel() }}
@@ -135,8 +135,8 @@
             <span>{{ modelBomCommonDragRows.length > 1 ? '常用 BOM 可拖拽排序；点击一行查看和维护包内零件。' : '点击一行查看和维护包内零件。' }}</span>
           </div>
           <div class="section-actions">
-            <el-button size="small" :disabled="modelBoms.length === 0" @click="openModelBomListTextDialog">查看列表格式</el-button>
-            <el-button size="small" :disabled="modelBoms.length === 0" @click="copyModelBomListText">复制列表</el-button>
+            <el-button title="查看列表格式" size="small" :disabled="modelBoms.length === 0" @click="openModelBomListTextDialog">查看列表格式</el-button>
+            <el-button title="复制列表" size="small" :disabled="modelBoms.length === 0" @click="copyModelBomListText">复制列表</el-button>
             <div class="model-bom-table-height-actions" aria-label="零件包列表表格高度">
               <el-tooltip content="降低表格高度" placement="top">
                 <el-button
@@ -144,6 +144,7 @@
                   size="small"
                   :icon="Minus"
                   :disabled="modelBomWorkTableHeights.list <= modelBomWorkTableHeightLimits.min"
+                  title="降低零件包列表表格高度"
                   aria-label="降低零件包列表表格高度"
                   @click="adjustModelBomWorkTableHeight('list', -modelBomWorkTableHeightLimits.step)"
                 />
@@ -154,6 +155,7 @@
                   size="small"
                   :icon="Plus"
                   :disabled="modelBomWorkTableHeights.list >= modelBomWorkTableHeightLimits.max"
+                  title="提高零件包列表表格高度"
                   aria-label="提高零件包列表表格高度"
                   @click="adjustModelBomWorkTableHeight('list', modelBomWorkTableHeightLimits.step)"
                 />
@@ -164,6 +166,7 @@
                   size="small"
                   :icon="RefreshLeft"
                   :disabled="modelBomWorkTableHeights.list === modelBomWorkTableDefaultHeights.list"
+                  title="恢复零件包列表表格默认高度"
                   aria-label="恢复零件包列表表格默认高度"
                   @click="resetModelBomWorkTableHeight('list')"
                 />
@@ -266,72 +269,101 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="340" fixed="right">
+          <el-table-column label="操作" width="300" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click.stop="selectBom(row)">查看明细</el-button>
-              <el-button v-if="!isMobileLayout" link type="primary" :disabled="Boolean(modelBomOperationSavingKey)" @click.stop="openBomEditDialog(row)">编辑表头</el-button>
-              <el-button
-                v-if="!isMobileLayout && row.status === 'ENABLED' && !row.isCommon"
-                link
-                type="success"
-                :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'common')"
-                :disabled="Boolean(modelBomOperationSavingKey)"
-                @click.stop="setBomCommon(row, true)"
-              >
-                设为常用
-              </el-button>
-              <el-button
-                v-else-if="!isMobileLayout && row.status === 'ENABLED'"
-                link
-                type="warning"
-                :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'common')"
-                :disabled="Boolean(modelBomOperationSavingKey)"
-                @click.stop="setBomCommon(row, false)"
-              >
-                取消常用
-              </el-button>
-              <el-button
-                v-if="!isMobileLayout && isAllCustomerBom(row) && canCopyModelBomToCurrentCustomer(row)"
-                link
-                type="primary"
-                :disabled="Boolean(modelBomOperationSavingKey)"
-                @click.stop="openBomCopyDialog(row)"
-              >
-                复制给客户
-              </el-button>
-              <el-button v-else-if="isAllCustomerBom(row) && currentCustomerBomForSource(row)" link type="success" :disabled="Boolean(modelBomOperationSavingKey)" @click.stop="openCurrentCustomerBom(row)">
-                打开客户 BOM
-              </el-button>
-              <el-button
-                v-if="!isMobileLayout && row.status === 'ENABLED'"
-                link
-                type="danger"
-                :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'disable')"
-                :disabled="Boolean(modelBomOperationSavingKey)"
-                @click.stop="disableBom(row)"
-              >
-                停用
-              </el-button>
-              <el-button
-                v-else-if="!isMobileLayout"
-                link
-                type="success"
-                :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'enable')"
-                :disabled="Boolean(modelBomOperationSavingKey)"
-                @click.stop="enableBom(row)"
-              >
-                恢复启用
-              </el-button>
-              <el-button
-                v-if="!isMobileLayout"
-                link
-                type="danger"
-                :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'delete')"
-                :disabled="Boolean(modelBomOperationSavingKey)"
-                @click.stop="deleteBom(row)"
-              >
-                删除
-              </el-button>
+              <div class="model-bom-row-actions">
+                <div class="model-bom-row-action-group">
+                  <span class="model-bom-row-action-label">维护</span>
+                  <el-button link type="primary" title="查看明细" @click.stop="selectBom(row)">明细</el-button>
+                  <el-button
+                    v-if="!isMobileLayout"
+                    link
+                    type="primary"
+                    title="编辑表头"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="openBomEditDialog(row)"
+                  >
+                    表头
+                  </el-button>
+                  <el-button
+                    v-if="!isMobileLayout && isAllCustomerBom(row) && canCopyModelBomToCurrentCustomer(row)"
+                    link
+                    type="primary"
+                    title="复制给客户"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="openBomCopyDialog(row)"
+                  >
+                    复制
+                  </el-button>
+                  <el-button
+                    v-else-if="isAllCustomerBom(row) && currentCustomerBomForSource(row)"
+                    link
+                    type="success"
+                    title="打开客户 BOM"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="openCurrentCustomerBom(row)"
+                  >
+                    客户BOM
+                  </el-button>
+                </div>
+                <div v-if="!isMobileLayout" class="model-bom-row-action-group">
+                  <span class="model-bom-row-action-label">状态</span>
+                  <el-button
+                    v-if="!isMobileLayout && row.status === 'ENABLED' && !row.isCommon"
+                    link
+                    type="success"
+                    title="设为常用"
+                    :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'common')"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="setBomCommon(row, true)"
+                  >
+                    常用
+                  </el-button>
+                  <el-button
+                    v-else-if="row.status === 'ENABLED'"
+                    link
+                    type="warning"
+                    title="取消常用"
+                    :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'common')"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="setBomCommon(row, false)"
+                  >
+                    取消常用
+                  </el-button>
+                  <el-button
+                    v-if="row.status === 'ENABLED'"
+                    link
+                    type="danger"
+                    title="停用 BOM"
+                    :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'disable')"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="disableBom(row)"
+                  >
+                    停用
+                  </el-button>
+                  <el-button
+                    v-else
+                    link
+                    type="success"
+                    title="恢复启用 BOM"
+                    :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'enable')"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="enableBom(row)"
+                  >
+                    恢复
+                  </el-button>
+                  <el-button
+                    link
+                    type="danger"
+                    title="删除误建空 BOM"
+                    :loading="modelBomOperationSavingKey === modelBomOperationKey(row, 'delete')"
+                    :disabled="Boolean(modelBomOperationSavingKey)"
+                    @click.stop="deleteBom(row)"
+                  >
+                    删除
+                  </el-button>
+                </div>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -386,7 +418,7 @@
               <strong>版本记录</strong>
               <span>已记录 {{ bomRevisionPagination.total }} 次变更</span>
             </div>
-            <el-button size="small" :icon="RefreshLeft" @click="loadBomRevisions()">刷新</el-button>
+            <el-button title="刷新" size="small" :icon="RefreshLeft" @click="loadBomRevisions()">刷新</el-button>
           </div>
           <el-table :data="bomRevisions" size="small" max-height="220" empty-text="暂无版本记录">
             <el-table-column prop="revisionNo" label="版本" width="90">
@@ -416,7 +448,7 @@
           </el-table>
           <div v-if="bomRevisionHasMore" class="bom-revision-panel__footer">
             <span>已显示 {{ bomRevisions.length }} / {{ bomRevisionPagination.total }} 条</span>
-            <el-button size="small" :loading="bomRevisionLoading" @click="loadMoreBomRevisions">加载更多</el-button>
+            <el-button title="加载更多" size="small" :loading="bomRevisionLoading" @click="loadMoreBomRevisions">加载更多</el-button>
           </div>
         </div>
         <el-alert
@@ -434,8 +466,8 @@
               <span>{{ activeBomStructureGroups.length }} 组 / {{ activeBomDisplayLines.length }} 行</span>
             </div>
             <div class="section-actions">
-              <el-button size="small" :disabled="!bomStructureText" @click="openBomStructureTextDialog">查看固定格式</el-button>
-              <el-button size="small" :disabled="!bomStructureText" @click="copyBomStructureText">复制清单</el-button>
+              <el-button title="查看固定格式" size="small" :disabled="!bomStructureText" @click="openBomStructureTextDialog">查看固定格式</el-button>
+              <el-button title="复制清单" size="small" :disabled="!bomStructureText" @click="copyBomStructureText">复制清单</el-button>
               <div class="model-bom-table-height-actions" aria-label="BOM 明细表格高度">
                 <el-tooltip content="降低表格高度" placement="top">
                   <el-button
@@ -443,6 +475,7 @@
                     size="small"
                     :icon="Minus"
                     :disabled="modelBomWorkTableHeights.lines <= modelBomWorkTableHeightLimits.min"
+                    title="降低 BOM 明细表格高度"
                     aria-label="降低 BOM 明细表格高度"
                     @click="adjustModelBomWorkTableHeight('lines', -modelBomWorkTableHeightLimits.step)"
                   />
@@ -453,6 +486,7 @@
                     size="small"
                     :icon="Plus"
                     :disabled="modelBomWorkTableHeights.lines >= modelBomWorkTableHeightLimits.max"
+                    title="提高 BOM 明细表格高度"
                     aria-label="提高 BOM 明细表格高度"
                     @click="adjustModelBomWorkTableHeight('lines', modelBomWorkTableHeightLimits.step)"
                   />
@@ -463,6 +497,7 @@
                     size="small"
                     :icon="RefreshLeft"
                     :disabled="modelBomWorkTableHeights.lines === modelBomWorkTableDefaultHeights.lines"
+                    title="恢复 BOM 明细表格默认高度"
                     aria-label="恢复 BOM 明细表格默认高度"
                     @click="resetModelBomWorkTableHeight('lines')"
                   />
@@ -538,7 +573,7 @@
               <el-tag :type="sourceBomDiffIssues.length === 0 ? 'success' : 'warning'" effect="plain">
                 {{ sourceBomDiffIssues.length === 0 ? '无差异' : `${sourceBomDiffIssues.length} 项差异 / ${sourceBomDiffReviewedCount} 项已核对` }}
               </el-tag>
-              <el-button
+              <el-button title="导出核对"
                 v-if="!isMobileLayout"
                 size="small"
                 :icon="Download"
@@ -548,7 +583,7 @@
               >
                 导出核对
               </el-button>
-              <el-button
+              <el-button title="查看核对记录value条"
                 size="small"
                 :loading="sourceBomDiffReviewLoading"
                 :disabled="sourceBomDiffReviewLoading || sourceBomDiffReviews.length === 0"
@@ -556,7 +591,7 @@
               >
                 查看核对记录 {{ sourceBomDiffReviews.length }} 条
               </el-button>
-              <el-button size="small" :disabled="sourceBomDiffIssues.length === 0" @click="copySourceBomDiffText">复制差异</el-button>
+              <el-button title="复制差异" size="small" :disabled="sourceBomDiffIssues.length === 0" @click="copySourceBomDiffText">复制差异</el-button>
             </div>
           </div>
           <el-alert
@@ -584,18 +619,28 @@
                 <small v-if="isSourceBomDiffReviewed(issue)">{{ sourceBomDiffReviewRecordText(issue) }}</small>
               </div>
               <div class="bom-source-diff-item__actions">
-                <el-button v-if="!isMobileLayout || isSourceBomDiffReviewed(issue)" size="small" plain @click="openSourceBomDiffReviewDialog(issue)">
-                  {{ isSourceBomDiffReviewed(issue) ? '查看核对' : '核对' }}
-                </el-button>
-                <el-button
-                  v-if="!isMobileLayout && isSourceBomDiffReviewed(issue)"
-                  size="small"
-                  type="danger"
-                  plain
-                  @click="revokeSourceBomDiffReviewed(issue)"
-                >
-                  撤销核对
-                </el-button>
+                <div class="bom-source-diff-action-group">
+                  <span class="bom-source-diff-action-label">核对</span>
+                  <el-button
+                    v-if="!isMobileLayout || isSourceBomDiffReviewed(issue)"
+                    size="small"
+                    plain
+                    :title="isSourceBomDiffReviewed(issue) ? '查看 BOM 差异核对' : '核对 BOM 差异'"
+                    @click="openSourceBomDiffReviewDialog(issue)"
+                  >
+                    {{ isSourceBomDiffReviewed(issue) ? '查看' : '核对' }}
+                  </el-button>
+                  <el-button
+                    v-if="!isMobileLayout && isSourceBomDiffReviewed(issue)"
+                    size="small"
+                    type="danger"
+                    plain
+                    title="撤销 BOM 差异核对"
+                    @click="revokeSourceBomDiffReviewed(issue)"
+                  >
+                    撤销
+                  </el-button>
+                </div>
               </div>
             </article>
           </div>
@@ -698,37 +743,44 @@
               </div>
               <div class="bom-line-actions">
                 <template v-if="!isMobileLayout">
-                  <el-button
-                    v-if="row.lineType === 'COMPONENT' && row.status === 'ENABLED'"
-                    link
-                    type="success"
-                    :disabled="activeBom?.status === 'DISABLED' || saving || Boolean(modelBomLineOperationSavingKey)"
-                    @click="openLineCreateDialog('CHILD_PART', normalizeComponentNo(row.componentNo))"
-                  >
-                    加子件
-                  </el-button>
-                  <el-button link type="primary" :disabled="saving || Boolean(modelBomLineOperationSavingKey)" @click="openLineEditDialog(row)">编辑</el-button>
-                  <el-button
-                    v-if="row.status === 'ENABLED'"
-                    link
-                    type="danger"
-                    :loading="modelBomLineOperationSavingKey === modelBomLineOperationKey(row, 'disable')"
-                    :disabled="saving || Boolean(modelBomLineOperationSavingKey)"
-                    @click="disableLine(row)"
-                  >
-                    停用
-                  </el-button>
-                  <el-button
-                    v-else
-                    link
-                    :type="row.materialStatus === 'DISABLED' ? 'info' : 'success'"
-                    :title="row.materialStatus === 'DISABLED' ? '请先启用零件基础资料' : '启用包内明细'"
-                    :loading="modelBomLineOperationSavingKey === modelBomLineOperationKey(row, 'enable')"
-                    :disabled="saving || Boolean(modelBomLineOperationSavingKey)"
-                    @click="enableLine(row)"
-                  >
-                    启用
-                  </el-button>
+                  <div v-if="row.lineType === 'COMPONENT' && row.status === 'ENABLED'" class="bom-line-action-group">
+                    <span class="bom-line-action-label">结构</span>
+                    <el-button
+                      link
+                      type="success"
+                      title="添加子件"
+                      :disabled="activeBom?.status === 'DISABLED' || saving || Boolean(modelBomLineOperationSavingKey)"
+                      @click="openLineCreateDialog('CHILD_PART', normalizeComponentNo(row.componentNo))"
+                    >
+                      加子件
+                    </el-button>
+                  </div>
+                  <div class="bom-line-action-group">
+                    <span class="bom-line-action-label">维护</span>
+                    <el-button link type="primary" title="编辑 BOM 明细" :disabled="saving || Boolean(modelBomLineOperationSavingKey)" @click="openLineEditDialog(row)">编辑</el-button>
+                    <el-button
+                      v-if="row.status === 'ENABLED'"
+                      link
+                      type="danger"
+                      title="停用 BOM 明细"
+                      :loading="modelBomLineOperationSavingKey === modelBomLineOperationKey(row, 'disable')"
+                      :disabled="saving || Boolean(modelBomLineOperationSavingKey)"
+                      @click="disableLine(row)"
+                    >
+                      停用
+                    </el-button>
+                    <el-button
+                      v-else
+                      link
+                      :type="row.materialStatus === 'DISABLED' ? 'info' : 'success'"
+                      :title="row.materialStatus === 'DISABLED' ? '请先启用零件基础资料' : '启用包内明细'"
+                      :loading="modelBomLineOperationSavingKey === modelBomLineOperationKey(row, 'enable')"
+                      :disabled="saving || Boolean(modelBomLineOperationSavingKey)"
+                      @click="enableLine(row)"
+                    >
+                      启用
+                    </el-button>
+                  </div>
                 </template>
                 <span v-else class="mobile-readonly-note">手机端只读</span>
               </div>
@@ -808,7 +860,7 @@
             >
               移除搜索结果
             </el-button>
-            <el-button size="small" plain @click="clearBomScopeCustomers">清空</el-button>
+            <el-button title="清空" size="small" plain @click="clearBomScopeCustomers">清空</el-button>
             <span class="bom-scope-help">{{ bomScopeSelectedCustomerCountText }}</span>
             <span class="bom-scope-help">{{ bomScopeCustomerOptionLoadText }}</span>
           </div>
@@ -834,8 +886,10 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeBomDialog">取消</el-button>
-        <el-button v-if="!bomForm.id" type="primary" plain :loading="saving" @click="saveBom(true)">保存并添加明细</el-button>
-        <el-button type="primary" :loading="saving" @click="saveBom(false)">保存</el-button>
+        <el-button v-if="!bomForm.id" type="primary" plain :loading="saving" @click="saveBom(true)"
+          title="保存并添加明细">保存并添加明细</el-button>
+        <el-button type="primary" :loading="saving" @click="saveBom(false)"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -860,18 +914,21 @@
               <el-button
                 :icon="Minus"
                 :disabled="modelBomWorkTableHeights.scopeReview <= modelBomWorkTableHeightLimits.min"
+                title="降低 BOM 适用范围核对表格高度"
                 aria-label="降低 BOM 适用范围核对表格高度"
                 @click="adjustModelBomWorkTableHeight('scopeReview', -modelBomWorkTableHeightLimits.step)"
               />
               <el-button
                 :icon="Plus"
                 :disabled="modelBomWorkTableHeights.scopeReview >= modelBomWorkTableHeightLimits.max"
+                title="提高 BOM 适用范围核对表格高度"
                 aria-label="提高 BOM 适用范围核对表格高度"
                 @click="adjustModelBomWorkTableHeight('scopeReview', modelBomWorkTableHeightLimits.step)"
               />
               <el-button
                 :icon="RefreshLeft"
                 :disabled="modelBomWorkTableHeights.scopeReview === modelBomWorkTableDefaultHeights.scopeReview"
+                title="恢复 BOM 适用范围核对表格默认高度"
                 aria-label="恢复 BOM 适用范围核对表格默认高度"
                 @click="resetModelBomWorkTableHeight('scopeReview')"
               />
@@ -921,10 +978,12 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="resolveBomScopeReview(false)">取消</el-button>
-        <el-button v-if="bomScopeChangeBroadens()" type="warning" :loading="bomScopeApprovalSubmitting" @click="submitBomScopeApprovalRequest">
+        <el-button v-if="bomScopeChangeBroadens()" type="warning" :loading="bomScopeApprovalSubmitting" @click="submitBomScopeApprovalRequest"
+  title="提交管理员申请">
           提交管理员申请
         </el-button>
-        <el-button v-else type="primary" :loading="saving" @click="resolveBomScopeReview(true)">确认并保存</el-button>
+        <el-button v-else type="primary" :loading="saving" @click="resolveBomScopeReview(true)"
+          title="确认并保存">确认并保存</el-button>
       </template>
     </el-dialog>
 
@@ -960,7 +1019,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeCopyDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="copyBom">确认复制</el-button>
+        <el-button type="primary" :loading="saving" @click="copyBom"
+          title="确认复制">确认复制</el-button>
       </template>
     </el-dialog>
 
@@ -1168,7 +1228,8 @@
               </button>
               <span class="default-process-index">{{ index + 1 }}</span>
               <strong>{{ step }}</strong>
-              <el-button link type="danger" @click="removeDefaultProcessStep(index)">删除</el-button>
+              <el-button link type="danger" @click="removeDefaultProcessStep(index)"
+  title="删除">删除</el-button>
             </div>
           </div>
         </el-form-item>
@@ -1190,7 +1251,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeLineDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveLine">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="saveLine"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -1203,8 +1265,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="bomStructureTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!bomStructureText" @click="copyBomStructureText">复制清单</el-button>
+        <el-button title="关闭" @click="bomStructureTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!bomStructureText" @click="copyBomStructureText">复制清单</el-button>
       </template>
     </el-dialog>
 
@@ -1217,8 +1279,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="bomListTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!modelBomListText" @click="copyModelBomListText">复制列表</el-button>
+        <el-button title="关闭" @click="bomListTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制列表" type="primary" :disabled="!modelBomListText" @click="copyModelBomListText">复制列表</el-button>
       </template>
     </el-dialog>
 
@@ -1246,18 +1308,21 @@
                 <el-button
                   :icon="Minus"
                   :disabled="modelBomWorkTableHeights.thicknessReview <= modelBomWorkTableHeightLimits.min"
+                  title="降低 BOM 厚度核对表格高度"
                   aria-label="降低 BOM 厚度核对表格高度"
                   @click="adjustModelBomWorkTableHeight('thicknessReview', -modelBomWorkTableHeightLimits.step)"
                 />
                 <el-button
                   :icon="Plus"
                   :disabled="modelBomWorkTableHeights.thicknessReview >= modelBomWorkTableHeightLimits.max"
+                  title="提高 BOM 厚度核对表格高度"
                   aria-label="提高 BOM 厚度核对表格高度"
                   @click="adjustModelBomWorkTableHeight('thicknessReview', modelBomWorkTableHeightLimits.step)"
                 />
                 <el-button
                   :icon="RefreshLeft"
                   :disabled="modelBomWorkTableHeights.thicknessReview === modelBomWorkTableDefaultHeights.thicknessReview"
+                  title="恢复 BOM 厚度核对表格默认高度"
                   aria-label="恢复 BOM 厚度核对表格默认高度"
                   @click="resetModelBomWorkTableHeight('thicknessReview')"
                 />
@@ -1323,8 +1388,8 @@
         <el-empty v-else description="当前 BOM 没有需要核对厚度的子零件或单独零件" />
       </div>
       <template #footer>
-        <el-button @click="thicknessReviewDialogVisible = false">关闭</el-button>
-        <el-button :disabled="!thicknessReviewText" @click="copyThicknessReviewText">复制核对清单</el-button>
+        <el-button title="关闭" @click="thicknessReviewDialogVisible = false">关闭</el-button>
+        <el-button title="复制核对清单" :disabled="!thicknessReviewText" @click="copyThicknessReviewText">复制核对清单</el-button>
       </template>
     </el-dialog>
 
@@ -1383,18 +1448,21 @@
               <el-button
                 :icon="Minus"
                 :disabled="modelBomWorkTableHeights.sourceDiffFields <= modelBomWorkTableHeightLimits.min"
+                title="降低来源 BOM 差异字段表格高度"
                 aria-label="降低来源 BOM 差异字段表格高度"
                 @click="adjustModelBomWorkTableHeight('sourceDiffFields', -modelBomWorkTableHeightLimits.step)"
               />
               <el-button
                 :icon="Plus"
                 :disabled="modelBomWorkTableHeights.sourceDiffFields >= modelBomWorkTableHeightLimits.max"
+                title="提高来源 BOM 差异字段表格高度"
                 aria-label="提高来源 BOM 差异字段表格高度"
                 @click="adjustModelBomWorkTableHeight('sourceDiffFields', modelBomWorkTableHeightLimits.step)"
               />
               <el-button
                 :icon="RefreshLeft"
                 :disabled="modelBomWorkTableHeights.sourceDiffFields === modelBomWorkTableDefaultHeights.sourceDiffFields"
+                title="恢复来源 BOM 差异字段表格默认高度"
                 aria-label="恢复来源 BOM 差异字段表格默认高度"
                 @click="resetModelBomWorkTableHeight('sourceDiffFields')"
               />
@@ -1422,7 +1490,7 @@
         </el-table>
       </div>
       <template #footer>
-        <el-button @click="sourceBomReviewDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="sourceBomReviewDialogVisible = false">关闭</el-button>
         <el-button v-if="selectedSourceBomDiffIssue?.targetLine" plain @click="focusSourceBomReviewTargetLine">定位客户行</el-button>
         <el-button v-if="selectedSourceBomDiffIssue?.sourceLine" plain @click="openSourceBomFromReview">打开来源 BOM</el-button>
         <el-button
@@ -1432,7 +1500,8 @@
           :loading="sourceBomDiffReviewSaving"
           :disabled="!sourceBomReviewForm.reviewedBy.trim()"
           @click="confirmSourceBomDiffReviewed"
-        >
+
+          title="确认保留差异">
           确认保留差异
         </el-button>
         <el-button
@@ -1441,7 +1510,8 @@
           plain
           :loading="sourceBomDiffReviewRevoking"
           @click="revokeSourceBomDiffReviewed(selectedSourceBomDiffIssue)"
-        >
+
+        title="撤销核对">
           撤销核对
         </el-button>
         <el-button v-if="!isMobileLayout && selectedSourceBomDiffIssue?.targetLine" type="primary" @click="editSourceBomReviewTargetLine">编辑客户行</el-button>
@@ -1520,8 +1590,8 @@
         </el-table>
       </div>
       <template #footer>
-        <el-button @click="bomRevisionDetailDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!selectedBomRevisionSnapshotText" @click="copyBomRevisionSnapshotText">复制快照</el-button>
+        <el-button title="关闭" @click="bomRevisionDetailDialogVisible = false">关闭</el-button>
+        <el-button title="复制快照" type="primary" :disabled="!selectedBomRevisionSnapshotText" @click="copyBomRevisionSnapshotText">复制快照</el-button>
       </template>
     </el-dialog>
 
@@ -1538,6 +1608,7 @@
             :icon="Download"
             :loading="sourceBomDiffReviewExporting"
             :disabled="!activeBom?.sourceBomId"
+            title="导出来源 BOM 差异核对记录"
             @click="exportSourceBomDiffReviewsExcel"
           >
             导出 Excel
@@ -1547,6 +1618,7 @@
             :icon="RefreshLeft"
             :loading="sourceBomDiffReviewLoading"
             :disabled="!activeBom?.sourceBomId"
+            title="刷新来源 BOM 差异核对记录"
             @click="loadSourceBomDiffReviews()"
           >
             刷新
@@ -1555,18 +1627,21 @@
             <el-button
               :icon="Minus"
               :disabled="modelBomWorkTableHeights.sourceDiffReviews <= modelBomWorkTableHeightLimits.min"
+              title="降低来源 BOM 差异核对记录表格高度"
               aria-label="降低来源 BOM 差异核对记录表格高度"
               @click="adjustModelBomWorkTableHeight('sourceDiffReviews', -modelBomWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="modelBomWorkTableHeights.sourceDiffReviews >= modelBomWorkTableHeightLimits.max"
+              title="提高来源 BOM 差异核对记录表格高度"
               aria-label="提高来源 BOM 差异核对记录表格高度"
               @click="adjustModelBomWorkTableHeight('sourceDiffReviews', modelBomWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="modelBomWorkTableHeights.sourceDiffReviews === modelBomWorkTableDefaultHeights.sourceDiffReviews"
+              title="恢复来源 BOM 差异核对记录表格默认高度"
               aria-label="恢复来源 BOM 差异核对记录表格默认高度"
               @click="resetModelBomWorkTableHeight('sourceDiffReviews')"
             />
@@ -1599,10 +1674,10 @@
       </el-table>
       <div v-if="sourceBomDiffReviewHasMore" class="model-bom-dialog-table-footer">
         <span>已显示 {{ sourceBomDiffReviews.length }} / {{ sourceBomDiffReviewPagination.total }} 条</span>
-        <el-button size="small" :loading="sourceBomDiffReviewLoading" @click="loadMoreSourceBomDiffReviews">加载更多</el-button>
+        <el-button title="加载更多" size="small" :loading="sourceBomDiffReviewLoading" @click="loadMoreSourceBomDiffReviews">加载更多</el-button>
       </div>
       <template #footer>
-        <el-button @click="sourceBomReviewListDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="sourceBomReviewListDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1622,8 +1697,11 @@
             <span class="bom-scope-help">已显示 {{ bomScopeApprovalRequests.length }} / {{ bomScopeApprovalTotal }} 条</span>
           </div>
           <div class="scope-approval-actions">
-            <el-button :loading="bomScopeApprovalLoading" @click="refreshBomScopeApprovalRequests()">刷新</el-button>
-            <el-button v-if="bomScopeApprovalHasMore" :loading="bomScopeApprovalLoading" @click="loadMoreBomScopeApprovalRequests">加载更多</el-button>
+            <div class="scope-approval-action-group">
+              <span class="scope-approval-action-label">列表</span>
+              <el-button :loading="bomScopeApprovalLoading" title="刷新审批申请列表" @click="refreshBomScopeApprovalRequests()">刷新</el-button>
+              <el-button v-if="bomScopeApprovalHasMore" :loading="bomScopeApprovalLoading" title="加载更多审批申请" @click="loadMoreBomScopeApprovalRequests">更多</el-button>
+            </div>
           </div>
         </div>
         <el-table v-loading="bomScopeApprovalLoading" :data="bomScopeApprovalRequests" border max-height="560" empty-text="暂无 BOM 范围审批申请">
@@ -1663,21 +1741,22 @@
           </el-table-column>
           <el-table-column label="操作" width="150" fixed="right">
             <template #default="{ row }">
-              <template v-if="row.status === 'PENDING'">
-                <el-button link type="success" :loading="bomScopeApprovalSavingId === `${row.id}:approve`" @click="reviewBomScopeApprovalRequest(row, true)">
+              <div v-if="row.status === 'PENDING'" class="scope-approval-row-actions">
+                <span class="scope-approval-action-label">审批</span>
+                <el-button link type="success" title="批准 BOM 范围申请" :loading="bomScopeApprovalSavingId === `${row.id}:approve`" @click="reviewBomScopeApprovalRequest(row, true)">
                   批准
                 </el-button>
-                <el-button link type="danger" :loading="bomScopeApprovalSavingId === `${row.id}:reject`" @click="reviewBomScopeApprovalRequest(row, false)">
+                <el-button link type="danger" title="驳回 BOM 范围申请" :loading="bomScopeApprovalSavingId === `${row.id}:reject`" @click="reviewBomScopeApprovalRequest(row, false)">
                   驳回
                 </el-button>
-              </template>
+              </div>
               <span v-else>-</span>
             </template>
           </el-table-column>
         </el-table>
       </div>
       <template #footer>
-        <el-button @click="bomScopeApprovalDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="bomScopeApprovalDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -6971,6 +7050,28 @@ async function enableLine(row: ModelBomLine) {
   justify-content: flex-end;
 }
 
+.scope-approval-action-group,
+.scope-approval-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.scope-approval-action-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.scope-approval-actions :deep(.el-button),
+.scope-approval-row-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
 .model-bom-confirm-panel {
   display: grid;
   gap: 10px;
@@ -7202,6 +7303,33 @@ async function enableLine(row: ModelBomLine) {
 .model-bom-list-table :deep(.cell) {
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.model-bom-row-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.model-bom-row-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.model-bom-row-action-label {
+  flex: 0 0 30px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.model-bom-row-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
 }
 
 .table-pagination-row {
@@ -7471,6 +7599,26 @@ async function enableLine(row: ModelBomLine) {
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 4px 8px;
+}
+
+.bom-line-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.bom-line-action-label {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.bom-line-actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 .bom-line-drag-handle {
@@ -7758,6 +7906,26 @@ async function enableLine(row: ModelBomLine) {
   flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
+}
+
+.bom-source-diff-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.bom-source-diff-action-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.bom-source-diff-item__actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 .source-bom-review {

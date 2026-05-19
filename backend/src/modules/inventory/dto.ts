@@ -96,6 +96,14 @@ export class MaterialQueryDto {
   keyword?: string;
 
   @IsOptional()
+  @IsString()
+  customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  projectModel?: string;
+
+  @IsOptional()
   @IsEnum(CommonStatus)
   status?: CommonStatus;
 
@@ -787,6 +795,10 @@ export class InventorySourceDetailQueryDto {
   @IsOptional()
   @IsString()
   customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 
   @IsOptional()
   @IsString()

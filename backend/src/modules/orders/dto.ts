@@ -299,6 +299,10 @@ export class ListOrderImportSessionQueryDto {
   @IsNumber()
   @Min(0)
   offset?: number;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class GetOrderImportSessionQueryDto {

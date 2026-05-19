@@ -3,8 +3,10 @@
     <div class="page-header">
       <h2 class="page-title">订单总列表</h2>
       <div class="page-header-actions orders-page-header-actions">
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="orderExporting" @click="exportOrdersExcel">导出 Excel</el-button>
-        <el-button v-if="!isMobileLayout" @click="openImportDialog">导入订单</el-button>
+        <el-button title="刷新整页订单数据" :loading="orderPageRefreshing" @click="refreshOrdersPage">刷新</el-button>
+        <el-button title="导出Excel" v-if="!isMobileLayout" :icon="Download" :loading="orderExporting" @click="exportOrdersExcel">导出 Excel</el-button>
+        <el-button v-if="!isMobileLayout" @click="openImportDialog"
+          title="导入订单">导入订单</el-button>
         <el-button v-if="!isMobileLayout" type="primary" @click="openCreate">新增订单</el-button>
       </div>
     </div>
@@ -89,8 +91,8 @@
           />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="loadOrders">查询</el-button>
-      <el-button @click="reset">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="loadOrders">查询</el-button>
+      <el-button title="重置" @click="reset">重置</el-button>
     </div>
 
     <div class="table-card orders-table-card desktop-table">
@@ -102,6 +104,8 @@
               size="small"
               :icon="Minus"
               :disabled="ordersWorkTableHeights.orders <= ordersWorkTableHeightLimits.min"
+              title="降低订单总列表表格高度"
+
               aria-label="降低订单总列表表格高度"
               @click="adjustOrdersWorkTableHeight('orders', -ordersWorkTableHeightLimits.step)"
             />
@@ -109,6 +113,8 @@
               size="small"
               :icon="Plus"
               :disabled="ordersWorkTableHeights.orders >= ordersWorkTableHeightLimits.max"
+              title="提高订单总列表表格高度"
+
               aria-label="提高订单总列表表格高度"
               @click="adjustOrdersWorkTableHeight('orders', ordersWorkTableHeightLimits.step)"
             />
@@ -116,6 +122,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="ordersWorkTableHeights.orders === ordersWorkTableDefaultHeights.orders"
+              title="恢复订单总列表表格默认高度"
               aria-label="恢复订单总列表表格默认高度"
               @click="resetOrdersWorkTableHeight('orders')"
             />
@@ -160,15 +167,28 @@
             <span v-else class="muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="goProcess(row)">{{ orderProcessActionText(row) }}</el-button>
-            <el-button v-if="row.status === 'DRAFT'" link type="danger" @click.stop="openDeleteDraftOrder(row)">删除草稿</el-button>
-            <el-tooltip :content="cancelOrderDisabledReason(row)" :disabled="canCancelOrder(row)" placement="top">
-              <span class="action-tooltip-wrap">
-                <el-button link type="danger" :disabled="!canCancelOrder(row)" @click.stop="openCancelOrder(row)">取消</el-button>
-              </span>
-            </el-tooltip>
+            <div class="order-row-actions">
+              <div class="order-row-action-group">
+                <span class="order-row-action-label">流程</span>
+                <el-button link type="primary" :title="orderProcessActionText(row)" @click="goProcess(row)">
+                  {{ orderProcessActionText(row) }}
+                </el-button>
+              </div>
+              <div v-if="row.status === 'DRAFT'" class="order-row-action-group">
+                <span class="order-row-action-label">草稿</span>
+                <el-button link type="danger" title="删除草稿" @click.stop="openDeleteDraftOrder(row)">删除</el-button>
+              </div>
+              <div class="order-row-action-group">
+                <span class="order-row-action-label">订单</span>
+                <el-tooltip :content="cancelOrderDisabledReason(row)" :disabled="canCancelOrder(row)" placement="top">
+                  <span class="action-tooltip-wrap">
+                    <el-button link type="danger" title="取消订单" :disabled="!canCancelOrder(row)" @click.stop="openCancelOrder(row)">取消</el-button>
+                  </span>
+                </el-tooltip>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -353,6 +373,7 @@
                     size="small"
                     :icon="Minus"
                     :disabled="ordersWorkTableHeights.modelBomRecommendationStructure <= ordersWorkTableHeightLimits.min"
+                    title="降低零件包推荐结构预览高度"
                     aria-label="降低零件包推荐结构预览高度"
                     @click="adjustOrdersWorkTableHeight('modelBomRecommendationStructure', -ordersWorkTableHeightLimits.step)"
                   />
@@ -360,6 +381,7 @@
                     size="small"
                     :icon="Plus"
                     :disabled="ordersWorkTableHeights.modelBomRecommendationStructure >= ordersWorkTableHeightLimits.max"
+                    title="提高零件包推荐结构预览高度"
                     aria-label="提高零件包推荐结构预览高度"
                     @click="adjustOrdersWorkTableHeight('modelBomRecommendationStructure', ordersWorkTableHeightLimits.step)"
                   />
@@ -367,6 +389,7 @@
                     size="small"
                     :icon="RefreshLeft"
                     :disabled="ordersWorkTableHeights.modelBomRecommendationStructure === ordersWorkTableDefaultHeights.modelBomRecommendationStructure"
+                    title="恢复零件包推荐结构预览默认高度"
                     aria-label="恢复零件包推荐结构预览默认高度"
                     @click="resetOrdersWorkTableHeight('modelBomRecommendationStructure')"
                   />
@@ -435,7 +458,8 @@
                   :loading="modelBomRecommendationDetailLoadingId === bom.id"
                   :disabled="Boolean(modelBomRecommendationDetailLoadingId) && modelBomRecommendationDetailLoadingId !== bom.id"
                   @click="openModelBomApplyDialog(bom)"
-                >
+
+                  title="预览带入">
                   预览带入
                 </el-button>
               </article>
@@ -466,8 +490,8 @@
               <span>{{ orderFormStructureGroups.length }} 组 / {{ orderFormFilledLineCount }} 行</span>
             </div>
             <div class="structure-header-actions">
-              <el-button size="small" :disabled="orderFormFilledLineCount === 0" @click="openOrderFormStructureTextDialog">查看固定格式</el-button>
-              <el-button size="small" :disabled="orderFormFilledLineCount === 0" @click="copyOrderFormStructureText">复制清单</el-button>
+              <el-button title="查看固定格式" size="small" :disabled="orderFormFilledLineCount === 0" @click="openOrderFormStructureTextDialog">查看固定格式</el-button>
+              <el-button title="复制清单" size="small" :disabled="orderFormFilledLineCount === 0" @click="copyOrderFormStructureText">复制清单</el-button>
             </div>
           </div>
           <div class="orders-table-height-toolbar">
@@ -478,6 +502,7 @@
                   size="small"
                   :icon="Minus"
                   :disabled="ordersWorkTableHeights.orderFormStructure <= ordersWorkTableHeightLimits.min"
+                  title="降低当前草稿固定格式清单高度"
                   aria-label="降低当前草稿固定格式清单高度"
                   @click="adjustOrdersWorkTableHeight('orderFormStructure', -ordersWorkTableHeightLimits.step)"
                 />
@@ -485,6 +510,7 @@
                   size="small"
                   :icon="Plus"
                   :disabled="ordersWorkTableHeights.orderFormStructure >= ordersWorkTableHeightLimits.max"
+                  title="提高当前草稿固定格式清单高度"
                   aria-label="提高当前草稿固定格式清单高度"
                   @click="adjustOrdersWorkTableHeight('orderFormStructure', ordersWorkTableHeightLimits.step)"
                 />
@@ -492,6 +518,7 @@
                   size="small"
                   :icon="RefreshLeft"
                   :disabled="ordersWorkTableHeights.orderFormStructure === ordersWorkTableDefaultHeights.orderFormStructure"
+                  title="恢复当前草稿固定格式清单默认高度"
                   aria-label="恢复当前草稿固定格式清单默认高度"
                   @click="resetOrdersWorkTableHeight('orderFormStructure')"
                 />
@@ -534,7 +561,8 @@
       <template #footer>
         <div class="dialog-footer-actions">
           <el-button :disabled="saving" @click="closeCreateOrderDialog">取消</el-button>
-          <el-button type="primary" :loading="saving" :disabled="saving" @click="saveOrder">保存订单</el-button>
+          <el-button type="primary" :loading="saving" :disabled="saving" @click="saveOrder"
+            title="保存订单">保存订单</el-button>
         </div>
       </template>
     </el-dialog>
@@ -548,26 +576,28 @@
       />
       <div class="import-toolbar">
         <input ref="importFileInput" type="file" accept=".xlsx" multiple class="hidden-file-input" @change="handleImportFileChange" />
-        <el-button :loading="importTemplateDownloading" @click="downloadImportTemplate">下载上传模板</el-button>
-        <el-button
+        <el-button title="下载上传模板" :loading="importTemplateDownloading" @click="downloadImportTemplate">下载上传模板</el-button>
+        <el-button title="下载问题明细"
           :disabled="!importPreview || importPreview.summary.errorCount + importPreview.summary.warningCount === 0"
           :loading="importIssueReportDownloading"
           @click="downloadImportIssueReport"
         >
           下载问题明细
         </el-button>
-        <el-button type="primary" :loading="importUploading || importSessionCreating" @click="selectImportFile">
+        <el-button title="上传ERP上传净表" type="primary" :loading="importUploading || importSessionCreating" @click="selectImportFile">
           上传 ERP上传净表
         </el-button>
-        <el-button :disabled="!importPreview" :loading="importPreviewLoading" @click="refreshImportPreview">刷新预览</el-button>
-        <el-button :loading="importSessionsLoading" @click="loadImportSessionHistory">刷新导入记录</el-button>
+        <el-button title="刷新预览" :disabled="!importPreview" :loading="importPreviewLoading" @click="refreshImportPreview">刷新预览</el-button>
+        <el-button :loading="importSessionsLoading" @click="loadImportSessionHistory"
+          title="刷新导入记录">刷新导入记录</el-button>
         <el-button
           type="warning"
           plain
           :disabled="!canExtractMaterialImportDraft"
           :loading="materialImportExtracting"
           @click="extractMaterialImportDraftFromOrderImport"
-        >
+
+        title="提取零件库草稿">
           提取零件库草稿
         </el-button>
         <el-button
@@ -576,7 +606,8 @@
           :disabled="!canExtractMaterialImportDraft"
           :loading="modelBomDraftPreviewLoading"
           @click="previewModelBomDraftFromOrderImport"
-        >
+
+        title="预览 BOM 草稿">
           预览 BOM 草稿
         </el-button>
         <el-button
@@ -585,7 +616,8 @@
           :disabled="!importPreview || importPreview.status !== 'DRAFT'"
           :loading="importDiscarding"
           @click="discardImportSession"
-        >
+
+        title="放弃本次导入">
           放弃本次导入
         </el-button>
         <el-button
@@ -593,7 +625,8 @@
           :disabled="!canCommitImport"
           :loading="importCommitting"
           @click="commitImportSession"
-        >
+
+          title="创建已勾选草稿订单">
           创建已勾选草稿订单
         </el-button>
         <el-button
@@ -602,7 +635,8 @@
           :disabled="!canCommitAllImportSelectable"
           :loading="importCommittingAll"
           @click="commitAllImportSelectableOrders"
-        >
+
+          title="创建全部可导入草稿">
             创建全部可导入草稿
           </el-button>
       </div>
@@ -661,7 +695,8 @@
               type="danger"
               :loading="importSessionDeletingId === session.id"
               @click="deleteImportSessionMemory(session)"
-            >
+
+            :title="session.status === 'DRAFT' ? '放弃' : '删除导入记忆'">
               {{ session.status === 'DRAFT' ? '放弃' : '删除导入记忆' }}
             </el-button>
           </div>
@@ -669,7 +704,7 @@
       </div>
       <div v-if="importSessionHistory.length || importSessionHistoryTotal > 0" class="import-history-footer">
         <span>已显示 {{ importSessionHistory.length }} / {{ importSessionHistoryTotal }} 条导入记录</span>
-        <el-button
+        <el-button title="加载更多"
           v-if="importSessionHistoryHasMore"
           size="small"
           :loading="importSessionsLoading"
@@ -731,7 +766,8 @@
             size="small"
             :disabled="importPreview.status !== 'DRAFT' || visibleSelectableImportOrderCount === 0"
             @click="selectAllValidImportOrders"
-          >
+
+            title="勾选当前页可导入">
             勾选当前页可导入
           </el-button>
           <el-button
@@ -741,10 +777,11 @@
             :disabled="importPreview.status !== 'DRAFT' || importPreview.summary.orderCount === 0"
             :loading="importSelectingAllOrders"
             @click="selectAllImportSelectableOrders"
-          >
+
+            title="勾选全部可导入">
             勾选全部可导入
           </el-button>
-          <el-button size="small" :disabled="selectedValidImportOrderNos.length === 0" @click="clearImportOrderSelection">
+          <el-button title="清空勾选" size="small" :disabled="selectedValidImportOrderNos.length === 0" @click="clearImportOrderSelection">
             清空勾选
           </el-button>
         </div>
@@ -768,7 +805,8 @@
               :disabled="importPreview.status !== 'DRAFT'"
               :loading="importFileDeletingId === file.id"
               @click="deleteImportFile(file.id)"
-            >
+
+            title="删除文件">
               删除文件
             </el-button>
           </div>
@@ -789,6 +827,8 @@
               size="small"
               :icon="Plus"
               :disabled="ordersWorkTableHeights.importPreview >= ordersWorkTableHeightLimits.max"
+              title="提高订单导入预览表格高度"
+
               aria-label="提高订单导入预览表格高度"
               @click="adjustOrdersWorkTableHeight('importPreview', ordersWorkTableHeightLimits.step)"
             />
@@ -796,6 +836,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="ordersWorkTableHeights.importPreview === ordersWorkTableDefaultHeights.importPreview"
+              title="恢复订单导入预览表格默认高度"
               aria-label="恢复订单导入预览表格默认高度"
               @click="resetOrdersWorkTableHeight('importPreview')"
             />
@@ -819,8 +860,8 @@
                 <strong>固定格式清单</strong>
                 <span>{{ importStructureGroups(row.rows).length }} 组 / {{ row.rows.length }} 行</span>
                 <div class="structure-header-actions">
-                  <el-button size="small" :disabled="row.rows.length === 0" @click="openImportOrderStructureTextDialog(row)">查看固定格式</el-button>
-                  <el-button size="small" :disabled="row.rows.length === 0" @click="copyImportOrderStructureText(row)">复制清单</el-button>
+                  <el-button title="查看固定格式" size="small" :disabled="row.rows.length === 0" @click="openImportOrderStructureTextDialog(row)">查看固定格式</el-button>
+                  <el-button title="复制清单" size="small" :disabled="row.rows.length === 0" @click="copyImportOrderStructureText(row)">复制清单</el-button>
                 </div>
               </div>
               <div v-if="importStructureGroups(row.rows).length" class="import-structure-list">
@@ -910,7 +951,7 @@
       </el-table>
       <div v-if="importPreview" class="import-preview-footer">
         <span>已显示 {{ importPreview.orders.length }} / {{ importPreview.orderPage?.totalCount || importPreview.summary.orderCount }} 个订单预览</span>
-        <el-button
+        <el-button title="加载更多订单预览"
           v-if="importPreview.orderPage?.hasMore"
           size="small"
           :loading="importPreviewLoading"
@@ -922,17 +963,19 @@
       <el-empty v-else description="请上传包含 ERP上传净表 的 .xlsx 文件" />
       <template #footer>
         <div class="dialog-footer-actions">
-          <el-button @click="importDialogVisible = false">关闭</el-button>
+          <el-button title="关闭" @click="importDialogVisible = false">关闭</el-button>
           <el-button
             type="danger"
             plain
             :disabled="!importPreview || importPreview.status !== 'DRAFT'"
             :loading="importDiscarding"
             @click="discardImportSession"
-          >
+
+          title="放弃本次导入">
             放弃本次导入
           </el-button>
-          <el-button type="success" :disabled="!canCommitImport" :loading="importCommitting" @click="commitImportSession">
+          <el-button type="success" :disabled="!canCommitImport" :loading="importCommitting" @click="commitImportSession"
+            title="创建已勾选草稿订单">
             创建已勾选草稿订单
           </el-button>
           <el-button
@@ -941,7 +984,8 @@
             :disabled="!canCommitAllImportSelectable"
             :loading="importCommittingAll"
             @click="commitAllImportSelectableOrders"
-          >
+
+            title="创建全部可导入草稿">
           创建全部可导入草稿
         </el-button>
           <el-button
@@ -950,7 +994,8 @@
             :disabled="!canExtractMaterialImportDraft"
             :loading="materialImportExtracting"
             @click="extractMaterialImportDraftFromOrderImport"
-          >
+
+          title="提取零件库草稿">
             提取零件库草稿
           </el-button>
           <el-button
@@ -959,7 +1004,8 @@
             :disabled="!canExtractMaterialImportDraft"
             :loading="modelBomDraftPreviewLoading"
             @click="previewModelBomDraftFromOrderImport"
-          >
+
+          title="预览 BOM 草稿">
             预览 BOM 草稿
           </el-button>
         </div>
@@ -1044,7 +1090,7 @@
               />
               <small v-if="modelBomDraftNameConflict(draft)" class="danger-text">同范围已有同名 BOM，请改名后再创建。</small>
             </div>
-            <el-button
+            <el-button title="查看已有BOM"
               v-if="modelBomDraftExistingBoms(draft).length"
               type="primary"
               plain
@@ -1093,7 +1139,7 @@
                 变更字段：{{ modelBomDraftDiffChangedFieldsText(bom) }}
               </small>
               <div class="model-bom-draft-diff-actions">
-                <el-button size="small" type="primary" plain @click="openExistingModelBomFromDraft(draft, bom)">
+                <el-button title="查看此BOM" size="small" type="primary" plain @click="openExistingModelBomFromDraft(draft, bom)">
                   查看此 BOM
                 </el-button>
                 <el-button size="small" type="primary" plain @click="openModelBomDraftDiffDialog(draft, bom)">
@@ -1125,6 +1171,8 @@
                   size="small"
                   :icon="Plus"
                   :disabled="ordersWorkTableHeights.modelBomDraft >= ordersWorkTableHeightLimits.max"
+                  title="提高 BOM 草稿预览表格高度"
+
                   aria-label="提高 BOM 草稿预览表格高度"
                   @click="adjustOrdersWorkTableHeight('modelBomDraft', ordersWorkTableHeightLimits.step)"
                 />
@@ -1132,6 +1180,7 @@
                   size="small"
                   :icon="RefreshLeft"
                   :disabled="ordersWorkTableHeights.modelBomDraft === ordersWorkTableDefaultHeights.modelBomDraft"
+                  title="恢复 BOM 草稿预览表格默认高度"
                   aria-label="恢复 BOM 草稿预览表格默认高度"
                   @click="resetOrdersWorkTableHeight('modelBomDraft')"
                 />
@@ -1182,7 +1231,7 @@
       </el-tabs>
       <el-empty v-else description="暂无 BOM 草稿预览" />
       <template #footer>
-        <el-button
+        <el-button title="刷新BOM草稿"
           type="primary"
           plain
           :disabled="!canExtractMaterialImportDraft || Boolean(modelBomDraftCommittingKey)"
@@ -1198,10 +1247,11 @@
           :disabled="!canExtractMaterialImportDraft || materialImportExtracting"
           :loading="materialImportExtracting"
           @click="extractMaterialImportDraftFromOrderImport"
-        >
+
+        title="先生成零件库草稿">
           先生成零件库草稿
         </el-button>
-        <el-button @click="modelBomDraftPreviewVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="modelBomDraftPreviewVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1292,7 +1342,7 @@
         >
           已核对此 BOM
         </el-button>
-        <el-button @click="modelBomDraftDiffDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="modelBomDraftDiffDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1384,8 +1434,9 @@
       </el-form>
       <template #footer>
         <div class="dialog-footer-actions">
-          <el-button :disabled="saving" @click="closeCancelOrderDialog">返回</el-button>
-          <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelOrder">确认取消订单</el-button>
+          <el-button title="返回" :disabled="saving" @click="closeCancelOrderDialog">返回</el-button>
+          <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelOrder"
+  title="确认取消订单">确认取消订单</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1413,7 +1464,8 @@
       <template #footer>
         <div class="dialog-footer-actions">
           <el-button :disabled="saving" @click="closeDeleteDraftDialog">取消</el-button>
-          <el-button type="danger" :loading="saving" :disabled="saving" @click="deleteDraftOrder">确认删除草稿</el-button>
+          <el-button type="danger" :loading="saving" :disabled="saving" @click="deleteDraftOrder"
+  title="确认删除草稿">确认删除草稿</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1445,8 +1497,8 @@
                 <strong>固定格式清单</strong>
                 <span>{{ importFileStructureOrders.length }} 个订单 / 已加载 {{ importFilePreview.rows.length }} 行</span>
                 <div class="structure-header-actions">
-                  <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="openImportFileStructureTextDialog">查看固定格式</el-button>
-                  <el-button size="small" :disabled="importFilePreview.rows.length === 0" @click="copyImportFileStructureText">复制全部</el-button>
+                  <el-button title="查看固定格式" size="small" :disabled="importFilePreview.rows.length === 0" @click="openImportFileStructureTextDialog">查看固定格式</el-button>
+                  <el-button title="复制全部" size="small" :disabled="importFilePreview.rows.length === 0" @click="copyImportFileStructureText">复制全部</el-button>
                 </div>
               </div>
               <div class="orders-table-height-toolbar">
@@ -1464,6 +1516,7 @@
                       size="small"
                       :icon="Plus"
                       :disabled="ordersWorkTableHeights.importFileStructure >= ordersWorkTableHeightLimits.max"
+                      title="提高上传文件固定格式清单高度"
                       aria-label="提高上传文件固定格式清单高度"
                       @click="adjustOrdersWorkTableHeight('importFileStructure', ordersWorkTableHeightLimits.step)"
                     />
@@ -1471,6 +1524,7 @@
                       size="small"
                       :icon="RefreshLeft"
                       :disabled="ordersWorkTableHeights.importFileStructure === ordersWorkTableDefaultHeights.importFileStructure"
+                      title="恢复上传文件固定格式清单默认高度"
                       aria-label="恢复上传文件固定格式清单默认高度"
                       @click="resetOrdersWorkTableHeight('importFileStructure')"
                     />
@@ -1515,6 +1569,8 @@
                   size="small"
                   :icon="Minus"
                   :disabled="ordersWorkTableHeights.importFilePreview <= ordersWorkTableHeightLimits.min"
+                  title="降低上传文件预览表格高度"
+
                   aria-label="降低上传文件预览表格高度"
                   @click="adjustOrdersWorkTableHeight('importFilePreview', -ordersWorkTableHeightLimits.step)"
                 />
@@ -1522,6 +1578,8 @@
                   size="small"
                   :icon="Plus"
                   :disabled="ordersWorkTableHeights.importFilePreview >= ordersWorkTableHeightLimits.max"
+                  title="提高上传文件预览表格高度"
+
                   aria-label="提高上传文件预览表格高度"
                   @click="adjustOrdersWorkTableHeight('importFilePreview', ordersWorkTableHeightLimits.step)"
                 />
@@ -1529,6 +1587,7 @@
                   size="small"
                   :icon="RefreshLeft"
                   :disabled="ordersWorkTableHeights.importFilePreview === ordersWorkTableDefaultHeights.importFilePreview"
+                  title="恢复上传文件预览表格默认高度"
                   aria-label="恢复上传文件预览表格默认高度"
                   @click="resetOrdersWorkTableHeight('importFilePreview')"
                 />
@@ -1591,7 +1650,7 @@
               已显示 {{ importFilePreview.rows.length }} /
               {{ importFilePreview.rowPage.totalCount }} 行文件预览
             </span>
-            <el-button
+            <el-button title="加载更多行"
               v-if="importFilePreview.rowPage.hasMore"
               size="small"
               :loading="importFilePreviewLoading"
@@ -1690,6 +1749,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="ordersWorkTableHeights.modelBomApplyStructure <= ordersWorkTableHeightLimits.min"
+                title="降低 BOM 预览带入结构清单高度"
                 aria-label="降低 BOM 预览带入结构清单高度"
                 @click="adjustOrdersWorkTableHeight('modelBomApplyStructure', -ordersWorkTableHeightLimits.step)"
               />
@@ -1697,6 +1757,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="ordersWorkTableHeights.modelBomApplyStructure >= ordersWorkTableHeightLimits.max"
+                title="提高 BOM 预览带入结构清单高度"
                 aria-label="提高 BOM 预览带入结构清单高度"
                 @click="adjustOrdersWorkTableHeight('modelBomApplyStructure', ordersWorkTableHeightLimits.step)"
               />
@@ -1704,6 +1765,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="ordersWorkTableHeights.modelBomApplyStructure === ordersWorkTableDefaultHeights.modelBomApplyStructure"
+                title="恢复 BOM 预览带入结构清单默认高度"
                 aria-label="恢复 BOM 预览带入结构清单默认高度"
                 @click="resetOrdersWorkTableHeight('modelBomApplyStructure')"
               />
@@ -1738,7 +1800,7 @@
         </div>
       </div>
       <template #footer>
-        <el-button
+        <el-button title="刷新BOM预览"
           :disabled="!modelBomApplyPreview"
           :loading="modelBomApplyRefreshLoading"
           @click="refreshModelBomApplyPreview"
@@ -1749,6 +1811,7 @@
           v-if="modelBomApplyMissingThicknessSourceLines.length > 0"
           type="warning"
           plain
+          :title="modelBomApplySourceBomActionText"
           @click="openModelBomApplySourceBom"
         >
           {{ modelBomApplySourceBomActionText }}
@@ -1758,7 +1821,8 @@
           type="primary"
           :disabled="!modelBomApplyPreview || modelBomApplyPreviewOrderLines.length === 0 || modelBomApplyRequiresRefresh"
           @click="confirmApplyModelBomToOrder"
-        >
+
+          title="确认带入草稿">
           确认带入草稿
         </el-button>
       </template>
@@ -1779,8 +1843,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="structureTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!structureTextDialogContent" @click="copyStructureTextDialogContent">复制清单</el-button>
+        <el-button title="关闭" @click="structureTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!structureTextDialogContent" @click="copyStructureTextDialogContent">复制清单</el-button>
       </template>
     </el-dialog>
 
@@ -1950,6 +2014,7 @@ const inventorySummary = ref<InventorySummaryRow[]>([]);
 const dateRange = ref<string[]>([]);
 const orderDateRange = ref<string[]>([]);
 const loading = ref(false);
+const orderPageRefreshing = ref(false);
 const orderExporting = ref(false);
 const saving = ref(false);
 const dialogVisible = ref(false);
@@ -3390,6 +3455,23 @@ async function loadOrderOptions() {
 async function handleOrderScopeChange() {
   await loadOrderOptions();
   await loadOrders();
+}
+
+async function refreshOrdersPage() {
+  if (orderPageRefreshing.value) {
+    return;
+  }
+  orderPageRefreshing.value = true;
+  try {
+    // 整页刷新同步订单下拉、订单列表和已打开的导入记录，避免筛选范围或导入状态显示旧数据。
+    await loadOrderOptions();
+    await loadOrders();
+    if (importDialogVisible.value) {
+      await Promise.all([loadImportConfig(), loadImportSessionHistory()]);
+    }
+  } finally {
+    orderPageRefreshing.value = false;
+  }
 }
 
 async function reset() {
@@ -5439,8 +5521,7 @@ async function saveCancelOrder() {
 onMounted(async () => {
   restoreOrdersWorkTableHeights();
   window.addEventListener('focus', handleModelBomApplyWindowFocus);
-  await loadOrderOptions();
-  await loadOrders();
+  await refreshOrdersPage();
   await openOrderImportSessionFromRoute();
 });
 
@@ -5967,6 +6048,32 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.order-row-actions {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.order-row-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.order-row-action-label {
+  flex: 0 0 34px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.order-row-actions :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
 }
 
 .orders-table-height-label {

@@ -11,6 +11,11 @@ export class StatisticsController {
     return this.statisticsService.orderStatistics(query);
   }
 
+  @Get('options')
+  statisticsOptions(@Query() query: OrderStatisticsQueryDto) {
+    return this.statisticsService.statisticsOptions(query);
+  }
+
   @Get('orders/export')
   @Header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
   @Header('Content-Disposition', 'attachment; filename="order-statistics-export.xlsx"')

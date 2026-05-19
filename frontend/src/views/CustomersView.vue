@@ -2,7 +2,8 @@
   <section class="page">
     <div class="page-header">
       <h2 class="page-title">客户资料</h2>
-      <el-button v-if="!isMobileLayout" :icon="Download" :loading="customerExporting" @click="exportCustomersExcel">导出 Excel</el-button>
+      <el-button title="刷新整页客户数据" :loading="customerPageRefreshing" @click="refreshCustomersPage">刷新</el-button>
+      <el-button title="导出Excel" v-if="!isMobileLayout" :icon="Download" :loading="customerExporting" @click="exportCustomersExcel">导出 Excel</el-button>
       <el-button v-if="!isMobileLayout" type="primary" @click="openCreate">新增客户</el-button>
     </div>
 
@@ -37,7 +38,7 @@
         </el-select>
       </div>
       <el-button type="primary" :loading="loading" @click="searchCustomers">搜索</el-button>
-      <el-button @click="reset">重置</el-button>
+      <el-button title="重置" @click="reset">重置</el-button>
     </div>
 
     <div class="customer-bom-guide" aria-label="客户 BOM 入口说明">
@@ -58,6 +59,7 @@
               size="small"
               :icon="Minus"
               :disabled="customerWorkTableHeights.customers <= customerWorkTableHeightLimits.min"
+              title="降低客户资料表格高度"
               aria-label="降低客户资料表格高度"
               @click="adjustCustomerWorkTableHeight('customers', -customerWorkTableHeightLimits.step)"
             />
@@ -65,6 +67,7 @@
               size="small"
               :icon="Plus"
               :disabled="customerWorkTableHeights.customers >= customerWorkTableHeightLimits.max"
+              title="提高客户资料表格高度"
               aria-label="提高客户资料表格高度"
               @click="adjustCustomerWorkTableHeight('customers', customerWorkTableHeightLimits.step)"
             />
@@ -72,6 +75,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="customerWorkTableHeights.customers === customerWorkTableDefaultHeights.customers"
+              title="恢复客户资料表格默认高度"
               aria-label="恢复客户资料表格默认高度"
               @click="resetCustomerWorkTableHeight('customers')"
             />
@@ -99,17 +103,32 @@
             <StatusTag :value="row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="620" fixed="right">
+        <el-table-column label="操作" width="360" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openCustomerMaterials(row)">零件管理</el-button>
-            <el-button link type="primary" @click="openCustomerPrivateBoms(row)">客户零件包</el-button>
-            <el-button link type="primary" @click="openCustomerAvailableBoms(row)">可用BOM</el-button>
-            <el-button link type="primary" @click="openCustomerCommonBoms(row)">常用BOM</el-button>
-            <el-button link type="success" @click="openCustomerCommonSetup(row)">设置常用</el-button>
-            <el-button link type="success" @click="openCustomerBomCreate(row)">新建BOM</el-button>
-            <el-button link type="success" @click="openCustomerCommonBomCreate(row)">新建常用BOM</el-button>
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button link @click="openStatusDialog(row)">{{ row.status === 'ENABLED' ? '停用' : '启用' }}</el-button>
+            <div class="customer-row-actions">
+              <div class="customer-row-action-group">
+                <span class="customer-row-action-label">资料</span>
+                <el-button link type="primary" title="零件管理" @click="openCustomerMaterials(row)">零件</el-button>
+                <el-button link type="primary" title="编辑客户" @click="openEdit(row)">编辑</el-button>
+                <el-button
+                  link
+                  :type="row.status === 'ENABLED' ? 'danger' : 'success'"
+                  :title="row.status === 'ENABLED' ? '停用客户' : '启用客户'"
+                  @click="openStatusDialog(row)"
+                >
+                  {{ row.status === 'ENABLED' ? '停用' : '启用' }}
+                </el-button>
+              </div>
+              <div class="customer-row-action-group">
+                <span class="customer-row-action-label">BOM</span>
+                <el-button link type="primary" title="客户零件包" @click="openCustomerPrivateBoms(row)">客户包</el-button>
+                <el-button link type="primary" title="可用BOM" @click="openCustomerAvailableBoms(row)">可用</el-button>
+                <el-button link type="primary" title="常用BOM" @click="openCustomerCommonBoms(row)">常用</el-button>
+                <el-button link type="success" title="设置常用BOM" @click="openCustomerCommonSetup(row)">设常用</el-button>
+                <el-button link type="success" title="新建BOM" @click="openCustomerBomCreate(row)">新建</el-button>
+                <el-button link type="success" title="新建常用BOM" @click="openCustomerCommonBomCreate(row)">新常用</el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -139,7 +158,12 @@
             <small>{{ customer.customerCode }}</small>
           </div>
           <div class="mobile-card-header-actions">
-            <el-button link type="primary" @click="toggleMobileCustomerCard(customer.id)">
+            <el-button
+              link
+              type="primary"
+              :title="isMobileCustomerExpanded(customer.id) ? '收起客户资料详情' : '查看客户资料详情'"
+              @click="toggleMobileCustomerCard(customer.id)"
+            >
               {{ isMobileCustomerExpanded(customer.id) ? '收起' : '详情' }}
             </el-button>
           </div>
@@ -295,7 +319,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeCustomerDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="saving" @click="save">保存</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="save"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -335,6 +360,7 @@
           :type="nextCustomerStatus === 'DISABLED' ? 'warning' : 'primary'"
           :disabled="statusConfirmDisabled"
           :loading="statusSaving"
+          :title="`确认${statusActionText}`"
           @click="confirmStatusChange"
         >
           确认{{ statusActionText }}
@@ -367,10 +393,10 @@
             <el-radio-button value="COMMON">已设常用</el-radio-button>
             <el-radio-button value="AVAILABLE">普通可用</el-radio-button>
           </el-radio-group>
-          <el-button size="small" :disabled="!customerBomCommonFixedText" @click="openCustomerBomCommonTextDialog">
+          <el-button title="查看固定格式" size="small" :disabled="!customerBomCommonFixedText" @click="openCustomerBomCommonTextDialog">
             查看固定格式
           </el-button>
-          <el-button size="small" :disabled="!customerBomCommonFixedText" @click="copyCustomerBomCommonText">
+          <el-button title="复制当前筛选" size="small" :disabled="!customerBomCommonFixedText" @click="copyCustomerBomCommonText">
             复制当前筛选
           </el-button>
           <el-button
@@ -380,6 +406,7 @@
             plain
             :loading="bomCommonBatchSaving"
             :disabled="customerBomCommonBatchSetRows.length === 0 || bomCommonBusy"
+            title="将当前筛选结果设为客户常用 BOM"
             @click="setFilteredCustomerBomsCommon(true)"
           >
             筛选设为常用
@@ -391,6 +418,7 @@
             plain
             :loading="bomCommonBatchSaving"
             :disabled="customerBomCommonBatchCancelRows.length === 0 || bomCommonBusy"
+            title="取消筛选常用"
             @click="setFilteredCustomerBomsCommon(false)"
           >
             取消筛选常用
@@ -422,6 +450,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="customerWorkTableHeights.commonBoms <= customerWorkTableHeightLimits.min"
+                title="降低客户常用 BOM 表格高度"
                 aria-label="降低客户常用 BOM 表格高度"
                 @click="adjustCustomerWorkTableHeight('commonBoms', -customerWorkTableHeightLimits.step)"
               />
@@ -429,6 +458,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="customerWorkTableHeights.commonBoms >= customerWorkTableHeightLimits.max"
+                title="提高客户常用 BOM 表格高度"
                 aria-label="提高客户常用 BOM 表格高度"
                 @click="adjustCustomerWorkTableHeight('commonBoms', customerWorkTableHeightLimits.step)"
               />
@@ -436,6 +466,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="customerWorkTableHeights.commonBoms === customerWorkTableDefaultHeights.commonBoms"
+                title="恢复客户常用 BOM 表格默认高度"
                 aria-label="恢复客户常用 BOM 表格默认高度"
                 @click="resetCustomerWorkTableHeight('commonBoms')"
               />
@@ -506,25 +537,34 @@
               <StatusTag :value="row.status" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="230" fixed="right">
+          <el-table-column label="操作" width="190" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" :disabled="bomCommonBusy" @click="openCustomerBomDetail(row)">查看/编辑</el-button>
-              <el-button
-                link
-                :type="row.isCommon ? 'warning' : 'success'"
-                :loading="bomCommonSavingId === row.id"
-                :disabled="bomCommonBusy || (!row.isCommon && row.status === 'DISABLED')"
-                @click="setCustomerBomCommon(row, !row.isCommon)"
-              >
-                {{ row.isCommon ? '取消常用' : '设为常用' }}
-              </el-button>
+              <div class="customer-common-bom-actions">
+                <div class="customer-common-bom-action-group">
+                  <span class="customer-common-bom-action-label">详情</span>
+                  <el-button link type="primary" title="查看或编辑 BOM" :disabled="bomCommonBusy" @click="openCustomerBomDetail(row)">查看</el-button>
+                </div>
+                <div class="customer-common-bom-action-group">
+                  <span class="customer-common-bom-action-label">常用</span>
+                  <el-button
+                    link
+                    :type="row.isCommon ? 'warning' : 'success'"
+                    :title="row.isCommon ? '取消客户常用 BOM' : '设为客户常用 BOM'"
+                    :loading="bomCommonSavingId === row.id"
+                    :disabled="bomCommonBusy || (!row.isCommon && row.status === 'DISABLED')"
+                    @click="setCustomerBomCommon(row, !row.isCommon)"
+                  >
+                    {{ row.isCommon ? '取消' : '设为' }}
+                  </el-button>
+                </div>
+              </div>
             </template>
           </el-table-column>
         </el-table>
       </div>
       <template #footer>
-        <el-button :loading="bomCommonLoading" :disabled="bomCommonBusy" @click="loadCustomerCommonRows">刷新</el-button>
-        <el-button :disabled="bomCommonBusy" @click="bomCommonDialogVisible = false">关闭</el-button>
+        <el-button title="刷新" :loading="bomCommonLoading" :disabled="bomCommonBusy" @click="loadCustomerCommonRows">刷新</el-button>
+        <el-button title="关闭" :disabled="bomCommonBusy" @click="bomCommonDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -564,6 +604,7 @@
         <el-button
           :type="bomCommonBatchTargetIsCommon ? 'success' : 'warning'"
           :loading="bomCommonBatchSaving"
+          :title="`确认${bomCommonBatchActionText}`"
           @click="confirmFilteredCustomerBomsCommon"
         >
           确认{{ bomCommonBatchActionText }}
@@ -586,8 +627,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="customerBomCommonTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!customerBomCommonFixedText" @click="copyCustomerBomCommonText">
+        <el-button title="关闭" @click="customerBomCommonTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!customerBomCommonFixedText" @click="copyCustomerBomCommonText">
           复制清单
         </el-button>
       </template>
@@ -633,6 +674,7 @@ const customers = ref<Customer[]>([]);
 const keyword = ref('');
 const statusFilter = ref<CommonStatus>('ENABLED');
 const loading = ref(false);
+const customerPageRefreshing = ref(false);
 const customerExporting = ref(false);
 const customerPagination = reactive({ page: 1, limit: Number(20), total: 0 });
 const saving = ref(false);
@@ -894,6 +936,22 @@ async function loadCustomers() {
 function searchCustomers() {
   customerPagination.page = 1;
   void loadCustomers();
+}
+
+async function refreshCustomersPage() {
+  if (customerPageRefreshing.value) {
+    return;
+  }
+  customerPageRefreshing.value = true;
+  try {
+    // 整页刷新同步客户资料和已打开的客户常用 BOM，避免客户状态或 BOM 常用顺序显示旧数据。
+    await loadCustomers();
+    if (bomCommonDialogVisible.value) {
+      await loadCustomerCommonRows();
+    }
+  } finally {
+    customerPageRefreshing.value = false;
+  }
 }
 
 async function exportCustomersExcel() {
@@ -1879,7 +1937,7 @@ function toggleMobileCustomerCard(id: string) {
 
 onMounted(() => {
   restoreCustomerWorkTableHeights();
-  void loadCustomers();
+  void refreshCustomersPage();
 });
 watch(
   () => [customerWorkTableHeights.customers, customerWorkTableHeights.commonBoms],
@@ -1952,6 +2010,33 @@ onBeforeUnmount(clearCheckTimers);
   font-size: 13px;
   line-height: 20px;
   white-space: nowrap;
+}
+
+.customer-row-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.customer-row-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.customer-row-action-label {
+  flex: 0 0 30px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.customer-row-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
 }
 
 .customer-common-bom-dialog {
@@ -2042,6 +2127,33 @@ onBeforeUnmount(clearCheckTimers);
   color: #475569;
   font-size: 13px;
   white-space: nowrap;
+}
+
+.customer-common-bom-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.customer-common-bom-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.customer-common-bom-action-label {
+  flex: 0 0 32px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.customer-common-bom-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
 }
 
 .cell-subtext {

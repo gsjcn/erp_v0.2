@@ -37,6 +37,7 @@ import type {
   OrderDetail,
   ProcessDefinition,
   ProcessStepDetail,
+  OrderStatisticsOptions,
   OrderStatisticsResponse,
   OrderStatus,
   OrderProductionFilterStatus,
@@ -170,6 +171,8 @@ export interface SaveProcessDefinitionPayload {
 
 export interface MaterialMemoryFilters {
   keyword?: string;
+  customerId?: string;
+  projectModel?: string;
   status?: CommonStatus;
   stockAlert?: StockAlertFilter;
   limit?: number;
@@ -706,6 +709,7 @@ export interface InventorySourceDetailFilters {
   warehouseId?: string;
   sourceType?: 'ALL' | 'ORDER' | 'STOCK';
   customerId?: string;
+  includeTestFixtures?: boolean;
   excludeOrderNo?: string;
   excludeOrderId?: string;
   limit?: number;
@@ -784,6 +788,7 @@ export interface WarehouseWorkFilters {
   orderNo?: string;
   dateFrom?: string;
   dateTo?: string;
+  includeTestFixtures?: boolean;
 }
 
 export interface WarehouseTransactionFilters extends WarehouseWorkFilters {
@@ -952,6 +957,8 @@ export interface WithdrawProductionTaskPayload {
 export interface OrderStatisticsFilters {
   period?: 'year' | 'quarter' | 'month';
   year?: number;
+  quarter?: number;
+  month?: number;
   customerId?: string;
   inventorySnapshotLimit?: number;
   inventorySnapshotOffset?: number;
@@ -1146,9 +1153,13 @@ export const erpApi = {
       body: JSON.stringify({ createdBy })
     });
   },
-  orderImportSessions(limit = 20, offset = 0) {
+  orderImportSessions(limit = 20, offset = 0, includeTestFixtures = false) {
     return request<OrderImportSessionListResponse>(
-      `/orders/import-sessions${toQuery({ limit: String(limit), offset: String(offset) })}`
+      `/orders/import-sessions${toQuery({
+        limit: String(limit),
+        offset: String(offset),
+        includeTestFixtures: includeTestFixtures ? 'true' : undefined
+      })}`
     );
   },
   orderImportConfig() {
@@ -1456,8 +1467,13 @@ export const erpApi = {
     }
     await downloadXlsxResponse(response, filename);
   },
-  productionAnnualSummary(year: number) {
-    return request<ProductionAnnualSummaryRow[]>(`/production/tasks/annual-summary${toQuery({ year: String(year) })}`);
+  productionAnnualSummary(year: number, includeTestFixtures = false) {
+    return request<ProductionAnnualSummaryRow[]>(
+      `/production/tasks/annual-summary${toQuery({
+        year: String(year),
+        includeTestFixtures: includeTestFixtures ? 'true' : undefined
+      })}`
+    );
   },
   productionOperators(keyword?: string) {
     return request<ProductionOperator[]>(`/production/tasks/operators${toQuery({ keyword })}`);
@@ -1639,6 +1655,8 @@ export const erpApi = {
       `/statistics/orders${toQuery({
         period: filters.period,
         year: filters.year ? String(filters.year) : undefined,
+        quarter: filters.quarter ? String(filters.quarter) : undefined,
+        month: filters.month ? String(filters.month) : undefined,
         customerId: filters.customerId,
         inventorySnapshotLimit: filters.inventorySnapshotLimit ? String(filters.inventorySnapshotLimit) : undefined,
         inventorySnapshotOffset:
@@ -1646,11 +1664,16 @@ export const erpApi = {
       })}`
     );
   },
+  orderStatisticsOptions() {
+    return request<OrderStatisticsOptions>('/statistics/options');
+  },
   async downloadStatisticsExport(filters: OrderStatisticsFilters, filename: string) {
     const response = await fetch(
       `${apiBaseUrl}/statistics/orders/export${toQuery({
         period: filters.period,
         year: filters.year ? String(filters.year) : undefined,
+        quarter: filters.quarter ? String(filters.quarter) : undefined,
+        month: filters.month ? String(filters.month) : undefined,
         customerId: filters.customerId
       })}`
     );
@@ -1759,7 +1782,8 @@ export const erpApi = {
         customerId: filters.customerId,
         orderNo: filters.orderNo,
         dateFrom: filters.dateFrom,
-        dateTo: filters.dateTo
+        dateTo: filters.dateTo,
+        includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined
       })}`
     );
   },
@@ -1785,7 +1809,8 @@ export const erpApi = {
         customerId: filters.customerId,
         orderNo: filters.orderNo,
         dateFrom: filters.dateFrom,
-        dateTo: filters.dateTo
+        dateTo: filters.dateTo,
+        includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined
       })}`
     );
   },
@@ -1795,7 +1820,8 @@ export const erpApi = {
         customerId: filters.customerId,
         orderNo: filters.orderNo,
         dateFrom: filters.dateFrom,
-        dateTo: filters.dateTo
+        dateTo: filters.dateTo,
+        includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined
       })}`
     );
     if (!response.ok) {
@@ -1996,6 +2022,8 @@ export const erpApi = {
     return request<MaterialMemoryListResponse>(
       `/inventory/materials${toQuery({
         keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
         status: filters.status,
         stockAlert: filters.stockAlert,
         limit: filters.limit ? String(filters.limit) : undefined,
@@ -2051,6 +2079,8 @@ export const erpApi = {
     const response = await fetch(
       `${apiBaseUrl}/inventory/materials/export${toQuery({
         keyword: filters.keyword,
+        customerId: filters.customerId,
+        projectModel: filters.projectModel,
         status: filters.status,
         stockAlert: filters.stockAlert,
         includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined
@@ -2122,8 +2152,10 @@ export const erpApi = {
   materialProjectModels(customerId?: string, includeTestFixtures = false) {
     return request<string[]>(`/materials/project-models${toQuery({ customerId, includeTestFixtures: includeTestFixtures ? 'true' : undefined })}`);
   },
-  materialCommonProjectModels() {
-    return request<string[]>('/materials/common-project-models');
+  materialCommonProjectModels(includeTestFixtures = false) {
+    return request<string[]>(
+      `/materials/common-project-models${toQuery({ includeTestFixtures: includeTestFixtures ? 'true' : undefined })}`
+    );
   },
   saveMaterialCommonProjectModels(projectModels: string[]) {
     return request<string[]>('/materials/common-project-models', {
@@ -2527,10 +2559,11 @@ export const erpApi = {
         warehouseId: filters.warehouseId,
         sourceType: filters.sourceType,
         customerId: filters.customerId,
+        includeTestFixtures: filters.includeTestFixtures ? 'true' : undefined,
         excludeOrderNo: filters.excludeOrderNo,
         excludeOrderId: filters.excludeOrderId,
         limit: filters.limit ? String(filters.limit) : undefined,
-        offset: filters.offset ? String(filters.offset) : undefined,
+        offset: filters.offset !== undefined ? String(filters.offset) : undefined,
         withPage: filters.withPage ? 'true' : undefined
       })}`
     );

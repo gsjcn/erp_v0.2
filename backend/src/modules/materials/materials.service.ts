@@ -132,6 +132,14 @@ export class MaterialsService {
     return this.hasTestFixturePrefix(material.partCode, material.partName);
   }
 
+  private commonProjectModelFixtureWhere(): Prisma.MaterialCommonProjectModelWhereInput {
+    return {
+      OR: this.testFixturePrefixes.map((prefix) => ({
+        projectModel: { startsWith: prefix, mode: 'insensitive' as const }
+      }))
+    };
+  }
+
   private isArchivedTestFixtureCustomer(customer?: { customerCode?: string | null; customerName?: string | null; status?: string | null } | null) {
     return customer?.status === 'DISABLED' && this.hasTestFixturePrefix(customer.customerCode, customer.customerName);
   }
@@ -796,14 +804,18 @@ export class MaterialsService {
       .map((item) => item.value);
   }
 
-  async commonProjectModels() {
+  async commonProjectModels(query: MaterialProjectOptionsQueryDto = {}) {
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const businessProjectWhere: Prisma.MaterialCommonProjectModelWhereInput = includeTestFixtures
+      ? {}
+      : { NOT: this.commonProjectModelFixtureWhere() };
     const [enabledRows, totalCount] = await Promise.all([
       this.prisma.materialCommonProjectModel.findMany({
-        where: { status: 'ENABLED' },
+        where: { ...businessProjectWhere, status: 'ENABLED' },
         orderBy: [{ sortOrder: 'asc' }, { projectModelNormalized: 'asc' }],
         select: { projectModel: true }
       }),
-      this.prisma.materialCommonProjectModel.count()
+      this.prisma.materialCommonProjectModel.count({ where: businessProjectWhere })
     ]);
     if (enabledRows.length > 0) {
       return enabledRows.map((row) => row.projectModel);

@@ -15,7 +15,7 @@
           @clear="reloadTemplatesFromFirstPage"
         />
         <el-button :loading="loading" @click="reloadTemplatesFromFirstPage">搜索</el-button>
-        <el-button v-if="!readOnly" :icon="Download" :loading="exporting" @click="exportTemplatesExcel">导出 Excel</el-button>
+        <el-button title="导出Excel" v-if="!readOnly" :icon="Download" :loading="exporting" @click="exportTemplatesExcel">导出 Excel</el-button>
         <el-select
           v-if="showStatusFilter && !readOnly"
           v-model="statusFilter"
@@ -27,8 +27,9 @@
           <el-option label="停用" value="DISABLED" />
           <el-option label="全部" value="ALL" />
         </el-select>
-        <el-button v-if="canCreateFromSource && !readOnly" @click="openCreateFromSourceDialog">保存当前流程</el-button>
-        <el-button v-if="!readOnly" type="primary" @click="openCreateDialog">新建流程</el-button>
+        <el-button v-if="canCreateFromSource && !readOnly" @click="openCreateFromSourceDialog"
+          title="保存当前流程">保存当前流程</el-button>
+        <el-button v-if="!readOnly" type="primary" title="新建流程记忆" @click="openCreateDialog">新建流程</el-button>
         <span v-else class="mobile-readonly-note">手机端只查看流程记忆</span>
       </div>
     </div>
@@ -39,18 +40,21 @@
         <el-button-group>
           <el-button
             :icon="Minus"
+            title="降低流程记忆列表高度"
             :disabled="processTemplateListHeight <= processTemplateListHeightLimits.min"
             aria-label="降低流程记忆列表高度"
             @click="adjustProcessTemplateListHeight(-processTemplateListHeightLimits.step)"
           />
           <el-button
             :icon="Plus"
+            title="提高流程记忆列表高度"
             :disabled="processTemplateListHeight >= processTemplateListHeightLimits.max"
             aria-label="提高流程记忆列表高度"
             @click="adjustProcessTemplateListHeight(processTemplateListHeightLimits.step)"
           />
           <el-button
             :icon="RefreshLeft"
+            title="恢复流程记忆列表默认高度"
             :disabled="processTemplateListHeight === processTemplateListDefaultHeight"
             aria-label="恢复流程记忆列表默认高度"
             @click="resetProcessTemplateListHeight"
@@ -87,29 +91,44 @@
             <small>{{ templateStepSummary(template.steps) }}</small>
             <em v-if="template.remark" :title="template.remark">{{ templateRemarkPreview(template) }}</em>
           </button>
-          <el-button class="process-template-detail-toggle" link type="primary" @click.stop="toggleMobileTemplateCard(template.id)">
+          <el-button
+            class="process-template-detail-toggle"
+            link
+            type="primary"
+            :title="isMobileTemplateExpanded(template.id) ? '收起流程记忆详情' : '查看流程记忆详情'"
+            @click.stop="toggleMobileTemplateCard(template.id)"
+          >
             {{ isMobileTemplateExpanded(template.id) ? '收起' : '详情' }}
           </el-button>
           <div class="process-template-card-actions">
-            <el-button v-if="selectable && !readOnly && templateCanApply(template)" link type="primary" :disabled="disabled" @click.stop="applyTemplate(template)">应用</el-button>
-            <el-button link type="primary" @click.stop="openPreviewDialog(template)">查看</el-button>
+            <div v-if="selectable && !readOnly && templateCanApply(template)" class="process-template-action-group">
+              <span class="process-template-action-label">使用</span>
+              <el-button link type="primary" :disabled="disabled" title="应用流程记忆" @click.stop="applyTemplate(template)">应用</el-button>
+            </div>
+            <div class="process-template-action-group">
+              <span class="process-template-action-label">资料</span>
+              <el-button link type="primary" title="查看流程记忆" @click.stop="openPreviewDialog(template)">查看</el-button>
+            </div>
             <template v-if="!readOnly">
-              <template v-if="template.status === 'DISABLED'">
+              <div v-if="template.status === 'DISABLED'" class="process-template-action-group">
+                <span class="process-template-action-label">状态</span>
                 <el-button
                   link
                   type="success"
                   :loading="restoringTemplateId === template.id"
                   :disabled="Boolean(restoringTemplateId)"
+                  title="恢复启用流程记忆"
                   @click.stop="restoreTemplate(template)"
                 >
-                  恢复启用
+                  恢复
                 </el-button>
-              </template>
-              <template v-else>
-                <el-button link type="primary" @click.stop="openEditDialog(template)">编辑</el-button>
-                <el-button link type="primary" @click.stop="openCopyDialog(template)">复制</el-button>
-                <el-button link type="danger" @click.stop="openDeleteDialog(template)">停用</el-button>
-              </template>
+              </div>
+              <div v-else class="process-template-action-group">
+                <span class="process-template-action-label">维护</span>
+                <el-button link type="primary" title="编辑流程记忆" @click.stop="openEditDialog(template)">编辑</el-button>
+                <el-button link type="primary" title="复制流程记忆" @click.stop="openCopyDialog(template)">复制</el-button>
+                <el-button link type="danger" title="停用流程记忆" @click.stop="openDeleteDialog(template)">停用</el-button>
+              </div>
             </template>
             <span v-else class="mobile-readonly-note">手机端只读</span>
           </div>
@@ -211,7 +230,8 @@
               <div class="template-step-actions">
                 <el-button link :disabled="index === 0" @click="moveTemplateStep(index, -1)">上移</el-button>
                 <el-button link :disabled="index === templateForm.steps.length - 1" @click="moveTemplateStep(index, 1)">下移</el-button>
-                <el-button link type="danger" @click="removeTemplateStep(index)">删除</el-button>
+                <el-button link type="danger" @click="removeTemplateStep(index)"
+  title="删除">删除</el-button>
               </div>
             </div>
             <div class="template-step-add">
@@ -236,7 +256,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="templateDialogBusy" @click="closeTemplateDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="templateDialogBusy" @click="saveTemplate">保存流程记忆</el-button>
+        <el-button type="primary" :loading="saving" :disabled="templateDialogBusy" @click="saveTemplate"
+          title="保存流程记忆">保存流程记忆</el-button>
       </template>
     </el-dialog>
 
@@ -258,9 +279,9 @@
         <p v-else class="muted-text">暂无模板备注</p>
       </div>
       <template #footer>
-        <el-button @click="previewVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="previewVisible = false">关闭</el-button>
         <el-button v-if="selectable && !readOnly && templateCanApply(previewTemplate)" type="primary" :disabled="disabled || !previewTemplate" @click="applyPreviewTemplate">应用此流程</el-button>
-        <el-button v-if="previewTemplate && !readOnly && previewTemplate.status !== 'DISABLED'" type="primary" plain @click="copyPreviewTemplate">复制编辑</el-button>
+        <el-button title="复制编辑" v-if="previewTemplate && !readOnly && previewTemplate.status !== 'DISABLED'" type="primary" plain @click="copyPreviewTemplate">复制编辑</el-button>
       </template>
     </el-dialog>
 
@@ -283,7 +304,8 @@
       </div>
       <template #footer>
         <el-button :disabled="deleting" @click="closeDeleteDialog">取消</el-button>
-        <el-button type="danger" :loading="deleting" :disabled="deleting" @click="deleteTemplate">停用</el-button>
+        <el-button type="danger" :loading="deleting" :disabled="deleting" @click="deleteTemplate"
+  title="停用">停用</el-button>
       </template>
     </el-dialog>
   </section>
@@ -1268,8 +1290,25 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 .process-template-card-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px 12px;
+}
+
+.process-template-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.process-template-action-label {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .process-template-card-actions .el-button {
@@ -1507,6 +1546,7 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
     grid-column: 1 / -1;
     display: none;
     justify-content: stretch;
+    gap: 8px;
   }
 
   .process-template-card {
@@ -1523,6 +1563,8 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 
   .process-template-card.expanded .process-template-card-actions {
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .process-template-card:not(.expanded) .process-template-main em {
@@ -1533,6 +1575,15 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
     flex: 1 1 72px;
     min-width: 0;
     min-height: 44px;
+  }
+
+  .process-template-action-group {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .process-template-action-label {
+    flex: 0 0 36px;
   }
 
   .template-step-add .el-select,

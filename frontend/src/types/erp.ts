@@ -654,6 +654,8 @@ export interface OrderStatisticsInventorySnapshotRow {
 export interface OrderStatisticsResponse {
   period: StatisticsPeriod;
   year: number;
+  quarter?: number;
+  month?: number;
   currentBusinessDate?: string;
   statisticsEndDate?: string;
   isFuturePeriod?: boolean;
@@ -667,6 +669,14 @@ export interface OrderStatisticsResponse {
   customerRows: OrderStatisticsCustomerRow[];
   summaryRows: OrderStatisticsSummaryRow[];
   orderRows: OrderStatisticsOrderRow[];
+}
+
+export interface OrderStatisticsOptions {
+  years: number[];
+  currentBusinessDate: string;
+  currentBusinessYear: number;
+  currentBusinessQuarter: number;
+  currentBusinessMonth: number;
 }
 
 export interface WarehouseLocation {

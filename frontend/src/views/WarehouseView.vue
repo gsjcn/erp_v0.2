@@ -9,13 +9,13 @@
         </el-badge>
         <el-button v-if="!isMobileLayout" @click="openWarehouseDialog">新增仓库</el-button>
         <el-button v-if="!isMobileLayout" @click="openLocationDialog">新增库位</el-button>
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="warehouseConfigExporting" @click="exportWarehouseConfigExcel">
+        <el-button title="导出配置" v-if="!isMobileLayout" :icon="Download" :loading="warehouseConfigExporting" @click="exportWarehouseConfigExcel">
           导出配置
         </el-button>
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="warehouseWorkExporting" @click="exportWarehouseWorkExcel">
+        <el-button title="导出待处理" v-if="!isMobileLayout" :icon="Download" :loading="warehouseWorkExporting" @click="exportWarehouseWorkExcel">
           导出待处理
         </el-button>
-        <el-button :loading="loading" @click="queryWarehouseWork">刷新</el-button>
+        <el-button title="刷新整页仓库数据" :loading="warehousePageRefreshing || loading" @click="refreshWarehousePage">刷新</el-button>
       </div>
     </div>
 
@@ -43,8 +43,8 @@
           @change="handleWarehouseOrderChange"
         />
       </div>
-      <el-button type="primary" :loading="loading" @click="queryWarehouseWork">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="queryWarehouseWork">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
     </div>
 
     <div class="stat-grid">
@@ -57,12 +57,12 @@
         <div class="stat-value">{{ shipments.length }} 批</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">仓库</div>
-        <div class="stat-value">{{ warehouses.length }} 个</div>
+        <div class="stat-label">显示仓库</div>
+        <div class="stat-value">{{ warehouseConfigVisibleWarehouses.length }} 个</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">库位</div>
-        <div class="stat-value">{{ locationCount }} 个</div>
+        <div class="stat-label">显示库位</div>
+        <div class="stat-value">{{ visibleWarehouseLocationCount }} 个</div>
       </div>
     </div>
 
@@ -76,6 +76,7 @@
               circle
               :icon="Minus"
               :disabled="warehouseWorkTableHeights.receipts <= warehouseWorkTableHeightLimits.min"
+              title="降低待入库表格高度"
               aria-label="降低待入库表格高度"
               @click="adjustWarehouseWorkTableHeight('receipts', -warehouseWorkTableHeightLimits.step)"
             />
@@ -86,6 +87,7 @@
               circle
               :icon="Plus"
               :disabled="warehouseWorkTableHeights.receipts >= warehouseWorkTableHeightLimits.max"
+              title="提高待入库表格高度"
               aria-label="提高待入库表格高度"
               @click="adjustWarehouseWorkTableHeight('receipts', warehouseWorkTableHeightLimits.step)"
             />
@@ -96,6 +98,7 @@
               circle
               :icon="RefreshLeft"
               :disabled="warehouseWorkTableHeights.receipts === warehouseWorkTableDefaultHeights.receipts"
+              title="恢复待入库表格默认高度"
               aria-label="恢复待入库表格默认高度"
               @click="resetWarehouseWorkTableHeight('receipts')"
             />
@@ -167,7 +170,8 @@
         <el-table-column prop="status" label="状态" width="95" />
         <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openConfirm(row)">确认入库</el-button>
+            <el-button link type="primary" @click="openConfirm(row)"
+              title="确认入库">确认入库</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -261,7 +265,8 @@
             link-text="打开图纸"
             :title="`${receipt.partName} 入库图纸`"
           />
-          <el-button link type="primary" @click="openConfirm(receipt)">确认入库</el-button>
+          <el-button link type="primary" @click="openConfirm(receipt)"
+            title="确认入库">确认入库</el-button>
         </div>
       </article>
       <div v-if="!receipts.length && !loading" class="mobile-empty">暂无待入库任务</div>
@@ -278,6 +283,7 @@
                 circle
                 :icon="Minus"
                 :disabled="warehouseWorkTableHeights.shipments <= warehouseWorkTableHeightLimits.min"
+                title="降低待发货表格高度"
                 aria-label="降低待发货表格高度"
                 @click="adjustWarehouseWorkTableHeight('shipments', -warehouseWorkTableHeightLimits.step)"
               />
@@ -288,6 +294,7 @@
                 circle
                 :icon="Plus"
                 :disabled="warehouseWorkTableHeights.shipments >= warehouseWorkTableHeightLimits.max"
+                title="提高待发货表格高度"
                 aria-label="提高待发货表格高度"
                 @click="adjustWarehouseWorkTableHeight('shipments', warehouseWorkTableHeightLimits.step)"
               />
@@ -298,6 +305,7 @@
                 circle
                 :icon="RefreshLeft"
                 :disabled="warehouseWorkTableHeights.shipments === warehouseWorkTableDefaultHeights.shipments"
+                title="恢复待发货表格默认高度"
                 aria-label="恢复待发货表格默认高度"
                 @click="resetWarehouseWorkTableHeight('shipments')"
               />
@@ -398,20 +406,39 @@
           <template #default="{ row }">{{ row.warehouseName }} / {{ row.locationName || '-' }}</template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="100" />
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="selectShipmentOrder(row)">选中订单</el-button>
-            <el-button link type="primary" :disabled="!canShipWarehouseShipment(row)" :title="shipmentLockedText(row)" @click="openOrderShipmentConfirm(row)">订单发货</el-button>
-            <el-button link type="primary" @click="openShipmentSourceDetails(row)">库存来源/图纸</el-button>
-            <el-button
-              link
-              type="primary"
-              :disabled="!canShipWarehouseShipment(row) || Boolean(shipmentShortageText(row))"
-              :title="shipmentLockedText(row) || shipmentShortageText(row)"
-              @click="openShipmentConfirm(row)"
-            >
-              确认发货
-            </el-button>
+            <div class="warehouse-shipment-actions">
+              <div class="warehouse-shipment-action-group">
+                <span class="warehouse-shipment-action-label">订单</span>
+                <el-button link type="primary" title="选中订单" @click="selectShipmentOrder(row)">选中</el-button>
+                <el-button
+                  link
+                  type="primary"
+                  :disabled="!canShipWarehouseShipment(row)"
+                  :title="shipmentLockedText(row) || '订单发货'"
+                  @click="openOrderShipmentConfirm(row)"
+                >
+                  整单
+                </el-button>
+              </div>
+              <div class="warehouse-shipment-action-group">
+                <span class="warehouse-shipment-action-label">来源</span>
+                <el-button link type="primary" title="库存来源/图纸" @click="openShipmentSourceDetails(row)">图纸</el-button>
+              </div>
+              <div class="warehouse-shipment-action-group">
+                <span class="warehouse-shipment-action-label">发货</span>
+                <el-button
+                  link
+                  type="primary"
+                  :disabled="!canShipWarehouseShipment(row) || Boolean(shipmentShortageText(row))"
+                  :title="shipmentLockedText(row) || shipmentShortageText(row) || '确认发货'"
+                  @click="openShipmentConfirm(row)"
+                >
+                  确认
+                </el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -592,6 +619,7 @@
               circle
               :icon="Minus"
               :disabled="warehouseWorkTableHeights.locations <= warehouseWorkTableHeightLimits.min"
+              title="降低仓库库位表格高度"
               aria-label="降低仓库库位表格高度"
               @click="adjustWarehouseWorkTableHeight('locations', -warehouseWorkTableHeightLimits.step)"
             />
@@ -602,6 +630,7 @@
               circle
               :icon="Plus"
               :disabled="warehouseWorkTableHeights.locations >= warehouseWorkTableHeightLimits.max"
+              title="提高仓库库位表格高度"
               aria-label="提高仓库库位表格高度"
               @click="adjustWarehouseWorkTableHeight('locations', warehouseWorkTableHeightLimits.step)"
             />
@@ -612,6 +641,7 @@
               circle
               :icon="RefreshLeft"
               :disabled="warehouseWorkTableHeights.locations === warehouseWorkTableDefaultHeights.locations"
+              title="恢复仓库库位表格默认高度"
               aria-label="恢复仓库库位表格默认高度"
               @click="resetWarehouseWorkTableHeight('locations')"
             />
@@ -619,7 +649,7 @@
         </div>
       </div>
       <div class="warehouse-config-export-filters">
-        <span class="warehouse-config-export-title">配置导出范围</span>
+        <span class="warehouse-config-export-title">配置显示/导出范围</span>
         <div class="warehouse-config-export-filter">
           <span>仓库状态</span>
           <el-segmented v-model="warehouseConfigExportFilters.status" :options="warehouseConfigStatusOptions" />
@@ -645,24 +675,35 @@
             <span v-else class="muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" fixed="right" width="360">
+        <el-table-column label="操作" fixed="right" width="260">
           <template #default="{ row }">
-            <div class="table-actions">
-              <el-button link type="primary" @click="openEditWarehouseDialog(row)">编辑仓库</el-button>
-              <el-button link :type="row.warehouseStatus === 'ENABLED' ? 'danger' : 'success'" @click="toggleWarehouseStatus(row)">
-                {{ row.warehouseStatus === 'ENABLED' ? '停用仓库' : '启用仓库' }}
-              </el-button>
-              <el-button link type="danger" @click="requestDeleteWarehouse(row)">删除仓库</el-button>
-              <el-button v-if="row.locationId" link type="primary" @click="openEditLocationDialog(row)">编辑库位</el-button>
-              <el-button
-                v-if="row.locationId"
-                link
-                :type="row.locationStatus === 'ENABLED' ? 'danger' : 'success'"
-                @click="toggleLocationStatus(row)"
-              >
-                {{ row.locationStatus === 'ENABLED' ? '停用库位' : '启用库位' }}
-              </el-button>
-              <el-button v-if="row.locationId" link type="danger" @click="requestDeleteLocation(row)">删除库位</el-button>
+            <div class="warehouse-config-actions">
+              <div class="warehouse-config-action-group">
+                <span class="warehouse-config-action-label">仓库</span>
+                <el-button title="编辑仓库" link type="primary" @click="openEditWarehouseDialog(row)">编辑</el-button>
+                <el-button
+                  link
+                  :title="row.warehouseStatus === 'ENABLED' ? '停用仓库' : '启用仓库'"
+                  :type="row.warehouseStatus === 'ENABLED' ? 'danger' : 'success'"
+                  @click="toggleWarehouseStatus(row)"
+                >
+                  {{ row.warehouseStatus === 'ENABLED' ? '停用' : '启用' }}
+                </el-button>
+                <el-button title="删除仓库" link type="danger" @click="requestDeleteWarehouse(row)">删除</el-button>
+              </div>
+              <div v-if="row.locationId" class="warehouse-config-action-group">
+                <span class="warehouse-config-action-label">库位</span>
+                <el-button title="编辑库位" link type="primary" @click="openEditLocationDialog(row)">编辑</el-button>
+                <el-button
+                  link
+                  :title="row.locationStatus === 'ENABLED' ? '停用库位' : '启用库位'"
+                  :type="row.locationStatus === 'ENABLED' ? 'danger' : 'success'"
+                  @click="toggleLocationStatus(row)"
+                >
+                  {{ row.locationStatus === 'ENABLED' ? '停用' : '启用' }}
+                </el-button>
+                <el-button title="删除库位" link type="danger" @click="requestDeleteLocation(row)">删除</el-button>
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -729,6 +770,7 @@
                 circle
                 :icon="Minus"
                 :disabled="warehouseWorkTableHeights.transactions <= warehouseWorkTableHeightLimits.min"
+                title="降低库存流水表格高度"
                 aria-label="降低库存流水表格高度"
                 @click="adjustWarehouseWorkTableHeight('transactions', -warehouseWorkTableHeightLimits.step)"
               />
@@ -739,6 +781,7 @@
                 circle
                 :icon="Plus"
                 :disabled="warehouseWorkTableHeights.transactions >= warehouseWorkTableHeightLimits.max"
+                title="提高库存流水表格高度"
                 aria-label="提高库存流水表格高度"
                 @click="adjustWarehouseWorkTableHeight('transactions', warehouseWorkTableHeightLimits.step)"
               />
@@ -749,12 +792,13 @@
                 circle
                 :icon="RefreshLeft"
                 :disabled="warehouseWorkTableHeights.transactions === warehouseWorkTableDefaultHeights.transactions"
+                title="恢复库存流水表格默认高度"
                 aria-label="恢复库存流水表格默认高度"
                 @click="resetWarehouseWorkTableHeight('transactions')"
               />
             </el-tooltip>
           </div>
-          <el-button :icon="Download" :loading="transactionExporting" @click="exportWarehouseTransactions">
+          <el-button title="导出Excel" :icon="Download" :loading="transactionExporting" @click="exportWarehouseTransactions">
             导出 Excel
           </el-button>
           <el-segmented v-model="transactionType" :options="transactionOptions" @change="reloadTransactionsFromFirstPage" />
@@ -1036,7 +1080,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="confirmVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="confirmReceipt">确认入库</el-button>
+        <el-button type="primary" :loading="saving" @click="confirmReceipt"
+          title="确认入库">确认入库</el-button>
       </template>
     </el-dialog>
 
@@ -1063,7 +1108,8 @@
           <strong>该订单仍有待补单短缺，暂不能单批发货</strong>
           <p>{{ activeShipmentShortageText }}</p>
         </div>
-        <el-button type="warning" plain @click="goActiveShipmentShortageDetail">处理补单</el-button>
+        <el-button type="warning" plain @click="goActiveShipmentShortageDetail"
+  title="处理补单">处理补单</el-button>
       </div>
       <el-form label-width="92px">
         <el-form-item label="库存批次">
@@ -1185,7 +1231,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="shipmentVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="Boolean(activeShipmentShortageText)" @click="confirmShipment">确认发货</el-button>
+        <el-button type="primary" :loading="saving" :disabled="Boolean(activeShipmentShortageText)" @click="confirmShipment"
+          title="确认发货">确认发货</el-button>
       </template>
     </el-dialog>
 
@@ -1210,7 +1257,8 @@
           <strong>该订单仍有待补单短缺，暂不能整单或批量发货</strong>
           <p>{{ batchShipmentShortageText }}</p>
         </div>
-        <el-button type="warning" plain @click="goBatchShipmentShortageDetail">处理补单</el-button>
+        <el-button type="warning" plain @click="goBatchShipmentShortageDetail"
+  title="处理补单">处理补单</el-button>
       </div>
       <el-form label-width="92px">
         <el-form-item label="订单号">
@@ -1289,6 +1337,7 @@
                 circle
                 :icon="Minus"
                 :disabled="warehouseWorkTableHeights.batchShipment <= warehouseWorkTableHeightLimits.min"
+                title="降低批量发货明细表格高度"
                 aria-label="降低批量发货明细表格高度"
                 @click="adjustWarehouseWorkTableHeight('batchShipment', -warehouseWorkTableHeightLimits.step)"
               />
@@ -1299,6 +1348,7 @@
                 circle
                 :icon="Plus"
                 :disabled="warehouseWorkTableHeights.batchShipment >= warehouseWorkTableHeightLimits.max"
+                title="提高批量发货明细表格高度"
                 aria-label="提高批量发货明细表格高度"
                 @click="adjustWarehouseWorkTableHeight('batchShipment', warehouseWorkTableHeightLimits.step)"
               />
@@ -1309,6 +1359,7 @@
                 circle
                 :icon="RefreshLeft"
                 :disabled="warehouseWorkTableHeights.batchShipment === warehouseWorkTableDefaultHeights.batchShipment"
+                title="恢复批量发货明细表格默认高度"
                 aria-label="恢复批量发货明细表格默认高度"
                 @click="resetWarehouseWorkTableHeight('batchShipment')"
               />
@@ -1384,7 +1435,8 @@
               >
                 添加备货
               </el-button>
-              <el-button v-else link type="danger" @click="removeStockOverShipment(row)">移除</el-button>
+              <el-button v-else link type="danger" @click="removeStockOverShipment(row)"
+  title="移除">移除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -1430,7 +1482,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="warehouseVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveWarehouse">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="saveWarehouse"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -1464,7 +1517,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="locationVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="saveLocation">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="saveLocation"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -1492,7 +1546,8 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="warehouseDeleteVisible = false">取消</el-button>
-        <el-button type="danger" :loading="saving" @click="confirmDeleteWarehouseTarget">确认删除</el-button>
+        <el-button type="danger" :loading="saving" @click="confirmDeleteWarehouseTarget"
+  title="确认删除">确认删除</el-button>
       </template>
     </el-dialog>
 
@@ -1524,7 +1579,8 @@
           :type="activeWarehouseStatusTarget?.nextStatus === 'ENABLED' ? 'success' : 'danger'"
           :loading="saving"
           @click="confirmWarehouseStatusTarget"
-        >
+
+          :title="activeWarehouseStatusTarget?.actionLabel || '确认'">
           {{ activeWarehouseStatusTarget?.actionLabel || '确认' }}
         </el-button>
       </template>
@@ -1554,9 +1610,9 @@
           </el-select>
           <DateRangeFilter v-model="warehouseNoticeDateRange" start-placeholder="通知开始" end-placeholder="通知结束" width="220px" />
           <el-input v-model="warehouseNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="reloadWarehouseNoticesFromFirstPage" />
-          <el-button type="primary" @click="reloadWarehouseNoticesFromFirstPage">查询</el-button>
-          <el-button @click="resetWarehouseNoticeFilters">重置</el-button>
-          <el-button :icon="Download" :loading="warehouseNoticeExporting" @click="exportWarehouseNoticesExcel">导出 Excel</el-button>
+          <el-button title="查询" type="primary" @click="reloadWarehouseNoticesFromFirstPage">查询</el-button>
+          <el-button title="重置" @click="resetWarehouseNoticeFilters">重置</el-button>
+          <el-button title="导出Excel" :icon="Download" :loading="warehouseNoticeExporting" @click="exportWarehouseNoticesExcel">导出 Excel</el-button>
         </div>
         <div class="warehouse-dialog-list-toolbar">
           <div class="warehouse-table-height-actions" aria-label="仓库通知列表高度">
@@ -1566,6 +1622,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="warehouseWorkTableHeights.notices <= warehouseWorkTableHeightLimits.min"
+                title="降低仓库通知列表高度"
                 aria-label="降低仓库通知列表高度"
                 @click="adjustWarehouseWorkTableHeight('notices', -warehouseWorkTableHeightLimits.step)"
               />
@@ -1573,6 +1630,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="warehouseWorkTableHeights.notices >= warehouseWorkTableHeightLimits.max"
+                title="提高仓库通知列表高度"
                 aria-label="提高仓库通知列表高度"
                 @click="adjustWarehouseWorkTableHeight('notices', warehouseWorkTableHeightLimits.step)"
               />
@@ -1580,6 +1638,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="warehouseWorkTableHeights.notices === warehouseWorkTableDefaultHeights.notices"
+                title="恢复仓库通知列表默认高度"
                 aria-label="恢复仓库通知列表默认高度"
                 @click="resetWarehouseWorkTableHeight('notices')"
               />
@@ -1602,7 +1661,8 @@
               size="small"
               type="primary"
               @click="acknowledgeWarehouseNotice(notice)"
-            >
+
+              title="确认已知晓">
               确认已知晓
             </el-button>
             <StatusTag v-else value="ACKNOWLEDGED" compact />
@@ -1621,7 +1681,7 @@
         </div>
       </div>
       <template #footer>
-        <el-button @click="noticeVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="noticeVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1861,10 +1921,11 @@ const warehouseConfigExportFilters = reactive<{
   status: CommonStatus | 'ALL';
   locationStatus: CommonStatus | 'ALL';
 }>({
-  status: 'ALL',
-  locationStatus: 'ALL'
+  status: 'ENABLED',
+  locationStatus: 'ENABLED'
 });
 const loading = ref(false);
+const warehousePageRefreshing = ref(false);
 const warehouseConfigExporting = ref(false);
 const warehouseWorkExporting = ref(false);
 const transactionExporting = ref(false);
@@ -2197,7 +2258,10 @@ const warehouseRows = computed<WarehouseLocationRow[]>(() =>
     const visibleLocations = warehouse.locations.filter((location) =>
       warehouseConfigStatusMatches(location.status, warehouseConfigExportFilters.locationStatus)
     );
-    if (!warehouse.locations.length && warehouseConfigExportFilters.locationStatus === 'ALL') {
+    const shouldShowWarehouseWithoutVisibleLocation =
+      (warehouseConfigExportFilters.locationStatus === 'ALL' && !warehouse.locations.length) ||
+      (warehouseConfigExportFilters.locationStatus === 'ENABLED' && warehouse.status === 'ENABLED' && !visibleLocations.length);
+    if (shouldShowWarehouseWithoutVisibleLocation) {
       return [
         {
           warehouseId: warehouse.id,
@@ -2206,7 +2270,7 @@ const warehouseRows = computed<WarehouseLocationRow[]>(() =>
           warehouseStatus: warehouse.status,
           locationId: '',
           locationCode: '-',
-          locationName: '未建库位',
+          locationName: warehouse.locations.length ? '无启用库位' : '未建库位',
           locationStatus: warehouse.status,
           status: warehouse.status
         }
@@ -2225,6 +2289,7 @@ const warehouseRows = computed<WarehouseLocationRow[]>(() =>
     }));
   })
 );
+const visibleWarehouseLocationCount = computed(() => warehouseRows.value.filter((row) => row.locationId).length);
 
 function warehouseConfigStatusMatches(status: CommonStatus, filter: CommonStatus | 'ALL') {
   return filter === 'ALL' || status === filter;
@@ -2455,6 +2520,22 @@ async function queryWarehouseWork() {
     await loadData();
   } finally {
     loading.value = false;
+  }
+}
+
+async function refreshWarehousePage() {
+  if (warehousePageRefreshing.value) {
+    return;
+  }
+  warehousePageRefreshing.value = true;
+  try {
+    // 整页刷新同步订单下拉、待入库、待发货、仓库配置、库存流水和已打开的仓库通知。
+    await queryWarehouseWork();
+    if (noticeVisible.value) {
+      await loadWarehouseNotices();
+    }
+  } finally {
+    warehousePageRefreshing.value = false;
   }
 }
 
@@ -3970,7 +4051,7 @@ watch(
 onMounted(async () => {
   restoreWarehouseWorkTableHeights();
   applyRouteOrderFilter();
-  await queryWarehouseWork();
+  await refreshWarehousePage();
 });
 </script>
 
@@ -4307,6 +4388,58 @@ onMounted(async () => {
   flex-wrap: wrap;
   align-items: center;
   gap: 2px 10px;
+}
+
+.warehouse-shipment-actions {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.warehouse-shipment-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  line-height: 20px;
+}
+
+.warehouse-shipment-action-label {
+  flex: 0 0 34px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.warehouse-shipment-actions :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
+}
+
+.warehouse-config-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.warehouse-config-action-group {
+  display: flex;
+  align-items: center;
+  gap: 4px 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  line-height: 20px;
+}
+
+.warehouse-config-action-group .el-button {
+  margin-left: 0;
+}
+
+.warehouse-config-action-label {
+  min-width: 32px;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .delete-confirm-body {

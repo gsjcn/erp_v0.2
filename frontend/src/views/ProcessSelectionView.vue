@@ -5,22 +5,25 @@
       <div class="process-actions">
         <el-tooltip :disabled="!orderDetailDisabledReason" :content="orderDetailDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button :disabled="!order" @click="goOrderDetail">查看订单明细</el-button>
+            <el-button title="查看订单明细" :disabled="!order" @click="goOrderDetail">查看订单明细</el-button>
           </span>
         </el-tooltip>
         <el-tooltip :disabled="!processSaveDisabledReason" :content="processSaveDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button v-if="!isMobileLayout" :disabled="saving || !selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext">保存并下一个</el-button>
+            <el-button v-if="!isMobileLayout" :disabled="saving || !selectedLine || !canEditProcess" :loading="saving" @click="saveAndNext"
+              title="保存并下一个">保存并下一个</el-button>
           </span>
         </el-tooltip>
         <el-tooltip :disabled="!processSaveDisabledReason" :content="processSaveDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button v-if="!isMobileLayout" type="primary" :disabled="saving || !selectedLine || !canEditProcess" :loading="saving" @click="saveProcess">保存零件流程</el-button>
+            <el-button v-if="!isMobileLayout" type="primary" :disabled="saving || !selectedLine || !canEditProcess" :loading="saving" @click="saveProcess"
+              title="保存零件流程">保存零件流程</el-button>
           </span>
         </el-tooltip>
         <el-tooltip :disabled="!submitOrderDisabledReason" :content="submitOrderDisabledReason" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button v-if="!isMobileLayout" type="success" :disabled="submitting || !canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog">
+            <el-button v-if="!isMobileLayout" type="success" :disabled="submitting || !canSubmitOrder" :loading="submitting" @click="openSubmitOrderDialog"
+              title="提交生产">
               提交生产
             </el-button>
           </span>
@@ -56,7 +59,7 @@
         />
       </div>
 
-      <el-button type="primary" :loading="ordersLoading" @click="queryOrders">查询订单</el-button>
+      <el-button title="查询订单" type="primary" :loading="ordersLoading" @click="queryOrders">查询订单</el-button>
     </div>
 
     <el-empty v-if="ordersLoaded && orders.length === 0" description="当前条件没有订单" />
@@ -75,18 +78,23 @@
               <el-button
                 :icon="Minus"
                 :disabled="processOrderTableHeight <= processOrderTableHeightLimits.min"
+                title="降低生产流程订单列表表格高度"
+
                 aria-label="降低生产流程订单列表表格高度"
                 @click="adjustProcessOrderTableHeight(-processOrderTableHeightLimits.step)"
               />
               <el-button
                 :icon="Plus"
                 :disabled="processOrderTableHeight >= processOrderTableHeightLimits.max"
+                title="提高生产流程订单列表表格高度"
+
                 aria-label="提高生产流程订单列表表格高度"
                 @click="adjustProcessOrderTableHeight(processOrderTableHeightLimits.step)"
               />
               <el-button
                 :icon="RefreshLeft"
                 :disabled="processOrderTableHeight === processOrderTableDefaultHeight"
+                title="恢复生产流程订单列表表格默认高度"
                 aria-label="恢复生产流程订单列表表格默认高度"
                 @click="resetProcessOrderTableHeight"
               />
@@ -133,8 +141,18 @@
           </el-table-column>
           <el-table-column label="操作" width="170" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click="selectOrderFromList(row.orderNo)">{{ processEntryActionText(row) }}</el-button>
-              <el-button link type="primary" @click="goOrderSummaryDetail(row.orderNo)">订单明细</el-button>
+              <div class="process-order-actions">
+                <div class="process-order-action-group">
+                  <span class="process-order-action-label">流程</span>
+                  <el-button link type="primary" :title="processEntryActionText(row)" @click="selectOrderFromList(row.orderNo)">
+                    {{ processEntryActionText(row) }}
+                  </el-button>
+                </div>
+                <div class="process-order-action-group">
+                  <span class="process-order-action-label">订单</span>
+                  <el-button link type="primary" title="订单明细" @click="goOrderSummaryDetail(row.orderNo)">明细</el-button>
+                </div>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -203,7 +221,8 @@
           <div class="mobile-card-actions">
             <el-button link type="primary" @click="selectOrderFromList(item.orderNo)">查看流程</el-button>
             <el-button link type="primary" @click="goOrderSummaryDetail(item.orderNo)">订单明细</el-button>
-            <el-button v-if="orderNeedsShortageAttention(item) && !isMobileLayout" link type="warning" @click="goOrderShortageDetail(item)">
+            <el-button v-if="orderNeedsShortageAttention(item) && !isMobileLayout" link type="warning" @click="goOrderShortageDetail(item)"
+  title="处理补单">
               处理补单
             </el-button>
             <span v-if="orderNeedsShortageAttention(item) && isMobileLayout" class="mobile-readonly-note">手机端只查看补单状态</span>
@@ -254,6 +273,7 @@
                     size="small"
                     :icon="Minus"
                     :disabled="processWorkListHeights.structure <= processWorkListHeightLimits.min"
+                    title="降低流程固定格式清单高度"
                     aria-label="降低流程固定格式清单高度"
                     @click="adjustProcessWorkListHeight('structure', -processWorkListHeightLimits.step)"
                   />
@@ -261,6 +281,7 @@
                     size="small"
                     :icon="Plus"
                     :disabled="processWorkListHeights.structure >= processWorkListHeightLimits.max"
+                    title="提高流程固定格式清单高度"
                     aria-label="提高流程固定格式清单高度"
                     @click="adjustProcessWorkListHeight('structure', processWorkListHeightLimits.step)"
                   />
@@ -268,13 +289,14 @@
                     size="small"
                     :icon="RefreshLeft"
                     :disabled="processWorkListHeights.structure === processWorkListDefaultHeights.structure"
+                    title="恢复流程固定格式清单默认高度"
                     aria-label="恢复流程固定格式清单默认高度"
                     @click="resetProcessWorkListHeight('structure')"
                   />
                 </el-button-group>
               </div>
-              <el-button size="small" :disabled="order.lines.length === 0" @click="openProcessStructureTextDialog">查看固定格式</el-button>
-              <el-button size="small" :disabled="order.lines.length === 0" @click="copyProcessStructureText">复制清单</el-button>
+              <el-button title="查看固定格式" size="small" :disabled="order.lines.length === 0" @click="openProcessStructureTextDialog">查看固定格式</el-button>
+              <el-button title="复制清单" size="small" :disabled="order.lines.length === 0" @click="copyProcessStructureText">复制清单</el-button>
             </div>
           </div>
           <div v-if="processStructureGroups.length" class="process-structure-list" :style="{ maxHeight: processWorkListHeightStyle('structure') }">
@@ -484,7 +506,8 @@
               </el-tooltip>
               <el-tooltip :disabled="!processEditDisabledReason" :content="processEditDisabledReason" placement="top">
                 <span class="action-tooltip-wrap">
-                  <el-button link type="danger" :disabled="!canEditProcess" @click="removeStep(index)">删除</el-button>
+                  <el-button link type="danger" :disabled="!canEditProcess" @click="removeStep(index)"
+  title="删除">删除</el-button>
                 </span>
               </el-tooltip>
             </div>
@@ -509,8 +532,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="processStructureTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!processStructureText" @click="copyProcessStructureText">复制清单</el-button>
+        <el-button title="关闭" @click="processStructureTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!processStructureText" @click="copyProcessStructureText">复制清单</el-button>
       </template>
     </el-dialog>
 
@@ -604,18 +627,21 @@
               <el-button
                 :icon="Minus"
                 :disabled="processWorkListHeights.submitLines <= processWorkListHeightLimits.min"
+                title="降低提交生产零件明细高度"
                 aria-label="降低提交生产零件明细高度"
                 @click="adjustProcessWorkListHeight('submitLines', -processWorkListHeightLimits.step)"
               />
               <el-button
                 :icon="Plus"
                 :disabled="processWorkListHeights.submitLines >= processWorkListHeightLimits.max"
+                title="提高提交生产零件明细高度"
                 aria-label="提高提交生产零件明细高度"
                 @click="adjustProcessWorkListHeight('submitLines', processWorkListHeightLimits.step)"
               />
               <el-button
                 :icon="RefreshLeft"
                 :disabled="processWorkListHeights.submitLines === processWorkListDefaultHeights.submitLines"
+                title="恢复提交生产零件明细默认高度"
                 aria-label="恢复提交生产零件明细默认高度"
                 @click="resetProcessWorkListHeight('submitLines')"
               />
@@ -637,7 +663,8 @@
       </div>
       <template #footer>
         <el-button :disabled="submitting" @click="closeSubmitOrderDialog">取消</el-button>
-        <el-button type="success" :disabled="!submitPlanOperatorCode" :loading="submitting" @click="confirmSubmitOrderFromProcess">提交生产</el-button>
+        <el-button type="success" :disabled="!submitPlanOperatorCode" :loading="submitting" @click="confirmSubmitOrderFromProcess"
+          title="提交生产">提交生产</el-button>
       </template>
     </el-dialog>
 
@@ -652,7 +679,8 @@
       <p class="discard-changes-text">当前流程未保存，切换后会丢失修改。</p>
       <template #footer>
         <el-button @click="cancelDiscardChanges">取消</el-button>
-        <el-button type="warning" @click="confirmDiscardChangesDialog">继续切换</el-button>
+        <el-button type="warning" @click="confirmDiscardChangesDialog"
+  title="继续切换">继续切换</el-button>
       </template>
     </el-dialog>
   </section>
@@ -2227,6 +2255,32 @@ onMounted(loadInitialState);
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.process-order-actions {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.process-order-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.process-order-action-label {
+  flex: 0 0 34px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.process-order-actions :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
 }
 
 .process-table-height-label {

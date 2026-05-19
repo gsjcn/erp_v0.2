@@ -34,6 +34,7 @@ if (command === 'backup') {
 }
 
 function backupDatabase() {
+  assertCurrentPostgresTarget();
   fs.mkdirSync(backupDir, { recursive: true });
   const fileName = `${safeFilePrefix(postgresDb)}_${timestampKey()}.dump`;
   const containerPath = `/backups/${fileName}`;
@@ -67,6 +68,7 @@ function seedDatabase() {
 }
 
 function showDatabaseStatus() {
+  assertCurrentPostgresTarget();
   printCurrentDatabaseSummary();
   runDocker(['compose', 'ps']);
   warnAboutExtraPostgresResources();
@@ -140,6 +142,7 @@ function listDatabaseBackups() {
 }
 
 function verifyDatabaseBackups({ writeMissing = false } = {}) {
+  assertCurrentPostgresTarget();
   const backupFiles = listDatabaseBackups();
   if (backupFiles.length === 0) {
     throw new Error(`No ${safeFilePrefix(postgresDb)}_*.dump backup files found in ${backupDir}`);
@@ -190,6 +193,7 @@ function verifyDatabaseBackups({ writeMissing = false } = {}) {
 }
 
 function printRestorePlan({ fileName = '' } = {}) {
+  assertCurrentPostgresTarget();
   const backup = selectedRestoreBackupInfo(fileName);
   if (!backup) {
     throw new Error(`No ${safeFilePrefix(postgresDb)}_*.dump backup files found in ${backupDir}`);
@@ -259,6 +263,21 @@ function verifyBackupArchive(containerPath) {
     throw new Error(`Database backup archive verification failed: pg_restore --list returned no entries for ${containerPath}`);
   }
   return { entryCount: entries.length };
+}
+
+function assertCurrentPostgresTarget() {
+  const composeContainerId = dockerOutput(['compose', 'ps', '-q', 'postgres']).trim();
+  if (!composeContainerId) {
+    throw new Error(
+      `PostgreSQL compose service is not running. Start the single project database with docker compose up -d postgres, target container ${currentPostgresContainer}.`
+    );
+  }
+  const composeContainerName = dockerOutput(['inspect', composeContainerId, '--format', '{{.Name}}']).trim().replace(/^\//, '');
+  if (composeContainerName !== currentPostgresContainer) {
+    throw new Error(
+      `Refusing to operate on unexpected PostgreSQL container "${composeContainerName}". This ERP project only uses "${currentPostgresContainer}". Check Docker Compose project/name before backup, seed, or restore planning.`
+    );
+  }
 }
 
 function backupChecksumInfo(filePath) {

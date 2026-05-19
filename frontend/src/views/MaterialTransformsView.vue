@@ -6,8 +6,8 @@
         <p class="page-subtitle">维护通用件 / 半成品加工成客户零件的建议规则；不自动扣库存、不自动提交生产。</p>
       </div>
       <div class="page-actions">
-        <el-button @click="router.push('/materials')">返回零件管理</el-button>
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="exporting" @click="exportTransformRulesExcel">导出 Excel</el-button>
+        <el-button title="返回零件管理" @click="router.push('/materials')">返回零件管理</el-button>
+        <el-button title="导出Excel" v-if="!isMobileLayout" :icon="Download" :loading="exporting" @click="exportTransformRulesExcel">导出 Excel</el-button>
         <el-button
           v-if="!isMobileLayout"
           type="primary"
@@ -110,10 +110,10 @@
           <el-option label="暂无库存，考虑生产" value="NO_STOCK" />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="searchRules">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
-      <el-button :disabled="!transformRulesFixedText" @click="openTransformRulesTextDialog">查看固定格式</el-button>
-      <el-button :disabled="rules.length === 0" @click="copyTransformRulesText">复制当前结果</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="searchRules">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
+      <el-button title="查看固定格式" :disabled="!transformRulesFixedText" @click="openTransformRulesTextDialog">查看固定格式</el-button>
+      <el-button title="复制当前结果" :disabled="rules.length === 0" @click="copyTransformRulesText">复制当前结果</el-button>
     </div>
 
     <div class="transform-summary-strip" aria-label="来源加工关系当前结果库存判断汇总">
@@ -152,18 +152,23 @@
             <el-button
               :icon="Minus"
               :disabled="transformRuleTableHeight <= transformRuleTableHeightLimits.min"
+              title="降低来源加工关系表格高度"
+
               aria-label="降低来源加工关系表格高度"
               @click="adjustTransformRuleTableHeight(-transformRuleTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="transformRuleTableHeight >= transformRuleTableHeightLimits.max"
+              title="提高来源加工关系表格高度"
+
               aria-label="提高来源加工关系表格高度"
               @click="adjustTransformRuleTableHeight(transformRuleTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="transformRuleTableHeight === transformRuleTableDefaultHeight"
+              title="恢复来源加工关系表格默认高度"
               aria-label="恢复来源加工关系表格默认高度"
               @click="resetTransformRuleTableHeight"
             />
@@ -247,47 +252,59 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              :disabled="transformOperationBusy || sourceDetailsLoading"
-              @click="openTransformSourceDetails(row)"
-            >
-              来源库存
-            </el-button>
-            <el-button
-              link
-              type="primary"
-              :disabled="transformOperationBusy || sourceDetailsLoading"
-              @click="openTransformTargetDetails(row)"
-            >
-              目标库存
-            </el-button>
-            <el-button link type="primary" :disabled="transformOperationBusy" @click="openEditDialog(row)">
-              编辑
-            </el-button>
-            <el-button
-              v-if="row.status === 'ENABLED'"
-              link
-              type="danger"
-              :loading="operationSavingId === row.id"
-              :disabled="transformOperationBusy"
-              @click="disableRule(row)"
-            >
-              停用
-            </el-button>
-            <el-button
-              v-else
-              link
-              type="success"
-              :loading="operationSavingId === row.id"
-              :disabled="transformOperationBusy"
-              @click="enableRule(row)"
-            >
-              启用
-            </el-button>
+            <div class="transform-row-actions">
+              <div class="transform-row-action-group">
+                <span class="transform-row-action-label">库存</span>
+                <el-button
+                  link
+                  type="primary"
+                  title="来源库存"
+                  :disabled="transformOperationBusy || sourceDetailsLoading"
+                  @click="openTransformSourceDetails(row)"
+                >
+                  来源
+                </el-button>
+                <el-button
+                  link
+                  type="primary"
+                  title="目标库存"
+                  :disabled="transformOperationBusy || sourceDetailsLoading"
+                  @click="openTransformTargetDetails(row)"
+                >
+                  目标
+                </el-button>
+              </div>
+              <div class="transform-row-action-group">
+                <span class="transform-row-action-label">维护</span>
+                <el-button link type="primary" title="编辑来源加工关系" :disabled="transformOperationBusy" @click="openEditDialog(row)">
+                  编辑
+                </el-button>
+                <el-button
+                  v-if="row.status === 'ENABLED'"
+                  link
+                  type="danger"
+                  title="停用来源加工关系"
+                  :loading="operationSavingId === row.id"
+                  :disabled="transformOperationBusy"
+                  @click="disableRule(row)"
+                >
+                  停用
+                </el-button>
+                <el-button
+                  v-else
+                  link
+                  type="success"
+                  title="启用来源加工关系"
+                  :loading="operationSavingId === row.id"
+                  :disabled="transformOperationBusy"
+                  @click="enableRule(row)"
+                >
+                  启用
+                </el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -460,7 +477,8 @@
               </button>
               <span class="transform-process-index">{{ index + 1 }}</span>
               <strong>{{ step }}</strong>
-              <el-button link type="danger" :disabled="transformOperationBusy" @click="removeTransformProcessStep(index)">删除</el-button>
+              <el-button link type="danger" :disabled="transformOperationBusy" @click="removeTransformProcessStep(index)"
+  title="删除">删除</el-button>
             </div>
           </div>
         </el-form-item>
@@ -488,7 +506,8 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="closeRuleDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="transformOperationBusy" @click="saveRule">保存</el-button>
+        <el-button type="primary" :loading="saving" :disabled="transformOperationBusy" @click="saveRule"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -530,6 +549,7 @@
         <el-button
           :type="ruleStatusAction === 'disable' ? 'danger' : 'primary'"
           :loading="ruleStatusSaving"
+          :title="`确认${ruleStatusActionText}`"
           @click="confirmRuleStatusChange"
         >
           确认{{ ruleStatusActionText }}
@@ -546,8 +566,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="transformRulesTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!transformRulesFixedText" @click="copyTransformRulesText">复制清单</el-button>
+        <el-button title="关闭" @click="transformRulesTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!transformRulesFixedText" @click="copyTransformRulesText">复制清单</el-button>
       </template>
     </el-dialog>
   </section>
@@ -1734,6 +1754,33 @@ watch(
   color: #334155;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.transform-row-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.transform-row-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.transform-row-action-label {
+  flex: 0 0 30px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.transform-row-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
 }
 
 .inventory-decision-tag {

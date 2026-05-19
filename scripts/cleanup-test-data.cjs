@@ -21,7 +21,25 @@ for (const envPath of [resolve(rootDir, '.env'), resolve(rootDir, 'backend/.env'
 const prisma = new PrismaClient();
 const applyChanges = process.argv.includes('--apply');
 const knownPrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
-const previewLimit = Math.max(Number(process.env.CLEANUP_TEST_DATA_PREVIEW_LIMIT || 8), 1);
+const previewLimit = resolvePreviewLimit();
+
+function cliArgValue(name) {
+  const equalsArg = process.argv.find((arg) => arg.startsWith(`${name}=`));
+  if (equalsArg) {
+    return equalsArg.slice(name.length + 1);
+  }
+  const index = process.argv.indexOf(name);
+  if (index >= 0) {
+    return process.argv[index + 1];
+  }
+  return undefined;
+}
+
+function resolvePreviewLimit() {
+  const rawValue = cliArgValue('--preview-limit') ?? process.env.CLEANUP_TEST_DATA_PREVIEW_LIMIT ?? '8';
+  const parsedValue = Number(rawValue);
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? Math.max(Math.floor(parsedValue), 1) : 8;
+}
 
 function startsWithKnownPrefix(field) {
   return knownPrefixes.map((prefix) => ({ [field]: { startsWith: prefix } }));
@@ -52,13 +70,45 @@ function cleanupTargetSummary(databaseUrl = process.env.DATABASE_URL) {
   }
 }
 
+function expectedCleanupTargetSummary() {
+  const expectedHost = process.env.POSTGRES_HOST_BIND || '127.0.0.1';
+  const expectedPort = process.env.POSTGRES_HOST_PORT || '55432';
+  const expectedUser = process.env.POSTGRES_USER || 'baisheng';
+  const expectedDb = process.env.POSTGRES_DB || 'baisheng_erp';
+  return `postgresql://${expectedUser}:***@${expectedHost}:${expectedPort}/${expectedDb}?schema=public`;
+}
+
+function cleanupTargetMatchesProjectDatabase(databaseUrl = process.env.DATABASE_URL) {
+  if (!databaseUrl) {
+    return false;
+  }
+  try {
+    const url = new URL(databaseUrl);
+    const expectedPort = process.env.POSTGRES_HOST_PORT || '55432';
+    const expectedUser = process.env.POSTGRES_USER || 'baisheng';
+    const expectedDb = process.env.POSTGRES_DB || 'baisheng_erp';
+    const databaseName = url.pathname.replace(/^\//, '');
+    const port = url.port || (url.protocol === 'postgresql:' ? '5432' : '');
+    return (
+      isLocalCleanupDatabaseUrl(databaseUrl) &&
+      port === expectedPort &&
+      databaseName === expectedDb &&
+      (!url.username || url.username === expectedUser)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function printCleanupTarget() {
   console.log(`Target database: ${cleanupTargetSummary()}`);
+  console.log(`Expected project database: ${expectedCleanupTargetSummary()}`);
   console.log(
     applyChanges
       ? 'Mode: apply soft-disable changes after safety checks.'
       : 'Mode: dry-run only; no database rows are changed.'
   );
+  console.log(`Preview limit: ${previewLimit}`);
 }
 
 function statusCounts(rows) {
@@ -111,11 +161,11 @@ function assertCleanupApplyAllowed() {
       'cleanup:test-data --apply is blocked in production. Set ALLOW_TEST_DATA_CLEANUP=true only when you intentionally soft-disable test fixtures.'
     );
   }
-  if (cleanupConfirmed || allowTestDataCleanup || (!isProduction && isLocalCleanupDatabaseUrl())) {
+  if (cleanupConfirmed || allowTestDataCleanup || (!isProduction && cleanupTargetMatchesProjectDatabase())) {
     return;
   }
   throw new Error(
-    'cleanup:test-data --apply is blocked. Use a local DATABASE_URL, or set CLEANUP_TEST_DATA_CONFIRMED=true only after confirming the target database.'
+    `cleanup:test-data --apply is blocked. Default apply is only allowed for the current project database (${expectedCleanupTargetSummary()}); set CLEANUP_TEST_DATA_CONFIRMED=true only after confirming the target database.`
   );
 }
 
@@ -261,6 +311,10 @@ async function main() {
   const testWarehouses = await prisma.warehouse.findMany({
     where: { OR: startsWithKnownPrefix('warehouseCode') },
     select: { id: true, warehouseCode: true, warehouseName: true, status: true }
+  });
+  const testCommonProjectModels = await prisma.materialCommonProjectModel.findMany({
+    where: { OR: startsWithKnownPrefix('projectModel') },
+    select: { id: true, projectModel: true, sortOrder: true, status: true }
   });
 
   const customerIds = compactIds(testCustomers);
@@ -595,7 +649,8 @@ async function main() {
     { label: 'Customer', count: statusSummary(statusCounts(testCustomers)) },
     { label: 'Material', count: statusSummary(statusCounts(testMaterials)) },
     { label: 'ModelBom', count: statusSummary(statusCounts(testModelBoms)) },
-    { label: 'Warehouse', count: statusSummary(statusCounts(testWarehouses)) }
+    { label: 'Warehouse', count: statusSummary(statusCounts(testWarehouses)) },
+    { label: 'MaterialCommonProjectModel', count: statusSummary(statusCounts(testCommonProjectModels)) }
   ]);
   printRecordPreview('Matched customer preview', testCustomers, (row) =>
     `${previewText(row.customerCode)} | ${previewText(row.customerName)} | ${row.status} | ${row.id}`
@@ -605,6 +660,9 @@ async function main() {
   );
   printRecordPreview('Matched BOM preview', testModelBoms, (row) =>
     `${previewText(row.bomName)} | ${row.status} | ${row.id}`
+  );
+  printRecordPreview('Matched common project model preview', testCommonProjectModels, (row) =>
+    `${previewText(row.projectModel)} | sort ${row.sortOrder} | ${row.status} | ${row.id}`
   );
   printRecordPreview('Customer identity archive preview', customerIdentityArchiveRows, (row) =>
     `${previewText(row.customerCode)} -> ${archivedCustomerIdentity(row.customerCode, row.id)} | ${previewText(row.customerName)} -> ${archivedCustomerIdentity(row.customerName, row.id)}`

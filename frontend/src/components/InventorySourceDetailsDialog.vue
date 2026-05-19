@@ -34,8 +34,8 @@
             <MaterialSuggestionOption :item="item" />
           </template>
         </el-autocomplete>
-        <el-button @click="searchInventoryKeyword">查询库存</el-button>
-        <el-button v-if="expected?.partCode" @click="searchExpectedPart">返回订单零件</el-button>
+        <el-button title="查询库存" @click="searchInventoryKeyword">查询库存</el-button>
+        <el-button title="返回订单零件" v-if="expected?.partCode" @click="searchExpectedPart">返回订单零件</el-button>
       </div>
       <div v-if="sourceSearchManualPickRequired && lastInventorySuggestions.length" class="inventory-source-table-height-toolbar source-search-result-height-toolbar">
         <div class="inventory-source-table-height-actions" aria-label="替代物料搜索结果高度">
@@ -46,6 +46,7 @@
               size="small"
               :icon="Minus"
               :disabled="inventorySourceDialogTableHeights.searchResults <= inventorySourceDialogTableHeightLimits.min"
+              title="降低替代物料搜索结果高度"
               aria-label="降低替代物料搜索结果高度"
               @click="adjustInventorySourceDialogTableHeight('searchResults', -inventorySourceDialogTableHeightLimits.step)"
             />
@@ -56,6 +57,7 @@
               size="small"
               :icon="Plus"
               :disabled="inventorySourceDialogTableHeights.searchResults >= inventorySourceDialogTableHeightLimits.max"
+              title="提高替代物料搜索结果高度"
               aria-label="提高替代物料搜索结果高度"
               @click="adjustInventorySourceDialogTableHeight('searchResults', inventorySourceDialogTableHeightLimits.step)"
             />
@@ -66,6 +68,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="inventorySourceDialogTableHeights.searchResults === inventorySourceDialogTableDefaultHeights.searchResults"
+              title="恢复替代物料搜索结果默认高度"
               aria-label="恢复替代物料搜索结果默认高度"
               @click="resetInventorySourceDialogTableHeight('searchResults')"
             />
@@ -82,6 +85,8 @@
           v-for="item in lastInventorySuggestions"
           :key="`${item.partCode}-${item.matchedBatchNo || 'all'}`"
           type="button"
+          :title="inventorySuggestionPickTitle(item)"
+          :aria-label="inventorySuggestionPickTitle(item)"
           class="source-search-result"
           @click="handleInventorySuggestionSelect(item)"
         >
@@ -119,7 +124,7 @@
           </div>
         </article>
         <div v-if="transformRuleSuggestionHasMore" class="transform-suggestion-more">
-          <el-button size="small" plain :loading="transformRuleLoadingMore" @click="loadMoreTransformRuleSuggestions">
+          <el-button title="加载更多来源加工建议" size="small" plain :loading="transformRuleLoadingMore" @click="loadMoreTransformRuleSuggestions">
             加载更多来源加工建议
           </el-button>
         </div>
@@ -178,21 +183,32 @@
       </div>
 
       <div v-if="reviewMode && detail" class="source-bulk-actions">
-        <el-button size="small" type="primary" plain @click="autoSelectSources">按默认顺序选用库存</el-button>
-        <div class="source-bulk-quantity">
-          <span>每批</span>
-          <el-input-number
-            v-model="bulkEachQuantity"
-            :min="0"
-            :precision="3"
-            :controls="false"
-            size="small"
-            placeholder="数量"
-          />
-          <el-button size="small" @click="bulkSelectSourcesByQuantity">批量勾选</el-button>
+        <div class="source-bulk-action-group">
+          <span class="source-bulk-action-label">选用</span>
+          <el-button size="small" type="primary" plain title="按默认顺序选用库存" @click="autoSelectSources">默认选用</el-button>
         </div>
-        <el-button size="small" @click="clearSelectedSources">清空选择</el-button>
-        <span>默认优先使用数量少的库存批次；若先使用数量大的批次，必须填写说明。</span>
+        <div class="source-bulk-action-group">
+          <span class="source-bulk-action-label">批量</span>
+          <div class="source-bulk-quantity">
+            <span>每批</span>
+            <el-input-number
+              v-model="bulkEachQuantity"
+              :min="0"
+              :precision="3"
+              :controls="false"
+              size="small"
+              placeholder="数量"
+            />
+            <el-button size="small" title="按每批数量批量勾选库存" @click="bulkSelectSourcesByQuantity">勾选</el-button>
+          </div>
+        </div>
+        <div class="source-bulk-action-group">
+          <span class="source-bulk-action-label">选择</span>
+          <el-button size="small" title="清空已选库存批次" @click="clearSelectedSources">清空</el-button>
+        </div>
+        <div class="source-bulk-note">
+          默认优先使用数量少的库存批次；若先使用数量大的批次，必须填写说明。
+        </div>
       </div>
 
       <div v-if="reviewMode && detail" class="source-selection-overview">
@@ -225,9 +241,15 @@
             <span>拖动左侧手柄调整扣库顺序；提交生产会按当前顺序消耗库存。这里会保留跨零件搜索后选中的批次；取消勾选某批次后，系统会从后续批次自动补足，不会再选回该批次。</span>
           </div>
           <div class="selected-source-actions">
-            <el-button size="small" @click="autoSelectSources">按默认顺序选用库存</el-button>
-            <el-button size="small" @click="rebalanceCurrentSelectedSourcesByQueue">按当前顺序重算</el-button>
-            <el-button size="small" @click="clearSelectedSources">清空选择</el-button>
+            <div class="selected-source-action-group">
+              <span class="selected-source-action-label">选用</span>
+              <el-button size="small" title="按默认顺序选用库存" @click="autoSelectSources">默认选用</el-button>
+              <el-button size="small" title="按当前顺序重算使用数量" @click="rebalanceCurrentSelectedSourcesByQueue">重算</el-button>
+            </div>
+            <div class="selected-source-action-group">
+              <span class="selected-source-action-label">选择</span>
+              <el-button size="small" title="清空已选库存批次" @click="clearSelectedSources">清空</el-button>
+            </div>
           </div>
         </div>
         <div
@@ -301,12 +323,21 @@
               <span :title="manualConfirmationReasonTitle(source)">{{ manualConfirmationReasonPreview(source) }}</span>
             </el-tag>
             <el-tag v-else type="success" effect="plain">已匹配</el-tag>
-            <div class="selected-source-sort-actions">
-              <el-button link size="small" @click="focusSelectedSource(source)">查看该库存</el-button>
-              <el-button link size="small" :disabled="index === 0" @click="moveSelectedSource(index, -1)">上移</el-button>
-              <el-button link size="small" :disabled="index === selectedSourceRows.length - 1" @click="moveSelectedSource(index, 1)">下移</el-button>
+            <div class="selected-source-row-actions">
+              <div class="selected-source-action-group">
+                <span class="selected-source-action-label">定位</span>
+                <el-button link size="small" title="查看该库存" @click="focusSelectedSource(source)">查看</el-button>
+              </div>
+              <div class="selected-source-action-group">
+                <span class="selected-source-action-label">顺序</span>
+                <el-button link size="small" title="上移库存扣减顺序" :disabled="index === 0" @click="moveSelectedSource(index, -1)">上移</el-button>
+                <el-button link size="small" title="下移库存扣减顺序" :disabled="index === selectedSourceRows.length - 1" @click="moveSelectedSource(index, 1)">下移</el-button>
+              </div>
+              <div class="selected-source-action-group">
+                <span class="selected-source-action-label">选择</span>
+                <el-button link type="danger" title="移除已选库存批次" @click="removeSelectedSource(source.batchId)">移除</el-button>
+              </div>
             </div>
-            <el-button link type="danger" @click="removeSelectedSource(source.batchId)">移除</el-button>
           </article>
         </div>
       </div>
@@ -358,6 +389,8 @@
               size="small"
               :icon="Minus"
               :disabled="inventorySourceDialogTableHeights.sources <= inventorySourceDialogTableHeightLimits.min"
+              title="降低库存来源批次表格高度"
+
               aria-label="降低库存来源批次表格高度"
               @click="adjustInventorySourceDialogTableHeight('sources', -inventorySourceDialogTableHeightLimits.step)"
             />
@@ -368,6 +401,8 @@
               size="small"
               :icon="Plus"
               :disabled="inventorySourceDialogTableHeights.sources >= inventorySourceDialogTableHeightLimits.max"
+              title="提高库存来源批次表格高度"
+
               aria-label="提高库存来源批次表格高度"
               @click="adjustInventorySourceDialogTableHeight('sources', inventorySourceDialogTableHeightLimits.step)"
             />
@@ -378,6 +413,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="inventorySourceDialogTableHeights.sources === inventorySourceDialogTableDefaultHeights.sources"
+              title="恢复库存来源批次表格默认高度"
               aria-label="恢复库存来源批次表格默认高度"
               @click="resetInventorySourceDialogTableHeight('sources')"
             />
@@ -666,12 +702,13 @@
           <span class="source-confirm-hint">{{ confirmHint }}</span>
         </div>
         <div class="source-dialog-actions">
-          <el-button @click="emit('update:modelValue', false)">关闭</el-button>
+          <el-button title="关闭" @click="emit('update:modelValue', false)">关闭</el-button>
           <el-button
             type="primary"
             :disabled="!canConfirmReview"
             @click="confirmReviewed"
-          >
+
+            title="确认已核对库存来源">
             确认已核对库存来源
           </el-button>
         </div>
@@ -719,6 +756,8 @@
                 size="small"
                 :icon="Minus"
                 :disabled="inventorySourceDialogTableHeights.orderPreview <= inventorySourceDialogTableHeightLimits.min"
+                title="降低订单信息预览表格高度"
+
                 aria-label="降低订单信息预览表格高度"
                 @click="adjustInventorySourceDialogTableHeight('orderPreview', -inventorySourceDialogTableHeightLimits.step)"
               />
@@ -729,6 +768,8 @@
                 size="small"
                 :icon="Plus"
                 :disabled="inventorySourceDialogTableHeights.orderPreview >= inventorySourceDialogTableHeightLimits.max"
+                title="提高订单信息预览表格高度"
+
                 aria-label="提高订单信息预览表格高度"
                 @click="adjustInventorySourceDialogTableHeight('orderPreview', inventorySourceDialogTableHeightLimits.step)"
               />
@@ -739,6 +780,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="inventorySourceDialogTableHeights.orderPreview === inventorySourceDialogTableDefaultHeights.orderPreview"
+                title="恢复订单信息预览表格默认高度"
                 aria-label="恢复订单信息预览表格默认高度"
                 @click="resetInventorySourceDialogTableHeight('orderPreview')"
               />
@@ -946,6 +988,15 @@ function formatLongTextPreview(value?: string | null, maxLength = 32, emptyText 
     return emptyText;
   }
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function inventorySuggestionPickTitle(item: InventoryMaterialSuggestion) {
+  const materialText = [item.partCode, item.partName].filter(Boolean).join(' / ') || '该库存物料';
+  const unit = item.unit || expected.value?.unit || props.detail?.unit || '件';
+  const availableText = `可用 ${formatQuantity(item.availableQuantity, unit)}`;
+  const batchText = item.matchedBatchNo ? `批次 ${item.matchedBatchNo}` : '';
+  const riskText = item.hasIdentityConflict ? '存在同编码多套历史资料，选择前请核对图号、规格、厚度和项目型号。' : '';
+  return ['选择库存物料', materialText, availableText, batchText, riskText].filter(Boolean).join('；');
 }
 
 function transformRuleScopePreview(rule: MaterialTransformRule) {
@@ -3092,19 +3143,45 @@ watch(
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 12px;
   margin-bottom: 14px;
 }
 
-.source-bulk-actions span {
+.source-bulk-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.source-bulk-action-label {
+  flex: 0 0 auto;
   color: #64748b;
   font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.source-bulk-note {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.source-bulk-actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 .source-bulk-quantity {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.source-bulk-quantity span {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .source-bulk-quantity :deep(.el-input-number) {
@@ -3170,8 +3247,30 @@ watch(
 .selected-source-actions,
 .selected-source-sort-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+}
+
+.selected-source-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.selected-source-action-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.selected-source-actions :deep(.el-button),
+.selected-source-row-actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 .selected-source-title strong {
@@ -3192,7 +3291,7 @@ watch(
 .selected-source-item {
   position: relative;
   display: grid;
-  grid-template-columns: 46px minmax(220px, 1fr) minmax(120px, 160px) auto auto auto;
+  grid-template-columns: 46px minmax(220px, 1fr) minmax(120px, 160px) auto minmax(180px, auto);
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -3238,6 +3337,13 @@ watch(
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.selected-source-item > .selected-source-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
 }
 
 .selected-source-order-cell span {

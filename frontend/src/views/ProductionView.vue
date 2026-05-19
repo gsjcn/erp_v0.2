@@ -15,7 +15,7 @@
         <el-button :icon="Document" @click="openReplenishmentRequests">生产报废补单</el-button>
         </el-badge>
         <el-button :icon="Document" @click="openScrapRecords">报废统计</el-button>
-        <el-button
+        <el-button title="导出Excel"
           :icon="Download"
           :loading="productionExporting"
           :disabled="printableRowCount === 0"
@@ -24,7 +24,7 @@
           导出 Excel
         </el-button>
         <el-button :icon="Printer" :disabled="printableRowCount === 0" @click="openPrintPreview">打印预览</el-button>
-        <el-button :icon="Refresh" :loading="loading" @click="queryTasks">刷新</el-button>
+        <el-button title="刷新整页生产数据" :icon="Refresh" :loading="productionPageRefreshing || loading" @click="refreshProductionPage">刷新</el-button>
       </div>
     </div>
 
@@ -55,8 +55,8 @@
         />
       </div>
 
-      <el-button type="primary" :loading="loading" @click="queryTasks">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="queryTasks">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
     </div>
 
     <div class="stat-grid">
@@ -84,6 +84,7 @@
             size="small"
             :icon="Minus"
             :disabled="activeProductionWorkTableHeight <= productionWorkTableHeightLimits.min"
+            :title="`降低${productionWorkTableHeightLabel}`"
             :aria-label="`降低${productionWorkTableHeightLabel}`"
             @click="adjustActiveProductionWorkTableHeight(-productionWorkTableHeightLimits.step)"
           />
@@ -91,6 +92,7 @@
             size="small"
             :icon="Plus"
             :disabled="activeProductionWorkTableHeight >= productionWorkTableHeightLimits.max"
+            :title="`提高${productionWorkTableHeightLabel}`"
             :aria-label="`提高${productionWorkTableHeightLabel}`"
             @click="adjustActiveProductionWorkTableHeight(productionWorkTableHeightLimits.step)"
           />
@@ -98,6 +100,7 @@
             size="small"
             :icon="RefreshLeft"
             :disabled="activeProductionWorkTableHeight === activeProductionWorkTableDefaultHeight"
+            :title="productionWorkTableResetLabel"
             :aria-label="productionWorkTableResetLabel"
             @click="resetActiveProductionWorkTableHeight"
           />
@@ -108,15 +111,16 @@
           当前订单：
           <OrderNoLink :order-no="selectedProductionOrderNo" />
         </span>
-        <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
-        <el-button size="small" @click="backToOrderSummary">返回订单汇总</el-button>
+        <el-button title="查看订单明细" size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
+        <el-button title="返回订单汇总" size="small" @click="backToOrderSummary">返回订单汇总</el-button>
         <el-button
           type="primary"
           plain
           size="small"
           :disabled="selectedOrderPendingTasks.length === 0"
           @click="openBatchStartForCurrentOrder"
-        >
+
+          title="批量开始待确认生产">
           批量开始待确认生产
         </el-button>
         <el-button
@@ -124,7 +128,8 @@
           size="small"
           :disabled="selectedStartableTasks.length === 0"
           @click="openBatchStartForSelected"
-        >
+
+          title="批量开始所选">
           批量开始所选
         </el-button>
       </div>
@@ -214,7 +219,8 @@
           </el-table-column>
           <el-table-column label="待补单" min-width="180">
             <template #default="{ row }">
-              <el-button v-if="orderSummaryNeedsShortageAttention(row)" link type="warning" @click="goOrderShortageDetail(row)">
+              <el-button v-if="orderSummaryNeedsShortageAttention(row)" link type="warning" @click="goOrderShortageDetail(row)"
+  :title="orderSummaryShortageActionText(row)">
                 {{ orderSummaryShortageActionText(row) }}
               </el-button>
               <span v-else class="muted">-</span>
@@ -238,15 +244,23 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="220" fixed="right">
+          <el-table-column label="操作" width="200" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click="openOrderProductionDetail(row)">进入生产详情</el-button>
-              <el-button v-if="orderSummaryNeedsShortageAttention(row)" link type="warning" @click="goOrderShortageDetail(row)">
-                处理补单
-              </el-button>
-              <el-button v-if="row.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(row)">
-                批量开始生产
-              </el-button>
+              <div class="production-order-actions">
+                <div class="production-order-action-group">
+                  <span class="production-order-action-label">详情</span>
+                  <el-button link type="primary" title="进入生产详情" @click="openOrderProductionDetail(row)">详情</el-button>
+                </div>
+                <div v-if="orderSummaryNeedsShortageAttention(row) || row.pendingCount > 0" class="production-order-action-group">
+                  <span class="production-order-action-label">处理</span>
+                  <el-button v-if="orderSummaryNeedsShortageAttention(row)" link type="warning" title="处理补单" @click="goOrderShortageDetail(row)">
+                    补单
+                  </el-button>
+                  <el-button v-if="row.pendingCount > 0" link type="primary" title="批量开始生产" @click="openBatchStartForOrder(row)">
+                    批量
+                  </el-button>
+                </div>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -310,10 +324,12 @@
           </div>
           <div class="mobile-card-actions">
             <el-button link type="primary" @click="openOrderProductionDetail(summary)">进入生产详情</el-button>
-            <el-button v-if="orderSummaryNeedsShortageAttention(summary)" link type="warning" @click="goOrderShortageDetail(summary)">
+            <el-button v-if="orderSummaryNeedsShortageAttention(summary)" link type="warning" @click="goOrderShortageDetail(summary)"
+  title="处理补单">
               处理补单
             </el-button>
-            <el-button v-if="summary.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(summary)">
+            <el-button v-if="summary.pendingCount > 0" link type="primary" @click="openBatchStartForOrder(summary)"
+              title="批量开始生产">
               批量开始生产
             </el-button>
           </div>
@@ -359,8 +375,9 @@
               <OrderNoLink :order-no="selectedProductionOrderNo" /> 可能已全量使用库存，订单库存已进入仓库待发货。可查看订单明细或到仓库待发货继续处理。
             </span>
             <div class="empty-production-actions">
-              <el-button size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
-              <el-button size="small" type="primary" @click="goSelectedOrderWarehouse">到仓库待发货</el-button>
+              <el-button title="查看订单明细" size="small" @click="goSelectedOrderDetail">查看订单明细</el-button>
+              <el-button size="small" type="primary" @click="goSelectedOrderWarehouse"
+                title="到仓库待发货">到仓库待发货</el-button>
             </div>
           </div>
         </template>
@@ -445,36 +462,54 @@
             <StatusTag :value="effectiveProductionStatus(row)" :label-override="productionStatusLabel(effectiveProductionStatus(row))" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
-            <el-button
-              v-if="pendingProductionReplenishmentRequest(row)"
-              link
-              type="warning"
-              @click="openReplenishmentApproval(row)"
-            >
-              主管确认补单
-            </el-button>
-            <el-button v-if="shouldShowStartAction(row)" link type="primary" @click="openStartDialog(row)">开始生产</el-button>
-            <el-button
-              v-else-if="shouldShowConfirmCompletedAction(row)"
-              link
-              type="success"
-              @click="confirmCompletedTask(row)"
-            >
-              确认完成
-            </el-button>
-            <el-button v-else-if="shouldShowNextProcessAction(row)" link type="primary" @click="openNextProcess(row)">
-              下一道工序
-            </el-button>
-            <el-button v-else-if="canModifyFinalCompletion(row)" link type="primary" @click="confirmCompletedTask(row)">
-              修改完成确认
-            </el-button>
-            <el-button v-if="canWithdrawProduction(row)" link type="danger" @click="withdrawProduction(row)">
-              管理撤回
-            </el-button>
-            <span v-else-if="effectiveProductionStatus(row) === 'RECEIVED'" class="muted">已入库</span>
-            <span v-else-if="effectiveProductionStatus(row) === 'COMPLETED'" class="muted">已完成</span>
+            <div class="production-task-actions">
+              <div v-if="pendingProductionReplenishmentRequest(row)" class="production-task-action-group">
+                <span class="production-task-action-label">补单</span>
+                <el-button link type="warning" title="主管确认补单" @click="openReplenishmentApproval(row)">
+                  确认
+                </el-button>
+              </div>
+              <div
+                v-if="
+                  shouldShowStartAction(row) ||
+                  shouldShowConfirmCompletedAction(row) ||
+                  shouldShowNextProcessAction(row) ||
+                  canModifyFinalCompletion(row) ||
+                  (!canWithdrawProduction(row) && ['RECEIVED', 'COMPLETED'].includes(effectiveProductionStatus(row)))
+                "
+                class="production-task-action-group"
+              >
+                <span class="production-task-action-label">生产</span>
+                <el-button v-if="shouldShowStartAction(row)" link type="primary" title="开始生产" @click="openStartDialog(row)">
+                  开始
+                </el-button>
+                <el-button
+                  v-else-if="shouldShowConfirmCompletedAction(row)"
+                  link
+                  type="success"
+                  title="确认完成"
+                  @click="confirmCompletedTask(row)"
+                >
+                  完成
+                </el-button>
+                <el-button v-else-if="shouldShowNextProcessAction(row)" link type="primary" title="下一道工序" @click="openNextProcess(row)">
+                  下道
+                </el-button>
+                <el-button v-else-if="canModifyFinalCompletion(row)" link type="primary" title="修改完成确认" @click="confirmCompletedTask(row)">
+                  修改
+                </el-button>
+                <span v-else-if="effectiveProductionStatus(row) === 'RECEIVED'" class="muted">已入库</span>
+                <span v-else-if="effectiveProductionStatus(row) === 'COMPLETED'" class="muted">已完成</span>
+              </div>
+              <div v-if="canWithdrawProduction(row)" class="production-task-action-group">
+                <span class="production-task-action-label">管理</span>
+                <el-button link type="danger" title="管理撤回" @click="withdrawProduction(row)">
+                  撤回
+                </el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -587,25 +622,30 @@
             link
             type="warning"
             @click="openReplenishmentApproval(task)"
-          >
+
+          title="主管确认补单">
             主管确认补单
           </el-button>
-          <el-button v-if="shouldShowStartAction(task)" link type="primary" @click="openStartDialog(task)">开始生产</el-button>
+          <el-button v-if="shouldShowStartAction(task)" link type="primary" @click="openStartDialog(task)"
+            title="开始生产">开始生产</el-button>
           <el-button
             v-else-if="shouldShowConfirmCompletedAction(task)"
             link
             type="success"
             @click="confirmCompletedTask(task)"
-          >
+
+            title="确认完成">
             确认完成
           </el-button>
           <el-button v-else-if="shouldShowNextProcessAction(task)" link type="primary" @click="openNextProcess(task)">
             下一道工序
           </el-button>
-          <el-button v-else-if="canModifyFinalCompletion(task)" link type="primary" @click="confirmCompletedTask(task)">
+          <el-button v-else-if="canModifyFinalCompletion(task)" link type="primary" @click="confirmCompletedTask(task)"
+            title="修改完成确认">
             修改完成确认
           </el-button>
-          <el-button v-if="canWithdrawProduction(task)" link type="danger" @click="withdrawProduction(task)">
+          <el-button v-if="canWithdrawProduction(task)" link type="danger" @click="withdrawProduction(task)"
+  title="管理撤回">
             管理撤回
           </el-button>
           <span v-if="effectiveProductionStatus(task) === 'RECEIVED'" class="muted">已入库</span>
@@ -706,7 +746,8 @@
       </div>
       <template #footer>
         <el-button :disabled="startSaving" @click="closeStartDialog">取消</el-button>
-        <el-button type="primary" :loading="startSaving" :disabled="startSaving || !startSupervisorCode" @click="confirmStartProduction">
+        <el-button type="primary" :loading="startSaving" :disabled="startSaving || !startSupervisorCode" @click="confirmStartProduction"
+          title="确认开始生产">
           确认开始生产
         </el-button>
       </template>
@@ -767,7 +808,7 @@
             <el-button size="small" :disabled="batchStartSelectedTaskIds.length === batchStartTasks.length" @click="selectAllBatchStartTasks">
               全选
             </el-button>
-            <el-button size="small" :disabled="batchStartSelectedTaskIds.length === 0" @click="clearBatchStartTasks">
+            <el-button title="清空" size="small" :disabled="batchStartSelectedTaskIds.length === 0" @click="clearBatchStartTasks">
               清空
             </el-button>
           </div>
@@ -780,6 +821,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="productionWorkTableHeights.batchStartTasks <= productionWorkTableHeightLimits.min"
+                title="降低批量开始生产任务列表高度"
                 aria-label="降低批量开始生产任务列表高度"
                 @click="adjustProductionWorkTableHeight('batchStartTasks', -productionWorkTableHeightLimits.step)"
               />
@@ -787,6 +829,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="productionWorkTableHeights.batchStartTasks >= productionWorkTableHeightLimits.max"
+                title="提高批量开始生产任务列表高度"
                 aria-label="提高批量开始生产任务列表高度"
                 @click="adjustProductionWorkTableHeight('batchStartTasks', productionWorkTableHeightLimits.step)"
               />
@@ -794,6 +837,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="productionWorkTableHeights.batchStartTasks === productionWorkTableDefaultHeights.batchStartTasks"
+                title="恢复批量开始生产任务列表默认高度"
                 aria-label="恢复批量开始生产任务列表默认高度"
                 @click="resetProductionWorkTableHeight('batchStartTasks')"
               />
@@ -821,7 +865,8 @@
           :loading="batchStartSaving"
           :disabled="batchStartSaving || !batchStartSupervisorCode || batchStartSelectedTaskIds.length === 0"
           @click="confirmBatchStartProduction"
-        >
+
+          title="确认批量开始生产">
           确认批量开始生产
         </el-button>
       </template>
@@ -846,9 +891,9 @@
           </el-select>
           <DateRangeFilter v-model="productionNoticeDateRange" start-placeholder="通知开始" end-placeholder="通知结束" width="220px" />
           <el-input v-model="productionNoticeFilters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="reloadProductionNoticesFromFirstPage" />
-          <el-button type="primary" @click="reloadProductionNoticesFromFirstPage">查询</el-button>
-          <el-button @click="resetProductionNoticeFilters">重置</el-button>
-          <el-button :icon="Download" :loading="productionNoticeExporting" @click="exportProductionNoticesExcel">导出 Excel</el-button>
+          <el-button title="查询" type="primary" @click="reloadProductionNoticesFromFirstPage">查询</el-button>
+          <el-button title="重置" @click="resetProductionNoticeFilters">重置</el-button>
+          <el-button title="导出Excel" :icon="Download" :loading="productionNoticeExporting" @click="exportProductionNoticesExcel">导出 Excel</el-button>
         </div>
         <div class="production-dialog-list-toolbar">
           <div class="production-table-height-actions" aria-label="生产通知列表高度">
@@ -858,6 +903,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="productionWorkTableHeights.productionNotices <= productionWorkTableHeightLimits.min"
+                title="降低生产通知列表高度"
                 aria-label="降低生产通知列表高度"
                 @click="adjustProductionWorkTableHeight('productionNotices', -productionWorkTableHeightLimits.step)"
               />
@@ -865,6 +911,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="productionWorkTableHeights.productionNotices >= productionWorkTableHeightLimits.max"
+                title="提高生产通知列表高度"
                 aria-label="提高生产通知列表高度"
                 @click="adjustProductionWorkTableHeight('productionNotices', productionWorkTableHeightLimits.step)"
               />
@@ -872,6 +919,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="productionWorkTableHeights.productionNotices === productionWorkTableDefaultHeights.productionNotices"
+                title="恢复生产通知列表默认高度"
                 aria-label="恢复生产通知列表默认高度"
                 @click="resetProductionWorkTableHeight('productionNotices')"
               />
@@ -894,7 +942,8 @@
               size="small"
               type="primary"
               @click="acknowledgeNotice(notice)"
-            >
+
+              title="确认已知晓">
               确认已知晓
             </el-button>
             <StatusTag v-else value="ACKNOWLEDGED" compact />
@@ -913,7 +962,7 @@
         </div>
       </div>
       <template #footer>
-        <el-button @click="noticeVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="noticeVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -944,9 +993,9 @@
           class="replenishment-request-search"
           @keyup.enter="queryReplenishmentRequests"
         />
-        <el-button type="primary" size="small" @click="queryReplenishmentRequests">查询</el-button>
-        <el-button size="small" @click="resetReplenishmentRequestFilters">重置</el-button>
-        <el-button size="small" :icon="Download" :loading="replenishmentRequestExporting" @click="exportReplenishmentRequestsExcel">
+        <el-button title="查询" type="primary" size="small" @click="queryReplenishmentRequests">查询</el-button>
+        <el-button title="重置" size="small" @click="resetReplenishmentRequestFilters">重置</el-button>
+        <el-button title="导出Excel" size="small" :icon="Download" :loading="replenishmentRequestExporting" @click="exportReplenishmentRequestsExcel">
           导出 Excel
         </el-button>
       </div>
@@ -958,6 +1007,7 @@
               size="small"
               :icon="Minus"
               :disabled="productionWorkTableHeights.replenishmentRequests <= productionWorkTableHeightLimits.min"
+              title="降低生产报废补单申请列表高度"
               aria-label="降低生产报废补单申请列表高度"
               @click="adjustProductionWorkTableHeight('replenishmentRequests', -productionWorkTableHeightLimits.step)"
             />
@@ -965,6 +1015,7 @@
               size="small"
               :icon="Plus"
               :disabled="productionWorkTableHeights.replenishmentRequests >= productionWorkTableHeightLimits.max"
+              title="提高生产报废补单申请列表高度"
               aria-label="提高生产报废补单申请列表高度"
               @click="adjustProductionWorkTableHeight('replenishmentRequests', productionWorkTableHeightLimits.step)"
             />
@@ -972,6 +1023,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="productionWorkTableHeights.replenishmentRequests === productionWorkTableDefaultHeights.replenishmentRequests"
+              title="恢复生产报废补单申请列表默认高度"
               aria-label="恢复生产报废补单申请列表默认高度"
               @click="resetProductionWorkTableHeight('replenishmentRequests')"
             />
@@ -1057,7 +1109,7 @@
         />
       </div>
       <template #footer>
-        <el-button @click="replenishmentRequestVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="replenishmentRequestVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1123,7 +1175,8 @@
           :loading="replenishmentRejectSaving"
           :disabled="replenishmentRejectSaving"
           @click="saveReplenishmentReject"
-        >
+
+        title="确认驳回">
           确认驳回
         </el-button>
       </template>
@@ -1143,9 +1196,9 @@
           <label>订单</label>
           <OrderSelect v-model="scrapFilters.orderNo" :orders="scrapOrderOptions" placeholder="全部订单" width="260px" @change="reloadScrapRecordsFromFirstPage" />
         </div>
-        <el-button type="primary" :loading="scrapLoading" @click="reloadScrapRecordsFromFirstPage">查询</el-button>
-        <el-button @click="resetScrapFilters">重置</el-button>
-        <el-button :icon="Download" :loading="scrapExporting" @click="exportScrapRecordsExcel">导出 Excel</el-button>
+        <el-button title="查询" type="primary" :loading="scrapLoading" @click="reloadScrapRecordsFromFirstPage">查询</el-button>
+        <el-button title="重置" @click="resetScrapFilters">重置</el-button>
+        <el-button title="导出Excel" :icon="Download" :loading="scrapExporting" @click="exportScrapRecordsExcel">导出 Excel</el-button>
       </div>
       <div class="production-dialog-table-toolbar">
         <div class="production-table-height-actions" aria-label="生产报废统计表格高度">
@@ -1155,6 +1208,7 @@
               size="small"
               :icon="Minus"
               :disabled="productionWorkTableHeights.scrapRecords <= productionWorkTableHeightLimits.min"
+              title="降低生产报废统计表格高度"
               aria-label="降低生产报废统计表格高度"
               @click="adjustProductionWorkTableHeight('scrapRecords', -productionWorkTableHeightLimits.step)"
             />
@@ -1162,6 +1216,7 @@
               size="small"
               :icon="Plus"
               :disabled="productionWorkTableHeights.scrapRecords >= productionWorkTableHeightLimits.max"
+              title="提高生产报废统计表格高度"
               aria-label="提高生产报废统计表格高度"
               @click="adjustProductionWorkTableHeight('scrapRecords', productionWorkTableHeightLimits.step)"
             />
@@ -1169,6 +1224,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="productionWorkTableHeights.scrapRecords === productionWorkTableDefaultHeights.scrapRecords"
+              title="恢复生产报废统计表格默认高度"
               aria-label="恢复生产报废统计表格默认高度"
               @click="resetProductionWorkTableHeight('scrapRecords')"
             />
@@ -1209,7 +1265,7 @@
         />
       </div>
       <template #footer>
-        <el-button @click="scrapVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="scrapVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1492,7 +1548,8 @@
           :loading="processSaving"
           :disabled="processSaving"
           @click="saveProcessCompletion"
-        >
+
+          title="确认完成">
           确认完成
         </el-button>
       </template>
@@ -1514,7 +1571,7 @@
         </p>
       </div>
       <template #footer>
-        <el-button :disabled="processSaving" @click="cancelQuantityOverrideDialog">返回修改</el-button>
+        <el-button title="返回修改" :disabled="processSaving" @click="cancelQuantityOverrideDialog">返回修改</el-button>
         <el-button type="primary" :loading="processSaving" @click="confirmQuantityOverrideDialog">确定</el-button>
       </template>
     </el-dialog>
@@ -1698,7 +1755,8 @@
       </div>
       <template #footer>
         <el-button :disabled="finalSaving" @click="closeFinalConfirmDialog">取消</el-button>
-        <el-button type="primary" :loading="finalSaving" :disabled="finalSaving || !finalSupervisorCode" @click="saveFinalProductionCompletion">
+        <el-button type="primary" :loading="finalSaving" :disabled="finalSaving || !finalSupervisorCode" @click="saveFinalProductionCompletion"
+          :title="activeFinalTask?.status === 'COMPLETED' ? '保存修改' : '确认完成'">
           {{ activeFinalTask?.status === 'COMPLETED' ? '保存修改' : '确认完成' }}
         </el-button>
       </template>
@@ -1770,7 +1828,8 @@
           :loading="replenishmentApprovalSaving"
           :disabled="replenishmentApprovalSaving"
           @click="saveReplenishmentApproval"
-        >
+
+          title="确认生成报废补单">
           确认生成报废补单
         </el-button>
       </template>
@@ -1874,7 +1933,8 @@
       </div>
       <template #footer>
         <el-button :disabled="withdrawSaving" @click="closeWithdrawDialog">取消</el-button>
-        <el-button type="danger" :loading="withdrawSaving" :disabled="withdrawSaving" @click="saveWithdrawProduction">确认撤回</el-button>
+        <el-button type="danger" :loading="withdrawSaving" :disabled="withdrawSaving" @click="saveWithdrawProduction"
+  title="确认撤回">确认撤回</el-button>
       </template>
     </el-dialog>
 
@@ -2005,7 +2065,7 @@
         </article>
       </div>
       <template #footer>
-        <el-button @click="printPreviewVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="printPreviewVisible = false">关闭</el-button>
         <el-button type="primary" :icon="Printer" @click="printProductionPlan">打印</el-button>
       </template>
     </el-dialog>
@@ -2069,6 +2129,7 @@ const dateRange = ref<string[]>([]);
 const selectedCustomerName = ref('');
 const loading = ref(false);
 const productionExporting = ref(false);
+const productionPageRefreshing = ref(false);
 const noticeVisible = ref(false);
 const noticeLoading = ref(false);
 const productionNoticeExporting = ref(false);
@@ -3378,6 +3439,21 @@ async function queryTasks() {
     await Promise.all([loadProductionNotices(), loadProductionReplenishmentRequests()]);
   } finally {
     loading.value = false;
+  }
+}
+
+async function refreshProductionPage() {
+  if (productionPageRefreshing.value || loading.value) {
+    return;
+  }
+  productionPageRefreshing.value = true;
+  try {
+    // 生产页整页刷新必须同步当前客户名、操作员缓存、任务、订单汇总、通知和补单申请。
+    await loadSelectedCustomerName();
+    await loadOperators();
+    await queryTasks();
+  } finally {
+    productionPageRefreshing.value = false;
   }
 }
 
@@ -5788,9 +5864,7 @@ watch(
 onMounted(async () => {
   restoreProductionWorkTableHeights();
   applyProductionRouteScope();
-  await loadSelectedCustomerName();
-  await loadOperators();
-  await queryTasks();
+  await refreshProductionPage();
 });
 </script>
 
@@ -5858,6 +5932,36 @@ onMounted(async () => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.production-order-actions,
+.production-task-actions {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.production-order-action-group,
+.production-task-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.production-order-action-label,
+.production-task-action-label {
+  flex: 0 0 34px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.production-order-actions :deep(.el-button),
+.production-task-actions :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
 }
 
 .production-table-height-label {

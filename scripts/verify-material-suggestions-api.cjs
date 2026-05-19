@@ -52,50 +52,7 @@ async function requestJson(path) {
 }
 
 async function cleanup() {
-  await prisma.orderLine.deleteMany({
-    where: { partCode: { equals: partCode, mode: 'insensitive' } }
-  });
-  await prisma.customerOrder.deleteMany({
-    where: { orderNo: { startsWith: orderPrefix } }
-  });
-  await prisma.material.updateMany({
-    where: { partCode: { equals: partCode, mode: 'insensitive' } },
-    data: { status: 'DISABLED' }
-  });
-  for (let index = 1; index <= 25; index += 1) {
-    const suffix = String(index).padStart(2, '0');
-    const code = `${customerPrefix}-${suffix}`;
-    const name = `${customerNamePrefix} ${suffix}`;
-    const customer = await prisma.customer.findFirst({
-      where: {
-        OR: [
-          { customerCode: code },
-          { customerCode: { startsWith: `${code}__DISABLED__` } },
-          { customerName: { startsWith: `${name}__DISABLED__` } }
-        ]
-      },
-      orderBy: { createdAt: 'asc' },
-      select: { id: true }
-    });
-    if (!customer?.id) {
-      continue;
-    }
-    const archiveSuffix = `__DISABLED__${customer.id.slice(0, 8)}`;
-    await prisma.customerContact.updateMany({
-      where: { customerId: customer.id, status: 'ENABLED' },
-      data: { status: 'DISABLED' }
-    });
-    await prisma.customer.update({
-      where: { id: customer.id },
-      data: {
-        customerCode: `${code}${archiveSuffix}`,
-        customerName: `${name}${archiveSuffix}`,
-        contactName: null,
-        contactPhone: null,
-        status: 'DISABLED'
-      }
-    });
-  }
+  // material-suggestions-reusable-history-fixture: reuse stable hidden history orders instead of deleting order history.
 }
 
 async function createRegressionData() {
@@ -150,32 +107,43 @@ async function createRegressionData() {
       where: { customerId: customer.id, status: 'ENABLED' },
       data: { status: 'DISABLED' }
     });
-    await prisma.customerOrder.create({
-      data: {
-        orderNo: `${orderPrefix}-${suffix}`,
-        customerId: customer.id,
+    const orderData = {
+      customerId: customer.id,
+      customerCode: customer.customerCode,
+      customerName: customer.customerName,
+      customerSnapshot: {
         customerCode: customer.customerCode,
-        customerName: customer.customerName,
-        customerSnapshot: {
-          customerCode: customer.customerCode,
-          customerName: customer.customerName
-        },
-        orderDate: new Date(`2026-05-${String(Math.min(index, 28)).padStart(2, '0')}T00:00:00.000Z`),
-        status: 'DRAFT',
-        lines: {
-          create: {
-            lineNo: 1,
-            partCode,
-            partName,
-            partThickness: 1,
-            partSpecification: 'summary-preview',
-            quantity: 1,
-            productionPlanQuantity: 1,
-            unit: '件',
-            partCategory: '通用件',
-            projectModel: '历史客户摘要验证'
-          }
-        }
+        customerName: customer.customerName
+      },
+      orderDate: new Date(`2026-05-${String(Math.min(index, 28)).padStart(2, '0')}T00:00:00.000Z`),
+      status: 'DRAFT'
+    };
+    const order = await prisma.customerOrder.upsert({
+      where: { orderNo: `${orderPrefix}-${suffix}` },
+      update: orderData,
+      create: {
+        orderNo: `${orderPrefix}-${suffix}`,
+        ...orderData
+      }
+    });
+    const lineData = {
+      partCode,
+      partName,
+      partThickness: 1,
+      partSpecification: 'summary-preview',
+      quantity: 1,
+      productionPlanQuantity: 1,
+      unit: '件',
+      partCategory: '通用件',
+      projectModel: '历史客户摘要验证'
+    };
+    await prisma.orderLine.upsert({
+      where: { orderId_lineNo: { orderId: order.id, lineNo: 1 } },
+      update: lineData,
+      create: {
+        orderId: order.id,
+        lineNo: 1,
+        ...lineData
       }
     });
   }

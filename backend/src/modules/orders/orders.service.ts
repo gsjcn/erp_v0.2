@@ -260,6 +260,48 @@ export class OrdersService {
     );
   }
 
+  private orderFixtureStartsWith(field: string, prefix: string) {
+    return { [field]: { startsWith: prefix, mode: 'insensitive' as const } };
+  }
+
+  private nullableOrderFixtureStartsWith(field: string, prefix: string) {
+    // 可空字段在 NOT + OR 中必须先排除 null，避免正常导入会话被误过滤。
+    return {
+      AND: [{ [field]: { not: null } }, this.orderFixtureStartsWith(field, prefix)]
+    };
+  }
+
+  private orderImportSessionFixtureWhere(): Prisma.OrderImportSessionWhereInput {
+    return {
+      OR: ORDER_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        this.nullableOrderFixtureStartsWith('createdBy', prefix),
+        {
+          rows: {
+            some: {
+              OR: [
+                this.orderFixtureStartsWith('orderNo', prefix),
+                this.orderFixtureStartsWith('customerName', prefix),
+                this.nullableOrderFixtureStartsWith('projectModel', prefix),
+                this.orderFixtureStartsWith('partCode', prefix),
+                this.orderFixtureStartsWith('partName', prefix)
+              ]
+            }
+          }
+        },
+        {
+          files: {
+            some: {
+              OR: [
+                this.orderFixtureStartsWith('fileName', prefix),
+                this.nullableOrderFixtureStartsWith('storedFileName', prefix)
+              ]
+            }
+          }
+        }
+      ])
+    };
+  }
+
   private async readOrderImportTemplateWorkbookFile(): Promise<Uint8Array | null> {
     const relativePath = ['outputs', 'component-order-template', this.orderImportTemplateFileName];
     const candidates = [
@@ -1230,9 +1272,12 @@ export class OrdersService {
     const requestedOffset = Number(query.offset ?? 0);
     const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 20, 1), 100);
     const offset = Math.max(Number.isFinite(requestedOffset) ? requestedOffset : 0, 0);
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const where: Prisma.OrderImportSessionWhereInput = includeTestFixtures ? {} : { NOT: this.orderImportSessionFixtureWhere() };
     const [totalCount, sessions] = await Promise.all([
-      this.prisma.orderImportSession.count(),
+      this.prisma.orderImportSession.count({ where }),
       this.prisma.orderImportSession.findMany({
+        where,
         orderBy: { createdAt: 'desc' },
         skip: offset,
         take: limit,

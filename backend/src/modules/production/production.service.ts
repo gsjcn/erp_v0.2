@@ -707,15 +707,47 @@ export class ProductionService {
     return !role.includes('计划') && (role.includes('车间主任') || role.includes('车间主管') || role.includes('主任'));
   }
 
+  private fixtureStartsWith(field: string, prefix: string) {
+    return { [field]: { startsWith: prefix, mode: 'insensitive' as const } };
+  }
+
+  private nullableFixtureStartsWith(field: string, prefix: string) {
+    // 可空字段在 NOT + OR 中必须先排除 null，避免正常业务数据被误过滤。
+    return {
+      AND: [{ [field]: { not: null } }, this.fixtureStartsWith(field, prefix)]
+    };
+  }
+
   private productionTaskFixtureWhere(): Prisma.ProductionTaskWhereInput {
     return {
       OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
-        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
-        { customerName: { startsWith: prefix, mode: 'insensitive' as const } },
-        { replenishmentSourceRequestNo: { startsWith: prefix, mode: 'insensitive' as const } }
+        this.fixtureStartsWith('productionTaskNo', prefix),
+        this.fixtureStartsWith('orderNo', prefix),
+        this.fixtureStartsWith('partCode', prefix),
+        this.fixtureStartsWith('partName', prefix),
+        this.fixtureStartsWith('customerName', prefix),
+        this.nullableFixtureStartsWith('replenishmentSourceRequestNo', prefix)
+      ])
+    };
+  }
+
+  private productionOrderFixtureWhere(): Prisma.CustomerOrderWhereInput {
+    return {
+      OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        this.fixtureStartsWith('orderNo', prefix),
+        this.fixtureStartsWith('customerCode', prefix),
+        this.fixtureStartsWith('customerName', prefix)
+      ])
+    };
+  }
+
+  private productionOrderLineFixtureWhere(): Prisma.OrderLineWhereInput {
+    return {
+      OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
+        this.fixtureStartsWith('partCode', prefix),
+        this.fixtureStartsWith('partName', prefix),
+        this.nullableFixtureStartsWith('projectModel', prefix),
+        { order: this.productionOrderFixtureWhere() }
       ])
     };
   }
@@ -723,13 +755,13 @@ export class ProductionService {
   private productionNoticeFixtureWhere(): Prisma.ProductionNoticeWhereInput {
     return {
       OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
-        { noticeNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
-        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
-        { managerName: { startsWith: prefix, mode: 'insensitive' as const } }
+        this.fixtureStartsWith('noticeNo', prefix),
+        this.fixtureStartsWith('orderNo', prefix),
+        this.nullableFixtureStartsWith('productionTaskNo', prefix),
+        this.nullableFixtureStartsWith('partCode', prefix),
+        this.nullableFixtureStartsWith('partName', prefix),
+        this.fixtureStartsWith('reason', prefix),
+        this.nullableFixtureStartsWith('managerName', prefix)
       ])
     };
   }
@@ -737,13 +769,13 @@ export class ProductionService {
   private productionReplenishmentRequestFixtureWhere(): Prisma.ProductionReplenishmentRequestWhereInput {
     return {
       OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
-        { requestNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
-        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
-        { replenishmentTaskNo: { startsWith: prefix, mode: 'insensitive' as const } }
+        this.fixtureStartsWith('requestNo', prefix),
+        this.fixtureStartsWith('orderNo', prefix),
+        this.nullableFixtureStartsWith('productionTaskNo', prefix),
+        this.fixtureStartsWith('partCode', prefix),
+        this.fixtureStartsWith('partName', prefix),
+        this.fixtureStartsWith('reason', prefix),
+        this.nullableFixtureStartsWith('replenishmentTaskNo', prefix)
       ])
     };
   }
@@ -751,13 +783,13 @@ export class ProductionService {
   private productionScrapRecordFixtureWhere(): Prisma.ProductionScrapRecordWhereInput {
     return {
       OR: PRODUCTION_TEST_FIXTURE_PREFIXES.flatMap((prefix) => [
-        { scrapNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { orderNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { productionTaskNo: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partCode: { startsWith: prefix, mode: 'insensitive' as const } },
-        { partName: { startsWith: prefix, mode: 'insensitive' as const } },
-        { reason: { startsWith: prefix, mode: 'insensitive' as const } },
-        { sourceRecordId: { startsWith: prefix, mode: 'insensitive' as const } }
+        this.fixtureStartsWith('scrapNo', prefix),
+        this.fixtureStartsWith('orderNo', prefix),
+        this.nullableFixtureStartsWith('productionTaskNo', prefix),
+        this.fixtureStartsWith('partCode', prefix),
+        this.fixtureStartsWith('partName', prefix),
+        this.fixtureStartsWith('reason', prefix),
+        this.fixtureStartsWith('sourceRecordId', prefix)
       ])
     };
   }
@@ -1181,6 +1213,13 @@ export class ProductionService {
     const year = query.year || new Date().getFullYear();
     const start = new Date(Date.UTC(year, 0, 1));
     const end = new Date(Date.UTC(year + 1, 0, 1));
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const orderLineWhere: Prisma.OrderLineWhereInput = { order: { orderDate: { gte: start, lt: end } } };
+    const productionTaskWhere: Prisma.ProductionTaskWhereInput = { order: { orderDate: { gte: start, lt: end } } };
+    if (!includeTestFixtures) {
+      orderLineWhere.NOT = this.productionOrderLineFixtureWhere();
+      productionTaskWhere.NOT = this.productionTaskFixtureWhere();
+    }
     const rows = new Map<
       string,
       {
@@ -1218,7 +1257,7 @@ export class ProductionService {
     const [orderLines, productionTasks] = await this.prisma.$transaction([
       // 年度生产情况按零件汇总，客户订单、生产计划、实际完成、订单发货分别计算，避免一个数量字段承担多个业务含义。
       this.prisma.orderLine.findMany({
-        where: { order: { orderDate: { gte: start, lt: end } } },
+        where: orderLineWhere,
         include: {
           order: {
             select: { orderNo: true }
@@ -1226,7 +1265,7 @@ export class ProductionService {
         }
       }),
       this.prisma.productionTask.findMany({
-        where: { order: { orderDate: { gte: start, lt: end } } },
+        where: productionTaskWhere,
         include: { inventoryBatch: true }
       })
     ]);

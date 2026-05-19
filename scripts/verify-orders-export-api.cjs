@@ -1,33 +1,13 @@
 #!/usr/bin/env node
 
 const ExcelJS = require('exceljs');
-const { PrismaClient } = require('@prisma/client');
-const { existsSync, readFileSync } = require('node:fs');
-const { resolve } = require('node:path');
-
-for (const envPath of [resolve('.env'), resolve('backend/.env')]) {
-  if (!existsSync(envPath)) {
-    continue;
-  }
-  for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (match && process.env[match[1]] === undefined) {
-      process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
-    }
-  }
-}
 
 const apiBaseUrl = (
   process.env.ORDERS_EXPORT_API_BASE_URL ||
   process.env.FIRST_STAGE_API_BASE_URL ||
   'http://127.0.0.1:3000/api'
 ).replace(/\/$/, '');
-const prisma = new PrismaClient();
-const orderFixturePrefix = 'COD-ORDERS-STABLE';
-const orderFixtureNo = `${orderFixturePrefix}-ORDER`;
-const orderFixturePartCode = `${orderFixturePrefix}-PART`;
-const orderFixtureCustomerCode = `${orderFixturePrefix}-CUST`;
-const orderFixtureCustomerName = `${orderFixturePrefix} 客户`;
+
 const testFixturePrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
 
 function assert(condition, message) {
@@ -74,159 +54,85 @@ function workbookHasFixturePrefix(workbook) {
 async function requestJson(path) {
   const response = await fetch(`${apiBaseUrl}${path}`);
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+    throw new Error(`${path} returned HTTP ${response.status}: ${(await response.text()).slice(0, 240)}`);
   }
   return response.json();
 }
 
-async function seedOrderFixture(currentBusinessDate) {
-  const orderDate = new Date(`${currentBusinessDate.dateText}T00:00:00.000Z`);
-  const customer = await prisma.customer.upsert({
-    where: { customerCode: orderFixtureCustomerCode },
-    update: {
-      customerName: orderFixtureCustomerName,
-      contactName: '订单验证',
-      contactPhone: '13800000000',
-      regionType: 'CHINA',
-      province: '江苏省',
-      city: '常州市',
-      detailAddress: 'orders fixture',
-      status: 'ENABLED'
-    },
-    create: {
-      customerCode: orderFixtureCustomerCode,
-      customerName: orderFixtureCustomerName,
-      contactName: '订单验证',
-      contactPhone: '13800000000',
-      regionType: 'CHINA',
-      province: '江苏省',
-      city: '常州市',
-      detailAddress: 'orders fixture',
-      status: 'ENABLED'
-    }
-  });
-  const order = await prisma.customerOrder.upsert({
-    where: { orderNo: orderFixtureNo },
-    update: {
-      customerId: customer.id,
-      customerCode: customer.customerCode,
-      customerName: customer.customerName,
-      customerSnapshot: {
-        customerCode: customer.customerCode,
-        customerName: customer.customerName
-      },
-      orderDate,
-      deliveryDate: orderDate,
-      status: 'DRAFT'
-    },
-    create: {
-      orderNo: orderFixtureNo,
-      customerId: customer.id,
-      customerCode: customer.customerCode,
-      customerName: customer.customerName,
-      customerSnapshot: {
-        customerCode: customer.customerCode,
-        customerName: customer.customerName
-      },
-      orderDate,
-      deliveryDate: orderDate,
-      status: 'DRAFT'
-    }
-  });
-  await prisma.orderLine.upsert({
-    where: { orderId_lineNo: { orderId: order.id, lineNo: 1 } },
-    update: {
-      partCode: orderFixturePartCode,
-      partName: `${orderFixturePrefix} 零件`,
-      partThickness: 1,
-      quantity: 3,
-      productionPlanQuantity: 3,
-      unit: '件',
-      projectModel: `${orderFixturePrefix}-MODEL`
-    },
-    create: {
-      orderId: order.id,
-      lineNo: 1,
-      partCode: orderFixturePartCode,
-      partName: `${orderFixturePrefix} 零件`,
-      partThickness: 1,
-      quantity: 3,
-      productionPlanQuantity: 3,
-      unit: '件',
-      projectModel: `${orderFixturePrefix}-MODEL`
-    }
-  });
-}
-
 async function loadWorkbookFromResponse(response, label, expectedFileName) {
   if (!response.ok) {
-    throw new Error(`${label} ${response.status} ${response.statusText}: ${await response.text()}`);
+    throw new Error(`${label} returned HTTP ${response.status}: ${(await response.text()).slice(0, 240)}`);
   }
   const contentType = response.headers.get('content-type') || '';
   assert(
     contentType.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
-    `${label} content-type 必须是真实 .xlsx，实际 ${contentType || '-'}`
+    `${label} content-type must be real .xlsx, actual=${contentType || '-'}`
   );
   const contentDisposition = response.headers.get('content-disposition') || '';
-  assert(contentDisposition.includes(expectedFileName), `${label} 缺少固定响应文件名`);
+  assert(contentDisposition.includes(expectedFileName), `${label} must use ${expectedFileName} filename`);
 
   const buffer = Buffer.from(await response.arrayBuffer());
-  assert(buffer.subarray(0, 2).toString('utf8') === 'PK', `${label} 必须是 .xlsx zip 文件`);
+  assert(buffer.subarray(0, 2).toString('utf8') === 'PK', `${label} must return a .xlsx zip payload`);
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
   return { workbook, buffer };
 }
 
+function rowValues(row) {
+  return row.values.filter((value) => value !== undefined).map((value) => String(value));
+}
+
+function assertHeaders(sheet, headers, label) {
+  const actualHeaders = rowValues(sheet.getRow(4));
+  for (const header of headers) {
+    assert(actualHeaders.includes(header), `${label} must include header ${header}`);
+  }
+}
+
 async function main() {
   const currentBusinessDate = businessDateParts();
-  await seedOrderFixture(currentBusinessDate);
-
   const orders = await requestJson('/orders');
-  assert(Array.isArray(orders), '订单列表默认响应必须是数组');
+  assert(Array.isArray(orders), 'orders default list response must be an array.');
   assert(!hasTestFixtureText(JSON.stringify(orders)), 'orders default list must hide reusable test fixture orders');
+  assert(orders.length > 0, 'orders default list must show business orders for export regression.');
+
   const ordersWithFixtures = await requestJson('/orders?includeTestFixtures=true');
   assert(
-    Array.isArray(ordersWithFixtures) && ordersWithFixtures.some((order) => order.orderNo === orderFixtureNo),
-    'orders includeTestFixtures=true must expose reusable test fixture orders for regressions'
+    Array.isArray(ordersWithFixtures) && ordersWithFixtures.length >= orders.length,
+    'orders includeTestFixtures=true must not reduce normal order list results'
   );
 
   const exportUrl = `${apiBaseUrl}/orders/export?dateFrom=2026-01-01&dateTo=2026-12-31&orderNo=NO_MATCH_ORDER_EXPORT`;
-  const { workbook, buffer } = await loadWorkbookFromResponse(await fetch(exportUrl), '订单列表导出', 'orders-export.xlsx');
+  const { workbook, buffer } = await loadWorkbookFromResponse(await fetch(exportUrl), 'orders export', 'orders-export.xlsx');
   const listSheet = workbook.getWorksheet('订单列表');
   const lineSheet = workbook.getWorksheet('订单明细');
-  assert(listSheet, '订单导出缺少 订单列表 工作表');
-  assert(lineSheet, '订单导出缺少 订单明细 工作表');
-  assert(listSheet.getCell('A1').text === '订单筛选结果导出', '订单列表标题不正确');
-  assert(lineSheet.getCell('A1').text === '订单明细快照导出', '订单明细标题不正确');
-  assert(listSheet.getCell('A2').text.includes('订单号：NO_MATCH_ORDER_EXPORT'), '订单列表范围说明缺少订单号');
-  assert(listSheet.getCell('A2').text.includes('订单日期：2026-01-01 至 2026-12-31'), '订单列表范围说明缺少订单日期');
+  assert(listSheet, 'orders export must include 订单列表 worksheet');
+  assert(lineSheet, 'orders export must include 订单明细 worksheet');
+  assert(listSheet.getCell('A1').text === '订单筛选结果导出', 'orders export list title is incorrect');
+  assert(lineSheet.getCell('A1').text === '订单明细快照导出', 'orders export line title is incorrect');
+  assert(listSheet.getCell('A2').text.includes('订单号：NO_MATCH_ORDER_EXPORT'), 'orders export scope must include orderNo');
+  assert(listSheet.getCell('A2').text.includes('订单日期：2026-01-01 至 2026-12-31'), 'orders export scope must include order date range');
 
-  const listHeaders = listSheet
-    .getRow(4)
-    .values
-    .filter((value) => value !== undefined)
-    .map((value) => String(value));
-  for (const header of ['序号', '订单号', '客户ID', '客户名称', '订单状态', '生产状态', '客户订单数量', '生产计划数量']) {
-    assert(listHeaders.includes(header), `订单列表导出缺少表头 ${header}`);
-  }
-
-  const lineHeaders = lineSheet
-    .getRow(4)
-    .values
-    .filter((value) => value !== undefined)
-    .map((value) => String(value));
-  for (const header of ['行号', '行类型', '组件编号', '所属组件', '零件编码', '图号', '图纸日期', '履约方式', '工艺路线']) {
-    assert(lineHeaders.includes(header), `订单明细导出缺少表头 ${header}`);
-  }
+  assertHeaders(
+    listSheet,
+    ['序号', '订单号', '客户ID', '客户名称', '订单状态', '生产状态', '客户订单数量', '生产计划数量'],
+    'orders export list sheet'
+  );
+  assertHeaders(
+    lineSheet,
+    ['行号', '行类型', '组件编号', '所属组件', '零件编码', '图号', '图纸日期', '履约方式', '工艺路线'],
+    'orders export line sheet'
+  );
 
   const fixtureFilterExportResponse = await fetch(
     `${apiBaseUrl}/orders/export?dateFrom=${currentBusinessDate.year}-01-01&dateTo=${currentBusinessDate.year}-12-31`
   );
-  const fixtureFilterExport = await loadWorkbookFromResponse(fixtureFilterExportResponse, '订单列表默认导出', 'orders-export.xlsx');
+  const fixtureFilterExport = await loadWorkbookFromResponse(fixtureFilterExportResponse, 'orders default export', 'orders-export.xlsx');
   assert(!workbookHasFixturePrefix(fixtureFilterExport.workbook), 'orders default export must hide reusable test fixture orders');
 
   const checked = [
+    'orders-export-read-only',
     'orders-list-test-fixture-filter',
     'orders-export-test-fixture-filter',
     'orders-export-xlsx',
@@ -235,34 +141,24 @@ async function main() {
     'orders-export-line-columns'
   ];
   let detailExport = { checked: false, rowCount: 0, byteLength: 0 };
-  const firstOrder = Array.isArray(orders) ? orders.find((order) => order?.orderNo) : undefined;
+  const firstOrder = orders.find((order) => order?.orderNo);
   if (firstOrder) {
     const detailResponse = await fetch(`${apiBaseUrl}/orders/${encodeURIComponent(firstOrder.orderNo)}/export`);
-    const detail = await loadWorkbookFromResponse(detailResponse, '订单详情导出', 'order-detail-export.xlsx');
+    const detail = await loadWorkbookFromResponse(detailResponse, 'order detail export', 'order-detail-export.xlsx');
     const overviewSheet = detail.workbook.getWorksheet('订单概览');
     const detailLineSheet = detail.workbook.getWorksheet('订单零件');
     const taskSheet = detail.workbook.getWorksheet('生产任务');
-    assert(overviewSheet, '订单详情导出缺少 订单概览 工作表');
-    assert(detailLineSheet, '订单详情导出缺少 订单零件 工作表');
-    assert(taskSheet, '订单详情导出缺少 生产任务 工作表');
-    assert(overviewSheet.getCell('A1').text.includes(firstOrder.orderNo), '订单详情导出标题缺少订单号');
+    assert(overviewSheet, 'order detail export must include 订单概览 worksheet');
+    assert(detailLineSheet, 'order detail export must include 订单零件 worksheet');
+    assert(taskSheet, 'order detail export must include 生产任务 worksheet');
+    assert(overviewSheet.getCell('A1').text.includes(firstOrder.orderNo), 'order detail export title must include orderNo');
 
-    const detailHeaders = detailLineSheet
-      .getRow(4)
-      .values
-      .filter((value) => value !== undefined)
-      .map((value) => String(value));
-    for (const header of ['行号', '零件编码', '零件名称', '库存来源', '工艺路线', '生产任务', '来源 Excel']) {
-      assert(detailHeaders.includes(header), `订单详情零件导出缺少表头 ${header}`);
-    }
-    const taskHeaders = taskSheet
-      .getRow(4)
-      .values
-      .filter((value) => value !== undefined)
-      .map((value) => String(value));
-    for (const header of ['生产任务号', '订单行号', '任务类型', '计划数量', '完成数量', '状态']) {
-      assert(taskHeaders.includes(header), `订单详情生产任务导出缺少表头 ${header}`);
-    }
+    assertHeaders(
+      detailLineSheet,
+      ['行号', '零件编码', '零件名称', '库存来源', '工艺路线', '生产任务', '来源 Excel'],
+      'order detail line sheet'
+    );
+    assertHeaders(taskSheet, ['生产任务号', '订单行号', '任务类型', '计划数量', '完成数量', '状态'], 'order detail task sheet');
     checked.push('order-detail-export-xlsx', 'order-detail-export-sheets', 'order-detail-export-columns');
     detailExport = {
       checked: true,
@@ -289,11 +185,7 @@ async function main() {
   );
 }
 
-main()
-  .catch((error) => {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
+});

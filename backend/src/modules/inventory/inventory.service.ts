@@ -437,18 +437,29 @@ export class InventoryService {
     );
   }
 
+  private inventoryFixtureStartsWith(field: string, prefix: string) {
+    return { [field]: { startsWith: prefix } };
+  }
+
+  private nullableInventoryFixtureStartsWith(field: string, prefix: string) {
+    // 可空字段在 NOT + OR 中必须先排除 null，避免正常 BOM 审批记录被误过滤。
+    return {
+      AND: [{ [field]: { not: null } }, this.inventoryFixtureStartsWith(field, prefix)]
+    };
+  }
+
   private modelBomScopeApprovalFixtureWhere(): Prisma.ModelBomScopeApprovalRequestWhereInput {
     return {
       OR: this.testFixturePrefixes.flatMap((prefix) => [
-        { requestNo: { startsWith: prefix } },
-        { requestedBomName: { startsWith: prefix } },
-        { requestedCustomerNameSnapshot: { startsWith: prefix } },
-        { requestedProjectModel: { startsWith: prefix } },
-        { requestedScopeKey: { startsWith: prefix } },
-        { requestedProjectModelScopeKey: { startsWith: prefix } },
-        { bom: { is: { bomName: { startsWith: prefix } } } },
-        { bom: { is: { projectModel: { startsWith: prefix } } } },
-        { bom: { is: { customerNameSnapshot: { startsWith: prefix } } } }
+        this.inventoryFixtureStartsWith('requestNo', prefix),
+        this.inventoryFixtureStartsWith('requestedBomName', prefix),
+        this.nullableInventoryFixtureStartsWith('requestedCustomerNameSnapshot', prefix),
+        this.inventoryFixtureStartsWith('requestedProjectModel', prefix),
+        this.inventoryFixtureStartsWith('requestedScopeKey', prefix),
+        this.inventoryFixtureStartsWith('requestedProjectModelScopeKey', prefix),
+        { bom: { is: this.inventoryFixtureStartsWith('bomName', prefix) } },
+        { bom: { is: this.inventoryFixtureStartsWith('projectModel', prefix) } },
+        { bom: { is: this.nullableInventoryFixtureStartsWith('customerNameSnapshot', prefix) } }
       ])
     };
   }
@@ -480,6 +491,42 @@ export class InventoryService {
       batch.productionTask?.order?.orderNo,
       batch.productionTask?.order?.customerName
     );
+  }
+
+  private inventoryTransactionFixtureWhere(): Prisma.InventoryTransactionWhereInput {
+    return {
+      OR: this.testFixturePrefixes.flatMap((prefix) => [
+        this.inventoryFixtureStartsWith('transactionNo', prefix),
+        this.inventoryFixtureStartsWith('partCode', prefix),
+        this.inventoryFixtureStartsWith('partName', prefix),
+        this.nullableInventoryFixtureStartsWith('orderNo', prefix),
+        this.nullableInventoryFixtureStartsWith('productionTaskNo', prefix),
+        this.nullableInventoryFixtureStartsWith('sourceRecordId', prefix),
+        { batch: { is: this.inventoryBatchFixtureWhere() } }
+      ])
+    };
+  }
+
+  private inventoryBatchFixtureWhere(): Prisma.InventoryBatchWhereInput {
+    return {
+      OR: this.testFixturePrefixes.flatMap((prefix) => [
+        this.inventoryFixtureStartsWith('batchNo', prefix),
+        this.inventoryFixtureStartsWith('partCode', prefix),
+        this.inventoryFixtureStartsWith('partName', prefix),
+        this.nullableInventoryFixtureStartsWith('sourceOrderNo', prefix),
+        this.nullableInventoryFixtureStartsWith('sourceCustomerName', prefix),
+        this.nullableInventoryFixtureStartsWith('sourceProductionTaskNo', prefix),
+        this.nullableInventoryFixtureStartsWith('replenishmentSourceRequestNo', prefix),
+        { sourceOrder: { is: this.inventoryFixtureStartsWith('orderNo', prefix) } },
+        { sourceOrder: { is: this.inventoryFixtureStartsWith('customerCode', prefix) } },
+        { sourceOrder: { is: this.inventoryFixtureStartsWith('customerName', prefix) } },
+        { productionTask: { is: this.inventoryFixtureStartsWith('productionTaskNo', prefix) } },
+        { productionTask: { is: this.inventoryFixtureStartsWith('orderNo', prefix) } },
+        { productionTask: { is: this.inventoryFixtureStartsWith('partCode', prefix) } },
+        { productionTask: { is: this.inventoryFixtureStartsWith('partName', prefix) } },
+        { productionTask: { is: this.inventoryFixtureStartsWith('customerName', prefix) } }
+      ])
+    };
   }
 
   private async resolveInventoryCustomerScope(customerId?: string): Promise<InventoryCustomerScope | null> {
@@ -593,6 +640,9 @@ export class InventoryService {
     }
 
     const where: Prisma.InventoryTransactionWhereInput = { transactionType: 'OUT' };
+    if (query.includeTestFixtures !== 'true') {
+      where.NOT = this.inventoryTransactionFixtureWhere();
+    }
     if (query.warehouseId) {
       where.warehouseId = query.warehouseId;
     }
@@ -857,6 +907,82 @@ export class InventoryService {
     return row.stockAlertEnabled && alertQuantity !== null && Number(row.availableQuantity ?? 0) <= alertQuantity;
   }
 
+  private async findMaterialMemoryScopePartCodes(query: MaterialQueryDto) {
+    const customerId = query.customerId?.trim();
+    const projectModel = query.projectModel?.trim();
+    if (!customerId && !projectModel) {
+      return null;
+    }
+
+    const scopedPartCodes = new Set<string>();
+    const projectModelOr: Prisma.ModelBomWhereInput[] = projectModel
+      ? [{ projectModel: { contains: projectModel, mode: 'insensitive' } }, { projectModelScopeKey: 'ALL' }]
+      : [];
+    const bomScopeConditions: Prisma.ModelBomWhereInput[] = [];
+    if (customerId) {
+      bomScopeConditions.push({
+        OR: [
+          { customerId },
+          { customerId: null, customerScopeMode: 'ALL' },
+          { customerId: null, customerScopeMode: 'SELECTED', customerScopes: { some: { customerId, status: 'ENABLED' } } }
+        ]
+      });
+    }
+    if (projectModelOr.length > 0) {
+      bomScopeConditions.push({ OR: projectModelOr });
+    }
+
+    const [applicabilities, bomLines, orderLines] = await Promise.all([
+      this.prisma.materialApplicability.findMany({
+        where: {
+          status: 'ENABLED',
+          ...(customerId ? { OR: [{ customerId }, { customerId: null }] } : {}),
+          ...(projectModel
+            ? { AND: [{ OR: [{ projectModel: { contains: projectModel, mode: 'insensitive' } }, { projectModelScopeKey: 'ALL' }] }] }
+            : {})
+        },
+        select: { material: { select: { partCode: true } } }
+      }),
+      this.prisma.modelBomLine.findMany({
+        where: {
+          status: 'ENABLED',
+          bom: {
+            status: 'ENABLED',
+            ...(bomScopeConditions.length > 0 ? { AND: bomScopeConditions } : {})
+          }
+        },
+        select: { material: { select: { partCode: true } } }
+      }),
+      this.prisma.orderLine.findMany({
+        where: {
+          ...(customerId ? { order: { customerId } } : {}),
+          ...(projectModel ? { projectModel: { contains: projectModel, mode: 'insensitive' } } : {})
+        },
+        select: { partCode: true }
+      })
+    ]);
+
+    for (const row of applicabilities) {
+      const partCode = row.material.partCode.trim().toLocaleLowerCase();
+      if (partCode) {
+        scopedPartCodes.add(partCode);
+      }
+    }
+    for (const row of bomLines) {
+      const partCode = row.material.partCode.trim().toLocaleLowerCase();
+      if (partCode) {
+        scopedPartCodes.add(partCode);
+      }
+    }
+    for (const row of orderLines) {
+      const partCode = row.partCode.trim().toLocaleLowerCase();
+      if (partCode) {
+        scopedPartCodes.add(partCode);
+      }
+    }
+    return scopedPartCodes;
+  }
+
   async materials(query: MaterialQueryDto) {
     const status = query.status || 'ENABLED';
     const normalizedKeyword = normalizeSearchKeyword(query.keyword);
@@ -864,8 +990,16 @@ export class InventoryService {
     const includeTestFixtures = query.includeTestFixtures === 'true';
     const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
     const offset = Math.max(Number(query.offset || 0), 0);
-    const historyByCode = normalizedKeyword
-      ? await this.findMaterialSuggestionHistory({ keyword: query.keyword }, query.keyword)
+    const scopePartCodes = await this.findMaterialMemoryScopePartCodes(query);
+    const historyByCode = normalizedKeyword || scopePartCodes
+      ? await this.findMaterialSuggestionHistory(
+          {
+            keyword: query.keyword,
+            customerId: query.customerId,
+            projectModel: query.projectModel
+          },
+          query.keyword
+        )
       : new Map<string, MaterialSuggestionHistory>();
     const materialRows = await this.prisma.material.findMany({
       where: { status },
@@ -873,10 +1007,12 @@ export class InventoryService {
     });
     const visibleMaterialRows = includeTestFixtures ? materialRows : materialRows.filter((material) => !this.isTestFixtureMaterial(material));
     const stockAlertFilter = this.normalizeStockAlertFilter(query.stockAlert);
-    let materials = visibleMaterialRows.filter(
-      (material) =>
-        this.materialMemoryMatchesKeyword(material, query.keyword) || historyByCode.has(material.partCode.trim().toLocaleLowerCase())
-    );
+    let materials = visibleMaterialRows.filter((material) => {
+      const partCodeKey = material.partCode.trim().toLocaleLowerCase();
+      const materialMatchesKeyword = this.materialMemoryMatchesKeyword(material, query.keyword) || historyByCode.has(partCodeKey);
+      const materialMatchesScope = !scopePartCodes || scopePartCodes.has(partCodeKey);
+      return materialMatchesKeyword && materialMatchesScope;
+    });
     if (stockAlertFilter === 'ENABLED') {
       materials = materials.filter((material) => material.stockAlertEnabled);
     } else if (stockAlertFilter === 'DISABLED') {
@@ -1098,7 +1234,7 @@ export class InventoryService {
     this.addInventoryExportSheet(workbook, {
       sheetName: '零件基础资料',
       title: '零件基础库导出',
-      scopeText: this.materialMemoryExportScopeText(query),
+      scopeText: await this.materialMemoryExportScopeText(query),
       headers,
       rows: exportRows
     });
@@ -8225,6 +8361,7 @@ export class InventoryService {
     }
 
     const sourceType = query.sourceType || 'ALL';
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const customerScope = await this.resolveInventoryCustomerScope(query.customerId);
     const where: Prisma.InventoryBatchWhereInput = {
       partCode: { equals: normalizedPartCode, mode: 'insensitive' },
@@ -8264,8 +8401,9 @@ export class InventoryService {
       orderBy: [{ quantity: 'asc' }, { createdAt: 'asc' }, { batchNo: 'asc' }]
     });
 
+    const visibleBatches = includeTestFixtures ? batches : batches.filter((batch) => !this.isTestFixtureInventoryBatch(batch));
     const orderedBatches = customerScope
-      ? [...batches].sort((left, right) => {
+      ? [...visibleBatches].sort((left, right) => {
           // 库存来源核对只调整当前客户来源的展示优先级，不过滤全局备货，避免新客户无法使用可用库存。
           const leftCustomerRank = this.inventoryBatchMatchesCustomerScope(left, customerScope) ? 0 : 1;
           const rightCustomerRank = this.inventoryBatchMatchesCustomerScope(right, customerScope) ? 0 : 1;
@@ -8276,13 +8414,14 @@ export class InventoryService {
             String(left.batchNo || '').localeCompare(String(right.batchNo || ''), 'zh-Hans-CN')
           );
         })
-      : batches;
+      : visibleBatches;
     const sourceTaskMap = await this.findSourceTaskMap(orderedBatches.map((batch) => batch.sourceProductionTaskNo));
     const material = await this.prisma.material.findFirst({
       where: { partCode: { equals: normalizedPartCode, mode: 'insensitive' } }
     });
+    const visibleMaterial = includeTestFixtures || !material || !this.isTestFixtureMaterial(material) ? material : null;
     const firstBatch = orderedBatches[0];
-    const unit = query.unit?.trim() || firstBatch?.unit || material?.unit || '件';
+    const unit = query.unit?.trim() || firstBatch?.unit || visibleMaterial?.unit || '件';
 
     const sources = orderedBatches.map((batch) => this.toInventorySourceDetail(batch, sourceTaskMap, currentOrder));
     const withPage = query.withPage === 'true';
@@ -8291,8 +8430,8 @@ export class InventoryService {
     const pagedSources = withPage ? sources.slice(offset, offset + limit) : sources;
     const totalSourceCount = sources.length;
     return {
-      partCode: firstBatch?.partCode || material?.partCode || normalizedPartCode,
-      partName: firstBatch?.partName || material?.partName || '',
+      partCode: firstBatch?.partCode || visibleMaterial?.partCode || normalizedPartCode,
+      partName: firstBatch?.partName || visibleMaterial?.partName || '',
       unit,
       availableQuantity: sources.reduce((sum, row) => sum + row.quantity, 0),
       batchCount: totalSourceCount,
@@ -9311,9 +9450,11 @@ export class InventoryService {
     return status || '';
   }
 
-  private materialMemoryExportScopeText(query: MaterialQueryDto) {
+  private async materialMemoryExportScopeText(query: MaterialQueryDto) {
     return [
       `关键词：${query.keyword?.trim() || '全部'}`,
+      `客户范围：${await this.inventoryExportCustomerLabel(query.customerId)}`,
+      `机型 / 项目：${query.projectModel?.trim() || '全部'}`,
       `状态：${this.materialMemoryExportStatusText(query.status || 'ENABLED')}`,
       `库存报警：${this.inventoryExportStockAlertLabel(query.stockAlert)}`
     ].join('；');

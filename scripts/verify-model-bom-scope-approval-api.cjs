@@ -122,15 +122,30 @@ async function createScopeApprovalCustomer(suffix) {
     where: { customerId: customer.id, status: 'ENABLED' },
     data: { status: 'DISABLED', isPrimary: false }
   });
-  await prisma.customerContact.create({
-    data: {
+  const existingContact = await prisma.customerContact.findFirst({
+    where: {
       customerId: customer.id,
       contactName: '范围审批验证',
-      contactPhone: '13800000000',
-      isPrimary: true,
-      status: 'ENABLED'
-    }
+      contactPhone: '13800000000'
+    },
+    orderBy: { createdAt: 'asc' }
   });
+  if (existingContact?.id) {
+    await prisma.customerContact.update({
+      where: { id: existingContact.id },
+      data: { isPrimary: true, status: 'ENABLED' }
+    });
+  } else {
+    await prisma.customerContact.create({
+      data: {
+        customerId: customer.id,
+        contactName: '范围审批验证',
+        contactPhone: '13800000000',
+        isPrimary: true,
+        status: 'ENABLED'
+      }
+    });
+  }
   assert(customer?.id, 'scope approval regression must create its own enabled customer');
   return customer;
 }

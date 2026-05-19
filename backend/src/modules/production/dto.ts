@@ -477,4 +477,8 @@ export class ProductionAnnualSummaryQueryDto {
   @IsInt()
   @Min(2000)
   year?: number;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }

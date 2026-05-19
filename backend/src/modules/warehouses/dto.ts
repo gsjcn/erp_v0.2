@@ -170,6 +170,10 @@ export class WarehouseWorkQueryDto {
   @IsOptional()
   @IsDateString()
   dateTo?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class WarehouseTransactionQueryDto {
@@ -208,6 +212,10 @@ export class WarehouseTransactionQueryDto {
   @IsOptional()
   @IsString()
   withPage?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 }
 
 export class WarehouseNoticeQueryDto {

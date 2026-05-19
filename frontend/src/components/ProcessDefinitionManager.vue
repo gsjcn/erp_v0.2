@@ -15,7 +15,7 @@
           @clear="reloadDefinitionsFromFirstPage"
         />
         <el-button :loading="loading" @click="reloadDefinitionsFromFirstPage">搜索</el-button>
-        <el-button v-if="!readOnly" :icon="Download" :loading="exporting" @click="exportDefinitionsExcel">导出 Excel</el-button>
+        <el-button title="导出Excel" v-if="!readOnly" :icon="Download" :loading="exporting" @click="exportDefinitionsExcel">导出 Excel</el-button>
         <el-select
           v-if="showStatusFilter && !readOnly"
           v-model="statusFilter"
@@ -27,7 +27,7 @@
           <el-option label="停用" value="DISABLED" />
           <el-option label="全部" value="ALL" />
         </el-select>
-        <el-button v-if="!readOnly" type="primary" @click="openCreateDialog">新建工序</el-button>
+        <el-button v-if="!readOnly" type="primary" title="新建标准工序" @click="openCreateDialog">新建工序</el-button>
         <span v-else class="mobile-readonly-note">手机端只查看标准工序</span>
       </div>
     </div>
@@ -38,18 +38,21 @@
         <el-button-group>
           <el-button
             :icon="Minus"
+            title="降低标准工序列表高度"
             :disabled="processDefinitionListHeight <= processDefinitionListHeightLimits.min"
             aria-label="降低标准工序列表高度"
             @click="adjustProcessDefinitionListHeight(-processDefinitionListHeightLimits.step)"
           />
           <el-button
             :icon="Plus"
+            title="提高标准工序列表高度"
             :disabled="processDefinitionListHeight >= processDefinitionListHeightLimits.max"
             aria-label="提高标准工序列表高度"
             @click="adjustProcessDefinitionListHeight(processDefinitionListHeightLimits.step)"
           />
           <el-button
             :icon="RefreshLeft"
+            title="恢复标准工序列表默认高度"
             :disabled="processDefinitionListHeight === processDefinitionListDefaultHeight"
             aria-label="恢复标准工序列表默认高度"
             @click="resetProcessDefinitionListHeight"
@@ -82,25 +85,34 @@
             <small v-if="definition.remark" :title="definition.remark">{{ processDefinitionRemarkPreview(definition) }}</small>
             <small v-else>暂无备注</small>
           </div>
-          <el-button class="process-definition-detail-toggle" link type="primary" @click.stop="toggleMobileDefinitionCard(definition.id)">
+          <el-button
+            class="process-definition-detail-toggle"
+            link
+            type="primary"
+            :title="isMobileDefinitionExpanded(definition.id) ? '收起标准工序详情' : '查看标准工序详情'"
+            @click.stop="toggleMobileDefinitionCard(definition.id)"
+          >
             {{ isMobileDefinitionExpanded(definition.id) ? '收起' : '详情' }}
           </el-button>
           <div v-if="!readOnly" class="process-definition-actions">
-            <template v-if="definition.status === 'DISABLED'">
+            <div v-if="definition.status === 'DISABLED'" class="process-definition-action-group">
+              <span class="process-definition-action-label">状态</span>
               <el-button
                 link
                 type="success"
                 :loading="restoringDefinitionId === definition.id"
                 :disabled="Boolean(restoringDefinitionId)"
+                title="恢复启用标准工序"
                 @click="restoreDefinition(definition)"
               >
-                恢复启用
+                恢复
               </el-button>
-            </template>
-            <template v-else>
-              <el-button link type="primary" @click="openEditDialog(definition)">编辑</el-button>
-              <el-button link type="danger" @click="openDeleteDialog(definition)">停用</el-button>
-            </template>
+            </div>
+            <div v-else class="process-definition-action-group">
+              <span class="process-definition-action-label">维护</span>
+              <el-button link type="primary" title="编辑标准工序" @click="openEditDialog(definition)">编辑</el-button>
+              <el-button link type="danger" title="停用标准工序" @click="openDeleteDialog(definition)">停用</el-button>
+            </div>
           </div>
           <span v-else class="mobile-readonly-note process-definition-readonly">手机端只读</span>
         </article>
@@ -149,7 +161,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeDefinitionDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveDefinition">保存工序</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveDefinition"
+          title="保存工序">保存工序</el-button>
       </template>
     </el-dialog>
 
@@ -172,7 +185,8 @@
       </div>
       <template #footer>
         <el-button :disabled="deleting" @click="closeDeleteDialog">取消</el-button>
-        <el-button type="danger" :loading="deleting" :disabled="deleting" @click="deleteDefinition">停用工序</el-button>
+        <el-button type="danger" :loading="deleting" :disabled="deleting" @click="deleteDefinition"
+  title="停用工序">停用工序</el-button>
       </template>
     </el-dialog>
   </section>
@@ -660,8 +674,24 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
 .process-definition-actions {
   display: flex;
   flex-shrink: 0;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.process-definition-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.process-definition-action-label {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .process-definition-actions .el-button {
@@ -770,10 +800,13 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
     grid-column: 1 / -1;
     display: none;
     justify-content: stretch;
+    gap: 8px;
   }
 
   .process-definition-card.expanded .process-definition-actions {
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .process-definition-card:not(.expanded) small {
@@ -783,6 +816,15 @@ onBeforeUnmount(() => window.clearTimeout(searchTimer.value));
   .process-definition-actions .el-button {
     flex: 1 1 96px;
     min-height: 44px;
+  }
+
+  .process-definition-action-group {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .process-definition-action-label {
+    flex: 0 0 36px;
   }
 }
 </style>

@@ -318,6 +318,8 @@ function verifyFrontendDockerAndNginxProxy() {
 
 function verifyBackendDockerfileMigrationDeploy() {
   const dockerfile = readRequiredFile('backend/Dockerfile');
+  assertIncludes(dockerfile, 'COPY frontend/package.json ./frontend/package.json', 'backend Dockerfile workspace install');
+  assertIncludes(dockerfile, 'RUN npm ci', 'backend Dockerfile workspace install');
   assertIncludes(dockerfile, 'RUN npm --workspace backend run db:generate', 'backend Dockerfile build stage');
   assertIncludes(dockerfile, 'COPY --from=build /app/backend/scripts ./backend/scripts', 'backend Dockerfile runtime stage');
   assertIncludes(dockerfile, 'COPY --from=build /app/database/prisma ./database/prisma', 'backend Dockerfile runtime stage');
@@ -326,6 +328,9 @@ function verifyBackendDockerfileMigrationDeploy() {
     'node scripts/prisma-with-root-env.cjs migrate deploy --schema ../database/prisma/schema.prisma && node dist/main.js',
     'backend Dockerfile runtime CMD'
   );
+  if (dockerfile.includes('RUN npm ci --workspace backend')) {
+    addFailure('backend Dockerfile must run root npm ci so workspace-hoisted dependencies are available during db:generate.');
+  }
 }
 
 function verifyPostgreSqlPrismaPrimaryDatabase() {
@@ -414,11 +419,31 @@ function verifyBackendEnvBootstrapAndPrismaScripts() {
     '"backend:db:deploy": "npm --workspace backend run db:deploy"',
     '"backend:db:seed": "npm --workspace backend run db:seed"',
     '"verify:prisma-client-enums": "node scripts/verify-prisma-client-enums.cjs"',
+    '"verify:docker-runtime": "node scripts/verify-docker-runtime.cjs"',
+    '"verify:frontend-smoke": "node scripts/verify-frontend-smoke.cjs"',
+    '"verify:local-runtime": "npm run verify:docker-runtime && npm run verify:frontend-smoke && npm run verify:business-data-baseline-api && npm run verify:business-fixture-visibility-api"',
+    '"verify:customer-management-api": "node scripts/verify-customer-management-api.cjs"',
+    '"verify:customer-contact-management-api": "node scripts/verify-customer-contact-management-api.cjs"',
+    '"verify:order-management-api": "node scripts/verify-order-management-api.cjs"',
+    '"verify:material-management-api": "node scripts/verify-material-management-api.cjs"',
+    '"verify:material-drawing-management-api": "node scripts/verify-material-drawing-management-api.cjs"',
+    '"verify:model-bom-management-api": "node scripts/verify-model-bom-management-api.cjs"',
+    '"verify:material-transform-management-api": "node scripts/verify-material-transform-management-api.cjs"',
+    '"verify:inventory-management-api": "node scripts/verify-inventory-management-api.cjs"',
+    '"verify:production-management-api": "node scripts/verify-production-management-api.cjs"',
+    '"verify:statistics-management-api": "node scripts/verify-statistics-management-api.cjs"',
+    '"verify:business-data-baseline-api": "node scripts/verify-business-data-baseline-api.cjs"',
+    '"verify:business-fixture-visibility-api": "node scripts/verify-business-fixture-visibility-api.cjs"',
+    '"verify:warehouse-management-api": "node scripts/verify-warehouse-management-api.cjs"',
+    '"verify:warehouse-work-management-api": "node scripts/verify-warehouse-work-management-api.cjs"',
+    '"verify:process-management-api": "node scripts/verify-process-management-api.cjs"',
+    '"verify:notice-center-api": "node scripts/verify-notice-center-api.cjs"',
+    '"verify:production-exception-management-api": "node scripts/verify-production-exception-management-api.cjs"',
     '"verify:first-stage:api": "node scripts/verify-first-stage-api.cjs"',
     '"verify:first-stage:api:after-build": "node scripts/verify-first-stage-api.cjs --skip-build"',
     '"verify:first-stage:strict"',
     'npm run backend:db:generate && npm run verify:prisma-client-enums && npm run backend:verify:first-stage',
-    'npm run verify:first-stage:api:after-build && npm run frontend:build',
+    'npm run verify:first-stage:api:after-build && npm run frontend:build && npm run verify:frontend-smoke',
     '"docker:up": "docker compose up -d --build"',
     '"docker:down": "docker compose down"',
     '"docker:ps": "docker compose ps"',
@@ -459,12 +484,16 @@ function verifyReadmeDockerDatabaseCommands() {
     'npm run docker:db:deploy',
     'npm run docker:db:seed',
     'npm run docker:db:status',
+    'npm run verify:docker-runtime',
     'npm run docker:db:backup',
     'npm run docker:db:verify-backups',
     'npm run docker:db:restore-plan',
     '--file=baisheng_erp_YYYYMMDD_HHMMSS.dump',
     '--write-missing',
     'baisheng-erp-postgres',
+    'baisheng-erp-backend',
+    'baisheng-erp-frontend',
+    'workspace',
     'POSTGRES_DATA_DIR',
     'POSTGRES_BACKUP_DIR',
     '测试阶段只认这一套项目库'
@@ -476,6 +505,30 @@ function verifyReadmeDockerDatabaseCommands() {
 
   if (readme.includes('docker compose exec backend npm run db:seed')) {
     addFailure('README should use docker:db:seed so test data resets are backed up first.');
+  }
+}
+
+function verifyDockerRuntimeUtility() {
+  const source = readRequiredFile('scripts/verify-docker-runtime.cjs');
+  const requiredSnippets = [
+    "['postgres', { name: 'baisheng-erp-postgres'",
+    "['backend', { name: 'baisheng-erp-backend'",
+    "['frontend', { name: 'baisheng-erp-frontend'",
+    'function verifySingleProjectRuntime',
+    'project runtime uniqueness',
+    'sameProjectContainers',
+    'Current project should have exactly one',
+    'Current project should use exactly one PostgreSQL container: baisheng-erp-postgres',
+    "requiredHostIp: '127.0.0.1'",
+    'must not expose PostgreSQL on a non-localhost host IP',
+    'com.docker.compose.project.working_dir',
+    'com.docker.compose.service',
+    'backend health',
+    'frontend root'
+  ];
+
+  for (const snippet of requiredSnippets) {
+    assertIncludes(source, snippet, 'scripts/verify-docker-runtime.cjs runtime uniqueness');
   }
 }
 
@@ -496,6 +549,11 @@ function verifyDockerDbUtility() {
     'function listDatabaseBackups()',
     'function verifyDatabaseBackups',
     'function printRestorePlan',
+    'function assertCurrentPostgresTarget',
+    "dockerOutput(['compose', 'ps', '-q', 'postgres'])",
+    "dockerOutput(['inspect', composeContainerId, '--format', '{{.Name}}'])",
+    'Refusing to operate on unexpected PostgreSQL container',
+    'This ERP project only uses',
     'function selectedRestoreBackupInfo',
     'function normalizeBackupFileName',
     'restore-plan --file only accepts a backup file name',
@@ -582,6 +640,7 @@ verifyBackendDockerfileMigrationDeploy();
 verifyPostgreSqlPrismaPrimaryDatabase();
 verifyBackendEnvBootstrapAndPrismaScripts();
 verifyReadmeDockerDatabaseCommands();
+verifyDockerRuntimeUtility();
 verifyDockerDbUtility();
 verifyApiRegressionScriptCoverage();
 verifyDatabaseSafetyMigrations();

@@ -12,10 +12,10 @@
         <RouterLink to="/inventory/model-boms">
           <el-button>机型零件包</el-button>
         </RouterLink>
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="inventoryExporting" @click="exportInventoryExcel">
+        <el-button title="导出Excel" v-if="!isMobileLayout" :icon="Download" :loading="inventoryExporting" @click="exportInventoryExcel">
           导出 Excel
         </el-button>
-        <el-button :loading="loading" @click="loadInventory">刷新</el-button>
+        <el-button title="刷新整页库存数据" :loading="inventoryPageRefreshing" @click="refreshInventoryPage">刷新</el-button>
       </div>
     </div>
 
@@ -129,8 +129,8 @@
           <el-option label="未启用" value="DISABLED" />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="searchInventory">查询</el-button>
-      <el-button @click="reset">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="searchInventory">查询</el-button>
+      <el-button title="重置" @click="reset">重置</el-button>
     </div>
 
     <div v-if="inventoryQueryNoticeRows.length" class="inventory-query-notice">
@@ -164,7 +164,7 @@
             <el-option label="已启用" value="ENABLED" />
             <el-option label="未启用" value="DISABLED" />
           </el-select>
-          <el-button :loading="materialMemoryLoading" @click="searchMaterialMemory">查询</el-button>
+          <el-button title="查询" :loading="materialMemoryLoading" @click="searchMaterialMemory">查询</el-button>
           <div class="inventory-table-height-actions" aria-label="库存使用总览表格高度">
             <el-tooltip content="降低表格高度" placement="top">
               <el-button
@@ -172,6 +172,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="inventoryWorkTableHeights.materialMemory <= inventoryWorkTableHeightLimits.min"
+                title="降低库存使用总览表格高度"
                 aria-label="降低库存使用总览表格高度"
                 @click="adjustInventoryWorkTableHeight('materialMemory', -inventoryWorkTableHeightLimits.step)"
               />
@@ -182,6 +183,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="inventoryWorkTableHeights.materialMemory >= inventoryWorkTableHeightLimits.max"
+                title="提高库存使用总览表格高度"
                 aria-label="提高库存使用总览表格高度"
                 @click="adjustInventoryWorkTableHeight('materialMemory', inventoryWorkTableHeightLimits.step)"
               />
@@ -192,6 +194,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="inventoryWorkTableHeights.materialMemory === inventoryWorkTableDefaultHeights.materialMemory"
+                title="恢复库存使用总览表格默认高度"
                 aria-label="恢复库存使用总览表格默认高度"
                 @click="resetInventoryWorkTableHeight('materialMemory')"
               />
@@ -231,29 +234,47 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="170" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="Boolean(materialMemoryOperationSavingId)" @click="openMaterialMemoryDialog(row)">编辑搜索记忆</el-button>
-            <el-button
-              v-if="row.status === 'ENABLED'"
-              link
-              type="danger"
-              :loading="materialMemoryDisableSaving && materialMemoryOperationSavingId === row.id"
-              :disabled="Boolean(materialMemoryOperationSavingId) || materialMemoryDisableDialogVisible"
-              @click="disableMaterialMemory(row)"
-            >
-              停用记忆
-            </el-button>
-            <el-button
-              v-else
-              link
-              type="success"
-              :loading="materialMemoryOperationSavingId === row.id"
-              :disabled="Boolean(materialMemoryOperationSavingId)"
-              @click="enableMaterialMemory(row)"
-            >
-              启用记忆
-            </el-button>
+            <div class="inventory-memory-actions">
+              <div class="inventory-memory-action-group">
+                <span class="inventory-memory-action-label">资料</span>
+                <el-button
+                  link
+                  type="primary"
+                  title="编辑零件搜索记忆"
+                  :disabled="Boolean(materialMemoryOperationSavingId)"
+                  @click="openMaterialMemoryDialog(row)"
+                >
+                  编辑
+                </el-button>
+              </div>
+              <div class="inventory-memory-action-group">
+                <span class="inventory-memory-action-label">状态</span>
+                <el-button
+                  v-if="row.status === 'ENABLED'"
+                  link
+                  type="danger"
+                  title="停用零件搜索记忆"
+                  :loading="materialMemoryDisableSaving && materialMemoryOperationSavingId === row.id"
+                  :disabled="Boolean(materialMemoryOperationSavingId) || materialMemoryDisableDialogVisible"
+                  @click="disableMaterialMemory(row)"
+                >
+                  停用
+                </el-button>
+                <el-button
+                  v-else
+                  link
+                  type="success"
+                  title="启用零件搜索记忆"
+                  :loading="materialMemoryOperationSavingId === row.id"
+                  :disabled="Boolean(materialMemoryOperationSavingId)"
+                  @click="enableMaterialMemory(row)"
+                >
+                  启用
+                </el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -287,6 +308,7 @@
               size="small"
               :icon="Minus"
               :disabled="inventoryWorkTableHeights.summary <= inventoryWorkTableHeightLimits.min"
+              title="降低库存汇总表格高度"
               aria-label="降低库存汇总表格高度"
               @click="adjustInventoryWorkTableHeight('summary', -inventoryWorkTableHeightLimits.step)"
             />
@@ -297,6 +319,7 @@
               size="small"
               :icon="Plus"
               :disabled="inventoryWorkTableHeights.summary >= inventoryWorkTableHeightLimits.max"
+              title="提高库存汇总表格高度"
               aria-label="提高库存汇总表格高度"
               @click="adjustInventoryWorkTableHeight('summary', inventoryWorkTableHeightLimits.step)"
             />
@@ -307,6 +330,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="inventoryWorkTableHeights.summary === inventoryWorkTableDefaultHeights.summary"
+              title="恢复库存汇总表格默认高度"
               aria-label="恢复库存汇总表格默认高度"
               @click="resetInventoryWorkTableHeight('summary')"
             />
@@ -520,6 +544,7 @@
               size="small"
               :icon="Minus"
               :disabled="inventoryWorkTableHeights.batches <= inventoryWorkTableHeightLimits.min"
+              title="降低库存溯源表格高度"
               aria-label="降低库存溯源表格高度"
               @click="adjustInventoryWorkTableHeight('batches', -inventoryWorkTableHeightLimits.step)"
             />
@@ -530,6 +555,7 @@
               size="small"
               :icon="Plus"
               :disabled="inventoryWorkTableHeights.batches >= inventoryWorkTableHeightLimits.max"
+              title="提高库存溯源表格高度"
               aria-label="提高库存溯源表格高度"
               @click="adjustInventoryWorkTableHeight('batches', inventoryWorkTableHeightLimits.step)"
             />
@@ -540,6 +566,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="inventoryWorkTableHeights.batches === inventoryWorkTableDefaultHeights.batches"
+              title="恢复库存溯源表格默认高度"
               aria-label="恢复库存溯源表格默认高度"
               @click="resetInventoryWorkTableHeight('batches')"
             />
@@ -610,20 +637,28 @@
             <StatusTag :value="row.status" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="230" fixed="right">
+        <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openSourceDetails(row.partCode, row.unit, 'ALL')">
-              库存来源
-            </el-button>
-            <el-button link type="primary" @click="openReservationDialog(row)">
-              预占记录
-            </el-button>
-            <el-button link type="primary" :disabled="!canAdjustBatch(row)" :title="adjustmentDisabledReason(row)" @click="openAdjustDialog(row)">
-              盘点调整
-            </el-button>
-            <el-button link type="danger" :disabled="!canScrapBatch(row)" :title="scrapBatchDisabledReason(row)" @click="openScrapInventoryDialog(row)">
-              销毁清零
-            </el-button>
+            <div class="inventory-batch-actions">
+              <div class="inventory-batch-action-group">
+                <span class="inventory-batch-action-label">来源</span>
+                <el-button link type="primary" title="库存来源详情" @click="openSourceDetails(row.partCode, row.unit, 'ALL')">
+                  来源
+                </el-button>
+                <el-button link type="primary" title="预占记录" @click="openReservationDialog(row)">
+                  预占
+                </el-button>
+              </div>
+              <div class="inventory-batch-action-group">
+                <span class="inventory-batch-action-label">处理</span>
+                <el-button link type="primary" :disabled="!canAdjustBatch(row)" :title="adjustmentDisabledReason(row)" @click="openAdjustDialog(row)">
+                  盘点
+                </el-button>
+                <el-button link type="danger" :disabled="!canScrapBatch(row)" :title="scrapBatchDisabledReason(row)" @click="openScrapInventoryDialog(row)">
+                  销毁
+                </el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -803,6 +838,7 @@
               size="small"
               :icon="Minus"
               :disabled="inventoryWorkTableHeights.reservationHistory <= inventoryWorkTableHeightLimits.min"
+              title="降低库存预占记录表格高度"
               aria-label="降低库存预占记录表格高度"
               @click="adjustInventoryWorkTableHeight('reservationHistory', -inventoryWorkTableHeightLimits.step)"
             />
@@ -813,6 +849,7 @@
               size="small"
               :icon="Plus"
               :disabled="inventoryWorkTableHeights.reservationHistory >= inventoryWorkTableHeightLimits.max"
+              title="提高库存预占记录表格高度"
               aria-label="提高库存预占记录表格高度"
               @click="adjustInventoryWorkTableHeight('reservationHistory', inventoryWorkTableHeightLimits.step)"
             />
@@ -823,6 +860,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="inventoryWorkTableHeights.reservationHistory === inventoryWorkTableDefaultHeights.reservationHistory"
+              title="恢复库存预占记录表格默认高度"
               aria-label="恢复库存预占记录表格默认高度"
               @click="resetInventoryWorkTableHeight('reservationHistory')"
             />
@@ -867,7 +905,7 @@
         </el-table-column>
       </el-table>
       <template #footer>
-        <el-button @click="reservationDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="reservationDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -952,6 +990,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="inventoryWorkTableHeights.adjustmentHistory <= inventoryWorkTableHeightLimits.min"
+                title="降低库存盘点记录表格高度"
                 aria-label="降低库存盘点记录表格高度"
                 @click="adjustInventoryWorkTableHeight('adjustmentHistory', -inventoryWorkTableHeightLimits.step)"
               />
@@ -962,6 +1001,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="inventoryWorkTableHeights.adjustmentHistory >= inventoryWorkTableHeightLimits.max"
+                title="提高库存盘点记录表格高度"
                 aria-label="提高库存盘点记录表格高度"
                 @click="adjustInventoryWorkTableHeight('adjustmentHistory', inventoryWorkTableHeightLimits.step)"
               />
@@ -972,6 +1012,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="inventoryWorkTableHeights.adjustmentHistory === inventoryWorkTableDefaultHeights.adjustmentHistory"
+                title="恢复库存盘点记录表格默认高度"
                 aria-label="恢复库存盘点记录表格默认高度"
                 @click="resetInventoryWorkTableHeight('adjustmentHistory')"
               />
@@ -1017,7 +1058,8 @@
       </div>
       <template #footer>
         <el-button :disabled="adjustSaving" @click="closeAdjustDialog">取消</el-button>
-        <el-button type="primary" :loading="adjustSaving" @click="submitAdjustment">保存盘点</el-button>
+        <el-button type="primary" :loading="adjustSaving" @click="submitAdjustment"
+          title="保存盘点">保存盘点</el-button>
       </template>
     </el-dialog>
 
@@ -1061,7 +1103,8 @@
       </div>
       <template #footer>
         <el-button :disabled="stockAlertSaving" @click="closeStockAlertDialog">取消</el-button>
-        <el-button type="primary" :loading="stockAlertSaving" @click="saveStockAlert">保存报警设置</el-button>
+        <el-button type="primary" :loading="stockAlertSaving" @click="saveStockAlert"
+          title="保存报警设置">保存报警设置</el-button>
       </template>
     </el-dialog>
 
@@ -1123,7 +1166,8 @@
       </div>
       <template #footer>
         <el-button :disabled="materialMemorySaving" @click="closeMaterialMemoryDialog">取消</el-button>
-        <el-button type="primary" :loading="materialMemorySaving" @click="saveMaterialMemory">保存</el-button>
+        <el-button type="primary" :loading="materialMemorySaving" @click="saveMaterialMemory"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -1198,6 +1242,7 @@ const inventory = ref<InventoryBatch[]>([]);
 const inventorySummary = ref<InventorySummaryRow[]>([]);
 const inventorySummaryPageRows = ref<InventorySummaryRow[]>([]);
 const loading = ref(false);
+const inventoryPageRefreshing = ref(false);
 const inventoryExporting = ref(false);
 const adjustDialogVisible = ref(false);
 const adjustSaving = ref(false);
@@ -1557,6 +1602,19 @@ function searchInventory() {
   inventoryPagination.page = Number(1);
   expandedMobileInventoryCardKeys.value = [];
   void loadInventory();
+}
+
+async function refreshInventoryPage() {
+  if (inventoryPageRefreshing.value) {
+    return;
+  }
+  inventoryPageRefreshing.value = true;
+  try {
+    // 库存页刷新必须同步仓库下拉、库存汇总、批次明细和零件搜索记忆，避免同页数据新旧不一致。
+    await Promise.all([loadWarehouses(), loadInventory(), loadMaterialMemory()]);
+  } finally {
+    inventoryPageRefreshing.value = false;
+  }
 }
 
 function handleSummaryPageChange(page: number) {
@@ -2402,8 +2460,7 @@ watch(
 
 onMounted(async () => {
   restoreInventoryWorkTableHeights();
-  await loadWarehouses();
-  await Promise.all([loadInventory(), loadMaterialMemory()]);
+  await refreshInventoryPage();
 });
 </script>
 
@@ -2588,6 +2645,36 @@ onMounted(async () => {
   align-items: center;
   flex-shrink: 0;
   gap: 6px;
+}
+
+.inventory-memory-actions,
+.inventory-batch-actions {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.inventory-memory-action-group,
+.inventory-batch-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.inventory-memory-action-label,
+.inventory-batch-action-label {
+  flex: 0 0 34px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.inventory-memory-actions :deep(.el-button),
+.inventory-batch-actions :deep(.el-button) {
+  margin-left: 0;
+  padding: 0;
 }
 
 .inventory-stat-value-compact {

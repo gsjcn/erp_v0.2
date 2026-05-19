@@ -5773,7 +5773,7 @@ async function assertDraftStockReservationPriorityUsesOrderNoTieBreaker() {
     assert(Number(higherReservationAfterLowerEdit?.quantity) === higherPriorityQuantity, `同时间较小订单号提高预占后较大订单号预占数量必须仍为 ${higherPriorityQuantity}，实际 ${higherReservationAfterLowerEdit?.quantity}`);
 
     const lowerSourceDetails = await requestJson(
-      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&excludeOrderNo=${encodeURIComponent(lowerOrderNo)}`
+      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&includeTestFixtures=true&excludeOrderNo=${encodeURIComponent(lowerOrderNo)}`
     );
     const lowerSourceBatch = lowerSourceDetails.sources?.find((source) => source.id === stockBatch.id);
     assert(lowerSourceBatch, '同时间较小订单号库存来源明细必须返回原备货批次');
@@ -5782,7 +5782,7 @@ async function assertDraftStockReservationPriorityUsesOrderNoTieBreaker() {
     assert(Number(lowerSourceDetails.availableQuantity) === batchQuantity, `同时间较小订单号库存来源明细汇总可用量应为 ${batchQuantity}，实际 ${lowerSourceDetails.availableQuantity}`);
 
     const higherSourceDetails = await requestJson(
-      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&excludeOrderNo=${encodeURIComponent(higherOrderNo)}`
+      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&includeTestFixtures=true&excludeOrderNo=${encodeURIComponent(higherOrderNo)}`
     );
     const higherSourceBatch = higherSourceDetails.sources?.find((source) => source.id === stockBatch.id);
     const higherReservedQuantity = (higherSourceBatch?.reservations || []).reduce((sum, reservation) => sum + Number(reservation.quantity || 0), 0);
@@ -5874,7 +5874,7 @@ async function assertDraftStockReservationPriorityUsesOrderNoTieBreaker() {
     assert(Number(higherMaterialSuggestion.orderInventoryQuantity || 0) === 0, `同时间较大订单号物料建议订单库存应为 0，实际 ${higherMaterialSuggestion.orderInventoryQuantity}`);
 
     const higherSourceDetailsById = await requestJson(
-      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&excludeOrderId=${encodeURIComponent(higherDraftOrder.id)}`
+      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&includeTestFixtures=true&excludeOrderId=${encodeURIComponent(higherDraftOrder.id)}`
     );
     const higherSourceBatchById = higherSourceDetailsById.sources?.find((source) => source.id === stockBatch.id);
     assert(higherSourceBatchById, '同时间较大订单 id 库存来源明细必须返回原备货批次');
@@ -5929,7 +5929,7 @@ async function assertDraftStockReservationPriorityUsesOrderNoTieBreaker() {
 
     const conflictingCurrentOrderQuery = `excludeOrderId=${encodeURIComponent(higherDraftOrder.id)}&excludeOrderNo=${encodeURIComponent(lowerOrderNo)}`;
     const higherSourceDetailsByConflictingId = await requestJson(
-      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&${conflictingCurrentOrderQuery}`
+      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&includeTestFixtures=true&${conflictingCurrentOrderQuery}`
     );
     const higherSourceBatchByConflictingId = higherSourceDetailsByConflictingId.sources?.find((source) => source.id === stockBatch.id);
     assert(higherSourceBatchByConflictingId, '同时间较大订单 id 冲突参数库存来源明细必须返回原备货批次');
@@ -5978,7 +5978,7 @@ async function assertDraftStockReservationPriorityUsesOrderNoTieBreaker() {
 
     const staleCurrentOrderQuery = `excludeOrderId=${encodeURIComponent('00000000-0000-4000-8000-000000000000')}&excludeOrderNo=${encodeURIComponent(higherOrderNo)}`;
     const higherSourceDetailsByStaleId = await requestJson(
-      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&${staleCurrentOrderQuery}`
+      `/inventory/materials/${encodeURIComponent(partCode)}/source-details?sourceType=STOCK&includeTestFixtures=true&${staleCurrentOrderQuery}`
     );
     const higherSourceBatchByStaleId = higherSourceDetailsByStaleId.sources?.find((source) => source.id === stockBatch.id);
     assert(higherSourceBatchByStaleId, 'same-time higher order stale id source-details must fall back to excludeOrderNo');
@@ -9643,7 +9643,12 @@ async function main() {
       requiredCodes: ['PART_COMPONENT_NO_NOT_ALLOWED'],
       forbiddenOrderCodePairs: [{ orderNo: `${orderPrefix}-SPLIT`, code: 'DEMAND_QUANTITY_REQUIRED' }]
     });
-    const historyAfterSplit = await requestJson('/orders/import-sessions?limit=20&offset=0');
+    const defaultHistoryAfterSplit = await requestJson('/orders/import-sessions?limit=20&offset=0');
+    assert(
+      !defaultHistoryAfterSplit.items?.some((item) => item.id === sessionId),
+      'order-import-session-history-test-fixture-filter: default import session history must hide reusable verification fixtures'
+    );
+    const historyAfterSplit = await requestJson('/orders/import-sessions?limit=20&offset=0&includeTestFixtures=true');
     const historySession = historyAfterSplit.items?.find((item) => item.id === sessionId);
     assert(historySession, '导入记录列表必须包含刚创建的导入会话');
     assert(

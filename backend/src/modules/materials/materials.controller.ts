@@ -24,8 +24,8 @@ export class MaterialsController {
   }
 
   @Get('common-project-models')
-  commonProjectModels() {
-    return this.materialsService.commonProjectModels();
+  commonProjectModels(@Query() query: MaterialProjectOptionsQueryDto) {
+    return this.materialsService.commonProjectModels(query);
   }
 
   @Patch('common-project-models')

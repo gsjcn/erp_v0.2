@@ -9,6 +9,7 @@
         <el-button @click="openDesktopMaintenancePage('/inventory/materials', '零件基础库维护')">零件基础库</el-button>
         <el-button @click="openDesktopMaintenancePage('/inventory/model-boms', '机型零件包维护')">机型零件包</el-button>
         <el-button @click="openDesktopMaintenancePage('/inventory/material-transforms', '来源加工关系维护')">来源加工关系</el-button>
+        <el-button title="刷新整页零件管理数据" :loading="materialDashboardRefreshing" @click="refreshMaterialsManagementPage">刷新</el-button>
         <el-button v-if="!isMobileLayout" type="primary" @click="openCreateDialog">新增零件</el-button>
       </div>
     </div>
@@ -250,8 +251,8 @@
           <el-option label="升序" value="ASC" />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="resetAndLoad">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="resetAndLoad">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
     </div>
 
     <div class="project-quick-list">
@@ -273,7 +274,7 @@
         >
           <el-option v-for="item in commonProjectSelectOptions" :key="item" :label="item" :value="item" />
         </el-select>
-        <el-button
+        <el-button title="刷新常用"
           v-if="!isMobileLayout"
           size="small"
           plain
@@ -333,7 +334,7 @@
         >
           {{ item }}
         </el-button>
-        <el-button
+        <el-button title="查看/编辑BOM"
           v-if="!isMobileLayout"
           size="small"
           type="primary"
@@ -351,7 +352,8 @@
           :loading="bomOperationSavingKey === projectBomOperationKey(item, 'disable')"
           :disabled="Boolean(bomOperationSavingKey)"
           @click="disableProjectBom(item)"
-        >
+
+        title="停用BOM">
           停用BOM
         </el-button>
         <el-button
@@ -362,7 +364,8 @@
           :loading="bomOperationSavingKey === projectBomOperationKey(item, 'enable')"
           :disabled="Boolean(bomOperationSavingKey)"
           @click="enableProjectBom(item)"
-        >
+
+          title="启用BOM">
           启用BOM
         </el-button>
         <el-button
@@ -373,7 +376,8 @@
           :loading="bomOperationSavingKey === projectBomOperationKey(item, 'delete')"
           :disabled="Boolean(bomOperationSavingKey)"
           @click="deleteProjectBom(item)"
-        >
+
+        title="删除BOM">
           删除BOM
         </el-button>
         <el-button v-if="!isMobileLayout" size="small" plain :disabled="commonProjectBusy" @click="removeCommonProject(item)">
@@ -391,18 +395,18 @@
           <span>{{ contextBomScopeText }}，共 {{ contextBomTotalCount }} 个，启用 {{ contextBomActiveCount }} 个</span>
         </div>
         <div v-if="!isMobileLayout" class="section-actions">
-          <el-button size="small" type="success" plain :disabled="Boolean(bomOperationSavingKey)" @click="openContextBomCreate">
+          <el-button size="small" type="success" plain :disabled="Boolean(bomOperationSavingKey)" title="新建当前范围零件包" @click="openContextBomCreate">
             新建零件包
           </el-button>
-          <el-button size="small" type="success" plain :disabled="Boolean(bomOperationSavingKey)" @click="openContextCommonBomCreate">
+          <el-button size="small" type="success" plain :disabled="Boolean(bomOperationSavingKey)" title="新建当前范围常用零件包" @click="openContextCommonBomCreate">
             新建常用零件包
           </el-button>
           <el-button size="small" type="primary" plain :disabled="Boolean(bomOperationSavingKey)" @click="openContextBomMaintain">
             维护零件包
           </el-button>
-          <el-button size="small" plain :disabled="!contextBomFixedText" @click="openContextBomTextDialog">查看范围格式</el-button>
-          <el-button size="small" plain :disabled="!contextBomPanelVisible" @click="copyContextBomFilterLink">复制范围链接</el-button>
-          <el-button size="small" plain :disabled="!contextBomFixedText" @click="copyContextBomText">复制范围</el-button>
+          <el-button title="查看范围格式" size="small" plain :disabled="!contextBomFixedText" @click="openContextBomTextDialog">查看范围格式</el-button>
+          <el-button title="复制范围链接" size="small" plain :disabled="!contextBomPanelVisible" @click="copyContextBomFilterLink">复制范围链接</el-button>
+          <el-button title="复制范围" size="small" plain :disabled="!contextBomFixedText" @click="copyContextBomText">复制范围</el-button>
         </div>
       </div>
       <div class="context-bom-scope-summary">
@@ -437,10 +441,10 @@
         </span>
       </div>
       <el-empty v-if="!contextBomLoading && contextBomVisibleRows.length === 0" :description="contextBomEmptyDescription">
-        <el-button v-if="!isMobileLayout" type="primary" plain :disabled="Boolean(bomOperationSavingKey)" @click="openContextBomCreate">
+        <el-button v-if="!isMobileLayout" type="primary" plain :disabled="Boolean(bomOperationSavingKey)" title="新建当前范围零件包" @click="openContextBomCreate">
           新建零件包
         </el-button>
-        <el-button v-if="!isMobileLayout" type="success" plain :disabled="Boolean(bomOperationSavingKey)" @click="openContextCommonBomCreate">
+        <el-button v-if="!isMobileLayout" type="success" plain :disabled="Boolean(bomOperationSavingKey)" title="新建当前范围常用零件包" @click="openContextCommonBomCreate">
           新建常用零件包
         </el-button>
       </el-empty>
@@ -546,7 +550,8 @@
                 :loading="bomOperationSavingKey === contextBomOperationKey(bom, 'common')"
                 :disabled="Boolean(bomOperationSavingKey)"
                 @click="setContextBomCommon(bom, false)"
-              >
+
+              title="取消常用">
                 取消常用
               </el-button>
               <el-button link type="primary" :disabled="Boolean(bomOperationSavingKey)" @click="openContextBomDetail(bom)">
@@ -559,7 +564,8 @@
                 :loading="bomOperationSavingKey === contextBomOperationKey(bom, 'disable')"
                 :disabled="Boolean(bomOperationSavingKey)"
                 @click="disableContextBom(bom)"
-              >
+
+              title="停用">
                 停用
               </el-button>
               <el-button
@@ -569,7 +575,8 @@
                 :loading="bomOperationSavingKey === contextBomOperationKey(bom, 'enable')"
                 :disabled="Boolean(bomOperationSavingKey)"
                 @click="enableContextBom(bom)"
-              >
+
+                title="恢复启用">
                 恢复启用
               </el-button>
               <el-button
@@ -578,7 +585,8 @@
                 :loading="bomOperationSavingKey === contextBomOperationKey(bom, 'delete')"
                 :disabled="Boolean(bomOperationSavingKey)"
                 @click="deleteContextBom(bom)"
-              >
+
+              title="删除">
                 删除
               </el-button>
             </template>
@@ -595,12 +603,12 @@
           <span>第 {{ pagination.page }} 页，已显示 {{ dashboard.items.length }} / {{ dashboard.totalCount }} 条</span>
         </div>
         <div class="section-actions">
-          <el-button size="small" :loading="dashboardExporting" :disabled="dashboard.totalCount === 0" @click="exportDashboardExcel">
+          <el-button title="导出Excel" size="small" :loading="dashboardExporting" :disabled="dashboard.totalCount === 0" @click="exportDashboardExcel">
             导出 Excel
           </el-button>
-          <el-button size="small" @click="copyDashboardFilterLink">复制筛选链接</el-button>
-          <el-button size="small" :disabled="dashboard.items.length === 0" @click="openDashboardTextDialog">查看固定格式</el-button>
-          <el-button size="small" :disabled="dashboard.items.length === 0" @click="copyDashboardText">复制当前页</el-button>
+          <el-button title="复制筛选链接" size="small" @click="copyDashboardFilterLink">复制筛选链接</el-button>
+          <el-button title="查看固定格式" size="small" :disabled="dashboard.items.length === 0" @click="openDashboardTextDialog">查看固定格式</el-button>
+          <el-button title="复制当前页" size="small" :disabled="dashboard.items.length === 0" @click="copyDashboardText">复制当前页</el-button>
           <div class="material-dashboard-table-height-actions" aria-label="零件控制面板表格高度">
             <el-tooltip content="降低表格高度" placement="top">
               <el-button
@@ -608,6 +616,7 @@
                 size="small"
                 :icon="Minus"
                 :disabled="materialDashboardTableHeight <= materialDashboardTableHeightLimits.min"
+                title="降低零件控制面板表格高度"
                 aria-label="降低零件控制面板表格高度"
                 @click="adjustMaterialDashboardTableHeight(-materialDashboardTableHeightLimits.step)"
               />
@@ -618,6 +627,7 @@
                 size="small"
                 :icon="Plus"
                 :disabled="materialDashboardTableHeight >= materialDashboardTableHeightLimits.max"
+                title="提高零件控制面板表格高度"
                 aria-label="提高零件控制面板表格高度"
                 @click="adjustMaterialDashboardTableHeight(materialDashboardTableHeightLimits.step)"
               />
@@ -628,6 +638,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="materialDashboardTableHeight === materialDashboardTableDefaultHeight"
+                title="恢复零件控制面板表格默认高度"
                 aria-label="恢复零件控制面板表格默认高度"
                 @click="resetMaterialDashboardTableHeight"
               />
@@ -728,17 +739,30 @@
             <el-tag :type="row.status === 'ENABLED' ? 'success' : 'info'" effect="plain">{{ row.status === 'ENABLED' ? '启用' : '停用' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="350" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openMaterialDrawingMaintain(row)">图纸</el-button>
-            <el-button link type="primary" @click="openMaterialApplicabilityMaintain(row)">适用</el-button>
-            <el-button link :type="canCreateBomLineForCurrentScope(row) ? 'success' : 'primary'" @click="openBomMaintain(row)">
-              {{ bomMaintainActionLabel(row) }}
-            </el-button>
-            <el-button link type="primary" @click="openSourceDetails(row)">库存</el-button>
-            <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
-            <el-button v-if="row.status === 'ENABLED'" link type="danger" @click="disableMaterial(row)">停用</el-button>
-            <el-button v-else link type="success" @click="enableMaterial(row)">启用</el-button>
+            <div class="material-dashboard-actions">
+              <div class="material-dashboard-action-group">
+                <span class="material-dashboard-action-label">资料</span>
+                <el-button link type="primary" title="维护图纸版本" @click="openMaterialDrawingMaintain(row)">图纸</el-button>
+                <el-button link type="primary" title="维护适用范围" @click="openMaterialApplicabilityMaintain(row)">适用</el-button>
+                <el-button link type="primary" title="编辑零件资料" @click="openEditDialog(row)">编辑</el-button>
+              </div>
+              <div class="material-dashboard-action-group">
+                <span class="material-dashboard-action-label">业务</span>
+                <el-button
+                  link
+                  :type="canCreateBomLineForCurrentScope(row) ? 'success' : 'primary'"
+                  :title="bomMaintainActionTitle(row)"
+                  @click="openBomMaintain(row)"
+                >
+                  {{ bomMaintainActionLabel(row) }}
+                </el-button>
+                <el-button link type="primary" title="查看库存来源" @click="openSourceDetails(row)">库存</el-button>
+                <el-button v-if="row.status === 'ENABLED'" link type="danger" title="停用零件搜索记忆" @click="disableMaterial(row)">停用</el-button>
+                <el-button v-else link type="success" title="启用零件搜索记忆" @click="enableMaterial(row)">启用</el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -819,7 +843,7 @@
         <span>第 {{ pagination.page }} 页，已显示 {{ dashboard.items.length }} / {{ dashboard.totalCount }} 条</span>
         <div class="mobile-pagination-actions">
           <el-button size="small" :disabled="loading || pagination.page <= 1" @click="loadMobilePreviousPage">上一页</el-button>
-          <el-button size="small" type="primary" plain :disabled="loading || !dashboard.hasMore" @click="loadMobileNextPage">继续加载</el-button>
+          <el-button title="继续加载" size="small" type="primary" plain :disabled="loading || !dashboard.hasMore" @click="loadMobileNextPage">继续加载</el-button>
         </div>
       </div>
     </div>
@@ -863,7 +887,8 @@
       />
       <template #footer>
         <el-button :disabled="saving" @click="closeMaterialDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveMaterial">保存</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveMaterial"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -946,7 +971,7 @@
         </template>
       </div>
       <template #footer>
-        <el-button @click="relationDetailDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="relationDetailDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -959,8 +984,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="dashboardTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!dashboardFixedText" @click="copyDashboardText">复制清单</el-button>
+        <el-button title="关闭" @click="dashboardTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!dashboardFixedText" @click="copyDashboardText">复制清单</el-button>
       </template>
     </el-dialog>
 
@@ -973,8 +998,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="contextBomTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!contextBomFixedText" @click="copyContextBomText">复制范围</el-button>
+        <el-button title="关闭" @click="contextBomTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制范围" type="primary" :disabled="!contextBomFixedText" @click="copyContextBomText">复制范围</el-button>
       </template>
     </el-dialog>
 
@@ -1038,6 +1063,7 @@ const { isMobileLayout } = useDeviceProfile();
 const loading = ref(false);
 const saving = ref(false);
 const dashboardExporting = ref(false);
+const materialDashboardRefreshing = ref(false);
 const dialogVisible = ref(false);
 const editingMaterialId = ref('');
 const materialDashboardTableHeightLimits = {
@@ -1459,8 +1485,7 @@ const activeFilterItems = computed<Array<{ key: ActiveFilterKey; label: string }
 onMounted(async () => {
   restoreMaterialDashboardTableHeight();
   applyRouteQueryFilters();
-  await loadCommonProjectModels();
-  await Promise.all([loadProjectOptions(), loadDashboard(), loadContextBoms()]);
+  await refreshMaterialsManagementPage();
 });
 
 watch(
@@ -2014,6 +2039,19 @@ function resetAndLoad() {
   void loadContextBoms();
 }
 
+async function refreshMaterialsManagementPage() {
+  if (materialDashboardRefreshing.value) {
+    return;
+  }
+  materialDashboardRefreshing.value = true;
+  try {
+    // 整页刷新同步常用机型、机型选项、控制面板和当前范围 BOM，避免维护后出现局部旧数据。
+    await Promise.all([loadCommonProjectModels(), loadProjectOptions(), loadDashboard(), loadContextBoms()]);
+  } finally {
+    materialDashboardRefreshing.value = false;
+  }
+}
+
 function applyScopeTypeFilter(value: 'COMMON' | 'CUSTOM') {
   filters.scopeType = filters.scopeType === value ? '' : value;
   resetAndLoad();
@@ -2551,6 +2589,8 @@ function openMaterialMaintain(row: MaterialDashboardRow, action: 'drawing' | 'ap
     path: '/inventory/materials',
     query: {
       keyword: row.partCode,
+      customerId: filters.customerId || undefined,
+      projectModel: filters.projectModel || row.projectModel || undefined,
       status: row.status,
       action
     }
@@ -2702,6 +2742,10 @@ function canCreateBomLineForCurrentScope(row: MaterialDashboardRow) {
 
 function bomMaintainActionLabel(row: MaterialDashboardRow) {
   return canCreateBomLineForCurrentScope(row) ? '加入BOM' : 'BOM';
+}
+
+function bomMaintainActionTitle(row: MaterialDashboardRow) {
+  return canCreateBomLineForCurrentScope(row) ? '加入当前客户/机型 BOM' : '查看或维护 BOM 使用情况';
 }
 
 function bomCurrentScopeEmptyText(row: MaterialDashboardRow) {
@@ -4353,6 +4397,33 @@ function stockAlertTagType(row: MaterialDashboardRow) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.material-dashboard-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.material-dashboard-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.material-dashboard-action-label {
+  flex: 0 0 30px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.material-dashboard-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
 }
 
 .section-heading span {

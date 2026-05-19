@@ -26,6 +26,7 @@ const apiBaseUrl = (
 const prisma = new PrismaClient();
 const runId = 'STABLE';
 const testPrefix = 'COD-WH-STABLE';
+const orderImportWarehouseFixturePrefix = 'COD-IMPORT-STABLE';
 
 function assert(condition, message) {
   if (!condition) {
@@ -81,14 +82,12 @@ async function expectRequestFailure(label, action, expectedMessage) {
 }
 
 async function cleanup() {
-  await prisma.inventoryTransaction.deleteMany({ where: { transactionNo: { startsWith: testPrefix } } });
-  await prisma.inventoryBatch.deleteMany({ where: { batchNo: { startsWith: testPrefix } } });
   await prisma.warehouseLocation.updateMany({
-    where: { locationCode: { startsWith: testPrefix } },
+    where: { OR: [{ locationCode: { startsWith: testPrefix } }, { locationCode: { startsWith: orderImportWarehouseFixturePrefix } }] },
     data: { status: 'DISABLED' }
   });
   await prisma.warehouse.updateMany({
-    where: { warehouseCode: { startsWith: testPrefix } },
+    where: { OR: [{ warehouseCode: { startsWith: testPrefix } }, { warehouseCode: { startsWith: orderImportWarehouseFixturePrefix } }] },
     data: { status: 'DISABLED' }
   });
 }
@@ -158,8 +157,12 @@ async function createTemporaryWarehouseWithLocation(suffix) {
 }
 
 async function upsertRegressionWarehouseWithLocation(suffix) {
-  const warehouseCode = `${testPrefix}-${suffix}`;
-  const locationCode = `${testPrefix}-${suffix}-L1`;
+  return upsertRegressionWarehouseWithLocationForPrefix(testPrefix, suffix);
+}
+
+async function upsertRegressionWarehouseWithLocationForPrefix(prefix, suffix) {
+  const warehouseCode = `${prefix}-${suffix}`;
+  const locationCode = `${prefix}-${suffix}-L1`;
   const warehouseName = `Warehouse Config Verify ${suffix}`;
   const locationName = `Warehouse Config Verify ${suffix} Location`;
 
@@ -219,8 +222,19 @@ async function assertEmptyWarehouseCanBeDeleted() {
 }
 
 async function seedInventoryHistory(warehouse, location) {
-  const batch = await prisma.inventoryBatch.create({
-    data: {
+  // warehouse-config-reusable-history-fixture: keep inventory history stable so regression runs do not delete stock batches or transactions.
+  const batch = await prisma.inventoryBatch.upsert({
+    where: { batchNo: `${testPrefix}-BATCH` },
+    update: {
+      partCode: `${testPrefix}-PART`,
+      partName: 'Warehouse Config Verify Part',
+      quantity: 1,
+      unit: '件',
+      warehouseId: warehouse.id,
+      locationId: location.id,
+      status: 'AVAILABLE'
+    },
+    create: {
       batchNo: `${testPrefix}-BATCH`,
       partCode: `${testPrefix}-PART`,
       partName: 'Warehouse Config Verify Part',
@@ -231,8 +245,22 @@ async function seedInventoryHistory(warehouse, location) {
       status: 'AVAILABLE'
     }
   });
-  await prisma.inventoryTransaction.create({
-    data: {
+  await prisma.inventoryTransaction.upsert({
+    where: { transactionNo: `${testPrefix}-TX` },
+    update: {
+      transactionType: 'IN',
+      batchId: batch.id,
+      partCode: batch.partCode,
+      partName: batch.partName,
+      quantity: 1,
+      unit: batch.unit,
+      warehouseId: warehouse.id,
+      locationId: location.id,
+      remark: 'Warehouse config delete boundary verification',
+      sourceRecordType: 'WarehouseConfigVerify',
+      sourceRecordId: batch.id
+    },
+    create: {
       transactionNo: `${testPrefix}-TX`,
       transactionType: 'IN',
       batchId: batch.id,
@@ -288,6 +316,7 @@ async function assertWarehouseWithHistoryCanOnlyBeDisabled() {
 async function assertWarehouseConfigExport() {
   const enabledWarehouseWithDisabledLocation = await upsertRegressionWarehouseWithLocation('LOC-DISABLED');
   await upsertRegressionWarehouseWithLocation('LOC-ENABLED');
+  await upsertRegressionWarehouseWithLocationForPrefix(orderImportWarehouseFixturePrefix, 'BLOCK-WH');
   await requestJson(`/warehouses/${enabledWarehouseWithDisabledLocation.warehouse.id}/locations/${enabledWarehouseWithDisabledLocation.location.id}`, {
     method: 'PATCH',
     body: JSON.stringify({ status: 'DISABLED' })
@@ -298,10 +327,18 @@ async function assertWarehouseConfigExport() {
     !JSON.stringify(defaultWarehouses).includes(testPrefix),
     'warehouse config list must hide reusable test fixtures unless includeTestFixtures=true'
   );
+  assert(
+    !JSON.stringify(defaultWarehouses).includes(orderImportWarehouseFixturePrefix),
+    'warehouse config list must hide reusable order-import warehouse fixtures unless includeTestFixtures=true'
+  );
   const fixtureWarehouses = await requestJson('/warehouses?status=ALL&locationStatus=ALL&includeTestFixtures=true');
   assert(
     JSON.stringify(fixtureWarehouses).includes(`${testPrefix}-LOC-DISABLED`),
     'warehouse config list should expose reusable test fixtures only when includeTestFixtures=true'
+  );
+  assert(
+    JSON.stringify(fixtureWarehouses).includes(`${orderImportWarehouseFixturePrefix}-BLOCK-WH`),
+    'warehouse config list should expose order-import warehouse fixtures only when includeTestFixtures=true'
   );
   const fixtureListText = JSON.stringify(fixtureWarehouses);
   assert(
@@ -337,6 +374,10 @@ async function assertWarehouseConfigExport() {
   assert(
     !JSON.stringify(defaultExportWorkbook.model).includes(testPrefix),
     'warehouse config export must hide reusable test fixtures unless includeTestFixtures=true'
+  );
+  assert(
+    !JSON.stringify(defaultExportWorkbook.model).includes(orderImportWarehouseFixturePrefix),
+    'warehouse config export must hide reusable order-import warehouse fixtures unless includeTestFixtures=true'
   );
 
   const exportResponse = await requestBuffer('/warehouses/export?status=ALL&includeTestFixtures=true');

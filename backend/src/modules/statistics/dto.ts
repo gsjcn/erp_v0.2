@@ -20,8 +20,26 @@ export class OrderStatisticsQueryDto {
   year?: number;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(4)
+  quarter?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(12)
+  month?: number;
+
+  @IsOptional()
   @IsString()
   customerId?: string;
+
+  @IsOptional()
+  @IsString()
+  includeTestFixtures?: string;
 
   @IsOptional()
   @Type(() => Number)

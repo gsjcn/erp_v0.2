@@ -6,8 +6,8 @@
         <p class="page-subtitle">管理员全部通知只读查看，生产和仓库按 target 归类展示。</p>
       </div>
       <div class="admin-notice-header-actions">
-        <el-button :icon="Download" :loading="adminNoticeExporting" @click="exportAdminNoticesExcel">导出 Excel</el-button>
-        <el-button :loading="loading" @click="loadNotices">刷新</el-button>
+        <el-button title="导出Excel" :icon="Download" :loading="adminNoticeExporting" @click="exportAdminNoticesExcel">导出 Excel</el-button>
+        <el-button title="刷新" :loading="loading" @click="loadNotices">刷新</el-button>
       </div>
     </div>
 
@@ -59,14 +59,14 @@
         <label>关键字</label>
         <el-input v-model="filters.keyword" clearable placeholder="客户/原因/任务号" @keyup.enter="reloadAdminNoticesFromFirstPage" />
       </div>
-      <el-button type="primary" :loading="loading" @click="reloadAdminNoticesFromFirstPage">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="reloadAdminNoticesFromFirstPage">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
     </div>
 
     <div class="notice-summary-grid">
       <div class="notice-summary-item">
         <span>全部</span>
-        <strong>{{ notices.length }}</strong>
+        <strong>{{ allNoticeCount }}</strong>
       </div>
       <div class="notice-summary-item">
         <span>生产通知</span>
@@ -97,6 +97,8 @@
               size="small"
               :icon="Minus"
               :disabled="adminNoticeTableHeight <= adminNoticeTableHeightLimits.min"
+              title="降低管理员通知表格高度"
+
               aria-label="降低管理员通知表格高度"
               @click="adjustAdminNoticeTableHeight(-adminNoticeTableHeightLimits.step)"
             />
@@ -107,6 +109,8 @@
               size="small"
               :icon="Plus"
               :disabled="adminNoticeTableHeight >= adminNoticeTableHeightLimits.max"
+              title="提高管理员通知表格高度"
+
               aria-label="提高管理员通知表格高度"
               @click="adjustAdminNoticeTableHeight(adminNoticeTableHeightLimits.step)"
             />
@@ -117,6 +121,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="adminNoticeTableHeight === adminNoticeTableDefaultHeight"
+              title="恢复管理员通知表格默认高度"
               aria-label="恢复管理员通知表格默认高度"
               @click="resetAdminNoticeTableHeight"
             />
@@ -253,6 +258,13 @@ const adminNoticePagination = reactive({
   limit: adminNoticeDefaultLimit,
   totalCount: 0
 });
+const adminNoticeServerCounts = reactive({
+  ALL: 0,
+  PRODUCTION: 0,
+  WAREHOUSE: 0,
+  PENDING: 0,
+  ACKNOWLEDGED: 0
+});
 
 const filters = reactive({
   customerId: '',
@@ -270,10 +282,11 @@ const noticeTypeOptions: Array<{ label: string; value: ProductionNoticeType }> =
   { label: '管理撤回', value: 'TASK_WITHDRAWN' }
 ];
 
-const productionNoticeCount = computed(() => notices.value.filter((notice) => notice.target === 'PRODUCTION').length);
-const warehouseNoticeCount = computed(() => notices.value.filter((notice) => notice.target === 'WAREHOUSE').length);
-const pendingNoticeCount = computed(() => notices.value.filter((notice) => notice.status === 'PENDING').length);
-const acknowledgedNoticeCount = computed(() => notices.value.filter((notice) => notice.status === 'ACKNOWLEDGED').length);
+const allNoticeCount = computed(() => adminNoticeServerCounts.ALL);
+const productionNoticeCount = computed(() => adminNoticeServerCounts.PRODUCTION);
+const warehouseNoticeCount = computed(() => adminNoticeServerCounts.WAREHOUSE);
+const pendingNoticeCount = computed(() => adminNoticeServerCounts.PENDING);
+const acknowledgedNoticeCount = computed(() => adminNoticeServerCounts.ACKNOWLEDGED);
 const adminNoticeTableHeightLimits = { min: 320, max: 900, step: 80 } as const;
 const adminNoticeTableDefaultHeight = 560;
 const adminNoticeTableHeightStorageKey = 'baisheng.erp.adminNoticeTableHeight.v1';
@@ -330,8 +343,16 @@ restoreAdminNoticeTableHeight();
 function adminNoticeRequestFilters() {
   const offset = (adminNoticePagination.page - 1) * adminNoticePagination.limit;
   return {
+    ...adminNoticeBaseFilters(),
     target: targetFilter.value === 'ALL' ? undefined : targetFilter.value,
     status: statusFilter.value === 'ALL' ? undefined : statusFilter.value,
+    limit: adminNoticePagination.limit,
+    offset
+  };
+}
+
+function adminNoticeBaseFilters() {
+  return {
     noticeType: noticeTypeFilter.value === 'ALL' ? undefined : noticeTypeFilter.value,
     customerId: filters.customerId || undefined,
     orderNo: filters.orderNo,
@@ -339,24 +360,40 @@ function adminNoticeRequestFilters() {
     productionTaskNo: filters.productionTaskNo,
     keyword: filters.keyword,
     dateFrom: dateRange.value[0],
-    dateTo: dateRange.value[1],
-    limit: adminNoticePagination.limit,
-    offset
+    dateTo: dateRange.value[1]
   };
 }
 
 async function loadNotices() {
   loading.value = true;
   try {
+    const baseFilters = adminNoticeBaseFilters();
     // 管理员通知中心只读拉取历史消息，确认动作仍保留在生产和仓库业务入口内。
-    const result = await erpApi.adminProductionNoticesPage(adminNoticeRequestFilters());
+    const [result, allCount, productionCount, warehouseCount, pendingCount, acknowledgedCount] = await Promise.all([
+      erpApi.adminProductionNoticesPage(adminNoticeRequestFilters()),
+      erpApi.adminProductionNoticesPage({ ...baseFilters, limit: Number(1), offset: Number(0) }),
+      erpApi.adminProductionNoticesPage({ ...baseFilters, target: 'PRODUCTION', limit: Number(1), offset: Number(0) }),
+      erpApi.adminProductionNoticesPage({ ...baseFilters, target: 'WAREHOUSE', limit: Number(1), offset: Number(0) }),
+      erpApi.adminProductionNoticesPage({ ...baseFilters, status: 'PENDING', limit: Number(1), offset: Number(0) }),
+      erpApi.adminProductionNoticesPage({ ...baseFilters, status: 'ACKNOWLEDGED', limit: Number(1), offset: Number(0) })
+    ]);
     notices.value = result.items;
     adminNoticePagination.totalCount = result.totalCount;
     adminNoticePagination.limit = result.limit;
     adminNoticePagination.page = Math.floor(result.offset / result.limit) + 1;
+    adminNoticeServerCounts.ALL = allCount.totalCount;
+    adminNoticeServerCounts.PRODUCTION = productionCount.totalCount;
+    adminNoticeServerCounts.WAREHOUSE = warehouseCount.totalCount;
+    adminNoticeServerCounts.PENDING = pendingCount.totalCount;
+    adminNoticeServerCounts.ACKNOWLEDGED = acknowledgedCount.totalCount;
   } catch (error) {
     notices.value = [];
     adminNoticePagination.totalCount = 0;
+    adminNoticeServerCounts.ALL = 0;
+    adminNoticeServerCounts.PRODUCTION = 0;
+    adminNoticeServerCounts.WAREHOUSE = 0;
+    adminNoticeServerCounts.PENDING = 0;
+    adminNoticeServerCounts.ACKNOWLEDGED = 0;
     ElMessage.error(error instanceof Error ? error.message : '通知加载失败，请确认后端服务和筛选条件');
   } finally {
     loading.value = false;

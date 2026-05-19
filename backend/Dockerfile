@@ -8,9 +8,10 @@ RUN apt-get update \
 
 COPY package.json package-lock.json* ./
 COPY backend/package.json ./backend/package.json
+COPY frontend/package.json ./frontend/package.json
 COPY backend/scripts ./backend/scripts
 COPY database/prisma ./database/prisma
-RUN npm ci --workspace backend
+RUN npm ci
 RUN npm --workspace backend run db:generate
 
 COPY backend ./backend

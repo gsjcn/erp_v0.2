@@ -576,10 +576,13 @@ ProductionShortageHandling = REPLENISHMENT_REQUEST, REPLENISHMENT, MANAGER_APPRO
 - 新增数据库表或改变业务关系后，必须重新执行 migration + seed。
 - 测试数据不能把旧数据库错误状态当作新功能逻辑继续兼容。
 - 本地测试阶段默认保持一个 PostgreSQL 数据库和一个 `baisheng-erp-postgres` 容器；不要因为测试失败反复创建新的 Docker project、container、volume 或新数据库。
+- 检查 Docker 运行态时先执行 `npm run verify:docker-runtime`，必须确认当前 workspace 下只有 `baisheng-erp-postgres`、`baisheng-erp-backend` 和 `baisheng-erp-frontend`，且当前项目只使用一个 PostgreSQL 容器。
 - 需要重置测试数据时，优先使用 `npm run cleanup:test-data` 或当前 `seed.ts` 的受控清理逻辑；`seed.ts` 只能直接作用于本地 `localhost` / `127.0.0.1` / `::1` 开发库，Docker 内执行必须由 `npm run docker:db:seed` 先备份并传入 `SEED_BACKUP_CONFIRMED=true`。
-- `cleanup:test-data -- --apply` 只允许默认作用于本地 `DATABASE_URL`；非本地测试库必须显式设置 `CLEANUP_TEST_DATA_CONFIRMED=true`，生产环境还必须设置 `ALLOW_TEST_DATA_CLEANUP=true`，避免误停用真实主数据。
+- `cleanup:test-data -- --apply` 默认只允许作用于当前项目 PostgreSQL 目标库，例如 `POSTGRES_HOST_PORT`、`POSTGRES_USER` 和 `POSTGRES_DB` 指向的 `baisheng_erp`；其他测试库必须显式设置 `CLEANUP_TEST_DATA_CONFIRMED=true`，生产环境还必须设置 `ALLOW_TEST_DATA_CLEANUP=true`，避免误停用真实主数据。
+- `cleanup:test-data` dry-run 预览数量可用 `--preview-limit=20` 或 `CLEANUP_TEST_DATA_PREVIEW_LIMIT=20` 调整；该参数只影响命令行展示数量，不改变实际匹配、阻断和软停用范围。
 - `cleanup:test-data` dry-run 必须列出需要人工复核的活动业务记录；只要匹配到未取消订单、未关闭生产任务、待处理通知、有效库存预占或可用库存批次，`--apply` 必须先阻断，不能直接停用相关主数据。
 - 回归脚本创建临时客户、零件、BOM 或仓库时必须使用明确测试前缀；`cleanup:test-data` 必须覆盖 `VERIFY-`、`VERIFY_`、`COD-`、`MI-API-`、`MAT-STABLE`、`UPLOAD-FILENAME`、`CUST-SEARCH-`、`TEST-CUSTOMER` 等测试前缀；客户等主数据清理优先软停用，dry-run 必须显示 `total/enabled/disabled` 和需要人工复核的业务记录。
+- 当前 P0-P5 源码 checklist 进度必须通过 `npm run project:progress` 查看；该百分比只用于开发跟踪，不等同于最终业务验收。
 - 任何可能清空、覆盖、恢复数据库的动作前，必须先运行或提示用户运行 `npm run docker:db:backup`，并可用 `npm run docker:db:status`、`npm run docker:db:verify-backups` 检查备份状态。
 - 只有旧库确实无法迁移或无法启动时，才允许启用新库；启用新库后必须补齐 migration、seed、测试数据说明和当前连接信息，避免用户误以为数据丢失。
 

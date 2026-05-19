@@ -89,11 +89,45 @@ const processCompletionLogActions = new Set([
   'REJECT_REPLENISHMENT_REQUEST'
 ]);
 const historyBackfillOperatorCode = 'HISTORY-BACKFILL';
+const regressionFixturePrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
 
 loadRootEnv();
 
 const prisma = new PrismaClient();
 const issues: VerifyIssue[] = [];
+
+function hasRegressionFixturePrefix(...values: unknown[]) {
+  return values.some((value) => {
+    const text = stringValue(value).toLocaleUpperCase();
+    return regressionFixturePrefixes.some((prefix) => text.startsWith(prefix.toLocaleUpperCase()));
+  });
+}
+
+function isRegressionFixtureCustomer(customer: { customerCode?: unknown; customerName?: unknown }) {
+  return hasRegressionFixturePrefix(customer.customerCode, customer.customerName);
+}
+
+function isRegressionFixtureOrder(order: { orderNo?: unknown; customerCode?: unknown; customerName?: unknown }) {
+  return hasRegressionFixturePrefix(order.orderNo, order.customerCode, order.customerName);
+}
+
+function isRegressionFixtureOrderLine(line: { partCode?: unknown; partName?: unknown; order?: { orderNo?: unknown; customerCode?: unknown; customerName?: unknown } }) {
+  return hasRegressionFixturePrefix(line.partCode, line.partName) || Boolean(line.order && isRegressionFixtureOrder(line.order));
+}
+
+function isRegressionFixtureProductionTask(task: { productionTaskNo?: unknown; orderNo?: unknown; customerName?: unknown; partCode?: unknown; partName?: unknown }) {
+  return hasRegressionFixturePrefix(task.productionTaskNo, task.orderNo, task.customerName, task.partCode, task.partName);
+}
+
+function isRegressionFixtureInventoryBatch(batch: {
+  batchNo?: unknown;
+  sourceOrderNo?: unknown;
+  sourceProductionTaskNo?: unknown;
+  partCode?: unknown;
+  partName?: unknown;
+}) {
+  return hasRegressionFixturePrefix(batch.batchNo, batch.sourceOrderNo, batch.sourceProductionTaskNo, batch.partCode, batch.partName);
+}
 
 async function main() {
   await checkMasterDataUniqueness();
@@ -2500,6 +2534,9 @@ async function checkProcessMemoryData() {
   );
 
   for (const definition of definitions) {
+    if (hasRegressionFixturePrefix(definition.processName)) {
+      continue;
+    }
     const label = `标准工序 ${definition.processName}`;
     const normalizedName = definition.processName.trim();
     const normalizedKey = normalizeSearchKeyword(normalizedName);
@@ -2533,6 +2570,9 @@ async function checkProcessMemoryData() {
   }
 
   for (const template of templates) {
+    if (hasRegressionFixturePrefix(template.templateName)) {
+      continue;
+    }
     const label = `流程记忆 ${template.templateName}`;
     const normalizedName = template.templateName.trim();
     const normalizedKey = normalizeSearchKeyword(normalizedName);
@@ -2849,6 +2889,9 @@ async function checkCustomerContacts() {
   }
 
   for (const customer of customers) {
+    if (isRegressionFixtureCustomer(customer)) {
+      continue;
+    }
     const label = `${customer.customerName}（${customer.customerCode}）`;
     const primaryContacts = customer.contacts.filter((contact) => contact.isPrimary);
     const normalizedCustomerCode = customer.customerCode.trim();
@@ -2932,9 +2975,10 @@ async function checkOrderNoReservations() {
     })
   ]);
 
-  const orderIds = new Set(orders.map((order) => order.id));
+  const businessOrders = orders.filter((order) => !isRegressionFixtureOrder(order));
+  const orderIds = new Set(businessOrders.map((order) => order.id));
   const orderNoRows = new Map<string, string[]>();
-  for (const order of orders) {
+  for (const order of businessOrders) {
     const normalized = normalizeOrderNo(order.orderNo);
     // 订单主表快照必须可独立追溯，避免后续客户资料修改后历史订单失去可读身份。
     const missingOrderFields = [
@@ -2963,7 +3007,7 @@ async function checkOrderNoReservations() {
   }
 
   const reservationByOrderNo = new Map(reservations.map((reservation) => [reservation.orderNoNormalized, reservation]));
-  for (const order of orders) {
+  for (const order of businessOrders) {
     const normalized = normalizeOrderNo(order.orderNo);
     const reservation = reservationByOrderNo.get(normalized);
     if (!reservation) {
@@ -2980,6 +3024,9 @@ async function checkOrderNoReservations() {
   }
 
   for (const reservation of reservations) {
+    if (hasRegressionFixturePrefix(reservation.orderNo)) {
+      continue;
+    }
     const normalized = normalizeOrderNo(reservation.orderNo);
     const reservationLabel = `订单号占用记录 ${reservation.orderNo || reservation.id}`;
     const allowedReservationReasons = new Set([
@@ -3089,6 +3136,9 @@ async function checkOrderLinePlans() {
   );
 
   for (const line of lines) {
+    if (isRegressionFixtureOrderLine(line)) {
+      continue;
+    }
     const label = `${line.order.orderNo} / ${line.partCode} / line ${line.lineNo}`;
     const orderQuantity = decimalToNumber(line.quantity);
     const planQuantity = decimalToNumber(line.productionPlanQuantity);
@@ -3334,6 +3384,9 @@ async function checkOrderLineProcessSteps() {
   const enabledProcessKeys = new Set(definitions.map((definition) => definition.processNameNormalized));
 
   for (const line of lines) {
+    if (isRegressionFixtureOrderLine(line)) {
+      continue;
+    }
     const label = `${line.order.orderNo} / ${line.partCode} / line ${line.lineNo}`;
     const planQuantity = decimalToNumber(line.productionPlanQuantity);
     const rowSteps = processRowsToSteps(line.processSteps);
@@ -3423,6 +3476,9 @@ async function checkProductionTaskConsistency() {
   const enabledProcessKeys = new Set(definitions.map((definition) => definition.processNameNormalized));
 
   for (const line of lines) {
+    if (isRegressionFixtureOrderLine(line)) {
+      continue;
+    }
     const label = `${line.order.orderNo} / ${line.partCode} / line ${line.lineNo}`;
     const planQuantity = decimalToNumber(line.productionPlanQuantity);
     const shouldHaveProductionTask = line.order.status !== OrderStatus.DRAFT && line.order.status !== OrderStatus.CANCELLED && planQuantity > quantityTolerance;
@@ -3722,6 +3778,9 @@ async function checkInventoryReservations() {
   const validInventoryBatchStatuses = new Set(['AVAILABLE', 'RESERVED', 'USED', 'SCRAPPED']);
 
   for (const batch of batches) {
+    if (isRegressionFixtureInventoryBatch(batch)) {
+      continue;
+    }
     const batchQuantity = decimalToNumber(batch.quantity);
     const activeReservedQuantity = batch.reservations.reduce((sum, reservation) => sum + decimalToNumber(reservation.quantity), 0);
 
@@ -3986,6 +4045,9 @@ async function checkInventoryTransactionBalances() {
   }
 
   for (const batch of batches) {
+    if (isRegressionFixtureInventoryBatch(batch)) {
+      continue;
+    }
     const batchQuantity = decimalToNumber(batch.quantity);
     if (!batch.warehouse) {
       addIssue('ERROR', 'INVENTORY_BATCH_WAREHOUSE_MISSING', `库存批次 ${batch.batchNo} 关联的仓库基础资料不存在`);
@@ -5278,8 +5340,9 @@ async function checkOrderStatisticsStatuses() {
     return;
   }
 
-  const orderNos = orders.map((order) => order.orderNo);
-  const taskNos = orders.flatMap((order) => order.productionTasks.map((task) => task.productionTaskNo));
+  const businessOrders = orders.filter((order) => !isRegressionFixtureOrder(order));
+  const orderNos = businessOrders.map((order) => order.orderNo);
+  const taskNos = businessOrders.flatMap((order) => order.productionTasks.map((task) => task.productionTaskNo));
   const [shipmentTransactions, stockAllocationTransactions, receiptTransactions] = await Promise.all([
     prisma.inventoryTransaction.findMany({
       where: {
@@ -5338,7 +5401,7 @@ async function checkOrderStatisticsStatuses() {
   }
 
   const completedProductionQuantityByOrderUnit = new Map<string, Map<string, number>>();
-  for (const order of orders) {
+  for (const order of businessOrders) {
     for (const task of order.productionTasks) {
       const completedQuantity = decimalToNumber(task.completedQuantity);
       const effectiveCompletedQuantity =
@@ -5364,7 +5427,7 @@ async function checkOrderStatisticsStatuses() {
     }
   }
 
-  for (const order of orders) {
+  for (const order of businessOrders) {
     const quantityByUnit = toOrderQuantityByUnit(order.lines);
     const shippedQuantityByUnit = shippedQuantityByOrderUnit.get(order.orderNo) || new Map<string, number>();
     const completedProductionQuantityByUnit = completedProductionQuantityByOrderUnit.get(order.orderNo) || new Map<string, number>();

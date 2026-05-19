@@ -3,8 +3,8 @@
     <div class="page-header">
       <h2 class="page-title">统计表</h2>
       <div class="header-actions">
-        <el-button :icon="Download" :loading="statisticsExporting" @click="exportStatisticsExcel">导出 Excel</el-button>
-        <el-button :loading="loading" @click="loadStatistics">刷新</el-button>
+        <el-button :icon="Download" :loading="statisticsExporting" title="按当前统计筛选导出 Excel" @click="exportStatisticsExcel">导出 Excel</el-button>
+        <el-button :loading="loading" title="刷新年份选项和当前统计数据" @click="refreshStatistics">刷新</el-button>
       </div>
     </div>
 
@@ -15,10 +15,45 @@
       </div>
       <div class="filter-field">
         <label>年份</label>
-        <el-input-number v-model="year" :min="2000" :max="currentBusinessYear" :controls="false" style="width: 120px" />
+        <el-select v-model="year" filterable placeholder="选择年份" title="选择统计年份" style="width: 120px" @change="handleYearChange">
+          <el-option v-for="item in yearOptions" :key="item" :label="`${item} 年`" :value="item" />
+        </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="loadStatistics">查询</el-button>
-      <el-button @click="resetStatisticsFilters">重置</el-button>
+      <div class="filter-field">
+        <label>季度</label>
+        <el-select
+          v-model="quarter"
+          clearable
+          placeholder="全部季度"
+          :disabled="quarterFilterDisabled"
+          :title="quarterFilterTitle"
+          style="width: 130px"
+          @change="handleQuarterChange"
+        >
+          <el-option v-for="item in quarterOptions" :key="item" :label="`第 ${item} 季度`" :value="item" />
+        </el-select>
+      </div>
+      <div class="filter-field">
+        <label>月份</label>
+        <el-select
+          v-model="month"
+          clearable
+          placeholder="全部月份"
+          :disabled="monthFilterDisabled"
+          :title="monthFilterTitle"
+          style="width: 130px"
+          @change="handleMonthChange"
+        >
+          <el-option v-for="item in monthOptions" :key="item" :label="`${item} 月`" :value="item" />
+        </el-select>
+      </div>
+      <el-button type="primary" :loading="loading" title="按当前筛选查询统计" @click="loadStatistics">查询</el-button>
+      <el-button title="重置统计筛选条件" @click="resetStatisticsFilters">重置</el-button>
+    </div>
+
+    <div class="statistics-filter-summary" :title="statisticsFilterSummaryTitle">
+      <span>当前统计：{{ periodTitle }} / {{ statisticsExportScopeLabel }}</span>
+      <span>{{ statisticsNarrowFilterHint }}</span>
     </div>
 
     <el-tabs v-model="activePeriod" class="statistics-tabs">
@@ -100,18 +135,21 @@
             <el-button
               :icon="Minus"
               :disabled="statisticsWorkTableHeights.inventorySnapshot <= statisticsWorkTableHeightLimits.min"
+              title="降低统计库存快照表格高度"
               aria-label="降低统计库存快照表格高度"
               @click="adjustStatisticsWorkTableHeight('inventorySnapshot', -statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="statisticsWorkTableHeights.inventorySnapshot >= statisticsWorkTableHeightLimits.max"
+              title="提高统计库存快照表格高度"
               aria-label="提高统计库存快照表格高度"
               @click="adjustStatisticsWorkTableHeight('inventorySnapshot', statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="statisticsWorkTableHeights.inventorySnapshot === statisticsWorkTableDefaultHeights.inventorySnapshot"
+              title="恢复统计库存快照表格默认高度"
               aria-label="恢复统计库存快照表格默认高度"
               @click="resetStatisticsWorkTableHeight('inventorySnapshot')"
             />
@@ -180,7 +218,14 @@
             <small>{{ row.partCode }} / {{ row.batchCount }} 批</small>
           </div>
           <div class="mobile-card-header-actions">
-            <el-button link type="primary" @click="toggleMobileStatisticsCard(inventorySnapshotMobileCardKey(row))">
+            <el-button
+              link
+              type="primary"
+              :title="
+                isMobileStatisticsCardExpanded(inventorySnapshotMobileCardKey(row)) ? '收起当前库存快照详情' : '查看当前库存快照详情'
+              "
+              @click="toggleMobileStatisticsCard(inventorySnapshotMobileCardKey(row))"
+            >
               {{ isMobileStatisticsCardExpanded(inventorySnapshotMobileCardKey(row)) ? '收起' : '详情' }}
             </el-button>
           </div>
@@ -219,7 +264,7 @@
           <el-button size="small" :disabled="loading || inventorySnapshotPagination.page <= 1" @click="loadInventorySnapshotPreviousPage">
             上一页
           </el-button>
-          <el-button size="small" type="primary" plain :disabled="loading || !inventorySnapshotHasMore" @click="loadInventorySnapshotNextPage">
+          <el-button title="继续加载" size="small" type="primary" plain :disabled="loading || !inventorySnapshotHasMore" @click="loadInventorySnapshotNextPage">
             继续加载
           </el-button>
         </div>
@@ -235,18 +280,21 @@
             <el-button
               :icon="Minus"
               :disabled="statisticsWorkTableHeights.totals <= statisticsWorkTableHeightLimits.min"
+              title="降低统计总汇总表格高度"
               aria-label="降低统计总汇总表格高度"
               @click="adjustStatisticsWorkTableHeight('totals', -statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="statisticsWorkTableHeights.totals >= statisticsWorkTableHeightLimits.max"
+              title="提高统计总汇总表格高度"
               aria-label="提高统计总汇总表格高度"
               @click="adjustStatisticsWorkTableHeight('totals', statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="statisticsWorkTableHeights.totals === statisticsWorkTableDefaultHeights.totals"
+              title="恢复统计总汇总表格默认高度"
               aria-label="恢复统计总汇总表格默认高度"
               @click="resetStatisticsWorkTableHeight('totals')"
             />
@@ -276,7 +324,12 @@
             <small>{{ row.range }}</small>
           </div>
           <div class="mobile-card-header-actions">
-            <el-button link type="primary" @click="toggleMobileStatisticsCard(totalMobileCardKey(row))">
+            <el-button
+              link
+              type="primary"
+              :title="isMobileStatisticsCardExpanded(totalMobileCardKey(row)) ? '收起统计总汇总详情' : '查看统计总汇总详情'"
+              @click="toggleMobileStatisticsCard(totalMobileCardKey(row))"
+            >
               {{ isMobileStatisticsCardExpanded(totalMobileCardKey(row)) ? '收起' : '详情' }}
             </el-button>
           </div>
@@ -311,18 +364,21 @@
             <el-button
               :icon="Minus"
               :disabled="statisticsWorkTableHeights.customers <= statisticsWorkTableHeightLimits.min"
+              title="降低统计客户汇总表格高度"
               aria-label="降低统计客户汇总表格高度"
               @click="adjustStatisticsWorkTableHeight('customers', -statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="statisticsWorkTableHeights.customers >= statisticsWorkTableHeightLimits.max"
+              title="提高统计客户汇总表格高度"
               aria-label="提高统计客户汇总表格高度"
               @click="adjustStatisticsWorkTableHeight('customers', statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="statisticsWorkTableHeights.customers === statisticsWorkTableDefaultHeights.customers"
+              title="恢复统计客户汇总表格默认高度"
               aria-label="恢复统计客户汇总表格默认高度"
               @click="resetStatisticsWorkTableHeight('customers')"
             />
@@ -377,7 +433,12 @@
             <small>{{ row.periodLabel }}</small>
           </div>
           <div class="mobile-card-header-actions">
-            <el-button link type="primary" @click="toggleMobileStatisticsCard(customerMobileCardKey(row))">
+            <el-button
+              link
+              type="primary"
+              :title="isMobileStatisticsCardExpanded(customerMobileCardKey(row)) ? '收起客户汇总详情' : '查看客户汇总详情'"
+              @click="toggleMobileStatisticsCard(customerMobileCardKey(row))"
+            >
               {{ isMobileStatisticsCardExpanded(customerMobileCardKey(row)) ? '收起' : '详情' }}
             </el-button>
           </div>
@@ -442,18 +503,21 @@
             <el-button
               :icon="Minus"
               :disabled="statisticsWorkTableHeights.summary <= statisticsWorkTableHeightLimits.min"
+              title="降低统计汇总表格高度"
               aria-label="降低统计汇总表格高度"
               @click="adjustStatisticsWorkTableHeight('summary', -statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="statisticsWorkTableHeights.summary >= statisticsWorkTableHeightLimits.max"
+              title="提高统计汇总表格高度"
               aria-label="提高统计汇总表格高度"
               @click="adjustStatisticsWorkTableHeight('summary', statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="statisticsWorkTableHeights.summary === statisticsWorkTableDefaultHeights.summary"
+              title="恢复统计汇总表格默认高度"
               aria-label="恢复统计汇总表格默认高度"
               @click="resetStatisticsWorkTableHeight('summary')"
             />
@@ -509,7 +573,12 @@
             <small>{{ row.periodLabel }} / {{ row.partCode }}</small>
           </div>
           <div class="mobile-card-header-actions">
-            <el-button link type="primary" @click="toggleMobileStatisticsCard(summaryMobileCardKey(row))">
+            <el-button
+              link
+              type="primary"
+              :title="isMobileStatisticsCardExpanded(summaryMobileCardKey(row)) ? '收起零件汇总详情' : '查看零件汇总详情'"
+              @click="toggleMobileStatisticsCard(summaryMobileCardKey(row))"
+            >
               {{ isMobileStatisticsCardExpanded(summaryMobileCardKey(row)) ? '收起' : '详情' }}
             </el-button>
           </div>
@@ -574,18 +643,21 @@
             <el-button
               :icon="Minus"
               :disabled="statisticsWorkTableHeights.orders <= statisticsWorkTableHeightLimits.min"
+              title="降低统计订单展示表格高度"
               aria-label="降低统计订单展示表格高度"
               @click="adjustStatisticsWorkTableHeight('orders', -statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="Plus"
               :disabled="statisticsWorkTableHeights.orders >= statisticsWorkTableHeightLimits.max"
+              title="提高统计订单展示表格高度"
               aria-label="提高统计订单展示表格高度"
               @click="adjustStatisticsWorkTableHeight('orders', statisticsWorkTableHeightLimits.step)"
             />
             <el-button
               :icon="RefreshLeft"
               :disabled="statisticsWorkTableHeights.orders === statisticsWorkTableDefaultHeights.orders"
+              title="恢复统计订单展示表格默认高度"
               aria-label="恢复统计订单展示表格默认高度"
               @click="resetStatisticsWorkTableHeight('orders')"
             />
@@ -635,7 +707,12 @@
             <small>{{ row.periodLabel }} / {{ row.customerName }}</small>
           </div>
           <div class="mobile-card-header-actions">
-            <el-button link type="primary" @click="toggleMobileStatisticsCard(orderMobileCardKey(row))">
+            <el-button
+              link
+              type="primary"
+              :title="isMobileStatisticsCardExpanded(orderMobileCardKey(row)) ? '收起订单展示详情' : '查看订单展示详情'"
+              @click="toggleMobileStatisticsCard(orderMobileCardKey(row))"
+            >
               {{ isMobileStatisticsCardExpanded(orderMobileCardKey(row)) ? '收起' : '详情' }}
             </el-button>
           </div>
@@ -690,6 +767,7 @@ import type {
   OrderStatisticsCustomerRow,
   OrderStatisticsInventorySnapshotRow,
   OrderStatisticsOrderRow,
+  OrderStatisticsOptions,
   OrderStatisticsResponse,
   OrderStatisticsSummaryRow,
   StatisticsPeriod
@@ -699,20 +777,44 @@ import { orderDisplayStatus } from '../utils/orderStatus';
 import { formatFileDateTime } from '../utils/tableExport';
 
 const { isMobileLayout } = useDeviceProfile();
-const currentBusinessDateText = localBusinessDateText();
+const statisticsBusinessTimeZone = 'Asia/Shanghai';
+const currentBusinessDateText = businessDateText();
 const currentBusinessYear = Number(currentBusinessDateText.substring(0, 4));
 const activePeriod = ref<StatisticsPeriod>('year');
 const year = ref(currentBusinessYear);
+const quarter = ref<number | undefined>();
+const month = ref<number | undefined>();
 const customerId = ref('');
 const loading = ref(false);
 const statisticsExporting = ref(false);
 const statistics = ref<OrderStatisticsResponse>();
+const statisticsOptions = ref<OrderStatisticsOptions>();
 const expandedMobileStatisticsCardKeys = ref<string[]>([]);
 const defaultInventorySnapshotPageLimit = 20;
 const inventorySnapshotPagination = reactive({
   page: 1,
   pageLimit: defaultInventorySnapshotPageLimit
 });
+const yearOptions = computed(() => {
+  const optionYears = new Set<number>([
+    ...(statisticsOptions.value?.years || []),
+    statisticsOptions.value?.currentBusinessYear || currentBusinessYear,
+    year.value
+  ]);
+  return [...optionYears]
+    .filter((item) => Number.isInteger(item) && item >= 2000 && item <= 2100)
+    .sort((a, b) => b - a);
+});
+const quarterOptions = [1, 2, 3, 4];
+const monthOptions = Array.from({ length: 12 }, (_, index) => index + 1);
+const quarterFilterDisabled = computed(() => activePeriod.value !== 'quarter');
+const monthFilterDisabled = computed(() => activePeriod.value !== 'month');
+const quarterFilterTitle = computed(() =>
+  quarterFilterDisabled.value ? '只有季度统计使用季度筛选；年度和月度统计会自动忽略季度。' : '选择统计季度；不选则显示全年全部季度'
+);
+const monthFilterTitle = computed(() =>
+  monthFilterDisabled.value ? '只有月度统计使用月份筛选；年度和季度统计会自动忽略月份。' : '选择统计月份；不选则显示全年全部月份'
+);
 
 type StatisticsWorkTableKey = 'totals' | 'summary' | 'customers' | 'orders' | 'inventorySnapshot';
 
@@ -747,22 +849,115 @@ const periodTitle = computed(() => {
   }
   return '年度';
 });
+const statisticsExportScopeLabel = computed(() => {
+  if (activePeriod.value === 'month') {
+    return month.value ? `${year.value}年${month.value}月` : `${year.value}年全部月份`;
+  }
+  if (activePeriod.value === 'quarter') {
+    return quarter.value ? `${year.value}年第${quarter.value}季度` : `${year.value}年全部季度`;
+  }
+  return `${year.value}年`;
+});
+const statisticsNarrowFilterHint = computed(() => {
+  if (activePeriod.value === 'month') {
+    return month.value ? '已按所选月份统计；季度筛选自动忽略。' : '未选择月份，默认显示全年全部月份汇总。';
+  }
+  if (activePeriod.value === 'quarter') {
+    return quarter.value ? '已按所选季度统计；月份筛选自动忽略。' : '未选择季度，默认显示全年全部季度汇总。';
+  }
+  return '年度统计默认忽略季度和月份筛选。';
+});
+const statisticsFilterSummaryTitle = computed(() =>
+  [
+    `统计类型：${periodTitle.value}`,
+    `统计范围：${statisticsExportScopeLabel.value}`,
+    statisticsNarrowFilterHint.value,
+    statisticsOptions.value?.years?.length ? `可选年份来自订单、生产、库存流水和报废记录：${statisticsOptions.value.years.join('、')}` : '',
+    '统计页只读，不会修改订单、生产、仓库或库存数据。'
+  ].filter(Boolean).join('；')
+);
 
 const totals = computed(() => ({
   orderCount: orderRows.value.length
 }));
 const statisticsCutoffNotice = computed(() => statistics.value?.cutoffNotice || '');
 
-function localBusinessDateText(value = new Date()) {
-  const month = String(value.getMonth() + 1).padStart(2, '0');
-  const day = String(value.getDate()).padStart(2, '0');
-  return `${value.getFullYear()}-${month}-${day}`;
+function businessDateText(value = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: statisticsBusinessTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(value);
+  const partValue = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value || '';
+  return `${partValue('year')}-${partValue('month')}-${partValue('day')}`;
+}
+
+function selectedStatisticsQuarter() {
+  return activePeriod.value === 'quarter' ? quarter.value || undefined : undefined;
+}
+
+function selectedStatisticsMonth() {
+  return activePeriod.value === 'month' ? month.value || undefined : undefined;
+}
+
+function normalizeStatisticsFiltersForActivePeriod() {
+  if (activePeriod.value === 'year') {
+    quarter.value = undefined;
+    month.value = undefined;
+    return;
+  }
+  if (activePeriod.value === 'quarter') {
+    month.value = undefined;
+    return;
+  }
+  quarter.value = undefined;
+}
+
+function handleQuarterChange(value?: number) {
+  const alreadyOnQuarterStatisticsTab = activePeriod.value === 'quarter';
+  if (value) {
+    month.value = undefined;
+    activePeriod.value = 'quarter';
+    if (alreadyOnQuarterStatisticsTab) {
+      void loadStatistics();
+    }
+    return;
+  }
+  if (alreadyOnQuarterStatisticsTab) {
+    void loadStatistics();
+  }
+}
+
+function handleMonthChange(value?: number) {
+  const alreadyOnMonthStatisticsTab = activePeriod.value === 'month';
+  if (value) {
+    quarter.value = undefined;
+    activePeriod.value = 'month';
+    if (alreadyOnMonthStatisticsTab) {
+      void loadStatistics();
+    }
+    return;
+  }
+  if (alreadyOnMonthStatisticsTab) {
+    void loadStatistics();
+  }
+}
+
+function handleYearChange() {
+  void loadStatistics();
+}
+
+function selectedDefaultStatisticsYear() {
+  return statisticsOptions.value?.currentBusinessYear || currentBusinessYear;
 }
 
 function emptyStatisticsResponse(): OrderStatisticsResponse {
   return {
     period: activePeriod.value,
     year: year.value,
+    quarter: selectedStatisticsQuarter(),
+    month: selectedStatisticsMonth(),
     currentBusinessDate: currentBusinessDateText,
     statisticsEndDate: currentBusinessDateText,
     isFuturePeriod: false,
@@ -962,6 +1157,24 @@ type LoadStatisticsOptions = {
   resetInventorySnapshotPage?: boolean;
 };
 
+async function loadStatisticsOptions() {
+  try {
+    statisticsOptions.value = await erpApi.orderStatisticsOptions();
+    if (!yearOptions.value.includes(year.value)) {
+      year.value = statisticsOptions.value.currentBusinessYear || currentBusinessYear;
+    }
+  } catch (error) {
+    statisticsOptions.value = {
+      years: [currentBusinessYear],
+      currentBusinessDate: currentBusinessDateText,
+      currentBusinessYear,
+      currentBusinessQuarter: Math.floor((Number(currentBusinessDateText.substring(5, 7)) - 1) / 3) + 1,
+      currentBusinessMonth: Number(currentBusinessDateText.substring(5, 7))
+    };
+    ElMessage.warning(error instanceof Error ? `统计年份选项加载失败：${error.message}` : '统计年份选项加载失败，已使用当前年份');
+  }
+}
+
 async function loadStatistics(options: LoadStatisticsOptions = { resetInventorySnapshotPage: true }) {
   if (options.resetInventorySnapshotPage !== false) {
     inventorySnapshotPagination.page = 1;
@@ -972,6 +1185,8 @@ async function loadStatistics(options: LoadStatisticsOptions = { resetInventoryS
     statistics.value = await erpApi.orderStatistics({
       period: activePeriod.value,
       year: year.value,
+      quarter: selectedStatisticsQuarter(),
+      month: selectedStatisticsMonth(),
       customerId: customerId.value || undefined,
       inventorySnapshotLimit: inventorySnapshotPagination.pageLimit,
       inventorySnapshotOffset: (inventorySnapshotPagination.page - 1) * inventorySnapshotPagination.pageLimit
@@ -985,6 +1200,11 @@ async function loadStatistics(options: LoadStatisticsOptions = { resetInventoryS
   }
 }
 
+async function refreshStatistics() {
+  await loadStatisticsOptions();
+  await loadStatistics();
+}
+
 async function exportStatisticsExcel() {
   if (statisticsExporting.value) {
     return;
@@ -996,9 +1216,11 @@ async function exportStatisticsExcel() {
       {
         period: activePeriod.value,
         year: year.value,
+        quarter: selectedStatisticsQuarter(),
+        month: selectedStatisticsMonth(),
         customerId: customerId.value || undefined
       },
-      `订单统计表_${periodTitle.value}_${year.value}_${formatFileDateTime()}.xlsx`
+      `订单统计表_${periodTitle.value}_${statisticsExportScopeLabel.value}_${formatFileDateTime()}.xlsx`
     );
     ElMessage.success('统计 Excel 已导出');
   } catch (error) {
@@ -1010,11 +1232,20 @@ async function exportStatisticsExcel() {
 
 function resetStatisticsFilters() {
   customerId.value = '';
-  year.value = currentBusinessYear;
-  void loadStatistics();
+  year.value = selectedDefaultStatisticsYear();
+  quarter.value = undefined;
+  month.value = undefined;
+  if (activePeriod.value === 'year') {
+    void loadStatistics();
+    return;
+  }
+  activePeriod.value = 'year';
 }
 
-watch(activePeriod, () => loadStatistics());
+watch(activePeriod, () => {
+  normalizeStatisticsFiltersForActivePeriod();
+  void loadStatistics();
+});
 
 watch(
   () => [
@@ -1071,6 +1302,7 @@ function inventorySnapshotStockAlertTagType(row: OrderStatisticsInventorySnapsho
 
 onMounted(async () => {
   restoreStatisticsWorkTableHeights();
+  await loadStatisticsOptions();
   await loadStatistics();
 });
 </script>
@@ -1078,6 +1310,21 @@ onMounted(async () => {
 <style scoped>
 .statistics-filter {
   margin-bottom: 12px;
+}
+
+.statistics-filter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: -4px 0 10px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.statistics-filter-summary span:first-child {
+  color: #0f172a;
+  font-weight: 700;
 }
 
 .statistics-tabs {

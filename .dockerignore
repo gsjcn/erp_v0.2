@@ -12,6 +12,7 @@ logs
 .codex-logs
 .codex-screens
 .runtime-logs
+.playwright-cli
 
 database/postgres-data
 database/backups

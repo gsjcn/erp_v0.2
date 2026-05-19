@@ -13,6 +13,8 @@
             size="small"
             :icon="Minus"
             :disabled="orderLineEditorTableHeight <= orderLineEditorTableHeightLimits.min"
+            title="降低订单零件编辑表格高度"
+
             aria-label="降低订单零件编辑表格高度"
             @click="adjustOrderLineEditorTableHeight(-orderLineEditorTableHeightLimits.step)"
           />
@@ -23,6 +25,8 @@
             size="small"
             :icon="Plus"
             :disabled="orderLineEditorTableHeight >= orderLineEditorTableHeightLimits.max"
+            title="提高订单零件编辑表格高度"
+
             aria-label="提高订单零件编辑表格高度"
             @click="adjustOrderLineEditorTableHeight(orderLineEditorTableHeightLimits.step)"
           />
@@ -32,13 +36,14 @@
             circle
             size="small"
             :icon="RefreshLeft"
+            title="恢复订单零件编辑表格默认高度"
             aria-label="恢复订单零件编辑表格默认高度"
             @click="resetOrderLineEditorTableHeight"
           />
         </el-tooltip>
       </div>
-      <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="openOrderLineFixedTextDialog">查看固定格式</el-button>
-      <el-button size="small" :disabled="orderLineFixedTextLineCount === 0" @click="copyOrderLineFixedText">复制清单</el-button>
+      <el-button title="查看固定格式" size="small" :disabled="orderLineFixedTextLineCount === 0" @click="openOrderLineFixedTextDialog">查看固定格式</el-button>
+      <el-button title="复制清单" size="small" :disabled="orderLineFixedTextLineCount === 0" @click="copyOrderLineFixedText">复制清单</el-button>
     </div>
   </div>
 
@@ -329,7 +334,8 @@
     </el-table-column>
     <el-table-column label="操作" width="96" fixed="right" align="center">
       <template #default="{ $index }">
-        <el-button v-if="!readOnly" class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove($index)">
+        <el-button v-if="!readOnly" class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove($index)"
+  :title="removeButtonText">
           {{ removeButtonText }}
         </el-button>
       </template>
@@ -363,7 +369,8 @@
           <el-button link type="primary" @click.stop="toggleMobileLineCard(index)">
             {{ isMobileLineExpanded(index) ? '收起' : '详情' }}
           </el-button>
-          <el-button v-if="!readOnly" class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove(index)">
+          <el-button v-if="!readOnly" class="line-remove-button" link type="danger" :icon="Delete" @click="emitRemove(index)"
+  :title="removeButtonText">
             {{ removeButtonText }}
           </el-button>
         </div>
@@ -637,8 +644,8 @@
       readonly
     />
     <template #footer>
-      <el-button @click="orderLineFixedTextDialogVisible = false">关闭</el-button>
-      <el-button type="primary" :disabled="!orderLineFixedText" @click="copyOrderLineFixedText">复制清单</el-button>
+      <el-button title="关闭" @click="orderLineFixedTextDialogVisible = false">关闭</el-button>
+      <el-button title="复制清单" type="primary" :disabled="!orderLineFixedText" @click="copyOrderLineFixedText">复制清单</el-button>
     </template>
   </el-dialog>
 </template>

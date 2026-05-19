@@ -49,6 +49,34 @@ type CustomerStatisticsSnapshot = {
   customerName: string;
 };
 
+type StatisticsOrderFixtureSource = {
+  orderNo?: string | null;
+  customerCode?: string | null;
+  customerName?: string | null;
+  lines: Array<{
+    partCode?: string | null;
+    partName?: string | null;
+    projectModel?: string | null;
+  }>;
+};
+
+type StatisticsInventoryTransactionCustomerSource = {
+  orderNo?: string | null;
+  productionTaskNo?: string | null;
+  partCode?: string | null;
+  partName?: string | null;
+  batch?: {
+    sourceOrderNo?: string | null;
+    sourceCustomerName?: string | null;
+    sourceOrder?: { orderNo?: string | null; customerId?: string | null; customerName?: string | null } | null;
+    productionTask?: {
+      orderNo?: string | null;
+      customerName?: string | null;
+      order?: { orderNo?: string | null; customerId?: string | null; customerName?: string | null } | null;
+    } | null;
+  } | null;
+};
+
 type InventorySnapshotRow = {
   partCode: string;
   partName: string;
@@ -71,10 +99,109 @@ type InventorySnapshotPagination = {
 };
 
 const STATISTICS_TEST_FIXTURE_PREFIXES = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
+const STATISTICS_STOCK_TRANSFER_SOURCE_RECORD_TYPES = [
+  'ProductionTaskOverage',
+  'ProductionTaskWithdrawStock',
+  'CustomerChangeStockHandling'
+];
 
 @Injectable()
 export class StatisticsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  async statisticsOptions(query: OrderStatisticsQueryDto = {}) {
+    const includeTestFixtures = query.includeTestFixtures === 'true';
+    const currentKey = businessDateKey();
+    const currentBusinessYear = Number(currentKey.substring(0, 4));
+    const currentBusinessMonth = Number(currentKey.substring(4, 6));
+    const currentBusinessDate = `${currentKey.substring(0, 4)}-${currentKey.substring(4, 6)}-${currentKey.substring(6, 8)}`;
+    const currentBusinessQuarter = Math.floor((currentBusinessMonth - 1) / 3) + 1;
+    const years = new Set<number>([currentBusinessYear]);
+
+    const orders = await this.prisma.customerOrder.findMany({
+      select: {
+        orderNo: true,
+        customerCode: true,
+        customerName: true,
+        orderDate: true,
+        lines: { select: { partCode: true, partName: true, projectModel: true } }
+      }
+    });
+    for (const order of orders) {
+      if (!includeTestFixtures && this.isStatisticsTestFixtureOrder(order)) {
+        continue;
+      }
+      years.add(order.orderDate.getUTCFullYear());
+    }
+
+    const completedTasks = await this.prisma.productionTask.findMany({
+      where: { completedAt: { not: null } },
+      select: {
+        completedAt: true,
+        orderNo: true,
+        productionTaskNo: true,
+        customerName: true,
+        partCode: true,
+        partName: true,
+        order: { select: { orderNo: true, customerName: true } }
+      }
+    });
+    for (const task of completedTasks) {
+      if (!task.completedAt || (!includeTestFixtures && this.hasTestFixturePrefix(task.orderNo, task.productionTaskNo, task.customerName, task.partCode, task.partName, task.order?.orderNo, task.order?.customerName))) {
+        continue;
+      }
+      years.add(task.completedAt.getUTCFullYear());
+    }
+
+    const transactions = await this.prisma.inventoryTransaction.findMany({
+      select: {
+        transactionTime: true,
+        orderNo: true,
+        productionTaskNo: true,
+        partCode: true,
+        partName: true,
+        batch: {
+          select: {
+            sourceOrderNo: true,
+            sourceCustomerName: true,
+            sourceOrder: { select: { orderNo: true, customerName: true } },
+            productionTask: {
+              select: {
+                orderNo: true,
+                productionTaskNo: true,
+                customerName: true,
+                order: { select: { orderNo: true, customerName: true } }
+              }
+            }
+          }
+        }
+      }
+    });
+    for (const transaction of transactions) {
+      if (!includeTestFixtures && this.isStatisticsTestFixtureInventoryTransaction(transaction)) {
+        continue;
+      }
+      years.add(transaction.transactionTime.getUTCFullYear());
+    }
+
+    const scrapRecords = await this.prisma.productionScrapRecord.findMany({
+      select: { recordDate: true, orderNo: true, partCode: true, partName: true }
+    });
+    for (const record of scrapRecords) {
+      if (!includeTestFixtures && this.hasTestFixturePrefix(record.orderNo, record.partCode, record.partName)) {
+        continue;
+      }
+      years.add(record.recordDate.getUTCFullYear());
+    }
+
+    return {
+      years: [...years].filter((item) => Number.isInteger(item) && item >= 2000 && item <= 2100).sort((a, b) => b - a),
+      currentBusinessDate,
+      currentBusinessYear,
+      currentBusinessQuarter,
+      currentBusinessMonth
+    };
+  }
 
   private hasTestFixturePrefix(...values: Array<string | null | undefined>) {
     return values.some((value) => {
@@ -83,9 +210,7 @@ export class StatisticsService {
     });
   }
 
-  private isStatisticsTestFixtureOrder(
-    order: Pick<Prisma.CustomerOrderGetPayload<{ include: { lines: true } }>, 'orderNo' | 'customerCode' | 'customerName' | 'lines'>
-  ) {
+  private isStatisticsTestFixtureOrder(order: StatisticsOrderFixtureSource) {
     return (
       this.hasTestFixturePrefix(order.orderNo, order.customerCode, order.customerName) ||
       order.lines.some((line) => this.hasTestFixturePrefix(line.partCode, line.partName, line.projectModel))
@@ -120,19 +245,23 @@ export class StatisticsService {
   async orderStatistics(query: OrderStatisticsQueryDto) {
     const period = query.period || StatisticsPeriod.YEAR;
     const year = query.year || Number(businessDateKey().substring(0, 4));
-    const dateWindow = this.resolveStatisticsDateWindow(year);
+    const periodFilters = this.resolveStatisticsPeriodFilters(period, query.quarter, query.month);
+    const dateWindow = this.resolveStatisticsDateWindow(year, periodFilters.quarter, periodFilters.month);
     const start = dateWindow.start;
     const end = dateWindow.end;
 
     const customerId = query.customerId?.trim();
+    const includeTestFixtures = query.includeTestFixtures === 'true';
     const inventorySnapshotPagination = this.resolveInventorySnapshotPagination(query);
-    const allInventorySnapshotRows = await this.currentInventorySnapshot(customerId);
+    const allInventorySnapshotRows = await this.currentInventorySnapshot(customerId, includeTestFixtures);
     const inventorySnapshotPage = this.paginateInventorySnapshotRows(allInventorySnapshotRows, inventorySnapshotPagination);
 
     if (dateWindow.isFuturePeriod) {
       return {
         period,
         year,
+        quarter: dateWindow.quarter,
+        month: dateWindow.month,
         currentBusinessDate: dateWindow.currentBusinessDate,
         statisticsEndDate: dateWindow.statisticsEndDate,
         isFuturePeriod: true,
@@ -157,16 +286,12 @@ export class StatisticsService {
       },
       include: { lines: true, inventoryBatches: true },
       orderBy: [{ orderDate: 'desc' }, { orderNo: 'desc' }]
-    })).filter((order) => !this.isStatisticsTestFixtureOrder(order));
+    })).filter((order) => includeTestFixtures || !this.isStatisticsTestFixtureOrder(order));
 
     const orderNos = orders.map((order) => order.orderNo);
     const rows = new Map<string, InternalSummaryRow>();
     const customerRows = new Map<string, InternalCustomerSummaryRow>();
     const orderPeriodMap = new Map(orders.map((order) => [order.orderNo, this.getPeriod(order.orderDate, period)]));
-    const orderCustomerMap = new Map(
-      orders.map((order) => [order.orderNo, { customerId: order.customerId, customerName: order.customerName }])
-    );
-
     const getRow = (periodKey: string, periodLabel: string, partCode: string, partName: string, unit: string) => {
       const key = `${periodKey}__${partCode}__${unit}`;
       const current = rows.get(key);
@@ -245,7 +370,6 @@ export class StatisticsService {
         : [[], [], []];
 
     const taskPeriodMap = new Map<string, { periodKey: string; periodLabel: string }>();
-    const taskByTaskNo = new Map<string, (typeof productionTasks)[number]>();
     const tasksByOrderNo = new Map<string, typeof productionTasks>();
     for (const task of productionTasks) {
       const orderPeriod = orderPeriodMap.get(task.orderNo);
@@ -253,7 +377,6 @@ export class StatisticsService {
         continue;
       }
       taskPeriodMap.set(task.productionTaskNo, orderPeriod);
-      taskByTaskNo.set(task.productionTaskNo, task);
       const orderTasks = tasksByOrderNo.get(task.orderNo) || [];
       orderTasks.push(task);
       tasksByOrderNo.set(task.orderNo, orderTasks);
@@ -267,37 +390,11 @@ export class StatisticsService {
       if (!transaction.orderNo) {
         continue;
       }
-      const orderPeriod = orderPeriodMap.get(transaction.orderNo);
-      if (!orderPeriod) {
-        continue;
-      }
-      const row = getRow(
-        orderPeriod.periodKey,
-        orderPeriod.periodLabel,
-        transaction.partCode,
-        transaction.partName,
-        transaction.unit
-      );
-      row.orderNoSet.add(transaction.orderNo);
       const quantity = decimalToNumber(transaction.quantity);
-      row.shippedOrderQuantity += quantity;
       this.addOrderUnitQuantity(shippedQuantityByOrderUnit, transaction.orderNo, transaction.unit, quantity);
       const orderLineId = transaction.orderLineId || transaction.batch?.sourceOrderLineId;
       if (orderLineId) {
         this.addLineQuantity(shippedQuantityByOrderLineId, orderLineId, quantity);
-      }
-      const customer = orderCustomerMap.get(transaction.orderNo);
-      if (customer) {
-        const customerRow = this.getCustomerStatisticsRow(
-          customerRows,
-          orderPeriod.periodKey,
-          orderPeriod.periodLabel,
-          customer.customerId,
-          customer.customerName,
-          transaction.unit
-        );
-        customerRow.orderNoSet.add(transaction.orderNo);
-        customerRow.shippedOrderQuantity += quantity;
       }
     }
 
@@ -307,18 +404,6 @@ export class StatisticsService {
       if (!transaction.orderNo) {
         continue;
       }
-      const orderPeriod = orderPeriodMap.get(transaction.orderNo);
-      if (!orderPeriod) {
-        continue;
-      }
-      const row = getRow(
-        orderPeriod.periodKey,
-        orderPeriod.periodLabel,
-        transaction.partCode,
-        transaction.partName,
-        transaction.unit
-      );
-      row.orderNoSet.add(transaction.orderNo);
       const quantity = decimalToNumber(transaction.quantity);
       // 使用库存转订单待发货库存只代表该数量已经可发货；统计页“实际完成数量”仍只统计真实生产入库。
       this.addOrderUnitQuantity(stockAllocatedQuantityByOrderUnit, transaction.orderNo, transaction.unit, quantity);
@@ -346,10 +431,6 @@ export class StatisticsService {
       if (!transaction.productionTaskNo) {
         continue;
       }
-      const orderPeriod = taskPeriodMap.get(transaction.productionTaskNo);
-      if (!orderPeriod) {
-        continue;
-      }
       const quantity = decimalToNumber(transaction.quantity);
       // 统计历史生产结果必须按 IN 流水计算，不能按当前库存余量计算。
       if (transaction.orderNo) {
@@ -359,29 +440,7 @@ export class StatisticsService {
         );
         continue;
       }
-      const row = getRow(
-        orderPeriod.periodKey,
-        orderPeriod.periodLabel,
-        transaction.partCode,
-        transaction.partName,
-        transaction.unit
-      );
-      row.stockQuantity += quantity;
       stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity);
-      const task = taskByTaskNo.get(transaction.productionTaskNo);
-      if (task) {
-        const customer: CustomerStatisticsSnapshot = orderCustomerMap.get(task.orderNo) || { customerName: task.customerName };
-        const customerRow = this.getCustomerStatisticsRow(
-          customerRows,
-          orderPeriod.periodKey,
-          orderPeriod.periodLabel,
-          customer.customerId,
-          customer.customerName,
-          transaction.unit
-        );
-        customerRow.orderNoSet.add(task.orderNo);
-        customerRow.stockQuantity += quantity;
-      }
     }
 
     const completedProductionQuantityByOrderUnit = new Map<string, Map<string, number>>();
@@ -391,28 +450,15 @@ export class StatisticsService {
       if (!orderPeriod) {
         continue;
       }
-      const row = getRow(orderPeriod.periodKey, orderPeriod.periodLabel, task.partCode, task.partName, task.unit);
       const completedQuantity = this.toEffectiveTaskCompletedQuantity(
         task,
         stockQuantityByTaskNo.get(task.productionTaskNo) ?? 0,
         orderReceiptQuantityByTaskNo.get(task.productionTaskNo) ?? 0
       );
-      row.completedProductionQuantity += completedQuantity;
       this.addOrderUnitQuantity(completedProductionQuantityByOrderUnit, task.orderNo, task.unit, completedQuantity);
       if (task.orderLineId) {
         this.addLineQuantity(completedProductionQuantityByOrderLineId, task.orderLineId, completedQuantity);
       }
-      const customer: CustomerStatisticsSnapshot = orderCustomerMap.get(task.orderNo) || { customerName: task.customerName };
-      const customerRow = this.getCustomerStatisticsRow(
-        customerRows,
-        orderPeriod.periodKey,
-        orderPeriod.periodLabel,
-        customer.customerId,
-        customer.customerName,
-        task.unit
-      );
-      customerRow.orderNoSet.add(task.orderNo);
-      customerRow.completedProductionQuantity += completedQuantity;
     }
 
     const completedFulfillmentQuantityByOrderUnit = this.mergeOrderUnitQuantityMaps(
@@ -424,12 +470,15 @@ export class StatisticsService {
       stockAllocatedQuantityByOrderLineId
     );
 
-    await this.appendScrapStatisticsRows(rows, customerRows, period, start, end, customerId);
+    await this.appendCompletedProductionStatisticsRows(rows, customerRows, period, start, end, customerId, includeTestFixtures);
+    await this.appendShipmentStatisticsRows(rows, customerRows, period, start, end, customerId, includeTestFixtures);
+    await this.appendStockTransferStatisticsRows(rows, customerRows, period, start, end, customerId, includeTestFixtures);
+    await this.appendScrapStatisticsRows(rows, customerRows, period, start, end, customerId, includeTestFixtures);
     if (dateWindow.isCurrentPeriodPartial) {
-      await this.appendCurrentInventoryStatisticsRows(rows, customerRows, period, dateWindow, customerId);
+      await this.appendCurrentInventoryStatisticsRows(rows, customerRows, period, dateWindow, customerId, includeTestFixtures);
     }
 
-    // 统计页只读展示，所有周期均按 CustomerOrder.orderDate 归属，不按生产完成或发货日期归属。
+    // 统计页只读展示：订单数量按订单日期，生产、发货、转库存按各自业务发生日期归属。
     const summaryRows = Array.from(rows.values())
       .map((row) => ({
         periodKey: row.periodKey,
@@ -511,6 +560,8 @@ export class StatisticsService {
     return {
       period,
       year,
+      quarter: dateWindow.quarter,
+      month: dateWindow.month,
       currentBusinessDate: dateWindow.currentBusinessDate,
       statisticsEndDate: dateWindow.statisticsEndDate,
       isFuturePeriod: false,
@@ -715,47 +766,103 @@ export class StatisticsService {
     return rows;
   }
 
-  private resolveStatisticsDateWindow(year: number) {
+  private resolveStatisticsDateWindow(year: number, quarter?: number, month?: number) {
     const currentKey = businessDateKey();
     const currentYear = Number(currentKey.substring(0, 4));
     const currentMonth = Number(currentKey.substring(4, 6));
     const currentDay = Number(currentKey.substring(6, 8));
     const currentBusinessDate = `${currentKey.substring(0, 4)}-${currentKey.substring(4, 6)}-${currentKey.substring(6, 8)}`;
-    const start = new Date(Date.UTC(year, 0, 1));
+    const selectedMonth = this.normalizeStatisticsMonth(month);
+    const selectedQuarter = selectedMonth ? undefined : this.normalizeStatisticsQuarter(quarter);
+    const startMonthIndex = selectedMonth ? selectedMonth - 1 : selectedQuarter ? (selectedQuarter - 1) * 3 : 0;
+    const monthSpan = selectedMonth ? 1 : selectedQuarter ? 3 : 12;
+    const start = new Date(Date.UTC(year, startMonthIndex, 1));
+    const plannedEnd = new Date(Date.UTC(year, startMonthIndex + monthSpan, 1));
+    const plannedEndDate = this.formatUtcBusinessDateText(new Date(Date.UTC(year, startMonthIndex + monthSpan, 0)));
+    const currentDateStart = new Date(Date.UTC(currentYear, currentMonth - 1, currentDay));
+    const currentDateExclusiveEnd = new Date(Date.UTC(currentYear, currentMonth - 1, currentDay + 1));
+    const scopeLabel = this.statisticsDateWindowScopeLabel(year, selectedQuarter, selectedMonth);
 
-    if (year > currentYear) {
+    if (start > currentDateStart) {
       return {
         start,
         end: start,
+        quarter: selectedQuarter,
+        month: selectedMonth,
         currentBusinessDate,
         statisticsEndDate: currentBusinessDate,
         isFuturePeriod: true,
         isCurrentPeriodPartial: false,
-        cutoffNotice: `${year}年是未来期间，统计页不把未来订单当作已发生数据。`
+        cutoffNotice: `${scopeLabel}是未来期间，统计页不把未来订单当作已发生数据。`
       };
     }
 
-    if (year === currentYear) {
+    if (plannedEnd > currentDateExclusiveEnd) {
       return {
         start,
-        end: new Date(Date.UTC(currentYear, currentMonth - 1, currentDay + 1)),
+        end: currentDateExclusiveEnd,
+        quarter: selectedQuarter,
+        month: selectedMonth,
         currentBusinessDate,
         statisticsEndDate: currentBusinessDate,
         isFuturePeriod: false,
         isCurrentPeriodPartial: true,
-        cutoffNotice: `当前${year}年统计截止到真实业务日期 ${currentBusinessDate}，未来日期不纳入已发生数据。`
+        cutoffNotice: `当前${scopeLabel}统计截止到真实业务日期 ${currentBusinessDate}，未来日期不纳入已发生数据。`
       };
     }
 
     return {
       start,
-      end: new Date(Date.UTC(year + 1, 0, 1)),
+      end: plannedEnd,
+      quarter: selectedQuarter,
+      month: selectedMonth,
       currentBusinessDate,
-      statisticsEndDate: `${year}-12-31`,
+      statisticsEndDate: plannedEndDate,
       isFuturePeriod: false,
       isCurrentPeriodPartial: false,
       cutoffNotice: ''
     };
+  }
+
+  private resolveStatisticsPeriodFilters(period: StatisticsPeriod, quarter?: number, month?: number) {
+    if (period === StatisticsPeriod.MONTH) {
+      return { quarter: undefined, month: this.normalizeStatisticsMonth(month) };
+    }
+    if (period === StatisticsPeriod.QUARTER) {
+      return { quarter: this.normalizeStatisticsQuarter(quarter), month: undefined };
+    }
+    return { quarter: undefined, month: undefined };
+  }
+
+  private normalizeStatisticsQuarter(quarter?: number) {
+    if (quarter === undefined) {
+      return undefined;
+    }
+    return Number.isInteger(quarter) && quarter >= 1 && quarter <= 4 ? quarter : undefined;
+  }
+
+  private normalizeStatisticsMonth(month?: number) {
+    if (month === undefined) {
+      return undefined;
+    }
+    return Number.isInteger(month) && month >= 1 && month <= 12 ? month : undefined;
+  }
+
+  private statisticsDateWindowScopeLabel(year: number, quarter?: number, month?: number) {
+    if (month) {
+      return `${year}年${month}月`;
+    }
+    if (quarter) {
+      return `${year}年第${quarter}季度`;
+    }
+    return `${year}年`;
+  }
+
+  private formatUtcBusinessDateText(date: Date) {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 
   private addOrderStatisticsExportSheet(
@@ -830,6 +937,8 @@ export class StatisticsService {
     return [
       `统计周期：${this.orderStatisticsExportPeriodLabel(statistics.period)}`,
       `年份：${statistics.year}`,
+      statistics.quarter ? `季度：第${statistics.quarter}季度` : '',
+      statistics.month ? `月份：${statistics.month}月` : '',
       `客户：${customerLabel}`,
       `统计截止：${statistics.statisticsEndDate || '-'}`,
       statistics.cutoffNotice ? `提示：${statistics.cutoffNotice}` : ''
@@ -939,13 +1048,349 @@ export class StatisticsService {
     };
   }
 
+  private async appendCompletedProductionStatisticsRows(
+    rows: Map<string, InternalSummaryRow>,
+    customerRows: Map<string, InternalCustomerSummaryRow>,
+    period: StatisticsPeriod,
+    start: Date,
+    end: Date,
+    customerId?: string,
+    includeTestFixtures = false
+  ) {
+    const where: Prisma.ProductionTaskWhereInput = {
+      completedAt: { gte: start, lt: end }
+    };
+    if (customerId) {
+      where.order = { customerId };
+    }
+
+    const tasks = (await this.prisma.productionTask.findMany({
+      where,
+      include: {
+        inventoryBatch: true,
+        order: { select: { customerId: true, customerName: true } }
+      }
+    })).filter(
+      (task) =>
+        includeTestFixtures ||
+        !this.hasTestFixturePrefix(
+          task.orderNo,
+          task.productionTaskNo,
+          task.customerName,
+          task.order?.customerName,
+          task.partCode,
+          task.partName
+        )
+    );
+    if (tasks.length === 0) {
+      return;
+    }
+
+    const taskNos = tasks.map((task) => task.productionTaskNo);
+    const receiptTransactions = (await this.prisma.inventoryTransaction.findMany({
+      where: {
+        transactionType: InventoryTransactionType.IN,
+        productionTaskNo: { in: taskNos },
+        sourceRecordType: { in: ['ProductionTask', 'ProductionTaskOverage'] }
+      }
+    })).filter((transaction) => includeTestFixtures || !this.isStatisticsTestFixtureInventoryTransaction(transaction));
+    const stockQuantityByTaskNo = new Map<string, number>();
+    const orderReceiptQuantityByTaskNo = new Map<string, number>();
+
+    for (const transaction of receiptTransactions) {
+      if (!transaction.productionTaskNo) {
+        continue;
+      }
+      const quantity = decimalToNumber(transaction.quantity);
+      if (transaction.sourceRecordType === 'ProductionTaskOverage' || !transaction.orderNo) {
+        stockQuantityByTaskNo.set(transaction.productionTaskNo, (stockQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity);
+        continue;
+      }
+      orderReceiptQuantityByTaskNo.set(
+        transaction.productionTaskNo,
+        (orderReceiptQuantityByTaskNo.get(transaction.productionTaskNo) ?? 0) + quantity
+      );
+    }
+
+    for (const task of tasks) {
+      if (!task.completedAt) {
+        continue;
+      }
+      const completedQuantity = this.toEffectiveTaskCompletedQuantity(
+        task,
+        stockQuantityByTaskNo.get(task.productionTaskNo) ?? 0,
+        orderReceiptQuantityByTaskNo.get(task.productionTaskNo) ?? 0
+      );
+      if (completedQuantity <= 0) {
+        continue;
+      }
+      const taskPeriod = this.getPeriod(task.completedAt, period);
+      const row = this.getStatisticsRow(rows, taskPeriod.periodKey, taskPeriod.periodLabel, task.partCode, task.partName, task.unit);
+      row.orderNoSet.add(task.orderNo);
+      row.completedProductionQuantity += completedQuantity;
+
+      const customer: CustomerStatisticsSnapshot = {
+        customerId: task.order?.customerId,
+        customerName: task.order?.customerName || task.customerName
+      };
+      const customerRow = this.getCustomerStatisticsRow(
+        customerRows,
+        taskPeriod.periodKey,
+        taskPeriod.periodLabel,
+        customer.customerId,
+        customer.customerName,
+        task.unit
+      );
+      customerRow.orderNoSet.add(task.orderNo);
+      customerRow.completedProductionQuantity += completedQuantity;
+    }
+  }
+
+  private async appendShipmentStatisticsRows(
+    rows: Map<string, InternalSummaryRow>,
+    customerRows: Map<string, InternalCustomerSummaryRow>,
+    period: StatisticsPeriod,
+    start: Date,
+    end: Date,
+    customerId?: string,
+    includeTestFixtures = false
+  ) {
+    const where: Prisma.InventoryTransactionWhereInput = {
+      transactionType: InventoryTransactionType.OUT,
+      transactionTime: { gte: start, lt: end },
+      sourceRecordType: 'InventoryBatch'
+    };
+    const customerScope = await this.statisticsCustomerTransactionScope(customerId);
+    if (customerScope) {
+      where.AND = [customerScope];
+    }
+
+    const transactions = (await this.prisma.inventoryTransaction.findMany({
+      where,
+      include: {
+        batch: {
+          select: {
+            sourceOrderNo: true,
+            sourceCustomerName: true,
+            sourceOrder: { select: { orderNo: true, customerId: true, customerName: true } },
+            productionTask: {
+              select: {
+                orderNo: true,
+                customerName: true,
+                order: { select: { orderNo: true, customerId: true, customerName: true } }
+              }
+            }
+          }
+        }
+      }
+    })).filter((transaction) => includeTestFixtures || !this.isStatisticsTestFixtureInventoryTransaction(transaction));
+
+    for (const transaction of transactions) {
+      const quantity = decimalToNumber(transaction.quantity);
+      if (quantity <= 0) {
+        continue;
+      }
+      const transactionPeriod = this.getPeriod(transaction.transactionTime, period);
+      const row = this.getStatisticsRow(
+        rows,
+        transactionPeriod.periodKey,
+        transactionPeriod.periodLabel,
+        transaction.partCode,
+        transaction.partName,
+        transaction.unit
+      );
+      const orderNo = this.inventoryTransactionOrderNo(transaction);
+      if (orderNo) {
+        row.orderNoSet.add(orderNo);
+      }
+      row.shippedOrderQuantity += quantity;
+
+      const customer = this.inventoryTransactionCustomerSnapshot(transaction);
+      const customerRow = this.getCustomerStatisticsRow(
+        customerRows,
+        transactionPeriod.periodKey,
+        transactionPeriod.periodLabel,
+        customer.customerId,
+        customer.customerName,
+        transaction.unit
+      );
+      if (orderNo) {
+        customerRow.orderNoSet.add(orderNo);
+      }
+      customerRow.shippedOrderQuantity += quantity;
+    }
+  }
+
+  private async appendStockTransferStatisticsRows(
+    rows: Map<string, InternalSummaryRow>,
+    customerRows: Map<string, InternalCustomerSummaryRow>,
+    period: StatisticsPeriod,
+    start: Date,
+    end: Date,
+    customerId?: string,
+    includeTestFixtures = false
+  ) {
+    const where: Prisma.InventoryTransactionWhereInput = {
+      transactionType: InventoryTransactionType.IN,
+      transactionTime: { gte: start, lt: end },
+      sourceRecordType: { in: STATISTICS_STOCK_TRANSFER_SOURCE_RECORD_TYPES }
+    };
+    const customerScope = await this.statisticsCustomerTransactionScope(customerId);
+    if (customerScope) {
+      where.AND = [customerScope];
+    }
+
+    const transactions = (await this.prisma.inventoryTransaction.findMany({
+      where,
+      include: {
+        batch: {
+          select: {
+            sourceOrderNo: true,
+            sourceCustomerName: true,
+            sourceOrder: { select: { orderNo: true, customerId: true, customerName: true } },
+            productionTask: {
+              select: {
+                orderNo: true,
+                customerName: true,
+                order: { select: { orderNo: true, customerId: true, customerName: true } }
+              }
+            }
+          }
+        }
+      }
+    })).filter((transaction) => includeTestFixtures || !this.isStatisticsTestFixtureInventoryTransaction(transaction));
+
+    for (const transaction of transactions) {
+      const quantity = decimalToNumber(transaction.quantity);
+      if (quantity <= 0) {
+        continue;
+      }
+      const transactionPeriod = this.getPeriod(transaction.transactionTime, period);
+      const row = this.getStatisticsRow(
+        rows,
+        transactionPeriod.periodKey,
+        transactionPeriod.periodLabel,
+        transaction.partCode,
+        transaction.partName,
+        transaction.unit
+      );
+      const orderNo = this.inventoryTransactionOrderNo(transaction);
+      if (orderNo) {
+        row.orderNoSet.add(orderNo);
+      }
+      row.stockQuantity += quantity;
+
+      const customer = this.inventoryTransactionCustomerSnapshot(transaction);
+      const customerRow = this.getCustomerStatisticsRow(
+        customerRows,
+        transactionPeriod.periodKey,
+        transactionPeriod.periodLabel,
+        customer.customerId,
+        customer.customerName,
+        transaction.unit
+      );
+      if (orderNo) {
+        customerRow.orderNoSet.add(orderNo);
+      }
+      customerRow.stockQuantity += quantity;
+    }
+  }
+
+  private async statisticsCustomerTransactionScope(customerId?: string): Promise<Prisma.InventoryTransactionWhereInput | undefined> {
+    if (!customerId?.trim()) {
+      return undefined;
+    }
+    const normalizedCustomerId = customerId.trim();
+    const [customer, orders, tasks] = await this.prisma.$transaction([
+      this.prisma.customer.findUnique({
+        where: { id: normalizedCustomerId },
+        select: { customerName: true }
+      }),
+      this.prisma.customerOrder.findMany({
+        where: { customerId: normalizedCustomerId },
+        select: { orderNo: true }
+      }),
+      this.prisma.productionTask.findMany({
+        where: { order: { customerId: normalizedCustomerId } },
+        select: { productionTaskNo: true }
+      })
+    ]);
+    const orderNos = orders.map((order) => order.orderNo).filter(Boolean);
+    const productionTaskNos = tasks.map((task) => task.productionTaskNo).filter(Boolean);
+    const customerConditions: Prisma.InventoryTransactionWhereInput[] = [
+      { batch: { sourceOrder: { is: { customerId: normalizedCustomerId } } } },
+      { batch: { productionTask: { is: { order: { customerId: normalizedCustomerId } } } } },
+      { orderLine: { is: { order: { customerId: normalizedCustomerId } } } }
+    ];
+    if (orderNos.length > 0) {
+      customerConditions.push({ orderNo: { in: orderNos } });
+      customerConditions.push({ batch: { sourceOrderNo: { in: orderNos } } });
+    }
+    if (productionTaskNos.length > 0) {
+      customerConditions.push({ productionTaskNo: { in: productionTaskNos } });
+      customerConditions.push({ batch: { sourceProductionTaskNo: { in: productionTaskNos } } });
+    }
+    if (customer?.customerName) {
+      customerConditions.push({ batch: { sourceCustomerName: { equals: customer.customerName } } });
+    }
+    return { OR: customerConditions };
+  }
+
+  private isStatisticsTestFixtureInventoryTransaction(transaction: StatisticsInventoryTransactionCustomerSource) {
+    return this.hasTestFixturePrefix(
+      transaction.orderNo,
+      transaction.productionTaskNo,
+      transaction.partCode,
+      transaction.partName,
+      transaction.batch?.sourceOrderNo,
+      transaction.batch?.sourceCustomerName,
+      transaction.batch?.sourceOrder?.orderNo,
+      transaction.batch?.sourceOrder?.customerName,
+      transaction.batch?.productionTask?.orderNo,
+      transaction.batch?.productionTask?.customerName,
+      transaction.batch?.productionTask?.order?.orderNo,
+      transaction.batch?.productionTask?.order?.customerName
+    );
+  }
+
+  private inventoryTransactionOrderNo(transaction: StatisticsInventoryTransactionCustomerSource) {
+    return (
+      transaction.orderNo ||
+      transaction.batch?.sourceOrder?.orderNo ||
+      transaction.batch?.sourceOrderNo ||
+      transaction.batch?.productionTask?.order?.orderNo ||
+      transaction.batch?.productionTask?.orderNo ||
+      null
+    );
+  }
+
+  private inventoryTransactionCustomerSnapshot(transaction: StatisticsInventoryTransactionCustomerSource): CustomerStatisticsSnapshot {
+    if (transaction.batch?.sourceOrder?.customerName) {
+      return { customerId: transaction.batch.sourceOrder.customerId, customerName: transaction.batch.sourceOrder.customerName };
+    }
+    if (transaction.batch?.productionTask?.order?.customerName) {
+      return {
+        customerId: transaction.batch.productionTask.order.customerId,
+        customerName: transaction.batch.productionTask.order.customerName
+      };
+    }
+    if (transaction.batch?.productionTask?.customerName) {
+      return { customerName: transaction.batch.productionTask.customerName };
+    }
+    if (transaction.batch?.sourceCustomerName) {
+      return { customerName: transaction.batch.sourceCustomerName };
+    }
+    return { customerName: '未关联客户' };
+  }
+
   private async appendScrapStatisticsRows(
     rows: Map<string, InternalSummaryRow>,
     customerRows: Map<string, InternalCustomerSummaryRow>,
     period: StatisticsPeriod,
     start: Date,
     end: Date,
-    customerId?: string
+    customerId?: string,
+    includeTestFixtures = false
   ) {
     const where: Prisma.ProductionScrapRecordWhereInput = {
       recordDate: { gte: start, lt: end },
@@ -969,7 +1414,7 @@ export class StatisticsService {
     const scrapRecords = (await this.prisma.productionScrapRecord.findMany({
       where,
       select: { recordDate: true, orderId: true, orderNo: true, partCode: true, partName: true, quantity: true, unit: true }
-    })).filter((record) => !this.hasTestFixturePrefix(record.orderNo, record.partCode, record.partName));
+    })).filter((record) => includeTestFixtures || !this.hasTestFixturePrefix(record.orderNo, record.partCode, record.partName));
     const scrapOrderMap = await this.findOrderCustomerMapForStatistics(scrapRecords.map((record) => record.orderNo));
     for (const record of scrapRecords) {
       const recordPeriod = this.getPeriod(record.recordDate, period);
@@ -997,7 +1442,8 @@ export class StatisticsService {
     customerRows: Map<string, InternalCustomerSummaryRow>,
     period: StatisticsPeriod,
     dateWindow: { currentBusinessDate: string },
-    customerId?: string
+    customerId?: string,
+    includeTestFixtures = false
   ) {
     const currentPeriod = this.getPeriod(this.businessDateTextToUtcDate(dateWindow.currentBusinessDate), period);
     const where: Prisma.InventoryBatchWhereInput = {
@@ -1026,7 +1472,7 @@ export class StatisticsService {
         productionTask: { select: { productionTaskNo: true, orderNo: true, customerName: true, order: { select: { orderNo: true, customerId: true, customerName: true } } } }
       }
     });
-    for (const batch of batches.filter((item) => !this.isStatisticsTestFixtureInventoryBatch(item))) {
+    for (const batch of batches.filter((item) => includeTestFixtures || !this.isStatisticsTestFixtureInventoryBatch(item))) {
       const row = this.getStatisticsRow(rows, currentPeriod.periodKey, currentPeriod.periodLabel, batch.partCode, batch.partName, batch.unit);
       // 当前库存是查询时点快照，只从 InventoryBatch 实时计算，不保存第二份汇总数量。
       const quantity = decimalToNumber(batch.quantity);
@@ -1161,7 +1607,7 @@ export class StatisticsService {
     };
   }
 
-  private async currentInventorySnapshot(customerId?: string): Promise<InventorySnapshotRow[]> {
+  private async currentInventorySnapshot(customerId?: string, includeTestFixtures = false): Promise<InventorySnapshotRow[]> {
     const where: Prisma.InventoryBatchWhereInput = {
       status: InventoryStatus.AVAILABLE,
       quantity: { gt: 0 }
@@ -1191,7 +1637,7 @@ export class StatisticsService {
       },
       orderBy: [{ partCode: 'asc' }, { createdAt: 'asc' }]
     });
-    const visibleBatches = batches.filter((item) => !this.isStatisticsTestFixtureInventoryBatch(item));
+    const visibleBatches = includeTestFixtures ? batches : batches.filter((item) => !this.isStatisticsTestFixtureInventoryBatch(item));
     if (visibleBatches.length === 0) {
       return [];
     }

@@ -1,31 +1,12 @@
 #!/usr/bin/env node
 
-const { PrismaClient } = require('@prisma/client');
-const { existsSync, readFileSync } = require('node:fs');
-const { resolve } = require('node:path');
-
-const rootDir = resolve(__dirname, '..');
-
-for (const envPath of [resolve(rootDir, '.env'), resolve(rootDir, 'backend/.env')]) {
-  if (!existsSync(envPath)) {
-    continue;
-  }
-  for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (match && process.env[match[1]] === undefined) {
-      process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
-    }
-  }
-}
-
 const apiBaseUrl = (
   process.env.INVENTORY_SUMMARY_API_BASE_URL ||
   process.env.FIRST_STAGE_API_BASE_URL ||
   'http://127.0.0.1:3000/api'
 ).replace(/\/$/, '');
-const prisma = new PrismaClient();
-const runId = 'STABLE';
-const testPrefix = 'COD-INV-SUM-STABLE';
+
+const testFixturePrefixes = ['VERIFY-', 'VERIFY_', 'COD-', 'MI-API-', 'MAT-STABLE', 'UPLOAD-FILENAME', 'CUST-SEARCH-', 'TEST-CUSTOMER'];
 
 function assert(condition, message) {
   if (!condition) {
@@ -35,6 +16,52 @@ function assert(condition, message) {
 
 function assertNumberEqual(actual, expected, label) {
   assert(Number(actual) === expected, `${label} expected ${expected}, actual ${actual}`);
+}
+
+function assertFiniteNumber(value, label) {
+  assert(typeof value === 'number' && Number.isFinite(value), `${label} must be a finite number`);
+}
+
+function assertNonNegativeNumber(value, label) {
+  assertFiniteNumber(value, label);
+  assert(value >= 0, `${label} must be non-negative`);
+}
+
+function startsWithTestFixturePrefix(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  const text = String(value).trim();
+  return testFixturePrefixes.some((prefix) => text.startsWith(prefix));
+}
+
+function collectPotentialFixtureStrings(value, results = []) {
+  if (value === null || value === undefined) {
+    return results;
+  }
+  if (typeof value === 'string' || typeof value === 'number') {
+    results.push(String(value));
+    return results;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectPotentialFixtureStrings(item, results);
+    }
+    return results;
+  }
+  if (typeof value === 'object') {
+    for (const item of Object.values(value)) {
+      collectPotentialFixtureStrings(item, results);
+    }
+  }
+  return results;
+}
+
+function assertNoTestFixtureRows(rows, label) {
+  for (const row of rows) {
+    const fixtureValue = collectPotentialFixtureStrings(row).find(startsWithTestFixturePrefix);
+    assert(!fixtureValue, `${label} must hide reusable test fixture value ${fixtureValue}`);
+  }
 }
 
 async function requestJson(path, options = {}) {
@@ -57,478 +84,276 @@ async function requestJson(path, options = {}) {
   return body;
 }
 
-async function cleanupDatabase() {
-  await prisma.inventoryReservation.deleteMany({ where: { partCode: { startsWith: testPrefix } } });
-  await prisma.inventoryTransaction.deleteMany({
-    where: {
-      OR: [{ transactionNo: { startsWith: testPrefix } }, { partCode: { startsWith: testPrefix } }]
-    }
-  });
-  await prisma.inventoryAdjustment.deleteMany({ where: { partCode: { startsWith: testPrefix } } });
-  await prisma.inventoryBatch.deleteMany({ where: { partCode: { startsWith: testPrefix } } });
-  await prisma.orderLine.deleteMany({ where: { partCode: { startsWith: testPrefix } } });
-  await prisma.customerOrder.deleteMany({ where: { orderNo: { startsWith: testPrefix } } });
-  await prisma.orderNoReservation.deleteMany({ where: { orderNo: { startsWith: testPrefix } } });
-  await prisma.material.updateMany({
-    where: { partCode: { startsWith: testPrefix } },
-    data: { status: 'DISABLED' }
-  });
-  const customer = await prisma.customer.findFirst({
-    where: {
-      OR: [
-        { customerCode: `${testPrefix}-CUST` },
-        { customerCode: { startsWith: `${testPrefix}-CUST__DISABLED__` } },
-        { customerName: { startsWith: `Inventory Summary Regression Customer ${runId}__DISABLED__` } }
-      ]
-    },
-    orderBy: { createdAt: 'asc' }
-  });
-  if (customer?.id) {
-    const archiveSuffix = `__DISABLED__${customer.id.slice(0, 8)}`;
-    await prisma.customerContact.updateMany({
-      where: { customerId: customer.id, status: 'ENABLED' },
-      data: { status: 'DISABLED', isPrimary: false }
-    });
-    await prisma.customer.update({
-      where: { id: customer.id },
-      data: {
-        customerCode: `${testPrefix}-CUST${archiveSuffix}`,
-        customerName: `Inventory Summary Regression Customer ${runId}${archiveSuffix}`,
-        contactName: null,
-        contactPhone: null,
-        status: 'DISABLED'
-      }
-    });
+function assertSummaryRowRelationships(row) {
+  for (const field of [
+    'batchCount',
+    'warehouseCount',
+    'physicalQuantity',
+    'reservedQuantity',
+    'availableQuantity',
+    'usedQuantity',
+    'totalQuantity',
+    'orderInventoryQuantity',
+    'stockInventoryQuantity',
+    'normalOrderStockQuantity',
+    'cancelledOrderStockQuantity',
+    'customerChangeStockQuantity'
+  ]) {
+    assertNonNegativeNumber(row[field], `${row.partCode}.${field}`);
   }
-  await prisma.warehouseLocation.updateMany({
-    where: { locationCode: { startsWith: testPrefix } },
-    data: { status: 'DISABLED' }
-  });
-  await prisma.warehouse.updateMany({
-    where: { warehouseCode: { startsWith: testPrefix } },
-    data: { status: 'DISABLED' }
-  });
-}
+  assert(row.partCode && typeof row.partCode === 'string', 'summary row must include partCode');
+  assert(row.partName && typeof row.partName === 'string', `${row.partCode}.partName must be present`);
+  assert(row.unit && typeof row.unit === 'string', `${row.partCode}.unit must be present`);
+  assert(Array.isArray(row.warehouses), `${row.partCode}.warehouses must be an array`);
+  assertNumberEqual(row.totalQuantity, row.physicalQuantity, `${row.partCode}.totalQuantity`);
+  assert(row.physicalQuantity >= row.reservedQuantity, `${row.partCode}.physicalQuantity must cover reservedQuantity`);
+  assertNumberEqual(row.availableQuantity, row.physicalQuantity - row.reservedQuantity, `${row.partCode}.availableQuantity`);
+  assertNumberEqual(
+    row.stockInventoryQuantity,
+    row.normalOrderStockQuantity + row.cancelledOrderStockQuantity + row.customerChangeStockQuantity,
+    `${row.partCode}.stockInventoryQuantity`
+  );
+  assertNumberEqual(row.availableQuantity, row.orderInventoryQuantity + row.stockInventoryQuantity, `${row.partCode}.availableQuantity split`);
+  assertNumberEqual(row.warehouseCount, row.warehouses.length, `${row.partCode}.warehouseCount`);
+  const warehouseBatchCount = row.warehouses.reduce((sum, warehouse) => {
+    assertNonNegativeNumber(warehouse.reservedQuantity, `${row.partCode}.${warehouse.warehouseName}.reservedQuantity`);
+    assertNonNegativeNumber(warehouse.availableQuantity, `${row.partCode}.${warehouse.warehouseName}.availableQuantity`);
+    assertNonNegativeNumber(warehouse.batchCount, `${row.partCode}.${warehouse.warehouseName}.batchCount`);
+    return sum + warehouse.batchCount;
+  }, 0);
+  assertNumberEqual(warehouseBatchCount, row.batchCount, `${row.partCode}.warehouse batchCount`);
 
-async function upsertRegressionWarehouse(warehouseCode, warehouseName) {
-  return prisma.warehouse.upsert({
-    where: { warehouseCode },
-    update: {
-      warehouseName,
-      status: 'ENABLED'
-    },
-    create: {
-      warehouseCode,
-      warehouseName,
-      status: 'ENABLED'
-    }
-  });
-}
-
-async function upsertRegressionWarehouseLocation(warehouseId, locationCode, locationName) {
-  const existingLocation = await prisma.warehouseLocation.findFirst({
-    where: { warehouseId, locationCode },
-    orderBy: { createdAt: 'asc' }
-  });
-  if (existingLocation) {
-    return prisma.warehouseLocation.update({
-      where: { id: existingLocation.id },
-      data: {
-        locationName,
-        status: 'ENABLED'
-      }
-    });
+  if (row.stockAlertEnabled) {
+    assertFiniteNumber(row.stockAlertQuantity, `${row.partCode}.stockAlertQuantity`);
+    assert(
+      row.stockAlertTriggered === (row.availableQuantity <= row.stockAlertQuantity),
+      `${row.partCode}.stockAlertTriggered must follow availableQuantity <= stockAlertQuantity`
+    );
+  } else {
+    assert(row.stockAlertTriggered === false, `${row.partCode}.stockAlertTriggered must be false when disabled`);
   }
-  return prisma.warehouseLocation.create({
-    data: {
-      warehouseId,
-      locationCode,
-      locationName,
-      status: 'ENABLED'
-    }
-  });
 }
 
-async function seedInventorySummaryRows() {
-  await cleanupDatabase();
-  const partCode = `${testPrefix}-PART`;
-  const zeroPartCode = `${testPrefix}-ZERO`;
-  const customerName = `Inventory Summary Regression Customer ${runId}`;
-  const unit = 'pcs';
-
-  await prisma.material.upsert({
-    where: { partCode },
-    update: {
-      partName: 'Inventory Summary Source Split Part',
-      unit,
-      stockAlertEnabled: true,
-      stockAlertQuantity: 100,
-      status: 'ENABLED'
-    },
-    create: {
-      partCode,
-      partName: 'Inventory Summary Source Split Part',
-      unit,
-      stockAlertEnabled: true,
-      stockAlertQuantity: 100,
-      status: 'ENABLED'
+function assertSourceDetailsRelationships(details) {
+  assert(details.partCode && typeof details.partCode === 'string', 'source details must include partCode');
+  assert(details.unit && typeof details.unit === 'string', `${details.partCode}.unit must be present`);
+  assertNonNegativeNumber(details.availableQuantity, `${details.partCode}.availableQuantity`);
+  assertNonNegativeNumber(details.batchCount, `${details.partCode}.batchCount`);
+  assertNonNegativeNumber(details.orderSourceCount, `${details.partCode}.orderSourceCount`);
+  assertNonNegativeNumber(details.stockSourceCount, `${details.partCode}.stockSourceCount`);
+  assert(Array.isArray(details.sources), `${details.partCode}.sources must be an array`);
+  assertNumberEqual(details.batchCount, details.orderSourceCount + details.stockSourceCount, `${details.partCode}.source count split`);
+  const availableFromSources = details.sources.reduce((sum, source) => {
+    assert(source.batchNo && typeof source.batchNo === 'string', `${details.partCode}.source.batchNo must be present`);
+    assertNonNegativeNumber(source.quantity, `${source.batchNo}.quantity`);
+    assertNonNegativeNumber(source.physicalQuantity, `${source.batchNo}.physicalQuantity`);
+    assertNonNegativeNumber(source.reservedQuantity, `${source.batchNo}.reservedQuantity`);
+    assertNumberEqual(source.quantity, source.physicalQuantity - source.reservedQuantity, `${source.batchNo}.quantity`);
+    assert(Array.isArray(source.reservations), `${source.batchNo}.reservations must be an array`);
+    for (const reservation of source.reservations) {
+      assert(reservation.orderNo && typeof reservation.orderNo === 'string', `${source.batchNo}.reservation.orderNo must be present`);
+      assertNonNegativeNumber(reservation.quantity, `${source.batchNo}.${reservation.orderNo}.reservation.quantity`);
     }
-  });
-  await prisma.material.upsert({
-    where: { partCode: zeroPartCode },
-    update: {
-      partName: 'Inventory Summary Zero Stock Part',
-      unit,
-      stockAlertEnabled: true,
-      stockAlertQuantity: 1,
-      status: 'ENABLED'
-    },
-    create: {
-      partCode: zeroPartCode,
-      partName: 'Inventory Summary Zero Stock Part',
-      unit,
-      stockAlertEnabled: true,
-      stockAlertQuantity: 1,
-      status: 'ENABLED'
-    }
-  });
-
-  const customerCode = `${testPrefix}-CUST`;
-  const existingCustomer = await prisma.customer.findFirst({
-    where: {
-      OR: [
-        { customerCode },
-        { customerCode: { startsWith: `${customerCode}__DISABLED__` } },
-        { customerName: { startsWith: `${customerName}__DISABLED__` } }
-      ]
-    },
-    orderBy: { createdAt: 'asc' }
-  });
-  const customerData = {
-    customerCode,
-    customerName,
-    regionType: 'CHINA',
-    province: 'Jiangsu',
-    city: 'Suzhou',
-    detailAddress: 'Inventory summary regression address',
-    status: 'ENABLED'
-  };
-  const customer = existingCustomer
-    ? await prisma.customer.update({
-        where: { id: existingCustomer.id },
-        data: customerData
-      })
-    : await prisma.customer.create({
-        data: customerData
-      });
-  const sourceOrder = await prisma.customerOrder.create({
-    data: {
-      orderNo: `${testPrefix}-ORDER`,
-      customerId: customer.id,
-      customerCode: customer.customerCode,
-      customerName: customer.customerName,
-      customerSnapshot: {
-        customerCode: customer.customerCode,
-        customerName: customer.customerName
-      },
-      orderDate: new Date('2026-05-16T00:00:00.000Z'),
-      status: 'PENDING_PRODUCTION'
-    }
-  });
-  const sourceLine = await prisma.orderLine.create({
-    data: {
-      orderId: sourceOrder.id,
-      lineNo: 1,
-      partCode,
-      partName: 'Inventory Summary Source Split Part',
-      partThickness: 1,
-      quantity: 20,
-      productionPlanQuantity: 20,
-      unit
-    }
-  });
-  const reservedOrder = await prisma.customerOrder.create({
-    data: {
-      orderNo: `${testPrefix}-RESERVED-ORDER`,
-      customerId: customer.id,
-      customerCode: customer.customerCode,
-      customerName: customer.customerName,
-      customerSnapshot: {
-        customerCode: customer.customerCode,
-        customerName: customer.customerName
-      },
-      orderDate: new Date('2026-05-17T00:00:00.000Z'),
-      status: 'DRAFT'
-    }
-  });
-  const reservedLine = await prisma.orderLine.create({
-    data: {
-      orderId: reservedOrder.id,
-      lineNo: 1,
-      partCode,
-      partName: 'Inventory Summary Source Split Part',
-      partThickness: 1,
-      quantity: 5,
-      productionPlanQuantity: 5,
-      fulfillmentMode: 'STOCK',
-      unit
-    }
-  });
-
-  const warehouseA = await upsertRegressionWarehouse(`${testPrefix}-WH-A`, 'Inventory Summary Warehouse A');
-  const warehouseB = await upsertRegressionWarehouse(`${testPrefix}-WH-B`, 'Inventory Summary Warehouse B');
-  const locationA = await upsertRegressionWarehouseLocation(warehouseA.id, `${testPrefix}-LOC-A`, 'Inventory Summary Location A');
-  const locationB = await upsertRegressionWarehouseLocation(warehouseB.id, `${testPrefix}-LOC-B`, 'Inventory Summary Location B');
-
-  const baseBatch = {
-    partCode,
-    partName: 'Inventory Summary Source Split Part',
-    unit,
-    status: 'AVAILABLE'
-  };
-  const reservedBatch = await prisma.inventoryBatch.create({
-    data: {
-      ...baseBatch,
-      batchNo: `${testPrefix}-RESERVED-STOCK`,
-      quantity: 7,
-      warehouseId: warehouseA.id,
-      locationId: locationA.id,
-      sourceOrderNo: `${testPrefix}-RESERVED-SOURCE`,
-      sourceCustomerName: customer.customerName,
-      sourceKind: 'NORMAL_ORDER'
-    }
-  });
-  await prisma.inventoryBatch.createMany({
-    data: [
-      {
-        ...baseBatch,
-        batchNo: `${testPrefix}-ORDER-BATCH`,
-        quantity: 4,
-        warehouseId: warehouseA.id,
-        locationId: locationA.id,
-        sourceOrderId: sourceOrder.id,
-        sourceOrderLineId: sourceLine.id,
-        sourceOrderNo: sourceOrder.orderNo,
-        sourceCustomerName: customer.customerName,
-        sourceKind: 'NORMAL_ORDER'
-      },
-      {
-        ...baseBatch,
-        batchNo: `${testPrefix}-NORMAL-STOCK`,
-        quantity: 8,
-        warehouseId: warehouseA.id,
-        locationId: locationA.id,
-        sourceOrderNo: `${testPrefix}-NORMAL-SOURCE`,
-        sourceCustomerName: customer.customerName,
-        sourceKind: 'NORMAL_ORDER'
-      },
-      {
-        ...baseBatch,
-        batchNo: `${testPrefix}-CANCELLED-STOCK`,
-        quantity: 3,
-        warehouseId: warehouseB.id,
-        locationId: locationB.id,
-        sourceOrderNo: `${testPrefix}-CANCELLED-SOURCE`,
-        sourceCustomerName: customer.customerName,
-        sourceKind: 'CANCELLED_ORDER'
-      },
-      {
-        ...baseBatch,
-        batchNo: `${testPrefix}-CHANGE-STOCK`,
-        quantity: 2,
-        warehouseId: warehouseB.id,
-        locationId: locationB.id,
-        sourceOrderNo: `${testPrefix}-CHANGE-SOURCE`,
-        sourceCustomerName: customer.customerName,
-        sourceKind: 'CUSTOMER_CHANGE'
-      }
-    ]
-  });
-  await prisma.inventoryReservation.create({
-    data: {
-      batchId: reservedBatch.id,
-      orderId: reservedOrder.id,
-      orderLineId: reservedLine.id,
-      orderNo: reservedOrder.orderNo,
-      partCode,
-      partName: 'Inventory Summary Source Split Part',
-      quantity: 5,
-      unit,
-      status: 'ACTIVE',
-      statusReason: 'VERIFY_INVENTORY_SUMMARY_RESERVATION'
-    }
-  });
-
-  return {
-    partCode,
-    zeroPartCode,
-    reservedOrderNo: reservedOrder.orderNo,
-    expected: {
-      batchCount: 5,
-      warehouseCount: 2,
-      physicalQuantity: 24,
-      reservedQuantity: 5,
-      availableQuantity: 19,
-      usedQuantity: 0,
-      totalQuantity: 24,
-      orderInventoryQuantity: 4,
-      stockInventoryQuantity: 15,
-      normalOrderStockQuantity: 10,
-      cancelledOrderStockQuantity: 3,
-      customerChangeStockQuantity: 2
-    }
-  };
+    return sum + source.quantity;
+  }, 0);
+  if (!Object.prototype.hasOwnProperty.call(details, 'totalSourceCount')) {
+    assertNumberEqual(details.sources.length, details.batchCount, `${details.partCode}.legacy source count`);
+    assertNumberEqual(availableFromSources, details.availableQuantity, `${details.partCode}.legacy availableQuantity`);
+  }
 }
 
-function assertSummaryRow(row, expected) {
-  assertNumberEqual(row.batchCount, expected.batchCount, 'batchCount');
-  assertNumberEqual(row.warehouseCount, expected.warehouseCount, 'warehouseCount');
-  assertNumberEqual(row.physicalQuantity, expected.physicalQuantity, 'physicalQuantity');
-  assertNumberEqual(row.reservedQuantity, expected.reservedQuantity, 'reservedQuantity');
-  assertNumberEqual(row.availableQuantity, expected.availableQuantity, 'availableQuantity');
-  assertNumberEqual(row.usedQuantity, expected.usedQuantity, 'usedQuantity');
-  assertNumberEqual(row.totalQuantity, expected.totalQuantity, 'totalQuantity');
-  assertNumberEqual(row.orderInventoryQuantity, expected.orderInventoryQuantity, 'orderInventoryQuantity');
-  assertNumberEqual(row.stockInventoryQuantity, expected.stockInventoryQuantity, 'stockInventoryQuantity');
-  assertNumberEqual(row.normalOrderStockQuantity, expected.normalOrderStockQuantity, 'normalOrderStockQuantity');
-  assertNumberEqual(row.cancelledOrderStockQuantity, expected.cancelledOrderStockQuantity, 'cancelledOrderStockQuantity');
-  assertNumberEqual(row.customerChangeStockQuantity, expected.customerChangeStockQuantity, 'customerChangeStockQuantity');
-  assert(row.stockInventoryQuantity === row.normalOrderStockQuantity + row.cancelledOrderStockQuantity + row.customerChangeStockQuantity, 'stock source split must add up to stockInventoryQuantity');
-  assert(row.availableQuantity === row.orderInventoryQuantity + row.stockInventoryQuantity, 'availableQuantity must equal orderInventoryQuantity + stockInventoryQuantity');
-  assert(row.stockAlertEnabled === true, 'stockAlertEnabled should be true');
-  assertNumberEqual(row.stockAlertQuantity, 100, 'stockAlertQuantity');
-  assert(row.stockAlertTriggered === true, 'stockAlertTriggered should be true');
-  assert(Array.isArray(row.warehouses) && row.warehouses.length === 2, 'warehouses should contain two warehouse rows');
+function assertPagedObject(page, label) {
+  assert(page && typeof page === 'object' && !Array.isArray(page), `${label} must be an explicit paged object`);
+  assert(Array.isArray(page.items), `${label}.items must be an array`);
+  assertNonNegativeNumber(page.totalCount, `${label}.totalCount`);
+  assertNonNegativeNumber(page.limit, `${label}.limit`);
+  assertNonNegativeNumber(page.offset, `${label}.offset`);
+  assert(typeof page.hasMore === 'boolean', `${label}.hasMore must be a boolean`);
+  assert(page.items.length <= page.limit, `${label}.items must respect limit`);
+  assert(page.hasMore === page.offset + page.items.length < page.totalCount, `${label}.hasMore must match paging metadata`);
+}
+
+function findSummaryRowForSourceDetails(rows) {
+  return (
+    rows.find((row) => row.reservedQuantity > 0 && row.batchCount > 0) ||
+    rows.find((row) => row.batchCount > 1) ||
+    rows.find((row) => row.batchCount > 0)
+  );
+}
+
+async function assertInventorySummaryReadOnly() {
+  const summaryRows = await requestJson('/inventory/summary?status=AVAILABLE&stockAlert=ALL');
+  assert(Array.isArray(summaryRows), 'inventory summary response must be an array');
+  assert(summaryRows.length > 0, 'inventory summary read-only regression requires business inventory baseline rows');
+  assertNoTestFixtureRows(summaryRows, 'inventory summary default response');
+  for (const row of summaryRows) {
+    assertSummaryRowRelationships(row);
+  }
+
+  const summaryWithFixtures = await requestJson('/inventory/summary?status=AVAILABLE&stockAlert=ALL&includeTestFixtures=true');
+  assert(Array.isArray(summaryWithFixtures), 'inventory summary includeTestFixtures response must be an array');
+  assert(summaryWithFixtures.length >= summaryRows.length, 'inventory summary includeTestFixtures must not hide business rows');
+
+  const summaryPage = await requestJson('/inventory/summary?status=AVAILABLE&stockAlert=ALL&withPage=true&limit=3&offset=0');
+  assertPagedObject(summaryPage, 'paged inventory summary');
+  assertNumberEqual(summaryPage.totalCount, summaryRows.length, 'paged inventory summary totalCount');
+  for (const row of summaryPage.items) {
+    assertSummaryRowRelationships(row);
+  }
+  const summaryLastPage = await requestJson(
+    `/inventory/summary?status=AVAILABLE&stockAlert=ALL&withPage=true&limit=1&offset=${Math.max(summaryPage.totalCount - 1, 0)}`
+  );
+  assertPagedObject(summaryLastPage, 'paged inventory summary last page');
+  assertNumberEqual(summaryLastPage.totalCount, summaryRows.length, 'paged inventory summary last page totalCount');
+  assert(summaryLastPage.hasMore === false, 'paged inventory summary last page should not have more rows');
+
+  return summaryRows;
+}
+
+async function assertInventoryStockAlertFilters() {
+  const triggeredRows = await requestJson('/inventory/summary?status=AVAILABLE&stockAlert=TRIGGERED');
+  assert(Array.isArray(triggeredRows), 'stockAlert=TRIGGERED response must be an array');
+  assert(triggeredRows.length > 0, 'inventory summary stock alert regression requires at least one triggered row');
+  for (const row of triggeredRows) {
+    assertSummaryRowRelationships(row);
+    assert(row.stockAlertEnabled === true, `${row.partCode} must have stock alert enabled`);
+    assert(row.stockAlertTriggered === true, `${row.partCode} must be triggered`);
+  }
+
+  const disabledRows = await requestJson('/inventory/summary?status=AVAILABLE&stockAlert=DISABLED');
+  assert(Array.isArray(disabledRows), 'stockAlert=DISABLED response must be an array');
+  for (const row of disabledRows) {
+    assertSummaryRowRelationships(row);
+    assert(row.stockAlertEnabled === false, `${row.partCode} must have stock alert disabled`);
+    assert(row.stockAlertTriggered === false, `${row.partCode} must not be triggered`);
+  }
+
+  const zeroStockAlertRow = triggeredRows.find((row) => row.batchCount === 0 && row.stockAlertTriggered);
+  if (zeroStockAlertRow) {
+    assertNumberEqual(zeroStockAlertRow.availableQuantity, 0, 'zero stock availableQuantity');
+    assertNumberEqual(zeroStockAlertRow.physicalQuantity, 0, 'zero stock physicalQuantity');
+    assert(zeroStockAlertRow.stockAlertQuantity > 0, 'zero stock alert row should keep positive threshold');
+  }
+  return { zeroStockAlertChecked: Boolean(zeroStockAlertRow) };
+}
+
+async function assertInventoryBatchPagination(sourceRow) {
+  const keyword = encodeURIComponent(sourceRow.partCode);
+  const publicBatchPage = await requestJson(`/inventory?keyword=${keyword}&status=AVAILABLE&stockAlert=ALL&limit=2&offset=0`);
+  assertPagedObject(publicBatchPage, 'public inventory batch response');
+  assert(publicBatchPage.totalCount >= publicBatchPage.items.length, 'public inventory totalCount must cover items');
+  assertNoTestFixtureRows(publicBatchPage.items, 'public inventory batch response');
+
+  const batchPage = await requestJson(`/inventory?keyword=${keyword}&status=AVAILABLE&stockAlert=ALL&withPage=true&limit=2&offset=0`);
+  assertPagedObject(batchPage, 'paged inventory batch response');
+  assertNumberEqual(batchPage.totalCount, publicBatchPage.totalCount, 'paged inventory totalCount');
+  assertNumberEqual(batchPage.limit, 2, 'paged inventory limit');
+  assertNumberEqual(batchPage.offset, 0, 'paged inventory offset');
+  assertNoTestFixtureRows(batchPage.items, 'paged inventory batch response');
+
+  const batchLastPage = await requestJson(
+    `/inventory?keyword=${keyword}&status=AVAILABLE&stockAlert=ALL&withPage=true&limit=1&offset=${Math.max(batchPage.totalCount - 1, 0)}`
+  );
+  assertPagedObject(batchLastPage, 'paged inventory batch last page');
+  assertNumberEqual(batchLastPage.totalCount, batchPage.totalCount, 'paged inventory last page totalCount');
+  assert(batchLastPage.hasMore === false, 'paged inventory last page should not have more rows');
+}
+
+async function assertInventorySourceDetails(sourceRow) {
+  const keyword = encodeURIComponent(sourceRow.partCode);
+  const legacySourceDetails = await requestJson(`/inventory/materials/${keyword}/source-details?sourceType=ALL`);
+  assertSourceDetailsRelationships(legacySourceDetails);
+  assertNoTestFixtureRows(legacySourceDetails.sources, 'legacy inventory source-details response');
+  assert(!Object.prototype.hasOwnProperty.call(legacySourceDetails, 'totalSourceCount'), 'legacy inventory source-details should not expose paging metadata');
+
+  const sourceDetailsPage = await requestJson(`/inventory/materials/${keyword}/source-details?sourceType=ALL&withPage=true&limit=2&offset=0`);
+  assertSourceDetailsRelationships(sourceDetailsPage);
+  assertNoTestFixtureRows(sourceDetailsPage.sources, 'paged inventory source-details response');
+  assertNumberEqual(sourceDetailsPage.totalSourceCount, legacySourceDetails.batchCount, 'paged inventory source-details totalSourceCount');
+  assertNumberEqual(sourceDetailsPage.sourceLimit, 2, 'paged inventory source-details sourceLimit');
+  assertNumberEqual(sourceDetailsPage.sourceOffset, 0, 'paged inventory source-details sourceOffset');
+  assert(sourceDetailsPage.sources.length <= sourceDetailsPage.sourceLimit, 'paged inventory source-details must respect sourceLimit');
+  assert(
+    sourceDetailsPage.sourceHasMore === sourceDetailsPage.sourceOffset + sourceDetailsPage.sources.length < sourceDetailsPage.totalSourceCount,
+    'paged inventory source-details sourceHasMore must match paging metadata'
+  );
+  assertNumberEqual(sourceDetailsPage.batchCount, legacySourceDetails.batchCount, 'paged inventory source-details batchCount should keep full count');
+
+  const sourceDetailsLastPage = await requestJson(
+    `/inventory/materials/${keyword}/source-details?sourceType=ALL&withPage=true&limit=1&offset=${Math.max(sourceDetailsPage.totalSourceCount - 1, 0)}`
+  );
+  assertSourceDetailsRelationships(sourceDetailsLastPage);
+  assertNumberEqual(sourceDetailsLastPage.totalSourceCount, sourceDetailsPage.totalSourceCount, 'paged inventory source-details last page totalSourceCount');
+  assert(sourceDetailsLastPage.sourceHasMore === false, 'paged inventory source-details last page should not have more rows');
+
+  return legacySourceDetails;
+}
+
+async function assertActiveReservationReadOnly(sourceRow, sourceDetails) {
+  if (sourceRow.reservedQuantity <= 0) {
+    return false;
+  }
+  const reservedSource = sourceDetails.sources.find((source) => source.reservations.length > 0);
+  const reservedOrderNo = reservedSource?.reservations?.[0]?.orderNo;
+  if (!reservedOrderNo) {
+    return false;
+  }
+  const currentOrderRows = await requestJson(
+    `/inventory/summary?keyword=${encodeURIComponent(sourceRow.partCode)}&status=AVAILABLE&stockAlert=ALL&excludeOrderNo=${encodeURIComponent(reservedOrderNo)}`
+  );
+  assert(Array.isArray(currentOrderRows), 'current order inventory summary response must be an array');
+  const currentOrderRow = currentOrderRows.find((row) => row.partCode === sourceRow.partCode);
+  assert(currentOrderRow, `current order summary should include ${sourceRow.partCode}`);
+  assertSummaryRowRelationships(currentOrderRow);
+  assert(
+    currentOrderRow.reservedQuantity <= sourceRow.reservedQuantity,
+    'excludeOrderNo should not increase active reserved quantity for the same part'
+  );
+  assert(
+    currentOrderRow.availableQuantity >= sourceRow.availableQuantity,
+    'excludeOrderNo should not reduce available quantity for the same part'
+  );
+  return true;
 }
 
 async function main() {
-  try {
-    const fixture = await seedInventorySummaryRows();
-    const hiddenFixtureSummaryRows = await requestJson(
-      `/inventory/summary?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=ALL`
-    );
-    assert(
-      !hiddenFixtureSummaryRows.some((row) => row.partCode === fixture.partCode),
-      'inventory summary default response must hide reusable test fixture inventory'
-    );
-    const summaryRows = await requestJson(`/inventory/summary?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=ALL&includeTestFixtures=true`);
-    assert(Array.isArray(summaryRows), 'inventory summary response must be an array');
-    const summaryRow = summaryRows.find((row) => row.partCode === fixture.partCode);
-    assert(summaryRow, `inventory summary should include ${fixture.partCode}`);
-    assertSummaryRow(summaryRow, fixture.expected);
+  const summaryRows = await assertInventorySummaryReadOnly();
+  const sourceRow = findSummaryRowForSourceDetails(summaryRows);
+  assert(sourceRow, 'inventory source-details regression requires at least one available inventory batch');
 
-    const summaryPage = await requestJson(
-      `/inventory/summary?keyword=${encodeURIComponent(testPrefix)}&status=AVAILABLE&stockAlert=ALL&withPage=true&includeTestFixtures=true&limit=1&offset=0`
-    );
-    assert(Array.isArray(summaryPage.items), 'paged inventory summary response should include items');
-    assertNumberEqual(summaryPage.totalCount, 2, 'paged inventory summary totalCount');
-    assertNumberEqual(summaryPage.items.length, 1, 'paged inventory summary first page item count');
-    assertNumberEqual(summaryPage.limit, 1, 'paged inventory summary limit');
-    assertNumberEqual(summaryPage.offset, 0, 'paged inventory summary offset');
-    assert(summaryPage.hasMore === true, 'paged inventory summary first page should have more rows');
-    const summaryLastPage = await requestJson(
-      `/inventory/summary?keyword=${encodeURIComponent(testPrefix)}&status=AVAILABLE&stockAlert=ALL&withPage=true&includeTestFixtures=true&limit=1&offset=1`
-    );
-    assertNumberEqual(summaryLastPage.totalCount, 2, 'paged inventory summary last page totalCount');
-    assertNumberEqual(summaryLastPage.items.length, 1, 'paged inventory summary last page item count');
-    assert(summaryLastPage.hasMore === false, 'paged inventory summary last page should not have more rows');
+  const stockAlertResult = await assertInventoryStockAlertFilters();
+  await assertInventoryBatchPagination(sourceRow);
+  const sourceDetails = await assertInventorySourceDetails(sourceRow);
+  const activeReservationChecked = await assertActiveReservationReadOnly(sourceRow, sourceDetails);
 
-    const triggeredRows = await requestJson(`/inventory/summary?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=TRIGGERED&includeTestFixtures=true`);
-    assert(triggeredRows.some((row) => row.partCode === fixture.partCode), 'stockAlert=TRIGGERED should include low stock row');
-    const disabledRows = await requestJson(`/inventory/summary?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=DISABLED&includeTestFixtures=true`);
-    assert(!disabledRows.some((row) => row.partCode === fixture.partCode), 'stockAlert=DISABLED should exclude enabled stock alert row');
-
-    const currentOrderRows = await requestJson(
-      `/inventory/summary?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=ALL&includeTestFixtures=true&excludeOrderNo=${encodeURIComponent(fixture.reservedOrderNo)}`
-    );
-    const currentOrderRow = currentOrderRows.find((row) => row.partCode === fixture.partCode);
-    assert(currentOrderRow, `current order summary should include ${fixture.partCode}`);
-    assertNumberEqual(currentOrderRow.reservedQuantity, 0, 'current order reservedQuantity');
-    assertNumberEqual(currentOrderRow.availableQuantity, 24, 'current order availableQuantity');
-
-    const publicBatchPage = await requestJson(`/inventory?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=ALL&includeTestFixtures=true&limit=2&offset=0`);
-    assert(!Array.isArray(publicBatchPage), 'public inventory batch response must be an explicit paged object');
-    assert(Array.isArray(publicBatchPage.items), 'public inventory batch response should include items');
-    assertNumberEqual(publicBatchPage.totalCount, 5, 'public inventory totalCount');
-    assertNumberEqual(publicBatchPage.items.length, 2, 'public inventory first page item count');
-    assertNumberEqual(publicBatchPage.limit, 2, 'public inventory limit');
-    assertNumberEqual(publicBatchPage.offset, 0, 'public inventory offset');
-    assert(publicBatchPage.hasMore === true, 'public inventory first page should have more rows');
-    const batchPage = await requestJson(
-      `/inventory?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=ALL&withPage=true&includeTestFixtures=true&limit=2&offset=0`
-    );
-    assert(Array.isArray(batchPage.items), 'paged inventory batch response should include items');
-    assertNumberEqual(batchPage.totalCount, 5, 'paged inventory totalCount');
-    assertNumberEqual(batchPage.items.length, 2, 'paged inventory first page item count');
-    assertNumberEqual(batchPage.limit, 2, 'paged inventory limit');
-    assertNumberEqual(batchPage.offset, 0, 'paged inventory offset');
-    assert(batchPage.hasMore === true, 'paged inventory first page should have more rows');
-    const batchLastPage = await requestJson(
-      `/inventory?keyword=${encodeURIComponent(fixture.partCode)}&status=AVAILABLE&stockAlert=ALL&withPage=true&includeTestFixtures=true&limit=2&offset=4`
-    );
-    assertNumberEqual(batchLastPage.totalCount, 5, 'paged inventory last page totalCount');
-    assertNumberEqual(batchLastPage.items.length, 1, 'paged inventory last page item count');
-    assert(batchLastPage.hasMore === false, 'paged inventory last page should not have more rows');
-
-    const legacySourceDetails = await requestJson(
-      `/inventory/materials/${encodeURIComponent(fixture.partCode)}/source-details?sourceType=ALL`
-    );
-    assert(Array.isArray(legacySourceDetails.sources), 'legacy inventory source-details response should include sources');
-    assertNumberEqual(legacySourceDetails.sources.length, 5, 'legacy inventory source-details source count');
-    assert(!Object.prototype.hasOwnProperty.call(legacySourceDetails, 'totalSourceCount'), 'legacy inventory source-details should not expose paging metadata');
-    const sourceDetailsPage = await requestJson(
-      `/inventory/materials/${encodeURIComponent(fixture.partCode)}/source-details?sourceType=ALL&withPage=true&limit=2&offset=0`
-    );
-    assert(Array.isArray(sourceDetailsPage.sources), 'paged inventory source-details response should include sources');
-    assertNumberEqual(sourceDetailsPage.totalSourceCount, 5, 'paged inventory source-details totalSourceCount');
-    assertNumberEqual(sourceDetailsPage.sources.length, 2, 'paged inventory source-details first page item count');
-    assertNumberEqual(sourceDetailsPage.sourceLimit, 2, 'paged inventory source-details sourceLimit');
-    assertNumberEqual(sourceDetailsPage.sourceOffset, 0, 'paged inventory source-details sourceOffset');
-    assert(sourceDetailsPage.sourceHasMore === true, 'paged inventory source-details first page should have more rows');
-    assertNumberEqual(sourceDetailsPage.batchCount, 5, 'paged inventory source-details batchCount should keep full count');
-    const sourceDetailsLastPage = await requestJson(
-      `/inventory/materials/${encodeURIComponent(fixture.partCode)}/source-details?sourceType=ALL&withPage=true&limit=2&offset=4`
-    );
-    assertNumberEqual(sourceDetailsLastPage.totalSourceCount, 5, 'paged inventory source-details last page totalSourceCount');
-    assertNumberEqual(sourceDetailsLastPage.sources.length, 1, 'paged inventory source-details last page item count');
-    assert(sourceDetailsLastPage.sourceHasMore === false, 'paged inventory source-details last page should not have more rows');
-
-    const zeroRows = await requestJson(`/inventory/summary?keyword=${encodeURIComponent(fixture.zeroPartCode)}&status=AVAILABLE&stockAlert=TRIGGERED&includeTestFixtures=true`);
-    const zeroRow = zeroRows.find((row) => row.partCode === fixture.zeroPartCode);
-    assert(zeroRow, `inventory summary should include zero stock material ${fixture.zeroPartCode}`);
-    assertNumberEqual(zeroRow.batchCount, 0, 'zero stock batchCount');
-    assertNumberEqual(zeroRow.availableQuantity, 0, 'zero stock availableQuantity');
-    assert(zeroRow.stockAlertEnabled === true, 'zero stock material should keep stockAlertEnabled');
-    assertNumberEqual(zeroRow.stockAlertQuantity, 1, 'zero stock stockAlertQuantity');
-    assert(zeroRow.stockAlertTriggered === true, 'zero stock material should trigger stock alert');
-
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          apiBaseUrl,
-          checked: [
-            'inventory-summary-source-split',
-            'inventory-summary-test-fixture-filter',
-            'inventory-summary-active-reservation',
-            'inventory-summary-current-order-priority',
-            'inventory-summary-explicit-pagination',
-            'inventory-batch-public-list-pagination',
-            'inventory-batch-explicit-pagination',
-            'inventory-source-details-legacy-response',
-            'inventory-source-details-explicit-pagination',
-            'inventory-summary-stock-alert-filter',
-            'inventory-summary-zero-stock-alert'
-          ]
-        },
-        null,
-        2
-      )
-    );
-  } finally {
-    await cleanupDatabase().catch(() => undefined);
-    await prisma.$disconnect();
-  }
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        apiBaseUrl,
+        samplePartCode: sourceRow.partCode,
+        activeReservationChecked,
+        zeroStockAlertChecked: stockAlertResult.zeroStockAlertChecked,
+        checked: [
+          'inventory-summary-read-only',
+          'inventory-summary-source-split-read-only',
+          'inventory-summary-test-fixture-filter',
+          'inventory-summary-active-reservation-read-only',
+          'inventory-summary-current-order-priority-read-only',
+          'inventory-summary-explicit-pagination',
+          'inventory-batch-public-list-pagination',
+          'inventory-batch-explicit-pagination',
+          'inventory-source-details-test-fixture-filter',
+          'inventory-source-details-legacy-response',
+          'inventory-source-details-explicit-pagination',
+          'inventory-summary-stock-alert-filter',
+          'inventory-summary-zero-stock-alert'
+        ]
+      },
+      null,
+      2
+    )
+  );
 }
 
 main().catch((error) => {

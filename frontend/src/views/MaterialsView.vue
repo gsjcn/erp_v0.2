@@ -6,10 +6,12 @@
         <p class="page-subtitle">维护下单可搜索的零件搜索记忆；不会生成订单、不会占用库存、不会创建生产任务。</p>
       </div>
       <div class="page-actions">
-        <el-button v-if="!isMobileLayout" :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate">下载导入模板</el-button>
-        <el-button v-if="!isMobileLayout" :icon="Download" :loading="materialExporting" @click="exportMaterialsExcel">导出 Excel</el-button>
-        <el-button v-if="!isMobileLayout" type="success" plain @click="openImportDialog">导入零件库</el-button>
-        <el-button @click="router.push('/materials')">返回零件管理</el-button>
+        <el-button v-if="!isMobileLayout" :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate"
+          title="下载导入模板">下载导入模板</el-button>
+        <el-button title="导出Excel" v-if="!isMobileLayout" :icon="Download" :loading="materialExporting" @click="exportMaterialsExcel">导出 Excel</el-button>
+        <el-button v-if="!isMobileLayout" type="success" plain @click="openImportDialog"
+          title="导入零件库">导入零件库</el-button>
+        <el-button title="返回零件管理" @click="router.push('/materials')">返回零件管理</el-button>
         <el-button @click="openDesktopMaintenancePage('/inventory/model-boms', '机型零件包维护')">机型零件包</el-button>
         <el-button @click="openDesktopMaintenancePage('/inventory/material-transforms', '来源加工关系维护')">来源加工关系</el-button>
         <el-button v-if="!isMobileLayout" type="primary" @click="openCreateDialog">新增零件</el-button>
@@ -69,6 +71,21 @@
         />
       </div>
       <div class="filter-field">
+        <label>客户范围</label>
+        <CustomerSelect v-model="filters.customerId" width="220px" placeholder="全部客户" @change="searchMaterials" />
+      </div>
+      <div class="filter-field">
+        <label>机型 / 项目</label>
+        <el-input
+          v-model="filters.projectModel"
+          clearable
+          placeholder="例如 B3 / B5"
+          style="width: 180px"
+          @keyup.enter="searchMaterials"
+          @clear="searchMaterials"
+        />
+      </div>
+      <div class="filter-field">
         <label>状态</label>
         <el-select v-model="filters.status" placeholder="状态" style="width: 140px" @change="searchMaterials">
           <el-option label="启用" value="ENABLED" />
@@ -83,8 +100,8 @@
           <el-option label="未启用" value="DISABLED" />
         </el-select>
       </div>
-      <el-button type="primary" :loading="loading" @click="searchMaterials">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
+      <el-button title="查询" type="primary" :loading="loading" @click="searchMaterials">查询</el-button>
+      <el-button title="重置" @click="resetFilters">重置</el-button>
     </div>
 
     <div class="table-card desktop-table">
@@ -101,6 +118,8 @@
               size="small"
               :icon="Minus"
               :disabled="materialLibraryWorkTableHeights.materials <= materialLibraryWorkTableHeightLimits.min"
+              title="降低零件基础资料表格高度"
+
               aria-label="降低零件基础资料表格高度"
               @click="adjustMaterialLibraryWorkTableHeight('materials', -materialLibraryWorkTableHeightLimits.step)"
             />
@@ -111,6 +130,8 @@
               size="small"
               :icon="Plus"
               :disabled="materialLibraryWorkTableHeights.materials >= materialLibraryWorkTableHeightLimits.max"
+              title="提高零件基础资料表格高度"
+
               aria-label="提高零件基础资料表格高度"
               @click="adjustMaterialLibraryWorkTableHeight('materials', materialLibraryWorkTableHeightLimits.step)"
             />
@@ -121,6 +142,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="materialLibraryWorkTableHeights.materials === materialLibraryWorkTableDefaultHeights.materials"
+              title="恢复零件基础资料表格默认高度"
               aria-label="恢复零件基础资料表格默认高度"
               @click="resetMaterialLibraryWorkTableHeight('materials')"
             />
@@ -172,31 +194,41 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="Boolean(materialOperationSavingId)" @click="openApplicabilityDialog(row)">适用范围</el-button>
-            <el-button link type="primary" :disabled="Boolean(materialOperationSavingId)" @click="openDrawingDialog(row)">图纸版本</el-button>
-            <el-button link type="primary" :disabled="Boolean(materialOperationSavingId)" @click="openEditDialog(row)">编辑</el-button>
-            <el-button
-              v-if="row.status === 'ENABLED'"
-              link
-              type="danger"
-              :loading="materialOperationSavingId === row.id"
-              :disabled="Boolean(materialOperationSavingId)"
-              @click="disableMaterial(row)"
-            >
-              停用
-            </el-button>
-            <el-button
-              v-else
-              link
-              type="success"
-              :loading="materialOperationSavingId === row.id"
-              :disabled="Boolean(materialOperationSavingId)"
-              @click="enableMaterial(row)"
-            >
-              启用
-            </el-button>
+            <div class="material-library-actions">
+              <div class="material-library-action-group">
+                <span class="material-library-action-label">资料</span>
+                <el-button link type="primary" :disabled="Boolean(materialOperationSavingId)" @click="openApplicabilityDialog(row)">适用</el-button>
+                <el-button link type="primary" :disabled="Boolean(materialOperationSavingId)" @click="openDrawingDialog(row)">图纸</el-button>
+                <el-button link type="primary" :disabled="Boolean(materialOperationSavingId)" @click="openEditDialog(row)">编辑</el-button>
+              </div>
+              <div class="material-library-action-group">
+                <span class="material-library-action-label">状态</span>
+                <el-button
+                  v-if="row.status === 'ENABLED'"
+                  link
+                  type="danger"
+                  :loading="materialOperationSavingId === row.id"
+                  :disabled="Boolean(materialOperationSavingId)"
+                  @click="disableMaterial(row)"
+
+                title="停用">
+                  停用
+                </el-button>
+                <el-button
+                  v-else
+                  link
+                  type="success"
+                  :loading="materialOperationSavingId === row.id"
+                  :disabled="Boolean(materialOperationSavingId)"
+                  @click="enableMaterial(row)"
+
+                  title="启用">
+                  启用
+                </el-button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -311,16 +343,17 @@
       </p>
       <template #footer>
         <el-button :disabled="saving" @click="closeMaterialDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveMaterial">保存</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveMaterial"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="importDialogVisible" class="responsive-dialog material-import-dialog" title="导入零件基础库" width="1180px">
       <div class="import-toolbar">
-        <el-button :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate">下载模板</el-button>
+        <el-button title="下载模板" :loading="materialImportTemplateDownloading" @click="downloadMaterialImportTemplate">下载模板</el-button>
         <el-button type="primary" :loading="importUploading" :disabled="materialImportBusy" @click="triggerMaterialImportFileInput">选择 .xlsx 文件</el-button>
-        <el-button :loading="importRefreshing" :disabled="!materialImportSession || materialImportBusy" @click="refreshMaterialImportSession">刷新预览</el-button>
-        <el-button
+        <el-button title="刷新预览" :loading="importRefreshing" :disabled="!materialImportSession || materialImportBusy" @click="refreshMaterialImportSession">刷新预览</el-button>
+        <el-button title="下载问题明细"
           :disabled="!materialImportHasIssues || materialImportBusy"
           :loading="importIssueReportDownloading"
           @click="downloadMaterialImportIssueReport"
@@ -332,10 +365,12 @@
           :disabled="!materialImportCanCommit || materialImportBusy"
           :loading="importCommitting"
           @click="commitMaterialImport"
-        >
+
+          title="确认写入零件库">
           确认写入零件库
         </el-button>
-        <el-button v-if="materialImportSession" type="danger" plain :loading="importDiscarding" :disabled="materialImportBusy" @click="discardMaterialImport">
+        <el-button v-if="materialImportSession" type="danger" plain :loading="importDiscarding" :disabled="materialImportBusy" @click="discardMaterialImport"
+  title="放弃本次导入">
           放弃本次导入
         </el-button>
         <input ref="materialImportInput" class="hidden-file-input" type="file" multiple accept=".xlsx" @change="handleImportFileInput" />
@@ -410,7 +445,8 @@
             :loading="importDeletingFileId === file.id"
             :disabled="materialImportSession.status !== 'DRAFT' || materialImportBusy"
             @click="deleteMaterialImportFile(file.id)"
-          >
+
+          title="删除文件">
             删除文件
           </el-button>
         </div>
@@ -425,6 +461,8 @@
               size="small"
               :icon="Minus"
               :disabled="materialLibraryWorkTableHeights.importPreview <= materialLibraryWorkTableHeightLimits.min"
+              title="降低零件库导入预览表格高度"
+
               aria-label="降低零件库导入预览表格高度"
               @click="adjustMaterialLibraryWorkTableHeight('importPreview', -materialLibraryWorkTableHeightLimits.step)"
             />
@@ -435,6 +473,8 @@
               size="small"
               :icon="Plus"
               :disabled="materialLibraryWorkTableHeights.importPreview >= materialLibraryWorkTableHeightLimits.max"
+              title="提高零件库导入预览表格高度"
+
               aria-label="提高零件库导入预览表格高度"
               @click="adjustMaterialLibraryWorkTableHeight('importPreview', materialLibraryWorkTableHeightLimits.step)"
             />
@@ -445,6 +485,7 @@
               size="small"
               :icon="RefreshLeft"
               :disabled="materialLibraryWorkTableHeights.importPreview === materialLibraryWorkTableDefaultHeights.importPreview"
+              title="恢复零件库导入预览表格默认高度"
               aria-label="恢复零件库导入预览表格默认高度"
               @click="resetMaterialLibraryWorkTableHeight('importPreview')"
             />
@@ -602,7 +643,7 @@
       </el-tabs>
       <div v-if="materialImportSession" class="import-preview-pager">
         <span>{{ materialImportPreviewProgressText }}</span>
-        <el-button
+        <el-button title="继续加载预览"
           v-if="materialImportHasMoreRows"
           type="primary"
           plain
@@ -617,13 +658,14 @@
       <el-empty v-else description="请先上传零件库导入文件" />
 
       <template #footer>
-        <el-button @click="importDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="importDialogVisible = false">关闭</el-button>
         <el-button
           type="success"
           :disabled="!materialImportCanCommit || materialImportBusy"
           :loading="importCommitting"
           @click="commitMaterialImport"
-        >
+
+          title="确认写入零件库">
           确认写入零件库
         </el-button>
       </template>
@@ -668,7 +710,7 @@
         <ImportIssueList :issues="activeMaterialImportTraceRow.issues" />
       </div>
       <template #footer>
-        <el-button @click="materialImportTraceDialogVisible = false">关闭</el-button>
+        <el-button title="关闭" @click="materialImportTraceDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -831,8 +873,9 @@
             </el-form-item>
           </el-form>
           <div class="applicability-actions">
-            <el-button :disabled="applicabilitySaving" @click="resetApplicabilityForm">清空</el-button>
-            <el-button type="primary" :loading="applicabilitySaving" :disabled="applicabilitySaving" @click="saveApplicability">
+            <el-button title="清空" :disabled="applicabilitySaving" @click="resetApplicabilityForm">清空</el-button>
+            <el-button type="primary" :loading="applicabilitySaving" :disabled="applicabilitySaving" @click="saveApplicability"
+              :title="applicabilityForm.id ? '保存范围' : '新增范围'">
               {{ applicabilityForm.id ? '保存范围' : '新增范围' }}
             </el-button>
           </div>
@@ -842,7 +885,7 @@
           <div class="material-library-dialog-table-header">
             <div class="material-library-dialog-title-actions">
               <h3>已维护范围</h3>
-              <el-button
+              <el-button title="导出Excel"
                 v-if="!isMobileLayout"
                 size="small"
                 :icon="Download"
@@ -861,6 +904,8 @@
                   size="small"
                   :icon="Minus"
                   :disabled="materialLibraryWorkTableHeights.applicability <= materialLibraryWorkTableHeightLimits.min"
+                  title="降低适用范围维护表格高度"
+
                   aria-label="降低适用范围维护表格高度"
                   @click="adjustMaterialLibraryWorkTableHeight('applicability', -materialLibraryWorkTableHeightLimits.step)"
                 />
@@ -871,6 +916,8 @@
                   size="small"
                   :icon="Plus"
                   :disabled="materialLibraryWorkTableHeights.applicability >= materialLibraryWorkTableHeightLimits.max"
+                  title="提高适用范围维护表格高度"
+
                   aria-label="提高适用范围维护表格高度"
                   @click="adjustMaterialLibraryWorkTableHeight('applicability', materialLibraryWorkTableHeightLimits.step)"
                 />
@@ -881,6 +928,7 @@
                   size="small"
                   :icon="RefreshLeft"
                   :disabled="materialLibraryWorkTableHeights.applicability === materialLibraryWorkTableDefaultHeights.applicability"
+                  title="恢复适用范围维护表格默认高度"
                   aria-label="恢复适用范围维护表格默认高度"
                   @click="resetMaterialLibraryWorkTableHeight('applicability')"
                 />
@@ -909,29 +957,39 @@
                 </el-tooltip>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="150" fixed="right">
+            <el-table-column label="操作" width="170" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" :disabled="applicabilitySaving || Boolean(applicabilityOperationSavingId)" @click="editApplicability(row)">编辑</el-button>
-                <el-button
-                  v-if="row.status === 'ENABLED'"
-                  link
-                  type="danger"
-                  :loading="applicabilityOperationSavingId === row.id"
-                  :disabled="applicabilitySaving || Boolean(applicabilityOperationSavingId)"
-                  @click="disableApplicability(row)"
-                >
-                  停用
-                </el-button>
-                <el-button
-                  v-else
-                  link
-                  type="success"
-                  :loading="applicabilityOperationSavingId === row.id"
-                  :disabled="applicabilitySaving || Boolean(applicabilityOperationSavingId)"
-                  @click="enableApplicability(row)"
-                >
-                  启用
-                </el-button>
+                <div class="material-maintenance-row-actions">
+                  <div class="material-maintenance-row-action-group">
+                    <span class="material-maintenance-row-action-label">资料</span>
+                    <el-button title="编辑适用范围" link type="primary" :disabled="applicabilitySaving || Boolean(applicabilityOperationSavingId)" @click="editApplicability(row)">编辑</el-button>
+                  </div>
+                  <div class="material-maintenance-row-action-group">
+                    <span class="material-maintenance-row-action-label">状态</span>
+                    <el-button
+                      v-if="row.status === 'ENABLED'"
+                      title="停用适用范围"
+                      link
+                      type="danger"
+                      :loading="applicabilityOperationSavingId === row.id"
+                      :disabled="applicabilitySaving || Boolean(applicabilityOperationSavingId)"
+                      @click="disableApplicability(row)"
+                    >
+                      停用
+                    </el-button>
+                    <el-button
+                      v-else
+                      title="恢复适用范围"
+                      link
+                      type="success"
+                      :loading="applicabilityOperationSavingId === row.id"
+                      :disabled="applicabilitySaving || Boolean(applicabilityOperationSavingId)"
+                      @click="enableApplicability(row)"
+                    >
+                      启用
+                    </el-button>
+                  </div>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -1011,8 +1069,9 @@
             </el-form-item>
           </el-form>
           <div class="applicability-actions">
-            <el-button :disabled="drawingSaving || drawingUploading" @click="resetDrawingForm">清空</el-button>
-            <el-button type="primary" :loading="drawingSaving" :disabled="drawingSaving || drawingUploading" @click="saveDrawingRevision">
+            <el-button title="清空" :disabled="drawingSaving || drawingUploading" @click="resetDrawingForm">清空</el-button>
+            <el-button type="primary" :loading="drawingSaving" :disabled="drawingSaving || drawingUploading" @click="saveDrawingRevision"
+              :title="drawingForm.id ? '保存图纸' : '新增图纸'">
               {{ drawingForm.id ? '保存图纸' : '新增图纸' }}
             </el-button>
           </div>
@@ -1022,7 +1081,7 @@
           <div class="material-library-dialog-table-header">
             <div class="material-library-dialog-title-actions">
               <h3>已维护图纸</h3>
-              <el-button
+              <el-button title="导出Excel"
                 v-if="!isMobileLayout"
                 size="small"
                 :icon="Download"
@@ -1041,6 +1100,8 @@
                   size="small"
                   :icon="Minus"
                   :disabled="materialLibraryWorkTableHeights.drawing <= materialLibraryWorkTableHeightLimits.min"
+                  title="降低图纸版本维护表格高度"
+
                   aria-label="降低图纸版本维护表格高度"
                   @click="adjustMaterialLibraryWorkTableHeight('drawing', -materialLibraryWorkTableHeightLimits.step)"
                 />
@@ -1051,6 +1112,8 @@
                   size="small"
                   :icon="Plus"
                   :disabled="materialLibraryWorkTableHeights.drawing >= materialLibraryWorkTableHeightLimits.max"
+                  title="提高图纸版本维护表格高度"
+
                   aria-label="提高图纸版本维护表格高度"
                   @click="adjustMaterialLibraryWorkTableHeight('drawing', materialLibraryWorkTableHeightLimits.step)"
                 />
@@ -1061,6 +1124,7 @@
                   size="small"
                   :icon="RefreshLeft"
                   :disabled="materialLibraryWorkTableHeights.drawing === materialLibraryWorkTableDefaultHeights.drawing"
+                  title="恢复图纸版本维护表格默认高度"
                   aria-label="恢复图纸版本维护表格默认高度"
                   @click="resetMaterialLibraryWorkTableHeight('drawing')"
                 />
@@ -1097,39 +1161,53 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="190" fixed="right">
+            <el-table-column label="操作" width="180" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" :disabled="drawingSaving || Boolean(drawingOperationSavingId)" @click="editDrawingRevision(row)">编辑</el-button>
-                <el-button
-                  v-if="!row.isDefault && row.status === 'ENABLED'"
-                  link
-                  type="success"
-                  :loading="drawingOperationSavingId === row.id"
-                  :disabled="drawingSaving || Boolean(drawingOperationSavingId)"
-                  @click="setDefaultDrawingRevision(row)"
-                >
-                  设默认
-                </el-button>
-                <el-button
-                  v-if="row.status === 'ENABLED'"
-                  link
-                  type="danger"
-                  :loading="drawingOperationSavingId === row.id"
-                  :disabled="drawingSaving || Boolean(drawingOperationSavingId)"
-                  @click="disableDrawingRevision(row)"
-                >
-                  停用
-                </el-button>
-                <el-button
-                  v-else
-                  link
-                  type="success"
-                  :loading="drawingOperationSavingId === row.id"
-                  :disabled="drawingSaving || Boolean(drawingOperationSavingId)"
-                  @click="enableDrawingRevision(row)"
-                >
-                  启用
-                </el-button>
+                <div class="material-maintenance-row-actions">
+                  <div class="material-maintenance-row-action-group">
+                    <span class="material-maintenance-row-action-label">资料</span>
+                    <el-button title="编辑图纸版本" link type="primary" :disabled="drawingSaving || Boolean(drawingOperationSavingId)" @click="editDrawingRevision(row)">编辑</el-button>
+                  </div>
+                  <div class="material-maintenance-row-action-group">
+                    <span class="material-maintenance-row-action-label">默认</span>
+                    <el-button
+                      v-if="!row.isDefault && row.status === 'ENABLED'"
+                      title="设为默认图纸"
+                      link
+                      type="success"
+                      :loading="drawingOperationSavingId === row.id"
+                      :disabled="drawingSaving || Boolean(drawingOperationSavingId)"
+                      @click="setDefaultDrawingRevision(row)"
+                    >
+                      设默认
+                    </el-button>
+                  </div>
+                  <div class="material-maintenance-row-action-group">
+                    <span class="material-maintenance-row-action-label">状态</span>
+                    <el-button
+                      v-if="row.status === 'ENABLED'"
+                      title="停用图纸版本"
+                      link
+                      type="danger"
+                      :loading="drawingOperationSavingId === row.id"
+                      :disabled="drawingSaving || Boolean(drawingOperationSavingId)"
+                      @click="disableDrawingRevision(row)"
+                    >
+                      停用
+                    </el-button>
+                    <el-button
+                      v-else
+                      title="恢复图纸版本"
+                      link
+                      type="success"
+                      :loading="drawingOperationSavingId === row.id"
+                      :disabled="drawingSaving || Boolean(drawingOperationSavingId)"
+                      @click="enableDrawingRevision(row)"
+                    >
+                      启用
+                    </el-button>
+                  </div>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -1165,7 +1243,8 @@
       </div>
       <template #footer>
         <el-button :disabled="Boolean(drawingOperationSavingId)" @click="closeDefaultDrawingDialog">取消</el-button>
-        <el-button type="primary" :loading="Boolean(drawingOperationSavingId)" @click="confirmDefaultDrawingRevision">确认设为默认</el-button>
+        <el-button type="primary" :loading="Boolean(drawingOperationSavingId)" @click="confirmDefaultDrawingRevision"
+          title="确认设为默认">确认设为默认</el-button>
       </template>
     </el-dialog>
   </section>
@@ -1294,10 +1373,14 @@ const routeActionApplied = ref(false);
 
 const filters = reactive<{
   keyword: string;
+  customerId: string;
+  projectModel: string;
   status: CommonStatus;
   stockAlert?: StockAlertFilter;
 }>({
   keyword: '',
+  customerId: '',
+  projectModel: '',
   status: 'ENABLED'
 });
 const materialPagination = reactive({
@@ -1602,10 +1685,18 @@ function routeQueryText(value: unknown) {
 
 function applyRouteQueryFilters() {
   const keyword = routeQueryText(route.query.keyword);
+  const customerId = routeQueryText(route.query.customerId);
+  const projectModel = routeQueryText(route.query.projectModel);
   const status = routeQueryText(route.query.status);
   const stockAlert = routeQueryText(route.query.stockAlert);
   if (keyword) {
     filters.keyword = keyword;
+  }
+  if (customerId) {
+    filters.customerId = customerId;
+  }
+  if (projectModel) {
+    filters.projectModel = projectModel;
   }
   if (status === 'ENABLED' || status === 'DISABLED') {
     filters.status = status;
@@ -1770,6 +1861,8 @@ async function loadMaterials() {
     const requestOffset = (requestPage - 1) * requestLimit;
     const baseFilters = {
       keyword: filters.keyword.trim() || undefined,
+      customerId: filters.customerId || undefined,
+      projectModel: filters.projectModel.trim() || undefined,
       status: filters.status
     };
     const [initialResult, triggeredResult] = await Promise.all([
@@ -1813,6 +1906,8 @@ async function loadMaterials() {
 function materialRequestFilters() {
   return {
     keyword: filters.keyword.trim() || undefined,
+    customerId: filters.customerId || undefined,
+    projectModel: filters.projectModel.trim() || undefined,
     status: filters.status,
     stockAlert: filters.stockAlert
   };
@@ -1885,6 +1980,8 @@ async function applyRouteActionAfterLoad() {
 
 function resetFilters() {
   filters.keyword = '';
+  filters.customerId = '';
+  filters.projectModel = '';
   filters.status = 'ENABLED';
   filters.stockAlert = undefined;
   searchMaterials();
@@ -2989,6 +3086,60 @@ async function confirmMaterialStatusChange() {
   align-items: center;
   gap: 8px;
   flex-wrap: nowrap;
+}
+
+.material-library-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.material-library-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.material-library-action-label {
+  flex: 0 0 30px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.material-library-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
+}
+
+.material-maintenance-row-actions {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.material-maintenance-row-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.material-maintenance-row-action-label {
+  flex: 0 0 32px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.material-maintenance-row-actions :deep(.el-button) {
+  height: auto;
+  margin-left: 0;
+  padding: 0;
 }
 
 .material-library-table-height-label {

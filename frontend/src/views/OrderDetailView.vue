@@ -3,7 +3,7 @@
     <div class="page-header">
       <h2 class="page-title">订单明细</h2>
       <div v-if="!isMobileLayout" class="page-actions order-detail-page-actions">
-        <el-button :icon="Download" :loading="orderExporting" :disabled="!order" @click="exportOrderDetailExcel">导出 Excel</el-button>
+        <el-button title="导出Excel" :icon="Download" :loading="orderExporting" :disabled="!order" @click="exportOrderDetailExcel">导出 Excel</el-button>
         <el-button :disabled="!order || order.status !== 'DRAFT'" @click="openEdit">编辑订单</el-button>
         <el-tooltip :content="additionalMaterialDisabledReason" :disabled="canAddAdditionalMaterial" placement="bottom">
           <span class="action-tooltip-wrap">
@@ -12,12 +12,15 @@
         </el-tooltip>
         <el-tooltip :content="cancelOrderDisabledReason" :disabled="canCancelOrder" placement="bottom">
           <span class="action-tooltip-wrap">
-            <el-button type="danger" plain :disabled="!canCancelOrder" @click="openCancelOrder">取消订单</el-button>
+            <el-button type="danger" plain :disabled="!canCancelOrder" @click="openCancelOrder"
+  title="取消订单">取消订单</el-button>
           </span>
         </el-tooltip>
-        <el-button type="danger" plain :disabled="!order || order.status !== 'DRAFT'" @click="openDeleteDraftOrder">删除草稿</el-button>
+        <el-button type="danger" plain :disabled="!order || order.status !== 'DRAFT'" @click="openDeleteDraftOrder"
+  title="删除草稿">删除草稿</el-button>
         <el-button @click="goProcess">{{ processActionText }}</el-button>
-        <el-button type="primary" :disabled="!order || order.status !== 'DRAFT'" :loading="saving" @click="openSubmitOrderDialog">提交生产</el-button>
+        <el-button type="primary" :disabled="!order || order.status !== 'DRAFT'" :loading="saving" @click="openSubmitOrderDialog"
+          title="提交生产">提交生产</el-button>
       </div>
     </div>
 
@@ -79,7 +82,8 @@
         class="mt-16"
       >
         <template #default>
-          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">查看需要补单零件</el-button>
+          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine"
+  title="查看需要补单零件">查看需要补单零件</el-button>
         </template>
       </el-alert>
       <el-alert
@@ -90,7 +94,8 @@
         class="mt-16"
       >
         <template #default>
-          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">查看短缺零件</el-button>
+          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine"
+  title="查看短缺零件">查看短缺零件</el-button>
         </template>
       </el-alert>
       <el-alert
@@ -107,7 +112,8 @@
             <strong>待处理短缺清单</strong>
             <p>用于防止生产报废或管理确认缺货后忘记补单、客户减量或无需补单说明。</p>
           </div>
-          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine">定位第一个零件</el-button>
+          <el-button size="small" type="warning" plain @click="scrollToFirstShortageLine"
+  title="定位第一个零件">定位第一个零件</el-button>
         </div>
         <div class="pending-shortage-list">
           <article v-for="line in linesNeedingReplenishmentAction" :key="line.id" class="pending-shortage-item">
@@ -124,7 +130,8 @@
                 type="warning"
                 plain
                 @click="openShortageResolution(line)"
-              >
+
+              title="处理补单">
                 处理补单
               </el-button>
             </div>
@@ -172,8 +179,8 @@
             <span>{{ orderStructureGroups.length }} 组 / {{ order.lines.length }} 行</span>
           </div>
           <div class="order-structure-actions">
-            <el-button size="small" :disabled="order.lines.length === 0" @click="openOrderStructureTextDialog">查看固定格式</el-button>
-            <el-button size="small" :disabled="order.lines.length === 0" @click="copyOrderStructureText">复制清单</el-button>
+            <el-button title="查看固定格式" size="small" :disabled="order.lines.length === 0" @click="openOrderStructureTextDialog">查看固定格式</el-button>
+            <el-button title="复制清单" size="small" :disabled="order.lines.length === 0" @click="copyOrderStructureText">复制清单</el-button>
           </div>
         </div>
         <div v-if="orderStructureGroups.length > 0" class="order-structure-list">
@@ -252,7 +259,8 @@
           </div>
           <div v-if="lineNeedsReplenishmentAction(line)" :id="`shortage-line-${line.id}`" class="line-replenishment-warning">
               <strong>{{ formatLineReplenishmentActionText(line) }}</strong>
-            <el-button v-if="!isMobileLayout" size="small" type="warning" plain @click="openShortageResolution(line)">处理补单</el-button>
+            <el-button v-if="!isMobileLayout" size="small" type="warning" plain @click="openShortageResolution(line)"
+  title="处理补单">处理补单</el-button>
           </div>
           <div v-show="showOrderDetailLineDetails(line.id)" class="order-detail-line-body">
             <div class="muted">来源 {{ fulfillmentModeLabel(line.fulfillmentMode) }} / 生产计划 {{ formatQuantity(line.productionPlanQuantity, line.unit) }}</div>
@@ -288,16 +296,21 @@
               </span>
             </div>
             <div v-if="!isMobileLayout" class="line-actions">
-              <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
-                <span class="action-tooltip-wrap">
-                  <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openReplenishment(line)">订单补单</el-button>
-                </span>
-              </el-tooltip>
-              <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
-                <span class="action-tooltip-wrap">
-                  <el-button size="small" :disabled="!canCreateProductionChange(line)" @click="openQuantityChange(line)">数量变更</el-button>
-                </span>
-              </el-tooltip>
+              <div class="order-line-change-action-group">
+                <span class="order-line-change-action-label">变更</span>
+                <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
+                  <span class="action-tooltip-wrap">
+                    <el-button size="small" :disabled="!canCreateProductionChange(line)" title="订单补单" @click="openReplenishment(line)">补单</el-button>
+                  </span>
+                </el-tooltip>
+                <el-tooltip :content="productionChangeDisabledReason(line)" :disabled="canCreateProductionChange(line)" placement="top">
+                  <span class="action-tooltip-wrap">
+                    <el-button size="small" :disabled="!canCreateProductionChange(line)" title="数量变更" @click="openQuantityChange(line)">数量</el-button>
+                  </span>
+                </el-tooltip>
+              </div>
+              <div v-if="orderChangeReplenishmentTasks(line).length > 0" class="order-line-change-action-group">
+                <span class="order-line-change-action-label">补单</span>
                 <el-tooltip
                   v-for="task in orderChangeReplenishmentTasks(line)"
                   :key="task.productionTaskNo"
@@ -311,12 +324,14 @@
                       type="danger"
                       plain
                       :disabled="!canCancelReplenishmentTask(task)"
+                      :title="`取消补单 ${task.productionTaskNo}`"
                       @click="openCancelReplenishment(line, task)"
                     >
-                      取消补单 {{ task.productionTaskNo }}
+                      取消 {{ task.productionTaskNo }}
                     </el-button>
                   </span>
                 </el-tooltip>
+              </div>
             </div>
           </div>
         </article>
@@ -336,12 +351,15 @@
               <el-button
                 :icon="Plus"
                 :disabled="orderDetailWorkTableHeights.lines >= orderDetailWorkTableHeightLimits.max"
+                title="提高订单详情零件明细表格高度"
+
                 aria-label="提高订单详情零件明细表格高度"
                 @click="adjustOrderDetailWorkTableHeight('lines', orderDetailWorkTableHeightLimits.step)"
               />
               <el-button
                 :icon="RefreshLeft"
                 :disabled="orderDetailWorkTableHeights.lines === orderDetailWorkTableDefaultHeights.lines"
+                title="恢复订单详情零件明细表格默认高度"
                 aria-label="恢复订单详情零件明细表格默认高度"
                 @click="resetOrderDetailWorkTableHeight('lines')"
               />
@@ -449,7 +467,8 @@
               </span>
               <div v-if="lineNeedsReplenishmentAction(row)" class="line-replenishment-warning table-warning">
                 <span>{{ formatLineReplenishmentActionText(row) }}</span>
-                <el-button link type="warning" @click="openShortageResolution(row)">处理补单</el-button>
+                <el-button link type="warning" @click="openShortageResolution(row)"
+  title="处理补单">处理补单</el-button>
               </div>
             </template>
           </el-table-column>
@@ -478,34 +497,43 @@
           </el-table-column>
           <el-table-column label="生产数量变更" width="210" fixed="right">
             <template #default="{ row }">
-              <el-tooltip :content="productionChangeDisabledReason(row)" :disabled="canCreateProductionChange(row)" placement="top">
-                <span class="action-tooltip-wrap">
-                  <el-button link type="primary" :disabled="!canCreateProductionChange(row)" @click="openReplenishment(row)">订单补单</el-button>
-                </span>
-              </el-tooltip>
-              <el-tooltip :content="productionChangeDisabledReason(row)" :disabled="canCreateProductionChange(row)" placement="top">
-                <span class="action-tooltip-wrap">
-                  <el-button link type="primary" :disabled="!canCreateProductionChange(row)" @click="openQuantityChange(row)">变更</el-button>
-                </span>
-              </el-tooltip>
-              <el-tooltip
-                v-for="task in orderChangeReplenishmentTasks(row)"
-                :key="task.productionTaskNo"
-                :content="cancelReplenishmentDisabledReason(task)"
-                :disabled="canCancelReplenishmentTask(task)"
-                placement="top"
-              >
-                <span class="action-tooltip-wrap">
-                  <el-button
-                    link
-                    type="danger"
-                    :disabled="!canCancelReplenishmentTask(task)"
-                    @click="openCancelReplenishment(row, task)"
+              <div class="order-line-change-actions">
+                <div class="order-line-change-action-group">
+                  <span class="order-line-change-action-label">变更</span>
+                  <el-tooltip :content="productionChangeDisabledReason(row)" :disabled="canCreateProductionChange(row)" placement="top">
+                    <span class="action-tooltip-wrap">
+                      <el-button link type="primary" :disabled="!canCreateProductionChange(row)" title="订单补单" @click="openReplenishment(row)">补单</el-button>
+                    </span>
+                  </el-tooltip>
+                  <el-tooltip :content="productionChangeDisabledReason(row)" :disabled="canCreateProductionChange(row)" placement="top">
+                    <span class="action-tooltip-wrap">
+                      <el-button link type="primary" :disabled="!canCreateProductionChange(row)" title="数量变更" @click="openQuantityChange(row)">数量</el-button>
+                    </span>
+                  </el-tooltip>
+                </div>
+                <div v-if="orderChangeReplenishmentTasks(row).length > 0" class="order-line-change-action-group">
+                  <span class="order-line-change-action-label">补单</span>
+                  <el-tooltip
+                    v-for="task in orderChangeReplenishmentTasks(row)"
+                    :key="task.productionTaskNo"
+                    :content="cancelReplenishmentDisabledReason(task)"
+                    :disabled="canCancelReplenishmentTask(task)"
+                    placement="top"
                   >
-                    取消补单
-                  </el-button>
-                </span>
-              </el-tooltip>
+                    <span class="action-tooltip-wrap">
+                      <el-button
+                        link
+                        type="danger"
+                        :disabled="!canCancelReplenishmentTask(task)"
+                        :title="`取消补单 ${task.productionTaskNo}`"
+                        @click="openCancelReplenishment(row, task)"
+                      >
+                        取消
+                      </el-button>
+                    </span>
+                  </el-tooltip>
+                </div>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -579,7 +607,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeEditDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveEdit">保存</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveEdit"
+          title="保存">保存</el-button>
       </template>
     </el-dialog>
 
@@ -605,7 +634,8 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="closeDeleteDraftDialog">取消</el-button>
-        <el-button type="danger" :loading="saving" :disabled="saving" @click="deleteDraftOrder">确认删除草稿</el-button>
+        <el-button type="danger" :loading="saving" :disabled="saving" @click="deleteDraftOrder"
+  title="确认删除草稿">确认删除草稿</el-button>
       </template>
     </el-dialog>
 
@@ -618,8 +648,8 @@
         readonly
       />
       <template #footer>
-        <el-button @click="orderStructureTextDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!orderStructureText" @click="copyOrderStructureText">复制清单</el-button>
+        <el-button title="关闭" @click="orderStructureTextDialogVisible = false">关闭</el-button>
+        <el-button title="复制清单" type="primary" :disabled="!orderStructureText" @click="copyOrderStructureText">复制清单</el-button>
       </template>
     </el-dialog>
 
@@ -737,7 +767,8 @@
                     >
                       下移
                     </el-button>
-                    <el-button link type="danger" @click="removeAdditionalMaterialProcess(index)">删除</el-button>
+                    <el-button link type="danger" @click="removeAdditionalMaterialProcess(index)"
+  title="删除">删除</el-button>
                   </div>
                 </div>
               </div>
@@ -869,6 +900,8 @@
                 size="small"
                 :icon="Minus"
                 :disabled="orderDetailWorkTableHeights.submitOrderLines <= orderDetailWorkTableHeightLimits.min"
+                title="降低提交生产订单零件列表高度"
+
                 aria-label="降低提交生产订单零件列表高度"
                 @click="adjustOrderDetailWorkTableHeight('submitOrderLines', -orderDetailWorkTableHeightLimits.step)"
               />
@@ -876,6 +909,8 @@
                 size="small"
                 :icon="Plus"
                 :disabled="orderDetailWorkTableHeights.submitOrderLines >= orderDetailWorkTableHeightLimits.max"
+                title="提高提交生产订单零件列表高度"
+
                 aria-label="提高提交生产订单零件列表高度"
                 @click="adjustOrderDetailWorkTableHeight('submitOrderLines', orderDetailWorkTableHeightLimits.step)"
               />
@@ -883,6 +918,7 @@
                 size="small"
                 :icon="RefreshLeft"
                 :disabled="orderDetailWorkTableHeights.submitOrderLines === orderDetailWorkTableDefaultHeights.submitOrderLines"
+                title="恢复提交生产订单零件列表默认高度"
                 aria-label="恢复提交生产订单零件列表默认高度"
                 @click="resetOrderDetailWorkTableHeight('submitOrderLines')"
               />
@@ -903,13 +939,14 @@
         </div>
       </div>
       <template #footer>
-        <el-button :disabled="saving" @click="closeSubmitOrderDialog">返回</el-button>
+        <el-button title="返回" :disabled="saving" @click="closeSubmitOrderDialog">返回</el-button>
         <el-button
           type="primary"
           :disabled="saving || !submitPlanOperatorCode || submitOrderBlockingWarnings.length > 0 || submitOrderMaterialIdentityConfirmRequired"
           :loading="saving"
           @click="confirmSubmitOrder"
-        >
+
+          title="确认提交生产">
           确认提交生产
         </el-button>
       </template>
@@ -958,8 +995,10 @@
           </article>
         </div>
         <div class="shortage-resolution-actions">
-          <el-button type="primary" @click="createReplenishmentFromShortage">创建订单补单</el-button>
-          <el-button @click="openQuantityChangeFromShortage">客户确认减少数量</el-button>
+          <el-button type="primary" @click="createReplenishmentFromShortage"
+            title="创建订单补单">创建订单补单</el-button>
+          <el-button @click="openQuantityChangeFromShortage"
+            title="客户确认减少数量">客户确认减少数量</el-button>
         </div>
         <el-divider>无需补单</el-divider>
         <el-form label-width="96px">
@@ -978,7 +1017,8 @@
       </div>
       <template #footer>
         <el-button :disabled="saving" @click="closeShortageResolutionDialog">取消</el-button>
-        <el-button type="warning" :loading="saving" :disabled="saving" @click="saveShortageNoReplenishment">确认无需补单</el-button>
+        <el-button type="warning" :loading="saving" :disabled="saving" @click="saveShortageNoReplenishment"
+  title="确认无需补单">确认无需补单</el-button>
       </template>
     </el-dialog>
 
@@ -1060,8 +1100,9 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button :disabled="saving" @click="closeCancelReplenishmentDialog">返回</el-button>
-        <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelReplenishment">确认取消补单</el-button>
+        <el-button title="返回" :disabled="saving" @click="closeCancelReplenishmentDialog">返回</el-button>
+        <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelReplenishment"
+  title="确认取消补单">确认取消补单</el-button>
       </template>
     </el-dialog>
 
@@ -1121,7 +1162,8 @@
       </el-form>
       <template #footer>
         <el-button :disabled="saving" @click="closeQuantityChangeDialog">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveQuantityChange">确认变更</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="saveQuantityChange"
+          title="确认变更">确认变更</el-button>
       </template>
     </el-dialog>
 
@@ -1196,8 +1238,9 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button :disabled="saving" @click="closeCancelOrderDialog">返回</el-button>
-        <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelOrder">确认取消订单</el-button>
+        <el-button title="返回" :disabled="saving" @click="closeCancelOrderDialog">返回</el-button>
+        <el-button type="danger" :loading="saving" :disabled="saving" @click="saveCancelOrder"
+  title="确认取消订单">确认取消订单</el-button>
       </template>
     </el-dialog>
 
@@ -1235,12 +1278,15 @@
                 <el-button
                   :icon="Plus"
                   :disabled="orderDetailWorkTableHeights.importSourcePreview >= orderDetailWorkTableHeightLimits.max"
+                  title="提高来源 Excel 预览表格高度"
+
                   aria-label="提高来源 Excel 预览表格高度"
                   @click="adjustOrderDetailWorkTableHeight('importSourcePreview', orderDetailWorkTableHeightLimits.step)"
                 />
                 <el-button
                   :icon="RefreshLeft"
                   :disabled="orderDetailWorkTableHeights.importSourcePreview === orderDetailWorkTableDefaultHeights.importSourcePreview"
+                  title="恢复来源 Excel 预览表格默认高度"
                   aria-label="恢复来源 Excel 预览表格默认高度"
                   @click="resetOrderDetailWorkTableHeight('importSourcePreview')"
                 />
@@ -1312,7 +1358,7 @@
           </el-table>
           <div class="import-source-preview-footer">
             <span>已加载 {{ importSourcePreview.rows.length }} / {{ importSourcePreview.rowPage.totalCount }} 行</span>
-            <el-button
+            <el-button title="加载更多行"
               v-if="importSourcePreview.rowPage.hasMore"
               size="small"
               :loading="importSourcePreviewLoading"
@@ -4578,6 +4624,34 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 14px;
+}
+
+.order-line-change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 4px 10px;
+}
+
+.order-line-change-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  line-height: 20px;
+}
+
+.order-line-change-action-label {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.line-actions :deep(.el-button),
+.order-line-change-actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 .order-detail-line-toolbar {
